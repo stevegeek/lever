@@ -49,6 +49,13 @@ type BodyDoer interface {
 	DoBody(ctx context.Context, method, path string, body []byte) (status int, respBody []byte, err error)
 }
 
+// IfMatchDoer is a BodyDoer that can also send an If-Match header, which
+// scion requires on an access constraint update.
+type IfMatchDoer interface {
+	BodyDoer
+	DoBodyIfMatch(ctx context.Context, method, path string, body []byte, ifMatch string) (status int, respBody []byte, err error)
+}
+
 // Client talks to the hub as the identity its Doer authenticates. It is safe
 // for concurrent use when its Doer is.
 type Client struct {
@@ -65,6 +72,25 @@ type APIError struct {
 	Msg    string
 	// NoProject marks ProjectID's answer for a name the hub does not list.
 	NoProject bool
+	// Code and Details are scion's error envelope ({"error":{"code",
+	// "details"}}) when a write's answer carried one.
+	Code    string
+	Details map[string]json.RawMessage
+}
+
+// envelopeError is the hub's answer to a refused write as an APIError.
+func envelopeError(status int, msg string, body []byte) *APIError {
+	e := &APIError{Status: status, Msg: msg}
+	var env struct {
+		Error struct {
+			Code    string                     `json:"code"`
+			Details map[string]json.RawMessage `json:"details"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &env) == nil {
+		e.Code, e.Details = env.Error.Code, env.Error.Details
+	}
+	return e
 }
 
 func (e *APIError) Error() string { return e.Msg }

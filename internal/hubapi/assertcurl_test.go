@@ -163,7 +163,9 @@ func TestAssertionPathAllowed(t *testing.T) {
 		{"GET", "/api/v1/conduit/grant-keys"},
 		{"GET", "/api/v1/artifacts?mine=1"},
 		{"PUT", "/api/v1/system/registry"},
+		{"GET", "/api/v1/system/runtime"},
 		{"PUT", "/api/v1/system/runtime"},
+		{"PUT", "/api/v1/admin/access-constraints/c-1"},
 	}
 	for _, c := range allowed {
 		if err := AssertionPathAllowed(c.method, c.path); err != nil {
@@ -196,10 +198,13 @@ func TestAssertionPathAllowed(t *testing.T) {
 		{"PUT", "/api/v1/system/identity/x"},
 		{"GET", "/api/v1/system/registry"},
 		{"PUT", "/api/v1/system/registry?x=1"},
-		{"GET", "/api/v1/system/runtime"},
 		{"POST", "/api/v1/system/runtime"},
 		{"PUT", "/api/v1/system/runtime?x=1"},
 		{"PUT", "/api/v1/system/runtime/x"},
+		{"GET", "/api/v1/system/runtime?x=1"},
+		{"PUT", "/api/v1/admin/access-constraints"},
+		{"PATCH", "/api/v1/admin/access-constraints/c-1"},
+		{"PUT", "/api/v1/admin/access-constraints/c-1/audit"},
 		{"PATCH", "/api/v1/system/workstation-settings"},
 		{"POST", "/api/v1/auth/tokens/t-1"},
 		{"GET", "/api/v1/users/u.1"},
@@ -388,5 +393,56 @@ func TestAssertCurlScriptsTurnOffGlobbing(t *testing.T) {
 		if !strings.Contains(s, "exec curl -q -g ") {
 			t.Fatalf("script lacks -g:\n%s", s)
 		}
+	}
+}
+
+// If-Match rides the environment like the body, only as a decimal revision,
+// and through a real sh and curl reaches the hub as the header.
+func TestAssertCurlIfMatch(t *testing.T) {
+	r := &scriptedRunner{res: proc.Result{Stdout: "{}\n200"}}
+	a, signed := assertCurl(r)
+	if _, _, err := a.DoBodyIfMatch(context.Background(), "PUT", "/api/v1/admin/access-constraints/c-1", []byte(`{}`), "12"); err != nil {
+		t.Fatal(err)
+	}
+	if r.call.Env["LEVER_HUB_IF_MATCH"] != "12" || r.call.Args[1] != assertCurlIfMatchScript || r.call.Stdin != testAssertion+"\n" {
+		t.Fatalf("env=%v script=%q", r.call.Env, r.call.Args[1])
+	}
+	for _, bad := range []string{"", "1\r\nX-Evil: 1", "\"3\"", "-1", "12345678901234567890"} {
+		before := *signed
+		if _, _, err := a.DoBodyIfMatch(context.Background(), "PUT", "/api/v1/admin/access-constraints/c-1", []byte(`{}`), bad); err == nil || *signed != before {
+			t.Fatalf("If-Match %q: err = %v, signed %d", bad, err, *signed-before)
+		}
+	}
+	if _, _, err := a.DoBodyIfMatch(context.Background(), "PUT", "/api/v1/admin/roles/r-1/../../x", []byte(`{}`), "1"); !errors.Is(err, ErrAssertionPathRefused) {
+		t.Fatalf("path check skipped: %v", err)
+	}
+	if !strings.Contains(assertCurlIfMatchScript, "exec curl -q -g ") || !strings.Contains(assertCurlIfMatchScript, "-H @-") ||
+		strings.Contains(strings.ToLower(assertCurlIfMatchScript), "authorization") {
+		t.Fatalf("script: %q", assertCurlIfMatchScript)
+	}
+
+	found := false
+	for _, dir := range []string{"/usr/local/bin", "/usr/bin", "/bin"} {
+		if _, err := os.Stat(dir + "/curl"); err == nil {
+			found = true
+		}
+	}
+	if !found {
+		t.Skip("curl not installed on the jail PATH")
+	}
+	var ifMatch, assertion, body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		ifMatch, assertion, body = r.Header.Get("If-Match"), r.Header.Get(AssertionHeader), string(b)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	jr := jail.New(jail.Config{Host: proc.RealRunner{}, UID: "501"})
+	real := &AssertCurl{Runner: jr, BaseURL: srv.URL, Sign: func() (string, error) { return testAssertion, nil }}
+	if st, _, err := real.DoBodyIfMatch(context.Background(), "PUT", "/api/v1/admin/access-constraints/c-1", []byte(`{"a":1}`), "7"); err != nil || st != 200 {
+		t.Fatalf("status %d err %v", st, err)
+	}
+	if ifMatch != "7" || assertion != testAssertion || body != `{"a":1}` {
+		t.Fatalf("server saw If-Match %q, assertion %q, body %q", ifMatch, assertion, body)
 	}
 }

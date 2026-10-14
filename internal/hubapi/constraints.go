@@ -30,6 +30,7 @@ type ConstraintSubject struct {
 	Kind          string `json:"kind"`
 	PrincipalType string `json:"principalType,omitempty"`
 	PrincipalID   string `json:"principalId,omitempty"`
+	GroupID       string `json:"groupId,omitempty"`
 }
 
 // ConstraintScope mirrors scion's constraintScopeRequest.
@@ -38,13 +39,22 @@ type ConstraintScope struct {
 	ID   string `json:"id,omitempty"`
 }
 
-// ConstraintDraft is the body of a create, and the draft of its preview.
+// ConstraintWindow mirrors scion's appliesWhen. The times stay in the hub's
+// own text so an update repeats them exactly.
+type ConstraintWindow struct {
+	NotBefore *string `json:"notBefore,omitempty"`
+	ExpiresAt *string `json:"expiresAt,omitempty"`
+}
+
+// ConstraintDraft is the body of a create or update, and the draft of its
+// preview.
 type ConstraintDraft struct {
 	Name               string            `json:"name"`
 	Purpose            string            `json:"purpose"`
 	Subject            ConstraintSubject `json:"subject"`
 	Scope              ConstraintScope   `json:"scope"`
 	MaximumPermissions []string          `json:"maximumPermissions"`
+	AppliesWhen        *ConstraintWindow `json:"appliesWhen,omitempty"`
 }
 
 // AccessConstraint is what lever reads back about a constraint. The list
@@ -52,11 +62,21 @@ type ConstraintDraft struct {
 type AccessConstraint struct {
 	ID                 string
 	Name               string
+	Purpose            string
 	Subject            ConstraintSubject
 	ScopeType          string
+	ScopeID            string
 	Status             string
 	Revision           string
 	MaximumPermissions []string
+	// Window is nil when the constraint always applies.
+	Window *ConstraintWindow
+}
+
+// Draft is the constraint as an update draft with maximum set perms.
+func (c AccessConstraint) Draft(perms []string) ConstraintDraft {
+	return ConstraintDraft{Name: c.Name, Purpose: c.Purpose, Subject: c.Subject,
+		Scope: ConstraintScope{Type: c.ScopeType, ID: c.ScopeID}, MaximumPermissions: perms, AppliesWhen: c.Window}
 }
 
 // wireConstraint is the hub's summary/detail row. resolvedScope names its id
@@ -64,20 +84,27 @@ type AccessConstraint struct {
 type wireConstraint struct {
 	ID      string            `json:"id"`
 	Name    string            `json:"name"`
+	Purpose string            `json:"purpose"`
 	Subject ConstraintSubject `json:"subject"`
 	Scope   struct {
-		Type string `json:"type"`
+		Type      string `json:"type"`
+		ProjectID string `json:"projectId"`
 	} `json:"scope"`
 	Status             string `json:"status"`
 	Revision           string `json:"revision"`
 	MaximumPermissions []struct {
 		ID string `json:"id"`
 	} `json:"maximumPermissions"`
+	AppliesWhen ConstraintWindow `json:"appliesWhen"`
 }
 
 func (w wireConstraint) constraint() AccessConstraint {
-	c := AccessConstraint{ID: w.ID, Name: w.Name, Subject: w.Subject, ScopeType: w.Scope.Type,
-		Status: w.Status, Revision: w.Revision}
+	c := AccessConstraint{ID: w.ID, Name: w.Name, Purpose: w.Purpose, Subject: w.Subject, ScopeType: w.Scope.Type,
+		ScopeID: w.Scope.ProjectID, Status: w.Status, Revision: w.Revision}
+	if w.AppliesWhen.NotBefore != nil || w.AppliesWhen.ExpiresAt != nil {
+		win := w.AppliesWhen
+		c.Window = &win
+	}
 	for _, p := range w.MaximumPermissions {
 		c.MaximumPermissions = append(c.MaximumPermissions, p.ID)
 	}
@@ -182,4 +209,50 @@ func (c *Client) DeleteAccessConstraint(ctx context.Context, id, revision string
 	return c.send(ctx, http.MethodDelete, "/api/v1/admin/access-constraints/"+url.PathEscape(id), struct {
 		PreviewToken string `json:"previewToken"`
 	}{tok}, nil)
+}
+
+// UpdateAccessConstraint previews and then commits a full update of a
+// constraint at the revision lever read, and returns it as the hub stored it.
+//
+// scion classifies the update by its maximum set: removing permissions only
+// narrows and needs no further authority; each permission added needs the
+// actor to hold it (RelaxationRefused).
+func (c *Client) UpdateAccessConstraint(ctx context.Context, id, revision string, d ConstraintDraft) (AccessConstraint, error) {
+	tok, err := c.previewToken(ctx, struct {
+		Operation    string          `json:"operation"`
+		Draft        ConstraintDraft `json:"draft"`
+		ConstraintID string          `json:"constraintId"`
+		BaseRevision string          `json:"baseRevision"`
+	}{"update", d, id, revision})
+	if err != nil {
+		return AccessConstraint{}, err
+	}
+	var w wireConstraint
+	err = c.sendIfMatch(ctx, http.MethodPut, "/api/v1/admin/access-constraints/"+url.PathEscape(id), revision, struct {
+		ConstraintDraft
+		PreviewToken string `json:"previewToken"`
+	}{d, tok}, &w)
+	if err != nil {
+		return AccessConstraint{}, err
+	}
+	return w.constraint(), nil
+}
+
+// relaxationAuthorityCode is scion's refusal of a change that would widen
+// what a constraint allows by permissions the actor does not hold.
+const relaxationAuthorityCode = "insufficient_constraint_relaxation_authority"
+
+// RelaxationRefused reports whether err is scion's relaxation-authority
+// refusal, and the permissions it named as missing. A delete is such a
+// relaxation of the constraint's whole maximum set.
+func RelaxationRefused(err error) ([]string, bool) {
+	var ae *APIError
+	if !errors.As(err, &ae) || ae.Status != http.StatusForbidden || ae.Code != relaxationAuthorityCode {
+		return nil, false
+	}
+	var missing []string
+	if raw, ok := ae.Details["missingPermissionIds"]; ok {
+		_ = json.Unmarshal(raw, &missing)
+	}
+	return missing, true
 }

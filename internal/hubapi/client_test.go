@@ -22,6 +22,16 @@ type fakeDoer struct {
 	seq    map[string][]reply
 	calls  []string
 	bodies map[string]string
+	// ifMatch records the If-Match of every DoBodyIfMatch call, keyed like calls.
+	ifMatch map[string]string
+}
+
+func (f *fakeDoer) DoBodyIfMatch(ctx context.Context, method, path string, body []byte, ifMatch string) (int, []byte, error) {
+	if f.ifMatch == nil {
+		f.ifMatch = map[string]string{}
+	}
+	f.ifMatch[method+" "+path] = ifMatch
+	return f.DoBody(ctx, method, path, body)
 }
 
 // bodies records the request body of every DoBody call, keyed like calls.

@@ -228,25 +228,32 @@ func (h *hiHub) eventsFrom(n int) []string { return slices.Clone(h.events[n:]) }
 
 // hiCaller is who a request comes from: an assertion's email or a PAT.
 type hiCaller struct {
-	email  string
-	secret string
+	email   string
+	secret  string
+	ifMatch string
 }
 
 // hiDoer is the in-process transport for one identity. An assertion doer
 // enforces AssertCurl's route allowlist, so a step that would send an
 // assertion to a route AssertCurl refuses fails here too.
 type hiDoer struct {
-	h     *hiHub
-	email string
-	pat   func() string
+	h       *hiHub
+	email   string
+	pat     func() string
+	ifMatch string
 }
 
 func (d hiDoer) Do(ctx context.Context, method, path string) (int, []byte, error) {
 	return d.DoBody(ctx, method, path, nil)
 }
 
+func (d hiDoer) DoBodyIfMatch(ctx context.Context, method, path string, body []byte, ifMatch string) (int, []byte, error) {
+	d.ifMatch = ifMatch
+	return d.DoBody(ctx, method, path, body)
+}
+
 func (d hiDoer) DoBody(_ context.Context, method, path string, body []byte) (int, []byte, error) {
-	c := hiCaller{email: d.email}
+	c := hiCaller{email: d.email, ifMatch: d.ifMatch}
 	if d.email != "" {
 		if err := hubapi.AssertionPathAllowed(method, path); err != nil {
 			d.h.t.Errorf("an assertion was sent to a route AssertCurl refuses: %v", err)
@@ -482,7 +489,7 @@ func (h *hiHub) handle(c hiCaller, method, raw string, body []byte) (int, []byte
 		return hiErr(404, "no binding")
 	}
 
-	if st, b, ok := h.constraintRoute(method, p, q, body); ok {
+	if st, b, ok := h.constraintRoute(method, p, q, body, c.ifMatch); ok {
 		return st, b
 	}
 
@@ -581,6 +588,9 @@ func (h *hiHub) handle(c hiCaller, method, raw string, body []byte) (int, []byte
 		h.event("registry %s by %s", h.registry, me.ID)
 		return hiJSON(200, map[string]any{"image_registry": h.registry})
 
+	case method == http.MethodGet && p == "/api/v1/system/runtime":
+		return hiJSON(200, map[string]any{"detected": "podman", "configured": h.runtime, "available": true})
+
 	case method == http.MethodPut && p == "/api/v1/system/runtime":
 		h.runtime = str("runtime")
 		h.event("runtime %s by %s", h.runtime, me.ID)
@@ -608,7 +618,7 @@ func (h *hiHub) handle(c hiCaller, method, raw string, body []byte) (int, []byte
 	return hiErr(404, "no route")
 }
 
-func (h *hiHub) constraintRoute(method, p string, q url.Values, body []byte) (int, []byte, bool) {
+func (h *hiHub) constraintRoute(method, p string, q url.Values, body []byte, ifMatch string) (int, []byte, bool) {
 	const base = "/api/v1/admin/access-constraints"
 	wire := func(c *hiConstraint, detail bool) map[string]any {
 		m := map[string]any{"id": c.ID, "name": c.Name, "subject": c.Subject,
@@ -694,6 +704,20 @@ func (h *hiHub) constraintRoute(method, p string, q url.Values, body []byte) (in
 			h.constraints = slices.Delete(h.constraints, i, i+1)
 			h.event("ceiling- %s %s", c.Subject.PrincipalID, strings.Join(c.Perms, ","))
 			return 204, nil, true
+		case http.MethodPut:
+			var req struct {
+				hubapi.ConstraintDraft
+				PreviewToken string `json:"previewToken"`
+			}
+			_ = json.Unmarshal(body, &req)
+			if ifMatch != strconv.Itoa(c.Rev) || !consume(req.PreviewToken, "update:"+id) {
+				st, b := hiErr(409, "bad preview token or revision")
+				return st, b, true
+			}
+			c.Perms, c.Rev = req.MaximumPermissions, c.Rev+1
+			h.event("ceiling~ %s %s", c.Subject.PrincipalID, strings.Join(c.Perms, ","))
+			st, b := hiJSON(200, wire(c, true))
+			return st, b, true
 		}
 	}
 	st, b := hiErr(404, "no constraint")
@@ -1476,8 +1500,7 @@ func TestHubIdentityTierMoveCapsFirst(t *testing.T) {
 	e.mustRun()
 	got := hiEventsWith(e.hub.eventsFrom(n), "ceiling", "bind", "unbind")
 	want := []string{
-		"ceiling+ " + u.ID + " " + contactPerms,
-		"ceiling- " + u.ID + " " + web,
+		"ceiling~ " + u.ID + " " + contactPerms,
 		"unbind " + remoteWebRoleName + " " + u.ID,
 		"bind " + contactRoleName + " " + u.ID,
 	}
@@ -1490,8 +1513,7 @@ func TestHubIdentityTierMoveCapsFirst(t *testing.T) {
 	e.mustRun()
 	got = hiEventsWith(e.hub.eventsFrom(n), "ceiling", "bind", "unbind")
 	want = []string{
-		"ceiling+ " + u.ID + " " + web,
-		"ceiling- " + u.ID + " " + contactPerms,
+		"ceiling~ " + u.ID + " " + web,
 		"unbind " + contactRoleName + " " + u.ID,
 		"bind " + remoteWebRoleName + " " + u.ID,
 	}

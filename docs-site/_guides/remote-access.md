@@ -670,11 +670,16 @@ instead: a system-scope **access constraint** named `lever-remote-ceiling:<email
 user, whose maximum permission set is `hub-member`'s permissions (read from the hub) minus
 `project.create`, plus the `lever-remote` permissions. A constraint only ever takes permissions
 away, and it applies to everything the user holds at every scope, which is why the role's own
-permissions are inside it. A constraint whose subject or set has drifted is replaced without a
-gap: the new one is written first, under the user's second name `lever-remote-ceiling:<email>:b`
-(scion keeps constraint names unique), and only then is the old one deleted, so for that moment the
-user holds the intersection of the two. The ceiling is read from the hub on every apply, so a
-`hub-member` permission a scion upgrade adds is picked up by the next apply.
+permissions are inside it. A ceiling whose set has drifted is rewritten in place, in one update.
+One whose subject is another hub user (the login's row was recreated) is replaced without a gap:
+the new one is written first, under the user's second name `lever-remote-ceiling:<email>:b` (scion
+keeps constraint names unique), and only then is the old one deleted, so for that moment the user
+holds the intersection of the two. scion lets lever-admin delete a constraint only when it holds
+every permission the constraint allows; a constraint it may not delete is first narrowed by the
+permissions it lacks (narrowing needs no such authority) and then deleted, and one that still
+cannot go stays with a warning, since it can only take permissions away. The ceiling is read from
+the hub on every apply, so a `hub-member` permission a scion upgrade adds or reserves is picked up
+by the next apply.
 
 **Bound before the first sign-in, while agents run.** Every `lever apply` and `lever reload` runs a
 `hub-identity` step against the live hub, as lever's own admin identity (`lever-admin@lever.local`,

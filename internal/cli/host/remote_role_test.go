@@ -30,12 +30,18 @@ type fakeAdminHub struct {
 	previews             map[string]fakePreview
 	blockPreview         bool
 	failCreateConstraint bool
-	calls                []string // "METHOD path", in order
-	next                 int
+	// actorLacks are permissions the admin does not hold, as scion's
+	// checkRelaxationAuthority sees them: a delete of a constraint naming one,
+	// or an update adding one, is refused.
+	actorLacks []string
+	calls      []string // "METHOD path", in order
+	next       int
 	// me is the user id /api/v1/auth/me answers (the dev user); scopes is what
 	// /api/v1/auth/scopes lists.
 	me     string
 	scopes []string
+	// ifMatch is the current request's If-Match.
+	ifMatch string
 }
 
 type fakeConstraint struct {
@@ -47,8 +53,9 @@ type fakeConstraint struct {
 
 type fakePreview struct {
 	op    string
-	draft string // canonical JSON of the create draft
-	id    string // the constraint a delete targets
+	draft string // canonical JSON of the create or update draft
+	id    string // the constraint an update or delete targets
+	rev   string // the revision an update or delete was previewed at
 }
 
 // fakeHubMemberPermissions is scion's seeded hub-member set, project.create
@@ -75,8 +82,13 @@ func (h *fakeAdminHub) Do(ctx context.Context, method, path string) (int, []byte
 	return h.DoBody(ctx, method, path, nil)
 }
 
-func (h *fakeAdminHub) DoBody(_ context.Context, method, path string, body []byte) (int, []byte, error) {
+func (h *fakeAdminHub) DoBody(ctx context.Context, method, path string, body []byte) (int, []byte, error) {
+	return h.DoBodyIfMatch(ctx, method, path, body, "")
+}
+
+func (h *fakeAdminHub) DoBodyIfMatch(_ context.Context, method, path string, body []byte, ifMatch string) (int, []byte, error) {
 	h.calls = append(h.calls, method+" "+path)
+	h.ifMatch = ifMatch
 	u, err := url.Parse(path)
 	if err != nil {
 		return 0, nil, err
@@ -205,6 +217,7 @@ func (h *fakeAdminHub) constraintRoute(method string, u *url.URL, body []byte) (
 			Operation    string                  `json:"operation"`
 			Draft        *hubapi.ConstraintDraft `json:"draft"`
 			ConstraintID string                  `json:"constraintId"`
+			BaseRevision string                  `json:"baseRevision"`
 		}
 		if err := json.Unmarshal(body, &req); err != nil {
 			return 400, map[string]string{"error": err.Error()}, true
@@ -214,7 +227,7 @@ func (h *fakeAdminHub) constraintRoute(method string, u *url.URL, body []byte) (
 				"commitBlocked": map[string]string{"code": "preview_incomplete", "message": "preview is incomplete"}}, true
 		}
 		tok := h.id("tok")
-		p := fakePreview{op: req.Operation, id: req.ConstraintID}
+		p := fakePreview{op: req.Operation, id: req.ConstraintID, rev: req.BaseRevision}
 		if req.Draft != nil {
 			b, _ := json.Marshal(req.Draft)
 			p.draft = string(b)
@@ -265,14 +278,68 @@ func (h *fakeAdminHub) constraintRoute(method string, u *url.URL, body []byte) (
 				PreviewToken string `json:"previewToken"`
 			}
 			_ = json.Unmarshal(body, &req)
-			if p, ok := consume(req.PreviewToken); !ok || p.op != "delete" || p.id != id {
+			c := h.constraints[i]
+			if p, ok := consume(req.PreviewToken); !ok || p.op != "delete" || p.id != id || p.rev != fmt.Sprint(c.revision) {
 				return 409, map[string]string{"error": "preview token invalid for this delete"}, true
+			}
+			if miss := h.lacking(c.MaximumPermissions); len(miss) > 0 {
+				return relaxationRefusal(miss)
 			}
 			h.constraints = slices.Delete(h.constraints, i, i+1)
 			return 200, map[string]string{"auditId": "audit-1"}, true
+		case http.MethodPut:
+			var req struct {
+				hubapi.ConstraintDraft
+				PreviewToken string `json:"previewToken"`
+			}
+			if err := json.Unmarshal(body, &req); err != nil {
+				return 400, map[string]string{"error": err.Error()}, true
+			}
+			c := h.constraints[i]
+			if h.ifMatch == "" {
+				return 428, map[string]string{"error": "If-Match header is required for updates"}, true
+			}
+			b, _ := json.Marshal(req.ConstraintDraft)
+			if p, ok := consume(req.PreviewToken); !ok || p.op != "update" || p.id != id || p.draft != string(b) || p.rev != h.ifMatch {
+				return 409, map[string]string{"error": "preview token invalid for this update"}, true
+			}
+			if h.ifMatch != fmt.Sprint(c.revision) {
+				return 409, map[string]string{"error": "stale revision"}, true
+			}
+			if req.Name != c.Name || req.Subject != c.Subject || req.Scope != c.Scope {
+				return 400, map[string]string{"error": "the fake hub takes only permission changes"}, true
+			}
+			var added []string
+			for _, p := range req.MaximumPermissions {
+				if !slices.Contains(c.MaximumPermissions, p) {
+					added = append(added, p)
+				}
+			}
+			if miss := h.lacking(added); len(miss) > 0 {
+				return relaxationRefusal(miss)
+			}
+			c.MaximumPermissions, c.Purpose, c.revision = req.MaximumPermissions, req.Purpose, c.revision+1
+			return 200, wire(c, true), true
 		}
 	}
 	return 0, nil, false
+}
+
+func (h *fakeAdminHub) lacking(perms []string) []string {
+	var out []string
+	for _, p := range perms {
+		if slices.Contains(h.actorLacks, p) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// relaxationRefusal is scion's answer from checkRelaxationAuthority.
+func relaxationRefusal(missing []string) (int, any, bool) {
+	return 403, map[string]any{"error": map[string]any{"code": "insufficient_constraint_relaxation_authority",
+		"message": fmt.Sprintf("actor lacks authority over %d permission(s) being restored", len(missing)),
+		"details": map[string]any{"missingPermissionIds": missing}}}, true
 }
 
 func (h *fakeAdminHub) count(prefix string) int {
@@ -467,57 +534,202 @@ func TestRemoteCeilingMatchingIsKept(t *testing.T) {
 	}
 }
 
-// A ceiling that does not match (it allows project.create, or names another
-// hub user) is replaced: the new one is created under the free name before the
-// old one is deleted, so the user is never uncapped. Run twice, the names
-// alternate.
-func TestRemoteCeilingReplacementCreatesBeforeDelete(t *testing.T) {
-	names := remoteCeilingNames("you@github")
-	for _, tc := range []struct {
-		name    string
-		subject string
-		perms   []string
-	}{
-		{"allows project.create", "user-1", append(webCeiling(), projectCreatePermission)},
-		{"another hub user", "user-old", webCeiling()},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			hub := newFakeAdminHub()
-			hub.constraints = []*fakeConstraint{ceilingFor("ac-old", names[0], tc.subject, tc.perms)}
-			warned, warn := collectWarnings()
-			id, err := ensureRemoteCeiling(context.Background(), &hubapi.Client{T: hub}, "you@github", "user-1", webCeiling(), warn)
-			if err != nil {
-				t.Fatal(err)
-			}
-			iCreate, iDelete := hub.callAt("POST /api/v1/admin/access-constraints"), hub.callAt("DELETE /api/v1/admin/access-constraints/ac-old")
-			if iCreate < 0 || iDelete < 0 || iCreate > iDelete {
-				t.Fatalf("create at %d, delete at %d; want the create first: %v", iCreate, iDelete, hub.calls)
-			}
-			if len(hub.constraints) != 1 || hub.constraints[0].id != id || hub.constraints[0].Name != names[1] ||
-				hub.constraints[0].Subject.PrincipalID != "user-1" || slices.Contains(hub.constraints[0].MaximumPermissions, projectCreatePermission) {
-				t.Fatalf("constraints = %+v, id %q", hub.constraints, id)
-			}
-			if len(*warned) != 1 || !strings.Contains((*warned)[0], "ac-old") {
-				t.Fatalf("warnings = %q", *warned)
-			}
+// The user's own ceiling with other permissions is rewritten in place: same
+// constraint, same name, no create and no delete, and the hub's If-Match
+// revision is the one read.
+func TestRemoteCeilingMismatchIsRewrittenInPlace(t *testing.T) {
+	for i, name := range remoteCeilingNames("you@github") {
+		hub := newFakeAdminHub()
+		hub.constraints = []*fakeConstraint{ceilingFor("ac-old", name, "user-1", append(webCeiling(), projectCreatePermission))}
+		warned, warn := collectWarnings()
+		id, err := ensureRemoteCeiling(context.Background(), &hubapi.Client{T: hub}, "you@github", "user-1", webCeiling(), warn)
+		if err != nil {
+			t.Fatalf("name %d: %v", i, err)
+		}
+		c := hub.constraints[0]
+		if id != "ac-old" || len(hub.constraints) != 1 || c.Name != name || c.revision != 4 ||
+			!hubapi.SamePermissions(c.MaximumPermissions, webCeiling()) || c.Purpose != remoteCeilingPurpose {
+			t.Fatalf("name %d: id %q, constraints %+v", i, id, hub.constraints)
+		}
+		if hub.count("POST /api/v1/admin/access-constraints")+hub.count("DELETE ") != 0 || hub.count("PUT /api/v1/admin/access-constraints/ac-old") != 1 {
+			t.Fatalf("name %d: calls %v", i, hub.calls)
+		}
+		if len(*warned) != 1 || !strings.Contains((*warned)[0], "rewriting") {
+			t.Fatalf("name %d: warnings %q", i, *warned)
+		}
+	}
+}
 
-			// The replacement now holds the second name; the next one goes back
-			// under the first.
-			hub.constraints[0].MaximumPermissions = append(webCeiling(), projectCreatePermission)
-			old := hub.constraints[0].id
-			hub.calls = nil
-			id2, err := ensureRemoteCeiling(context.Background(), &hubapi.Client{T: hub}, "you@github", "user-1", webCeiling(), warn)
-			if err != nil {
-				t.Fatal(err)
-			}
-			iCreate, iDelete = hub.callAt("POST /api/v1/admin/access-constraints"), hub.callAt("DELETE /api/v1/admin/access-constraints/"+old)
-			if iCreate < 0 || iDelete < 0 || iCreate > iDelete {
-				t.Fatalf("second replacement: create at %d, delete at %d: %v", iCreate, iDelete, hub.calls)
-			}
-			if len(hub.constraints) != 1 || hub.constraints[0].id != id2 || hub.constraints[0].Name != names[0] {
-				t.Fatalf("second replacement: constraints = %+v", hub.constraints)
-			}
-		})
+// A ceiling on another hub user (the login's row was recreated) is not the
+// user's: the new one is created under the free name before the old one is
+// deleted, so the user is never uncapped. Run again, the names alternate.
+func TestRemoteCeilingOnAnotherUserIsReplacedCreateFirst(t *testing.T) {
+	names := remoteCeilingNames("you@github")
+	hub := newFakeAdminHub()
+	hub.constraints = []*fakeConstraint{ceilingFor("ac-old", names[0], "user-old", webCeiling())}
+	warned, warn := collectWarnings()
+	id, err := ensureRemoteCeiling(context.Background(), &hubapi.Client{T: hub}, "you@github", "user-1", webCeiling(), warn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	iCreate, iDelete := hub.callAt("POST /api/v1/admin/access-constraints"), hub.callAt("DELETE /api/v1/admin/access-constraints/ac-old")
+	if iCreate < 0 || iDelete < 0 || iCreate > iDelete {
+		t.Fatalf("create at %d, delete at %d; want the create first: %v", iCreate, iDelete, hub.calls)
+	}
+	if len(hub.constraints) != 1 || hub.constraints[0].id != id || hub.constraints[0].Name != names[1] ||
+		hub.constraints[0].Subject.PrincipalID != "user-1" {
+		t.Fatalf("constraints = %+v, id %q", hub.constraints, id)
+	}
+	if len(*warned) != 1 || !strings.Contains((*warned)[0], "ac-old") {
+		t.Fatalf("warnings = %q", *warned)
+	}
+
+	hub.constraints[0].Subject.PrincipalID = "user-old"
+	old := hub.constraints[0].id
+	hub.calls = nil
+	id2, err := ensureRemoteCeiling(context.Background(), &hubapi.Client{T: hub}, "you@github", "user-1", webCeiling(), warn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	iCreate, iDelete = hub.callAt("POST /api/v1/admin/access-constraints"), hub.callAt("DELETE /api/v1/admin/access-constraints/"+old)
+	if iCreate < 0 || iDelete < 0 || iCreate > iDelete {
+		t.Fatalf("second replacement: create at %d, delete at %d: %v", iCreate, iDelete, hub.calls)
+	}
+	if len(hub.constraints) != 1 || hub.constraints[0].id != id2 || hub.constraints[0].Name != names[0] {
+		t.Fatalf("second replacement: constraints = %+v", hub.constraints)
+	}
+}
+
+// olderScionCeiling is the web ceiling as a lever on an older scion wrote it:
+// that scion's hub-member still carried user.list, which scion has since
+// reserved, so no hub user holds it and none may delete a constraint naming it.
+func olderScionCeiling() []string {
+	return append(slices.DeleteFunc(webCeiling(), func(p string) bool { return p == "user.list" }), "user.list", "skill.read")
+}
+
+func currentCeiling() []string {
+	return slices.DeleteFunc(webCeiling(), func(p string) bool { return p == "user.list" })
+}
+
+// A migrated instance: the ceiling an older lever wrote (as scion's dev user)
+// names user.list, which lever-admin does not hold. It is rewritten in place,
+// which only needs authority over the permissions it adds; nothing is deleted.
+func TestRemoteCeilingFromAnOlderScionIsRewritten(t *testing.T) {
+	hub := newFakeAdminHub()
+	hub.actorLacks = []string{"user.list"}
+	hub.constraints = []*fakeConstraint{ceilingFor("ac-dev", remoteCeilingName("you@github"), "user-1", olderScionCeiling())}
+	_, warn := collectWarnings()
+	id, err := ensureRemoteCeiling(context.Background(), &hubapi.Client{T: hub}, "you@github", "user-1", currentCeiling(), warn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "ac-dev" || len(hub.constraints) != 1 || !hubapi.SamePermissions(hub.constraints[0].MaximumPermissions, currentCeiling()) {
+		t.Fatalf("id %q, constraints %+v, calls %v", id, hub.constraints, hub.calls)
+	}
+}
+
+// The state an apply of the earlier release left when it kept the older
+// ceiling beside a new one: a match under the second name and the older
+// scion's under the first. The match is kept; the other is narrowed by what
+// lever-admin lacks, then deleted. A later change of the ceiling rewrites the
+// survivor in place and needs no free name.
+func TestRemoteCeilingBesideAnUndeletableOlderOneIsCleanedUp(t *testing.T) {
+	names := remoteCeilingNames("you@github")
+	hub := newFakeAdminHub()
+	hub.actorLacks = []string{"user.list"}
+	hub.constraints = []*fakeConstraint{
+		ceilingFor("ac-dev", names[0], "user-1", olderScionCeiling()),
+		ceilingFor("ac-b", names[1], "user-1", currentCeiling()),
+	}
+	warned, warn := collectWarnings()
+	id, err := ensureRemoteCeiling(context.Background(), &hubapi.Client{T: hub}, "you@github", "user-1", currentCeiling(), warn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "ac-b" || len(hub.constraints) != 1 || hub.constraints[0].id != "ac-b" || hub.count("POST /api/v1/admin/access-constraints") != 0 {
+		t.Fatalf("id %q, constraints %+v, calls %v", id, hub.constraints, hub.calls)
+	}
+	del := "DELETE /api/v1/admin/access-constraints/ac-dev"
+	iFirst, iNarrow := slices.Index(hub.calls, del), hub.callAt("PUT /api/v1/admin/access-constraints/ac-dev")
+	iLast := -1
+	for i, c := range hub.calls {
+		if c == del {
+			iLast = i
+		}
+	}
+	if iFirst < 0 || iNarrow < iFirst || iLast < iNarrow || hub.count(del) != 2 {
+		t.Fatalf("want delete (refused), narrow, delete: %v", hub.calls)
+	}
+	if slices.ContainsFunc(*warned, func(w string) bool { return strings.Contains(w, "stays") }) {
+		t.Fatalf("warnings %q", *warned)
+	}
+
+	changed := append(currentCeiling(), "inbox.read")
+	hub.calls = nil
+	id, err = ensureRemoteCeiling(context.Background(), &hubapi.Client{T: hub}, "you@github", "user-1", changed, warn)
+	if err != nil || id != "ac-b" || !hubapi.SamePermissions(hub.constraints[0].MaximumPermissions, changed) || hub.count("POST /api/v1/admin/access-constraints") != 0 {
+		t.Fatalf("later change: id %q, err %v, constraints %+v, calls %v", id, err, hub.constraints, hub.calls)
+	}
+}
+
+// Both names held by the user's own outdated ceilings: one is rewritten, the
+// other removed. While both stand the user holds no more than either.
+func TestRemoteCeilingTwoOutdatedOwnCeilings(t *testing.T) {
+	names := remoteCeilingNames("you@github")
+	hub := newFakeAdminHub()
+	hub.actorLacks = []string{"user.list"}
+	hub.constraints = []*fakeConstraint{
+		ceilingFor("ac-1", names[0], "user-1", olderScionCeiling()),
+		ceilingFor("ac-2", names[1], "user-1", append(currentCeiling(), projectCreatePermission)),
+	}
+	_, warn := collectWarnings()
+	id, err := ensureRemoteCeiling(context.Background(), &hubapi.Client{T: hub}, "you@github", "user-1", currentCeiling(), warn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "ac-1" || len(hub.constraints) != 1 || !hubapi.SamePermissions(hub.constraints[0].MaximumPermissions, currentCeiling()) {
+		t.Fatalf("id %q, constraints %+v, calls %v", id, hub.constraints, hub.calls)
+	}
+}
+
+// A constraint lever-admin may neither delete nor narrow into one it may
+// delete stays, with a warning: it only takes permissions away.
+func TestRemoteCeilingUndeletableStaysWithAWarning(t *testing.T) {
+	names := remoteCeilingNames("you@github")
+	hub := newFakeAdminHub()
+	hub.actorLacks = []string{"user.list"}
+	hub.constraints = []*fakeConstraint{
+		ceilingFor("ac-x", names[0], "user-old", []string{"user.list"}),
+		ceilingFor("ac-b", names[1], "user-1", currentCeiling()),
+	}
+	warned, warn := collectWarnings()
+	id, err := ensureRemoteCeiling(context.Background(), &hubapi.Client{T: hub}, "you@github", "user-1", currentCeiling(), warn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "ac-b" || len(hub.constraints) != 2 || hub.count("PUT ") != 0 {
+		t.Fatalf("id %q, constraints %+v, calls %v", id, hub.constraints, hub.calls)
+	}
+	if !slices.ContainsFunc(*warned, func(w string) bool { return strings.Contains(w, "ac-x") && strings.Contains(w, "stays") }) {
+		t.Fatalf("warnings %q", *warned)
+	}
+}
+
+// A rewrite that would add a permission lever-admin does not hold is refused;
+// the narrowing part is still made, and the apply fails.
+func TestRemoteCeilingRefusedWideningStillNarrows(t *testing.T) {
+	hub := newFakeAdminHub()
+	hub.actorLacks = []string{"agent.attach"}
+	old := append(slices.DeleteFunc(currentCeiling(), func(p string) bool { return p == "agent.attach" }), projectCreatePermission)
+	hub.constraints = []*fakeConstraint{ceilingFor("ac-1", remoteCeilingName("you@github"), "user-1", old)}
+	_, warn := collectWarnings()
+	_, err := ensureRemoteCeiling(context.Background(), &hubapi.Client{T: hub}, "you@github", "user-1", currentCeiling(), warn)
+	if err == nil || !strings.Contains(err.Error(), "agent.attach") {
+		t.Fatalf("err = %v", err)
+	}
+	got := hub.constraints[0].MaximumPermissions
+	if len(hub.constraints) != 1 || slices.Contains(got, projectCreatePermission) || slices.Contains(got, "agent.attach") {
+		t.Fatalf("constraints %+v", hub.constraints)
 	}
 }
 
@@ -541,13 +753,13 @@ func TestRemoteCeilingStaleBesideAMatchIsDeleted(t *testing.T) {
 	}
 }
 
-// Both names held by constraints that do not match leaves no free name: an
+// Both names held by constraints on other hub users leaves no free name: an
 // error, and nothing is deleted, so the existing caps stay in force.
 func TestRemoteCeilingBothNamesTakenFails(t *testing.T) {
 	names := remoteCeilingNames("you@github")
 	hub := newFakeAdminHub()
 	hub.constraints = []*fakeConstraint{
-		ceilingFor("ac-1", names[0], "user-1", append(webCeiling(), projectCreatePermission)),
+		ceilingFor("ac-1", names[0], "user-older", webCeiling()),
 		ceilingFor("ac-2", names[1], "user-old", webCeiling()),
 	}
 	_, warn := collectWarnings()
@@ -555,7 +767,7 @@ func TestRemoteCeilingBothNamesTakenFails(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "both") {
 		t.Fatalf("err = %v, want both names reported taken", err)
 	}
-	if hub.count("POST ")+hub.count("DELETE ") != 0 || len(hub.constraints) != 2 {
+	if hub.count("POST ")+hub.count("DELETE ")+hub.count("PUT ") != 0 || len(hub.constraints) != 2 {
 		t.Fatalf("wrote with no free name: %v", hub.calls)
 	}
 }
@@ -577,9 +789,9 @@ func TestRemoteCeilingRecoveryDisabledIsRefused(t *testing.T) {
 	}
 }
 
-// A create the hub refuses (a blocked preview) fails before any delete: the
+// A rewrite the hub refuses (a blocked preview) fails before any delete: the
 // stale ceiling stays.
-func TestRemoteCeilingFailedCreateDeletesNothing(t *testing.T) {
+func TestRemoteCeilingFailedRewriteDeletesNothing(t *testing.T) {
 	hub := newFakeAdminHub()
 	hub.constraints = []*fakeConstraint{ceilingFor("ac-old", remoteCeilingName("you@github"), "user-1", append(webCeiling(), projectCreatePermission))}
 	hub.blockPreview = true

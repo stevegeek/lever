@@ -189,6 +189,17 @@ func TestJailCurlPerCallCap(t *testing.T) {
 	assertTooLarge(t, err, "GET /x", "1 MiB")
 }
 
+// A smaller output limit the caller already set stays in force.
+func TestJailCurlKeepsASmallerOuterOutputLimit(t *testing.T) {
+	r := &scriptedRunner{res: proc.Result{Stdout: "{}\n200"}}
+	if _, _, err := jailCurl(r, "t").Do(proc.WithOutputLimit(context.Background(), 4096), "GET", "/x"); err != nil {
+		t.Fatal(err)
+	}
+	if r.limit != 4096 {
+		t.Errorf("output limit = %d, want the caller's 4096", r.limit)
+	}
+}
+
 // A killed or stopped transfer is never a reply, even when what it wrote
 // before the kill ends like one.
 func TestJailCurlTreatsACutTransferAsTooLarge(t *testing.T) {

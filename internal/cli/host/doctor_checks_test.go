@@ -1072,6 +1072,10 @@ func TestCheckAgentListSize(t *testing.T) {
 	if r := checkAgentListSize(ctx, "lever", sized(0, tooLarge)); r.ok || r.fix == "" {
 		t.Errorf("a page over the cap fails: %+v", r)
 	}
+	lookup := fmt.Errorf("looking up project lever: %v", &hubapi.APIError{TooLarge: true, Msg: "GET /api/v1/projects: too large"})
+	if r := checkAgentListSize(ctx, "lever", sized(0, lookup)); !r.ok {
+		t.Errorf("a project list over its cap is not blamed on the agent list: %+v", r)
+	}
 	if r := checkAgentListSize(ctx, "lever", sized(0, errors.New("down"))); !r.ok || !strings.Contains(r.detail, "not checked") {
 		t.Errorf("an unreachable hub is not checked: %+v", r)
 	}

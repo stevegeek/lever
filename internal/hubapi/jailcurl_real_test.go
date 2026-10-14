@@ -49,10 +49,15 @@ func sizedServer(t *testing.T) *httptest.Server {
 	return srv
 }
 
+// needCurl also clears the proxy variables, which would route the request to
+// the test server elsewhere.
 func needCurl(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("curl"); err != nil {
 		t.Skip("no curl")
+	}
+	for _, k := range []string{"http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"} {
+		t.Setenv(k, "")
 	}
 }
 

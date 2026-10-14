@@ -55,10 +55,12 @@ func ReplyCap(ctx context.Context) int {
 // command line, so it is never visible to ps on the host.
 //
 // -w appends a final line holding the status code; curl expands the \n
-// itself. --max-filesize takes the reply cap from $3; it stops a transfer
-// whose Content-Length or received size passes it, and the runner's output
-// limit backs it for a curl that only checks Content-Length. --fail is deliberately not set, so a 403 or 404 arrives as a status
+// itself. --fail is deliberately not set, so a 403 or 404 arrives as a status
 // rather than a non-zero exit indistinguishable from an unreachable hub.
+//
+// --max-filesize takes the reply cap from $3. It stops a transfer whose
+// Content-Length or received size passes the cap; the runner's output limit
+// backs it for a curl that only checks Content-Length.
 const curlScript = `exec curl -sS --connect-timeout 5 --max-time 20 --max-filesize "$3" ` +
 	`-o - -w '\n%{http_code}' -X "$1" ` +
 	`-H "Authorization: Bearer $SCION_HUB_TOKEN" -H 'Accept: application/json' "$2"`
@@ -117,7 +119,11 @@ func runCurl(ctx context.Context, r proc.Runner, env map[string]string, script, 
 // runCurlStdin is runCurl with stdin for the script.
 func runCurlStdin(ctx context.Context, r proc.Runner, stdin io.Reader, env map[string]string, script, method, path, url string) (int, []byte, error) {
 	limit := ReplyCap(ctx)
-	ctx = proc.WithOutputLimit(ctx, limit+statusTrailerRoom)
+	outLimit := limit + statusTrailerRoom
+	if outer, ok := proc.OutputLimit(ctx); ok {
+		outLimit = min(outLimit, outer)
+	}
+	ctx = proc.WithOutputLimit(ctx, outLimit)
 	args := []string{"-c", script, "_", method, url, strconv.Itoa(limit)}
 	var res proc.Result
 	var err error

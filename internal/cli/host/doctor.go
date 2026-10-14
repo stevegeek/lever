@@ -112,6 +112,11 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		return hc.Agents(ctx, project, scionpkg.DefaultHubEndpoint)
 	}
 	measureAgentList := func(ctx context.Context, project string) (int, error) {
+		// %v, not %w: a project list over its cap must not read as an agent
+		// list over its own.
+		if _, err := hc.ProjectID(ctx, project, scionpkg.DefaultHubEndpoint); err != nil {
+			return 0, fmt.Errorf("looking up project %s: %v", project, err)
+		}
 		_, largest, err := hc.AgentsLargestPage(ctx, project, scionpkg.DefaultHubEndpoint)
 		return largest, err
 	}

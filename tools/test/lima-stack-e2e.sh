@@ -523,7 +523,9 @@ echo "Manager for the stack e2e ($MARK). Do nothing unless asked." > "$INST/mana
 	echo "${ph:-unknown} $cl" >> "$WORK/conv-samples"
 done) &
 sampler=$!
-(cd "$INST" && timeout 900 "$LEVER" conversation new > "$WORK/conv-new.log" 2>&1); conv_rc=$?
+# The manager here never idles (its API key is fake, so every turn retries);
+# the busy refusal itself is unit-tested.
+(cd "$INST" && timeout 900 "$LEVER" conversation new --force > "$WORK/conv-new.log" 2>&1); conv_rc=$?
 touch "$WORK/conv-done"; wait "$sampler"
 tail -3 "$WORK/conv-new.log" | mask_secrets | sed 's/^/      | /'
 echo "      | phases seen: $(awk '{print $1"/"$2}' "$WORK/conv-samples" | uniq | tr '\n' ' ')"

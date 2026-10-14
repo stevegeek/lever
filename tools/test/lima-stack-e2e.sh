@@ -26,6 +26,8 @@ NAME="${NAME:-stacke2e}"
 VM="lever-${NAME}"
 LEVER="${LEVER:-$HOME/.local/bin/lever}"
 IMAGE="${IMAGE:-lever.local/lever-claude-slim}"
+# AGENT_IMAGE is the name agents run $IMAGE under (internal/imageref.Agent).
+AGENT_NAME="${IMAGE#lever.local/}"; AGENT_NAME="${AGENT_NAME#scionlocal/}"
 SCION_VERSION="${SCION_VERSION:-$(sed -n 's/^const ReleasePin = "\(.*\)"/\1/p' "$REPO_ROOT/internal/provision/scionbin/release.go")}"
 SCION_MODULE=github.com/GoogleCloudPlatform/scion
 OPERATOR=operator@example.com
@@ -77,6 +79,7 @@ while [ "$RP" = "$JP" ] || [ "$RP" = "$AP" ]; do RP=$(pick); done
 command -v limactl >/dev/null 2>&1 || { echo "limactl not found"; exit 1; }
 [ -x "$LEVER" ] || { echo "$LEVER not found (make install)"; exit 1; }
 case "$(uname -m)" in arm64|aarch64) ARCH=arm64 ;; *) ARCH=amd64 ;; esac
+AGENT_IMAGE="lever.local/$AGENT_NAME:$ARCH"
 LEVER_VERSION="$(sed -n 's/^const Version = "\(.*\)"/\1/p' "$REPO_ROOT/internal/cli/root.go")"
 JAIL_ABI="$(sed -n 's/^const JailABI = \([0-9]*\)$/\1/p' "$REPO_ROOT/internal/jailabi/jailabi.go")"
 
@@ -252,7 +255,8 @@ checkx "the project lists the broker" 'hubbody "/api/v1/projects/$PROJ/providers
 check "lever-admin pinned the experiments off" grep -q '"off": *\[' "$INST/.lever-state/hub-experiments.json"
 check "no dev token in the jail" G sh -c '! test -e ~/.scion/dev-token'
 cimage() { X inspect -f '{{.ImageName}}' "$1" 2>/dev/null; }
-checkx "the manager runs lever's image under its lever.local name ($(cimage "lever--$NAME"))" '[ "$(cimage "lever--$NAME")" = "lever.local/${IMAGE#lever.local/}:$ARCH" ]'
+checkx "the jail's podman refuses a pull from lever.local" 'X pull lever.local/none:1 2>&1 | grep -qi blocked'
+checkx "the manager runs lever's image under its lever.local name ($(cimage "lever--$NAME"))" '[ "$(cimage "lever--$NAME")" = "$AGENT_IMAGE" ]'
 check "no registry called lever.local resolves in the guest" G sh -c '! getent hosts lever.local'
 
 say "manager, worker and messages"
@@ -406,7 +410,7 @@ reg=$(hubreg 2>&1)
 checkx "the hub's endpoints section holds the agent's registry ($reg)" '[ "$reg" = registry.invalid/agent-chosen ]'
 mgr agent stop worker | tail -1 | sed 's/^/      | /'
 checkx "the worker resumes under the agent's registry" 'mgr agent resume worker | grep -qE "running|resumed"'
-checkx "the worker runs lever's image, not the agent's registry ($(cimage lever--worker))" '[ "$(cimage lever--worker)" = "lever.local/${IMAGE#lever.local/}:$ARCH" ]'
+checkx "the worker runs lever's image, not the agent's registry ($(cimage lever--worker))" '[ "$(cimage lever--worker)" = "$AGENT_IMAGE" ]'
 code=$(agentcall PATCH /api/v1/system/workstation-settings '{"auto_inject_gcloud_adc":true}')
 checkx "the agent's gcloud injection write reaches the hub ($code)" '[ "$code" = 200 ]'
 check "settings.yaml carries auto_inject_gcloud_adc" gcloudset

@@ -1530,7 +1530,9 @@ func TestCheckManagerImage(t *testing.T) {
 		{"a worker on a bare name", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "lever.local/lever-claude:arm64"}, scion.Agent{Slug: "w", Image: "scionlocal/lever-claude:arm64"}), true, "w (scionlocal/lever-claude:arm64)", "recycling"},
 		{"a worker on a digest", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "lever.local/lever-claude:arm64"}, scion.Agent{Slug: "w", Image: "x@sha256:aa"}), true, "as configured", ""},
 		{"drifted", listing(scion.Agent{Slug: "assistant", Phase: "suspended", Image: "scionlocal/lever-claude:v1"}), false, "scionlocal/lever-claude:v1", "lever up --fresh"},
-		{"no record", listing(scion.Agent{Slug: "scratch", Phase: "running", Image: "x"}), true, "not checked", ""},
+		{"no manager record, a worker on a bare name", listing(scion.Agent{Slug: "w", Image: "scionlocal/lever-claude:arm64"}), true, "w (scionlocal/lever-claude:arm64) created on an unqualified", "recycling"},
+		{"drifted manager, a worker on a bare name", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "lever.local/other:arm64"}, scion.Agent{Slug: "w", Image: "scionlocal/lever-claude:arm64"}), false, "w (scionlocal/lever-claude:arm64)", "lever up --fresh"},
+		{"no record", listing(scion.Agent{Slug: "scratch", Phase: "running", Image: "lever.local/x:1"}), true, "not checked", ""},
 		{"record without image", listing(scion.Agent{Slug: "assistant", Phase: "running"}), true, "not checked", ""},
 		{"list fails", func(context.Context, string) ([]scion.Agent, error) { return nil, fmt.Errorf("hub down") }, true, "not checked", ""},
 	}

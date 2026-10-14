@@ -3694,9 +3694,9 @@ func TestStartManagerFreshBypassesPreRoleGuard(t *testing.T) {
 	}
 }
 
-// TestRunLoadImageTarForwardsImageTagPolicy: the archive load receives
-// Deps.ImageTagPolicy as its allowTag, so every tag in the archive is checked
-// before a byte is streamed; a nil policy is forwarded as nil (no check).
+// TestRunLoadImageTarForwardsImageTagPolicy: every tag in the archive is held
+// to Deps.ImageTagPolicy and refused when it names another configured image,
+// before a byte is streamed.
 func TestRunLoadImageTarForwardsImageTagPolicy(t *testing.T) {
 	sentinel := errors.New("policy sentinel")
 	var got func(string) error
@@ -3709,20 +3709,28 @@ func TestRunLoadImageTarForwardsImageTagPolicy(t *testing.T) {
 			return nil
 		},
 	})
+	app := &config.App{Manager: config.Manager{Image: "scionlocal/mgr:arm64"},
+		Workers: []config.Worker{{Name: "w", Image: "scionlocal/x:arm64"}}}
 	step := Step{Target: "scionlocal/x:arm64", TarPath: "/inst/images/x.tar"}
-	if err := runLoadImage(context.Background(), step, d); err != nil {
+	if err := runLoadImage(context.Background(), step, d, app); err != nil {
 		t.Fatalf("runLoadImage: %v", err)
 	}
 	if calls != 1 || got == nil || !errors.Is(got("anything"), sentinel) {
 		t.Fatalf("the configured policy must reach LoadImageTar (calls=%d, got nil=%v)", calls, got == nil)
 	}
 	d.ImageTagPolicy = nil
-	got = func(string) error { return nil }
-	if err := runLoadImage(context.Background(), step, d); err != nil {
+	if err := runLoadImage(context.Background(), step, d, app); err != nil {
 		t.Fatalf("runLoadImage: %v", err)
 	}
-	if got != nil {
-		t.Fatal("a nil policy must be forwarded as nil")
+	for _, ok := range []string{"scionlocal/x:arm64", "docker.io/scionlocal/x:arm64", "lever.local/x:arm64", "scionlocal/other:1"} {
+		if err := got(ok); err != nil {
+			t.Errorf("%s: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"lever.local/mgr:arm64", "scionlocal/mgr:arm64", "docker.io/scionlocal/mgr:arm64", "mgr:arm64"} {
+		if err := got(bad); err == nil || !strings.Contains(err.Error(), "configured for another agent") {
+			t.Errorf("%s: want refused, got %v", bad, err)
+		}
 	}
 }
 
@@ -4201,6 +4209,31 @@ func TestStartManagerFreshAfterAnUnconfirmedDelete(t *testing.T) {
 		testutil.WantErrContaining(t, err, "lever up --fresh")
 		if r.startCalls != 0 {
 			t.Fatalf("still there: %d start(s); nothing may be created over the record", r.startCalls)
+		}
+	}
+}
+
+// A manager an older lever created keeps its unqualified image name, which
+// the hub's image registry still applies to: keeping or resuming it warns.
+func TestConvergeManagerWarnsOnAnUnqualifiedImage(t *testing.T) {
+	for _, c := range []struct {
+		image string
+		warn  bool
+	}{
+		{"scionlocal/lever-claude:arm64", true},
+		{"localhost/scionlocal/lever-claude:arm64", true},
+		{"lever.local/lever-claude:arm64", false},
+		{"", false},
+	} {
+		var logs []string
+		r := &run{app: &config.App{Name: "m"}, d: Deps{Log: func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }}}
+		rec := &scion.Agent{Slug: "m", Phase: scion.PhaseRunning, Image: c.image}
+		if _, err := r.convergeManager(context.Background(), "/lever", rec, scion.StartOpts{Image: "lever.local/lever-claude:arm64"}); err != nil {
+			t.Fatal(err)
+		}
+		got := strings.Contains(strings.Join(logs, "\n"), "unqualified image name")
+		if got != c.warn {
+			t.Errorf("%q: warned = %v, want %v (%q)", c.image, got, c.warn, logs)
 		}
 	}
 }

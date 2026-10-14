@@ -57,6 +57,29 @@ func (a *App) WorkerAgentImage(g Worker) string {
 	return imageref.Agent(a.WorkerImage(g))
 }
 
+// CheckTarTag refuses a tag in the archive that ships stepRef when it names
+// another configured image, under its configured name or the name agents run
+// it as: podman load imports every tag in an archive, so the tag would repoint
+// that agent's image.
+func (a *App) CheckTarTag(stepRef, tag string) error {
+	plain := strings.TrimPrefix(strings.TrimPrefix(tag, "docker.io/"), "library/")
+	own := imageref.Agent(stepRef)
+	refs := []string{a.ManagerImage()}
+	for _, g := range a.Workers {
+		refs = append(refs, a.WorkerImage(g))
+	}
+	for _, r := range refs {
+		agent := imageref.Agent(r)
+		if r == "" || agent == own {
+			continue
+		}
+		if plain == r || tag == r || imageref.Agent(plain) == agent || tag == agent {
+			return fmt.Errorf("image %q is configured for another agent (it runs as %s); one archive may not carry it", tag, agent)
+		}
+	}
+	return nil
+}
+
 // ImageTagPolicy returns the check applied to every tag an image_tar archive
 // carries, or nil with no allowed_image_registries: an archive can hold more
 // images than the one the config names, and each of them gets imported.

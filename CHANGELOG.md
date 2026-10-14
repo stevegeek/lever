@@ -209,7 +209,10 @@ version bump moves the block under the new version heading.
   such as `scionlocal/lever-claude` to that registry, so an agent could make the next worker or
   manager run an image from a registry it controls. lever now starts every agent on a name with a
   registry host, `lever.local/<name>`, which scion never rewrites; load-image tags the loaded
-  image with it, and no registry by that name exists or is contacted. A `manager.image` or
+  image with it. No registry by that name exists, and the jail's podman refuses any pull from it
+  (a `registries.conf.d` drop-in), so a missing image fails instead of asking the network. A
+  start-manager that keeps or resumes a manager on an unqualified name warns, and an image_tar
+  that carries another configured image's name is refused. A `manager.image` or
   `workers[].image` of `scionlocal/<name>` runs as `lever.local/<name>`, any other unqualified
   name `<name>` as `lever.local/<name>`, and a name with a registry host as written; a config whose
   images would share one name is refused. As defence in depth the hub-identity step also sets the
@@ -219,7 +222,10 @@ version bump moves the block under the new version heading.
   agents with, which then fail to start, and set `auto_inject_gcloud_adc`, which copies the jail
   user's gcloud credentials into every agent started afterwards. The hub-identity step sets the
   runtime to `podman` as `lever-admin`, and the apply's settings write removes the gcloud key. The
-  new `lever doctor` row *hub container runtime* fails while the hub's runtime is not podman.
+  new `lever doctor` row *hub container runtime* fails while the hub's runtime is not podman. The
+  first such apply creates the hub database's `profiles` row from the effective profiles, so
+  from then on that row, not `profiles:` in the jail's `settings.yaml`, decides; lever writes no
+  profile settings itself.
 - **The remote proxy refuses broker writes (lever#207).** A remote web user keeps scion's
   `broker.create`, so an operator login could register a broker and receive its join token and
   secret in the browser, and the extra broker blocked lever-admin's link of a new project's

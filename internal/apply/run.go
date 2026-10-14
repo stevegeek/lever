@@ -15,6 +15,7 @@ import (
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/hubauth"
+	"github.com/stevegeek/lever/internal/imageref"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/progress"
 	"github.com/stevegeek/lever/internal/retry"
@@ -545,7 +546,7 @@ func (r *run) step(ctx context.Context, s Step) error {
 	case KindBrokerUp:
 		return runBrokerUp(ctx, r.d)
 	case KindLoadImage:
-		return runLoadImage(ctx, s, r.d)
+		return runLoadImage(ctx, s, r.d, r.app)
 	case KindInitMachine:
 		return r.d.Scion.InitMachine(ctx)
 	case KindConfigRegistry:
@@ -722,12 +723,23 @@ func (r *run) agentTemplate(ctx context.Context, s Step) error {
 	return nil
 }
 
-func runLoadImage(ctx context.Context, s Step, d Deps) error {
+func runLoadImage(ctx context.Context, s Step, d Deps, app *config.App) error {
 	loaded, load := d.ImageLoaded, d.LoadImage
 	if s.TarPath != "" {
 		loaded = func(ctx context.Context, ref string) bool { return d.ImageLoadedTar(ctx, ref, s.TarPath) }
+		allow := func(tag string) error {
+			if d.ImageTagPolicy != nil {
+				if err := d.ImageTagPolicy(tag); err != nil {
+					return err
+				}
+			}
+			if app != nil {
+				return app.CheckTarTag(s.Target, tag)
+			}
+			return nil
+		}
 		load = func(ctx context.Context, ref string) error {
-			return d.LoadImageTar(ctx, ref, s.TarPath, d.ImageTagPolicy)
+			return d.LoadImageTar(ctx, ref, s.TarPath, allow)
 		}
 	}
 	rep := progress.From(ctx)
@@ -1804,6 +1816,13 @@ const NestedVirtRecreateFix = "recreate it to apply the change: `lever up --fres
 // reports whether it started or resumed anything, which decides whether the
 // liveness gate must hold for the settle window or may take one look.
 func (r *run) convergeManager(ctx context.Context, jp string, rec *scion.Agent, opts scion.StartOpts) (acted bool, err error) {
+	if rec != nil && !r.fresh && rec.Image != "" && !strings.Contains(rec.Image, "@") && !imageref.Qualified(rec.Image) {
+		// scion keeps the image a record was created with and rewrites an
+		// unqualified one to the hub's image registry at every start, which an
+		// agent can set between applies.
+		r.d.Log("start-manager: WARNING: manager %q was created on the unqualified image name %s, which the hub rewrites to its image registry at every start, a setting any agent can change; recreate it on %s with `lever up --fresh --keep-conversation`",
+			r.app.Name, termsafe.Sanitize(rec.Image), opts.Image)
+	}
 	switch {
 	case rec == nil:
 		// Under --fresh an "already exists" answer means the observe step

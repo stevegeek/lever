@@ -217,7 +217,8 @@ att=$(cd "$INST" && timeout 15 script -qfec "'$LEVER' attach" /dev/null 2>&1 | h
 checkx "lever attach opens with the member controller's PAT" '[ ${#att} -gt 100 ] && ! printf "%s" "$att" | grep -qiE "authentication failed|forbidden|no access token"'
 checkx "the migration needed no broker link (the old window linked it)" '! grep -q "linking the jail.s runtime broker" "$WORK/migrate.log"'
 start_worker2 "migrated"
-AGENT_IMAGE="lever.local/${IMAGE#scionlocal/}:$ARCH"
+AGENT_NAME="${IMAGE#lever.local/}"; AGENT_NAME="${AGENT_NAME#scionlocal/}"
+AGENT_IMAGE="lever.local/$AGENT_NAME:$ARCH"
 w2img=$(X inspect -f '{{.ImageName}}' lever--worker2 2>&1)
 checkx "migrated: worker2 runs the image under its lever.local name ($w2img)" '[ "$w2img" = "$AGENT_IMAGE" ]'
 checkx "migrated: the jail holds $AGENT_IMAGE" 'X image inspect "$AGENT_IMAGE" >/dev/null 2>&1'

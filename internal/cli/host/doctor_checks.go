@@ -1119,28 +1119,32 @@ func checkManagerImage(ctx context.Context, project, name, configured string, li
 	if err != nil {
 		return checkResult{check, true, "not checked (could not list agents): " + firstLine(err.Error()), ""}
 	}
-	a := scionpkg.FindAgent(agents, name)
-	if a == nil {
-		return checkResult{check, true, "not checked (no manager record)", ""}
-	}
-	if a.Image == "" {
-		return checkResult{check, true, "not checked (the record reports no image)", ""}
-	}
-	if !jail.SameImageRef(a.Image, want) && !jail.SameImageRef(a.Image, configured) {
-		return checkResult{check, false,
-			fmt.Sprintf("manager %q was created on %s but manager.image is now %s — a resume keeps the record's image", name, a.Image, want),
-			"run `lever up --fresh --keep-conversation` to recreate the manager on the configured image and keep its conversation (plain `--fresh` starts a new one; both back the old one up first)"}
-	}
 	var bare []string
 	for _, ag := range agents {
 		if ag.Image != "" && !strings.Contains(ag.Image, "@") && !imageref.Qualified(ag.Image) {
 			bare = append(bare, fmt.Sprintf("%s (%s)", ag.Slug, ag.Image))
 		}
 	}
+	bareDetail := ""
 	if len(bare) > 0 {
-		return warnResult(check,
-			fmt.Sprintf("%s created on an unqualified image name, which scion rewrites to the hub's image registry at every start; an agent can point that registry at its own between applies", strings.Join(bare, ", ")),
-			"recreate them on "+imageref.Registry+"/ names: the manager with `lever up --fresh --keep-conversation`, a worker by recycling or deleting it from the manager")
+		bareDetail = fmt.Sprintf("%s created on an unqualified image name, which scion rewrites to the hub's image registry at every start; an agent can point that registry at its own between applies", strings.Join(bare, ", "))
+	}
+	const bareFix = "recreate them on " + imageref.Registry + "/ names: the manager with `lever up --fresh --keep-conversation`, a worker by recycling or deleting it from the manager"
+	a := scionpkg.FindAgent(agents, name)
+	switch {
+	case a != nil && a.Image != "" && !jail.SameImageRef(a.Image, want) && !jail.SameImageRef(a.Image, configured):
+		detail := fmt.Sprintf("manager %q was created on %s but manager.image is now %s — a resume keeps the record's image", name, a.Image, want)
+		if bareDetail != "" {
+			detail += "; " + bareDetail
+		}
+		return checkResult{check, false, detail,
+			"run `lever up --fresh --keep-conversation` to recreate the manager on the configured image and keep its conversation (plain `--fresh` starts a new one; both back the old one up first)"}
+	case bareDetail != "":
+		return warnResult(check, bareDetail, bareFix)
+	case a == nil:
+		return checkResult{check, true, "not checked (no manager record)", ""}
+	case a.Image == "":
+		return checkResult{check, true, "not checked (the record reports no image)", ""}
 	}
 	return checkResult{check, true, fmt.Sprintf("%q runs %s, as configured", name, a.Image), ""}
 }

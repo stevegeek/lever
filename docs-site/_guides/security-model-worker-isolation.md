@@ -330,13 +330,15 @@ this scion keeps that registry in the hub database, which outranks `settings.yam
 the next agent start without a restart. An agent can set it to a registry it controls. lever
 therefore starts every agent on a name with a registry host, `lever.local/<name>`, which scion
 never rewrites: whatever the registry says, the agent runs the image `lever apply` loaded into the
-jail. No registry by that name exists, and none is contacted while the image is loaded. As defence
+jail. No registry by that name exists, and the jail's podman refuses any pull from it, so a
+missing image fails instead of asking the network. As defence
 in depth, every `lever apply` also sets the registry back to `scionlocal` as lever-admin. An agent
 record created by an older lever keeps its bare image name, and the registry still applies to it
 at each start; `lever doctor`'s `manager image` row lists such records, and recreating them closes
 it. The runtime route can likewise switch the hub's container runtime, which fails agent starts
 until the next `lever apply` sets it back to podman as lever-admin; doctor's `hub container
-runtime` row fails meanwhile. The workstation settings route can turn on
+runtime` row fails meanwhile. That pin stores the hub's profiles in its database, which from then
+on outranks `profiles:` in the jail's `settings.yaml`. The workstation settings route can turn on
 `auto_inject_gcloud_adc`, which makes scion copy the jail user's gcloud credentials into every
 agent it starts; the jail holds none, and every apply removes the key.
 

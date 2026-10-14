@@ -17,6 +17,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/stevegeek/lever/internal/imageref"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/provision/scionbin"
 )
@@ -105,8 +106,26 @@ func (g Guest) EnsureRuntimes(ctx context.Context, runUser string) error {
 	if err := user(pastaDropInScript()); err != nil {
 		return fmt.Errorf("stage pasta hub mapping: %w", err)
 	}
+	if err := user(agentRegistryBlockScript); err != nil {
+		return fmt.Errorf("block pulls from %s: %w", imageref.Registry, err)
+	}
 	return nil
 }
+
+// agentRegistryBlockScript makes podman refuse any pull from lever's agent
+// image registry name. Agents run images load-image put in the store, and
+// no registry by that name exists; a pull happens only when the image is
+// missing, and then it must fail rather than ask whatever answers for that
+// name on the network. Loading, tagging and running stored images do not
+// consult it.
+const agentRegistryBlockScript = `set -e
+mkdir -p "$HOME/.config/containers/registries.conf.d"
+cat > "$HOME/.config/containers/registries.conf.d/10-lever-agent-images.conf" <<'LEVER_EOF'
+[[registry]]
+location = "` + imageref.Registry + `"
+blocked = true
+LEVER_EOF
+`
 
 // dockerOffScript exits 0 either way. A stale pid file is only acted on while
 // that pid is still a dockerd, so a reused pid is never killed. The pid file

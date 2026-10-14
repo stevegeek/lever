@@ -12,7 +12,7 @@ import (
 	"github.com/stevegeek/lever/internal/scion"
 )
 
-// staleBackgroundPhrases are what Claude Code (2.1.296) prints when claude
+// staleBackgroundPhrases are what Claude Code (2.1.300) prints when claude
 // --continue refuses because the last conversation moved into a background
 // session. The first is printed after a container restart: the session was
 // registered in another container.

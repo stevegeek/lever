@@ -33,7 +33,7 @@ backend: orbstack
 tree: workspace
 egress: closed                            # seal the jail: agents reach only the broker
 scion:
-  version: b41cd6fe                       # pin a scion commit; a lever release ships this one prebuilt
+  version: 65531d7f                       # pin a scion commit; a lever release ships this one prebuilt
 manager:
   image: lever.local/lever-claude
   prompt_file: manager.md

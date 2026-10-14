@@ -314,11 +314,13 @@ decide:
   in, and the proxy refuses these routes as well, whatever the hub's state.
 - `/auth/callback/*`. No lever login uses it, and through the proxy it could only churn logins.
 - scion's conduit (`/api/v1/conduit*`, `/api/v1/admin/conduit*`: a shell, sftp and port relay
-  into agents through the hub) and artifacts (`/api/v1/artifacts*`, with its unauthenticated
-  `shared/` and `view/` links), and every write to `/api/v1/admin/experiments`, which switches
-  them on. Both experiments are off, and lever keeps them off (see
-  [worker isolation](/security-model-worker-isolation/)); the proxy refuses them in any case. Reading
-  `/api/v1/admin/experiments` stays admin-only at the hub.
+  into agents through the hub), artifacts (`/api/v1/artifacts*`, with its unauthenticated
+  `shared/` and `view/` links) and chat thread groups (`/api/v1/thread-groups*`), and every write
+  to `/api/v1/admin/experiments`, which switches them on. These experiments are off, and lever
+  keeps them off (see [worker isolation](/security-model-worker-isolation/)); the proxy refuses
+  them in any case. Reading `/api/v1/admin/experiments` stays admin-only at the hub. The
+  federation token route (`POST /api/v1/auth/federation-token`) is refused with every other
+  credential route under `/api/v1/auth/`.
 - An agent's `ports/tunnel` (the agent side's own socket) and `delegations` (they hand the
   signed-in user's authority to an agent) under `/api/v1/agents/<id>/`, and the test-identity
   routes (`/api/v1/test-identit*`, `/auth/test-identity*`), which mint credentials or sessions.

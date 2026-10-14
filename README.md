@@ -88,7 +88,7 @@ dependency. See [core vs instance](docs-site/_guides/core-vs-instance.md).
 
 ```bash
 go install github.com/stevegeek/lever/cmd/lever@latest   # host `lever` onto your GOBIN/PATH
-# — or from a clone (requires Go 1.26+):
+# — or from a clone (requires Go 1.26.9+):
 make install              # build host `lever` + the host tools lever-tool-github, lever-tool-fizzy, lever-tool-whisper, lever-tool-tts → ~/.local/bin (must be on PATH)
 make lever-image          # build the agent image lever.local/lever-claude:<arch>
 

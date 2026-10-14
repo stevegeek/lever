@@ -16,7 +16,7 @@ import (
 )
 
 // fakeExperimentsHub answers scion's experiments admin route the way b41cd6fe
-// does (merge on PUT, compare-and-set on expected_revision) and the two probe
+// does (merge on PUT, compare-and-set on expected_revision) and the probe
 // routes (404 while an experiment is off).
 type fakeExperimentsHub struct {
 	registered []string
@@ -38,7 +38,7 @@ type fakeExperimentsHub struct {
 }
 
 func newFakeExperimentsHub() *fakeExperimentsHub {
-	return &fakeExperimentsHub{registered: []string{"hub.artifacts", "hub.conduit", "web.agent_edit"}, overrides: map[string]bool{}}
+	return &fakeExperimentsHub{registered: []string{"federation.project_visitors", "hub.artifacts", "hub.chat_thread_groups", "hub.conduit", "web.agent_edit"}, overrides: map[string]bool{}}
 }
 
 func (h *fakeExperimentsHub) enabled(name string) bool {
@@ -70,7 +70,7 @@ func (h *fakeExperimentsHub) DoBody(_ context.Context, method, path string, body
 	h.calls = append(h.calls, method+" "+path)
 	notFound := []byte(`{"error":{"code":"not_found","message":"route not found"}}`)
 	for _, e := range pinnedOffExperiments {
-		if method == http.MethodGet && path == e.probe {
+		if e.probe != "" && method == http.MethodGet && path == e.probe {
 			if h.probeErr != nil {
 				return 0, nil, h.probeErr
 			}
@@ -148,25 +148,34 @@ func TestPinExperimentsOff(t *testing.T) {
 		wantKept map[string]bool
 	}{
 		{name: "fresh hub", setup: func(*fakeExperimentsHub) {},
-			wantRec: state.HubExperimentsRecord{Off: []string{"hub.conduit", "hub.artifacts"}, Revision: 1}, wantPuts: 1},
+			wantRec: state.HubExperimentsRecord{Off: []string{"hub.conduit", "hub.artifacts", "hub.chat_thread_groups", "federation.project_visitors"}, Revision: 1}, wantPuts: 1},
 		{name: "already pinned writes nothing", setup: func(h *fakeExperimentsHub) {
-			h.overrides = map[string]bool{"hub.conduit": false, "hub.artifacts": false}
+			h.overrides = map[string]bool{"hub.conduit": false, "hub.artifacts": false, "hub.chat_thread_groups": false, "federation.project_visitors": false}
 			h.revision = 7
-		}, wantRec: state.HubExperimentsRecord{Off: []string{"hub.conduit", "hub.artifacts"}, Revision: 7}},
+		}, wantRec: state.HubExperimentsRecord{Off: []string{"hub.conduit", "hub.artifacts", "hub.chat_thread_groups", "federation.project_visitors"}, Revision: 7}},
 		{name: "an admin turned conduit on; other overrides kept", setup: func(h *fakeExperimentsHub) {
-			h.overrides = map[string]bool{"hub.conduit": true, "hub.artifacts": false, "web.agent_edit": true}
+			h.overrides = map[string]bool{"hub.conduit": true, "hub.artifacts": false, "hub.chat_thread_groups": false,
+				"federation.project_visitors": false, "web.agent_edit": true}
 			h.revision = 2
-		}, wantRec: state.HubExperimentsRecord{Off: []string{"hub.conduit", "hub.artifacts"}, Revision: 3}, wantPuts: 1,
+		}, wantRec: state.HubExperimentsRecord{Off: []string{"hub.conduit", "hub.artifacts", "hub.chat_thread_groups", "federation.project_visitors"}, Revision: 3}, wantPuts: 1,
 			wantKept: map[string]bool{"web.agent_edit": true}},
 		{name: "older scion", setup: func(h *fakeExperimentsHub) { h.noRoute = true },
 			wantRec: state.HubExperimentsRecord{NotApplicable: true}},
 		{name: "hub registers only conduit", setup: func(h *fakeExperimentsHub) { h.registered = []string{"hub.conduit"} },
 			wantRec: state.HubExperimentsRecord{Off: []string{"hub.conduit"}, Revision: 1}, wantPuts: 1},
-		{name: "hub registers neither", setup: func(h *fakeExperimentsHub) { h.registered = []string{"web.agent_edit"} },
+		{name: "hub registers none", setup: func(h *fakeExperimentsHub) { h.registered = []string{"web.agent_edit"} },
 			wantRec: state.HubExperimentsRecord{}},
+		{name: "an older scion registers two", setup: func(h *fakeExperimentsHub) {
+			h.registered = []string{"hub.artifacts", "hub.conduit", "web.agent_edit"}
+		}, wantRec: state.HubExperimentsRecord{Off: []string{"hub.conduit", "hub.artifacts"}, Revision: 1}, wantPuts: 1},
+		{name: "federation on, which no probe sees", setup: func(h *fakeExperimentsHub) {
+			h.overrides = map[string]bool{"hub.conduit": false, "hub.artifacts": false, "hub.chat_thread_groups": false,
+				"federation.project_visitors": true}
+			h.revision = 4
+		}, wantRec: state.HubExperimentsRecord{Off: []string{"hub.conduit", "hub.artifacts", "hub.chat_thread_groups", "federation.project_visitors"}, Revision: 5}, wantPuts: 1},
 		{name: "malformed store", setup: func(h *fakeExperimentsHub) { h.malformed = true }, wantErr: errExperimentsMalformed},
 		{name: "one concurrent write is retried", setup: func(h *fakeExperimentsHub) { h.conflicts = 1 },
-			wantRec: state.HubExperimentsRecord{Off: []string{"hub.conduit", "hub.artifacts"}, Revision: 2}, wantPuts: 2},
+			wantRec: state.HubExperimentsRecord{Off: []string{"hub.conduit", "hub.artifacts", "hub.chat_thread_groups", "federation.project_visitors"}, Revision: 2}, wantPuts: 2},
 		{name: "persistent conflicts fail", setup: func(h *fakeExperimentsHub) { h.conflicts = 10 }, wantErr: hubapi.ErrExperimentsConflict, wantPuts: pinConflictRetries},
 		{name: "refused write fails", setup: func(h *fakeExperimentsHub) { h.putStatus = 403 }, anyErr: true, wantPuts: 1},
 		{name: "a hub still reporting it on fails", setup: func(h *fakeExperimentsHub) { h.lie = true }, anyErr: true, wantPuts: 1},
@@ -200,7 +209,8 @@ func TestPinExperimentsOff(t *testing.T) {
 				t.Fatal(err)
 			}
 			if rec.NotApplicable != tc.wantRec.NotApplicable || rec.Revision != tc.wantRec.Revision ||
-				!sameScopeSet(rec.Off, tc.wantRec.Off) || !rec.PinnedAt.Equal(now) {
+				!sameScopeSet(rec.Off, tc.wantRec.Off) || !rec.PinnedAt.Equal(now) ||
+				(!rec.NotApplicable && !sameScopeSet(rec.Asked, pinnedOffNames())) {
 				t.Fatalf("record = %+v, want %+v", rec, tc.wantRec)
 			}
 			for n, v := range tc.wantKept {

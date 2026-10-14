@@ -9,7 +9,7 @@ Part of [getting started](/getting-started/). Steps keep their original numberin
 ## 1. Install the binaries
 
 A release archive from GitHub holds the same host binaries, ready to run. Its `lever` needs **no Go
-toolchain** for the scion pin of its release (`b41cd6fe`, the pin in the examples): `lever apply`
+toolchain** for the scion pin of its release (`65531d7f`, the pin in the examples): `lever apply`
 downloads that release's prebuilt scion, checks it against the sha256 built into `lever`, and skips
 the scion compile. Any other pin, a failed download, and `remote.enabled` (which builds scion's web
 UI from source) still need Go. See [prebuilt scion](/reference/config/#prebuilt-scion).
@@ -96,7 +96,7 @@ scion's stock Claude harness image. Build it once from a scion checkout:
 
 ```sh
 git clone https://github.com/GoogleCloudPlatform/scion
-cd scion && git checkout b41cd6fe   # the same commit as scion.version in lever.yaml
+cd scion && git checkout 65531d7f   # the same commit as scion.version in lever.yaml
 image-build/scripts/build-images.sh --target harnesses
 ```
 
@@ -121,7 +121,7 @@ pinned tmux, lever's binaries, the boot hook and `/etc/claude-code`). It should 
 `make image-contract` prints the built size.
 
 ```sh
-make lever-image-slim SCION_VERSION=b41cd6fe   # your lever.yaml's scion.version
+make lever-image-slim SCION_VERSION=65531d7f   # your lever.yaml's scion.version
 ```
 
 sciontool and scion are cross-compiled on the host from the scion source the jail runs: set

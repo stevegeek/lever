@@ -1920,7 +1920,8 @@ func (d expSplitDoer) DoBody(ctx context.Context, method, path string, body []by
 	if err := hubapi.AssertionPathAllowed(method, path); err != nil {
 		return 0, nil, err
 	}
-	if strings.HasPrefix(path, "/api/v1/admin/experiments") || strings.HasPrefix(path, "/api/v1/conduit/") || strings.HasPrefix(path, "/api/v1/artifacts") {
+	if strings.HasPrefix(path, "/api/v1/admin/experiments") || strings.HasPrefix(path, "/api/v1/conduit/") || strings.HasPrefix(path, "/api/v1/artifacts") ||
+		strings.HasPrefix(path, "/api/v1/thread-groups") {
 		return d.exp.DoBody(ctx, method, path, body)
 	}
 	return d.rest.DoBody(ctx, method, path, body)

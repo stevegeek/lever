@@ -108,6 +108,7 @@ var assertionRoutes = []assertionRoute{
 	{http.MethodPut, "/api/v1/admin/experiments", false},
 	{http.MethodGet, "/api/v1/conduit/grant-keys", false},
 	{http.MethodGet, "/api/v1/artifacts", true},
+	{http.MethodGet, "/api/v1/thread-groups", false},
 	{http.MethodPut, "/api/v1/system/identity", false},
 	{http.MethodPut, "/api/v1/system/registry", false},
 	{http.MethodGet, "/api/v1/system/runtime", false},

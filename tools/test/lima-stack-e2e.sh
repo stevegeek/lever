@@ -166,6 +166,11 @@ refused() {
 	out=$(proxy "$login" -w '\n%{http_code}' "$@")
 	[ "${out##*$'\n'}" = 403 ] && [[ "$out" == *"does not forward this route"* ]]
 }
+mintrefused() {
+	local login=$1 out; shift
+	out=$(proxy "$login" -w '\n%{http_code}' "$@")
+	[ "${out##*$'\n'}" = 403 ] && [[ "$out" == *"does not hand out hub credentials"* ]]
+}
 doctor_out=""
 doctor_run() { doctor_out=$(cd "$INST" && timeout 900 "$LEVER" doctor 2>&1); }
 doctor_row() { printf '%s\n' "$doctor_out" | grep -E "^(✓|✗|!|-) $1" | head -1; }
@@ -253,6 +258,9 @@ check "the hub identity record says fresh" grep -q '"mode": *"fresh"' "$INST/.le
 PROJ=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["project_id"])' "$INST/.lever-state/hub-identity.json")
 checkx "the project lists the broker" 'hubbody "/api/v1/projects/$PROJ/providers" | grep -q brokerId'
 check "lever-admin pinned the experiments off" grep -q '"off": *\[' "$INST/.lever-state/hub-experiments.json"
+for x in hub.conduit hub.artifacts hub.chat_thread_groups federation.project_visitors; do
+	check "lever-admin pinned $x off" python3 -c 'import json,sys; sys.exit(sys.argv[2] not in json.load(open(sys.argv[1])).get("off", []))' "$INST/.lever-state/hub-experiments.json" "$x"
+done
 check "no dev token in the jail" G sh -c '! test -e ~/.scion/dev-token'
 cimage() { X inspect -f '{{.ImageName}}' "$1" 2>/dev/null; }
 # The pull must fail, so its status is dropped: under pipefail it would fail
@@ -271,7 +279,7 @@ checkx "lever msg send to the manager" '(cd "$INST" && "$LEVER" msg send --to "$
 checkx "the controller PAT lists notifications (inbox:read)" '[ "$(hub GET /api/v1/notifications)" = 200 ]'
 
 say "the experiment fence on the hub"
-for p in /api/v1/conduit/grant-keys /api/v1/artifacts; do
+for p in /api/v1/conduit/grant-keys /api/v1/artifacts /api/v1/thread-groups; do
 	code=$(hub GET "$p")
 	checkx "hub answers $p with 404 (experiment off): $code" '[ "$code" = 404 ]'
 done
@@ -282,9 +290,11 @@ checkx "the operator has a live session through the proxy ($code)" '[ "$code" = 
 code=$(pcode "$CONTACT" "http://127.0.0.1:$RP/api/v1/auth/me")
 checkx "the contact has a live session through the proxy ($code)" '[ "$code" = 200 ]'
 for login in "$OPERATOR" "$CONTACT"; do
-	for p in /api/v1/conduit /api/v1/conduit/grant-keys /api/v1/artifacts /api/v1/artifacts/shared/x /api/v1/artifacts/view/x /api/v1/admin/conduit/grant-keys/rotate /auth/test-identity/redeem; do
+	for p in /api/v1/conduit /api/v1/conduit/grant-keys /api/v1/artifacts /api/v1/artifacts/shared/x /api/v1/artifacts/view/x /api/v1/admin/conduit/grant-keys/rotate /auth/test-identity/redeem /api/v1/thread-groups; do
 		checkx "proxy refuses $p for $login" 'refused "$login" "http://127.0.0.1:$RP$p"'
 	done
+	checkx "proxy refuses a federation token for $login" \
+		'mintrefused "$login" -X POST -H "Content-Type: application/json" --data "{\"audience\":\"https://peer.example\"}" "http://127.0.0.1:$RP/api/v1/auth/federation-token"'
 	checkx "proxy refuses an experiments write for $login" \
 		'refused "$login" -X PUT -H "Content-Type: application/json" --data "{\"overrides\":{\"hub.conduit\":true}}" "http://127.0.0.1:$RP/api/v1/admin/experiments"'
 	checkx "proxy refuses a broker registration for $login" \

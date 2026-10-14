@@ -2186,6 +2186,18 @@ func checkHubRuntime(ctx context.Context, hc *hubapi.Client) checkResult {
 	return checkResult{name, true, apply.AgentRuntime, ""}
 }
 
+// unaskedExperiments are the experiments lever pins now that the pin rec
+// records neither held off nor looked for.
+func unaskedExperiments(rec state.HubExperimentsRecord) []string {
+	var out []string
+	for _, n := range pinnedOffNames() {
+		if !slices.Contains(rec.Off, n) && !slices.Contains(rec.Asked, n) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 // checkHubExperiments fails when the hub serves a pinned-off scion experiment
 // (pinnedOffExperiments), probed with the controller PAT, and warns when it is
 // off only by scion's default because lever never pinned it on this hub. The
@@ -2207,19 +2219,26 @@ func checkHubExperiments(ctx context.Context, st state.State, known scopeKnownFu
 	}
 	if len(on) > 0 {
 		return checkResult{name, false,
-			strings.Join(on, " and ") + " on at the hub: an inbound shell and port path into agents (conduit) or hub-held publishing with unauthenticated share links (artifacts), neither reviewed for the jail",
+			strings.Join(on, ", ") + " on at the hub: scion experiments not reviewed for the jail (conduit: an inbound shell and port path into agents; " +
+				"artifacts: hub-held publishing with unauthenticated share links; chat thread groups: project-wide chat groups agents can create)",
 			"run `lever apply`: it pins it off as lever-admin and restarts the hub"}
 	}
 	if !hubHasExperiments(ctx, known, rec, found) {
-		return checkResult{name, true, "off: the jail's scion has no hub experiments, so neither feature exists", ""}
+		return checkResult{name, true, "off: the jail's scion has no hub experiments, so none of these features exists", ""}
 	}
 	if !found || rec.NotApplicable {
 		return warnResult(name,
 			"off by scion's default only: lever has not pinned them off on this hub, so a changed default or an admin's override would turn them on",
 			"run `lever apply`: it pins them off as lever-admin")
 	}
+	if missing := unaskedExperiments(rec); len(missing) > 0 {
+		return warnResult(name,
+			"an older lever pinned the experiments on this hub and never looked for "+strings.Join(missing, ", ")+
+				", so a changed default or an admin's override would turn it on",
+			"run `lever apply`: it pins them off as lever-admin")
+	}
 	if len(rec.Off) == 0 {
-		return checkResult{name, true, "off: this hub registers neither experiment", ""}
+		return checkResult{name, true, "off: this hub registers none of the experiments lever pins", ""}
 	}
 	return checkResult{name, true, fmt.Sprintf("off at the hub; pinned off by lever on %s (%s)",
 		rec.PinnedAt.Format(time.RFC3339), strings.Join(rec.Off, ", ")), ""}

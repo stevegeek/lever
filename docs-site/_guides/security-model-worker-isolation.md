@@ -238,20 +238,28 @@ Two things need more than the controller's authority, and `lever-admin` does the
   checks with the controller PAT that the project lists a broker, and when it lists none it links
   the jail's own broker as `lever-admin` (`POST /api/v1/projects/<id>/providers`, with the tree's
   jail path), refusing when the hub lists any number of brokers but one.
-- **Two scion experiments kept off.** On a scion with hub-wide experiments, every apply's
+- **Four scion experiments kept off.** On a scion with hub-wide experiments, every apply's
   hub-identity step writes explicit `false` overrides for `hub.conduit` (an inbound shell, sftp and
-  port path into every agent, reaching the jail loopback and any Unix socket) and `hub.artifacts`
-  (hub-held publishing with unauthenticated share links), as `lever-admin` through scion's admin
-  experiments route. It never writes `true` and leaves every other override as it is. Both are off
-  by scion's default; the explicit override keeps them off if a later scion changes the default.
-  lever records what it wrote in `.lever-state/hub-experiments.json`; on a hub without the route (an
+  port path into every agent, reaching the jail loopback and any Unix socket), `hub.artifacts`
+  (hub-held publishing with unauthenticated share links), `hub.chat_thread_groups` (project-wide
+  chat groups that agents can create and rename, and that operators and contacts see) and
+  `federation.project_visitors` (users of external issuers acting in projects, and credentials for
+  peer hubs), as `lever-admin` through scion's admin experiments route. It never writes `true` and
+  leaves every other override as it is. All four are off by scion's default; the explicit override
+  keeps them off if a later scion changes the default. lever records what it wrote, and which
+  experiments it looked for, in `.lever-state/hub-experiments.json`; on a hub without the route (an
   older scion) it records "not applicable". Before and after the write lever asks the hub whether
-  either is on: `GET /api/v1/conduit/grant-keys` and `GET /api/v1/artifacts?mine=1` answer 404
-  exactly while their experiment is off. One found on is pinned off and the hub restarted, because
-  conduit's relay starts only with the hub; one still on after that fails the apply. scion has no
-  API to write the artifacts section's own `enabled` switch, so the experiment is the one lever
-  pins. `lever doctor`'s `scion conduit and artifacts` row fails while either is on and warns while
-  they are off only by scion's default.
+  one is on: `GET /api/v1/conduit/grant-keys`, `GET /api/v1/artifacts?mine=1` and
+  `GET /api/v1/thread-groups` answer 404 exactly while their experiment is off. The federation
+  experiment has no such route (its one route is `POST /api/v1/auth/federation-token`, which also
+  needs the hub's OIDC provider, never on under lever), so the admin route's answer after the write
+  is the proof. One found on is pinned off and the hub restarted, because conduit's relay starts
+  only with the hub; one still on after that fails the apply. scion has no API to write the
+  artifacts section's own `enabled` switch, so the experiment is the one lever pins. `lever
+  doctor`'s `scion conduit and artifacts` row fails while one with a probe route is on, and warns
+  while they are off only by scion's default or when an older lever wrote the record and never
+  looked for one lever pins now. The remote proxy refuses the thread-group routes for every login,
+  and the federation token route as a credential mint.
 
 `lever doctor`'s `hub authentication` row tests the effective configuration by behaviour, since
 file contents cannot prove it: an assertion signed by another key and one for another instance get

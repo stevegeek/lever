@@ -147,17 +147,19 @@ fenced() {
 	out=$(proxy "$login" -w '\n%{http_code}' "$@")
 	[ "${out##*$'\n'}" = 403 ] && [[ "$out" == *"does not forward this route"* ]]
 }
-# fence_checks <label>: scion's conduit and artifacts are off at the hub, lever
-# recorded the pin, and the proxy refuses them and an experiments write.
+# fence_checks <label>: scion's conduit, artifacts and thread groups are off at
+# the hub, lever recorded the pin, and the proxy refuses them and an
+# experiments write.
 fence_checks() {
 	local p code
-	for p in /api/v1/conduit/grant-keys /api/v1/artifacts; do
+	for p in /api/v1/conduit/grant-keys /api/v1/artifacts /api/v1/thread-groups; do
 		code=$(hubcode "$p")
 		checkx "$1: hub answers $p with 404 ($code)" '[ "$code" = 404 ]'
 	done
 	check "$1: lever-admin pinned the experiments off" grep -q '"off": *\[' "$INST/.lever-state/hub-experiments.json"
 	checkx "$1: proxy refuses conduit" 'fenced operator@example.com "http://127.0.0.1:$RP/api/v1/conduit/grant-keys"'
 	checkx "$1: proxy refuses artifacts" 'fenced operator@example.com "http://127.0.0.1:$RP/api/v1/artifacts"'
+	checkx "$1: proxy refuses thread groups" 'fenced operator@example.com "http://127.0.0.1:$RP/api/v1/thread-groups"'
 	checkx "$1: proxy refuses an experiments write" \
 		'fenced operator@example.com -X PUT -H "Content-Type: application/json" --data "{\"overrides\":{\"hub.conduit\":true}}" "http://127.0.0.1:$RP/api/v1/admin/experiments"'
 	check "$1: doctor: scion conduit and artifacts" row_ok "scion conduit and artifacts"

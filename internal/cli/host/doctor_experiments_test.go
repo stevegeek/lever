@@ -13,7 +13,7 @@ import (
 )
 
 func TestCheckHubExperiments(t *testing.T) {
-	pinned := &state.HubExperimentsRecord{Off: pinnedOffNames(), Revision: 2, PinnedAt: time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)}
+	pinned := &state.HubExperimentsRecord{Off: pinnedOffNames(), Asked: pinnedOffNames(), Revision: 2, PinnedAt: time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)}
 	for _, tc := range []struct {
 		name    string
 		known   scopeKnownFunc
@@ -36,8 +36,16 @@ func TestCheckHubExperiments(t *testing.T) {
 		{name: "older scion", known: knowsExperiments(false), wantOK: true, wantSub: "has no hub experiments"},
 		{name: "older scion, recorded not applicable", known: knowsExperiments(false),
 			rec: &state.HubExperimentsRecord{NotApplicable: true}, wantOK: true, wantSub: "has no hub experiments"},
-		{name: "hub registers neither", known: knowsExperiments(true), rec: &state.HubExperimentsRecord{Revision: 1},
-			wantOK: true, wantSub: "registers neither"},
+		{name: "hub registers none", known: knowsExperiments(true), rec: &state.HubExperimentsRecord{Asked: pinnedOffNames(), Revision: 1},
+			wantOK: true, wantSub: "registers none"},
+		{name: "an older lever's pin", known: knowsExperiments(true),
+			rec:    &state.HubExperimentsRecord{Off: []string{"hub.conduit", "hub.artifacts"}, Revision: 2},
+			wantOK: true, warn: true, wantSub: "never looked for hub.chat_thread_groups, federation.project_visitors"},
+		{name: "older scion registers only two", known: knowsExperiments(true),
+			rec:    &state.HubExperimentsRecord{Off: []string{"hub.conduit", "hub.artifacts"}, Asked: pinnedOffNames(), Revision: 2},
+			wantOK: true, wantSub: "pinned off by lever"},
+		{name: "thread groups live", known: knowsExperiments(true), rec: pinned,
+			hub: func(h *fakeExperimentsHub) { h.overrides["hub.chat_thread_groups"] = true }, wantSub: "hub.chat_thread_groups on at the hub"},
 		{name: "hub down", known: knowsExperiments(true), rec: pinned,
 			hub: func(h *fakeExperimentsHub) { h.probeErr = errors.New("connection refused") }, wantOK: true, wantSub: "not checked"},
 		{name: "controller PAT refused", known: knowsExperiments(true), rec: pinned,

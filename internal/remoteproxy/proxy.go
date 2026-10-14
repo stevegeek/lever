@@ -212,9 +212,10 @@ func mintsCredential(method, p string) bool {
 //     whatever the hub's state.
 //   - /auth/callback/*: no lever login uses it, and through the proxy it could
 //     only churn logins.
-//   - Conduit (the hub's shell, sftp and port relay into agents) and artifacts
-//     (hub-held files with unauthenticated share and view links): lever has
-//     not reviewed either, and both reach past the agent's own surface.
+//   - Conduit (the hub's shell, sftp and port relay into agents), artifacts
+//     (hub-held files with unauthenticated share and view links) and chat
+//     thread groups (project-wide groups agents can create and rename): lever
+//     has not reviewed them, and each reaches past the agent's own surface.
 //   - Experiment writes, which switch those features on. Reading the list
 //     changes nothing and stays admin-only at the hub.
 //   - An agent's port tunnel and delegations: the tunnel is the agent side's
@@ -282,6 +283,7 @@ var refusedPrefixes = []string{
 	"/api/v1/conduit",
 	"/api/v1/admin/conduit",
 	"/api/v1/artifacts",
+	"/api/v1/thread-groups",
 	"/api/v1/test-identit", // test-identities and test-identity-delegations
 	"/auth/test-identity",
 }

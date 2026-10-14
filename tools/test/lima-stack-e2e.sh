@@ -255,7 +255,9 @@ checkx "the project lists the broker" 'hubbody "/api/v1/projects/$PROJ/providers
 check "lever-admin pinned the experiments off" grep -q '"off": *\[' "$INST/.lever-state/hub-experiments.json"
 check "no dev token in the jail" G sh -c '! test -e ~/.scion/dev-token'
 cimage() { X inspect -f '{{.ImageName}}' "$1" 2>/dev/null; }
-checkx "the jail's podman refuses a pull from lever.local" 'X pull lever.local/none:1 2>&1 | grep -qi blocked'
+# The pull must fail, so its status is dropped: under pipefail it would fail
+# the check even when the output says blocked.
+checkx "the jail's podman refuses a pull from lever.local" '{ X pull lever.local/none:1 2>&1 || :; } | grep -qi blocked'
 checkx "the manager runs lever's image under its lever.local name ($(cimage "lever--$NAME"))" '[ "$(cimage "lever--$NAME")" = "$AGENT_IMAGE" ]'
 check "no registry called lever.local resolves in the guest" G sh -c '! getent hosts lever.local'
 

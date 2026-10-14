@@ -348,7 +348,9 @@ check "doctor: hub authentication (fresh)" row_ok "hub authentication"
 check "doctor: remote web role (fresh)" row_ok "remote web role"
 check "doctor: scion project registration (fresh)" row_ok "scion project registration"
 check "fresh: manager runs" running
-check "fresh: lever-admin linked the jail's runtime broker" grep -q "linking the jail's runtime broker .* as lever-admin" "$WORK/fresh.log"
+PROJ=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["project_id"])' "$INST/.lever-state/hub-identity.json")
+checkx "fresh: the project lists the jail's runtime broker" 'G sh -c "read -r t; curl -sS -m 20 -H \"Authorization: Bearer \$t\" http://127.0.0.1:8080/api/v1/projects/$PROJ/providers" < "$INST/.lever-state/controller.pat" | grep -q brokerId'
+check "fresh: no hub link refused the earlier instance's project marker" sh -c '! grep -q "project not found under the user access token" "$1"' _ "$WORK/fresh.log"
 start_worker2 "fresh"
 fence_checks "fresh"
 

@@ -7,6 +7,56 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Changed
+
+- **scion is pinned to `65531d7f`, its nightly-20261014.** The examples, the release's prebuilt
+  scion, the Makefile's `SCION_VERSION`, the Lima e2e and the docs move from `b41cd6fe`. lever's
+  calls to scion's CLI and hub need no change. One change on the scion side is visible: the
+  jail's runtime broker now reads the runtimes, profiles, harness configs and image registry stored
+  in the hub database on SQLite hubs too, so the copy there, whose runtime and registry lever's
+  apply sets as `lever-admin`, wins over the jail's `settings.yaml` for every agent start.
+- **The agent image bakes Claude Code 2.1.300 (was 2.1.296).** The messages lever reads from
+  Claude Code (a stale background session, no conversation to continue), its session records,
+  the agent-view switch and the hook events lever uses are unchanged in 2.1.300. It fixes, among
+  others, the first transcript entry after a resume being lost when a crash cut the transcript's
+  last line short, deny rules for an MCP server whose name holds a double underscore, and 2.1.296
+  running an approved tool call twice in a resumed headless session. It ships with the Jail ABI 5
+  image rebuild below.
+- **lever builds with Go 1.26.9 (was 1.26.4).** `go.mod`, `.tool-versions` and the lever-dev
+  example image move to it. govulncheck found 17 standard-library vulnerabilities that lever's code
+  reaches in 1.26.4 (HTTP/2 and HTTP/1 handling in `net/http`, `crypto/tls`, `net/textproto`,
+  `net/url`, `encoding/asn1`), all fixed in 1.26.9. A Go 1.21 or later downloads 1.26.9 by itself
+  unless `GOTOOLCHAIN=local`.
+
+### Security
+
+- **Two more scion experiments are kept off: chat thread groups and federation.** The new scion
+  registers `hub.chat_thread_groups` (project-wide chat groups that agents can create and rename,
+  shown to operators and contacts) and `federation.project_visitors` (users of external issuers
+  acting in projects, and short-lived credentials for peer hubs), both off by scion's default.
+  Every apply now pins them off as `lever-admin` beside conduit and artifacts, and proves thread
+  groups off with `GET /api/v1/thread-groups`; the federation experiment has no route a probe
+  can read, so the hub's experiments answer after the write proves it. `hub-experiments.json` now
+  records which experiments lever looked for, and doctor's *scion conduit and artifacts* row warns
+  when an older lever wrote it until the next apply. The remote proxy refuses
+  `/api/v1/thread-groups*` for every login, and the new `POST /api/v1/auth/federation-token` falls
+  under its refusal of credential routes.
+
+### Upgrade
+
+- **Jail ABI 5.** The agent image changed (Claude Code 2.1.300, sciontool and, in the slim image,
+  scion from the new pin) and so did the Go version: rebuild the agent image (`make lever-image` or
+  `make lever-image-slim`, then any instance image built from it) and recreate the manager on it
+  with `lever up --fresh --keep-conversation`. Doctor's *agent lever version* row says so. The
+  first `lever apply` installs the new scion pin in the jail.
+
+### Known issues
+
+- scion's loopback `/api/v1/system/*` writers still run no permission check at this pin: any jailed
+  agent can rename scion's dev user (`PUT /api/v1/system/identity`) or set the hub's runtime and
+  image registry. lever's mitigations are unchanged (see the 0.39.0 security notes). scion's fix
+  for the identity and workstation-settings routes landed after this nightly.
+
 ## [0.39.1] - 2026-10-14
 
 ### Fixed

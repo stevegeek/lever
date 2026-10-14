@@ -991,7 +991,7 @@ func TestStartManagerCreatedNeverSettlesNamesWarmUp(t *testing.T) {
 	}
 	err := runApply(app, deps)
 	testutil.WantErrContaining(t, err, "user-namespace layer copy",
-		"podman run --rm --userns=keep-id:uid=1000,gid=1000 --entrypoint true "+app.ManagerImage(), "lever up --fresh")
+		"podman run --rm --userns=keep-id:uid=1000,gid=1000 --entrypoint true "+app.ManagerAgentImage(), "lever up --fresh")
 }
 
 // TestStartManagerUnknownPhaseFailsWithoutDelete: a phase lever does not know
@@ -4048,6 +4048,21 @@ func TestManagerStartOptsNestedVirtVolume(t *testing.T) {
 	}
 	if !slices.Contains(opts.Volumes, scion.VolumeMount{Source: KVMDevice, Target: KVMDevice}) {
 		t.Fatalf("the manager create must carry the /dev/kvm volume, got %v", opts.Volumes)
+	}
+}
+
+// The manager is created on a qualified image name: scion rewrites a bare one
+// to the hub's image registry, which any agent can set.
+func TestManagerStartOptsQualifiedImage(t *testing.T) {
+	for _, img := range []string{"scionlocal/lever-claude:arm64", "lever.local/lever-claude:arm64"} {
+		r := &run{app: &config.App{Name: "m", Manager: config.Manager{Image: img}, Broker: config.Broker{LLMAuth: config.LLMAuthSubscription}}}
+		opts, err := r.managerStartOpts(context.Background(), "/lever/proj", "task", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if opts.Image != "lever.local/lever-claude:arm64" {
+			t.Fatalf("manager.image %s: the create runs %q, want lever.local/lever-claude:arm64", img, opts.Image)
+		}
 	}
 }
 

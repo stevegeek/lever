@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/stevegeek/lever/internal/imageref"
 	"github.com/stevegeek/lever/internal/proc"
 )
 
@@ -84,16 +85,17 @@ func jailImageID(ctx context.Context, r proc.Runner, prefix []string, uid, image
 	return normalizeImageID(res.Stdout)
 }
 
-// ImageLoaded reports whether the jail's podman already holds imageRef at the
-// same image ID as the host docker image, so the load can be skipped. It
-// returns false whenever either ID is unavailable: a bad check costs a
-// redundant load, never a skipped one that leaves a stale image in the jail.
+// ImageLoaded reports whether the jail's podman already holds the host docker
+// image imageRef, under the name agents run it as (imageref.Agent), so the
+// load can be skipped. It returns false whenever either ID is unavailable: a
+// bad check costs a redundant load, never a skipped one that leaves a stale
+// image in the jail.
 func ImageLoaded(ctx context.Context, r proc.Runner, prefix []string, uid, imageRef string) bool {
 	host := hostImageID(ctx, r, imageRef)
 	if host == "" {
 		return false
 	}
-	return host == jailImageID(ctx, r, prefix, uid, imageRef)
+	return host == jailImageID(ctx, r, prefix, uid, imageref.Agent(imageRef))
 }
 
 // PruneImages removes dangling images from the jail (see pruneImagesArgs).
@@ -106,13 +108,15 @@ func PruneImages(ctx context.Context, r proc.Runner, prefix []string, uid string
 	return nil
 }
 
-// WarmImage makes rootless podman build the id-mapped layer copy of imageRef
-// for scion's keep-id mapping. The first container under a mapping copies
+// WarmImage makes rootless podman build the id-mapped layer copy of the
+// configured imageRef, under the name agents run it as, for scion's keep-id
+// mapping. The first container under a mapping copies
 // every layer, which takes most of a minute for a multi-GB image, while
 // scion's agent start is cancelled after about 30 s and the partial work is
 // deleted. A run on an already warm image is fast, so nothing is detected
 // first.
 func WarmImage(ctx context.Context, r proc.Runner, prefix []string, uid, imageRef string) error {
+	imageRef = imageref.Agent(imageRef)
 	args := warmImageArgs(prefix, uid, imageRef)
 	res, err := r.Run(ctx, nil, args[0], args[1:]...)
 	if err != nil {
@@ -139,47 +143,59 @@ func loadImageAndAlias(ctx context.Context, r proc.Runner, prefix []string, uid,
 	if err := loadImage(ctx, r, prefix, uid, save); err != nil {
 		return err
 	}
-	return aliasLocalhost(ctx, r, prefix, uid, imageRef)
+	return aliasLoaded(ctx, r, prefix, uid, imageRef)
 }
 
-// localhostAliasArgs: ref must be unqualified (see aliasLocalhost).
-func localhostAliasArgs(prefix []string, uid, ref string) []string {
-	tagged := ref
+// withTag gives a tagless ref podman's implied :latest, so it can be a tag
+// source or target.
+func withTag(ref string) string {
 	if !strings.ContainsAny(ref[strings.LastIndex(ref, "/")+1:], ":@") {
-		tagged += ":latest"
+		return ref + ":latest"
 	}
-	src := "docker.io/" + tagged
-	if !strings.Contains(tagged, "/") {
-		src = "docker.io/library/" + tagged
+	return ref
+}
+
+// aliasArgs tags the image a load named after ref with every other name an
+// agent or a resumed record may run it under; nil when it needs none.
+func aliasArgs(prefix []string, uid, ref string) []string {
+	if strings.Contains(ref, "@") || imageref.Qualified(ref) {
+		return nil
 	}
+	tagged := withTag(ref)
+	src := tagged
+	var targets []string
+	if !strings.HasPrefix(tagged, "localhost/") {
+		src = "docker.io/" + tagged
+		if !strings.Contains(tagged, "/") {
+			src = "docker.io/library/" + tagged
+		}
+		targets = append(targets, "localhost/"+tagged)
+	}
+	targets = append(targets, imageref.Agent(tagged))
 	return slices.Concat(prefix, []string{
 		"env",
 		"XDG_RUNTIME_DIR=/run/user/" + uid,
-		"podman", "tag", src, "localhost/" + tagged,
-	})
+		"podman", "tag", src,
+	}, targets)
 }
 
-// aliasLocalhost: `podman load` of a docker archive names the image
-// docker.io/<RepoTag>, while the container spec's unqualified <ref> resolves
-// through podman's short-name path to localhost/<ref>, a name an earlier load
-// left behind, so after a rebuild the container would run the old image.
-// Tagging the fresh image as localhost/ makes both names one image. A ref
-// that names its registry is loaded under that exact name, and a
-// digest-pinned ref has no RepoTag and cannot be a tag target. Failure is
-// fatal so the stale image is never run silently.
-func aliasLocalhost(ctx context.Context, r proc.Runner, prefix []string, uid, ref string) error {
-	if strings.Contains(ref, "@") {
+// aliasLoaded: `podman load` of a docker archive names the image
+// docker.io/<RepoTag>. The name agents run is imageref.Agent(<ref>), which
+// scion never rewrites to the hub's image registry. An agent record created
+// on the unqualified <ref> resolves it through podman's short-name path to
+// localhost/<ref>, a name an earlier load left behind, so after a rebuild it
+// would run the old image; tagging the fresh image as localhost/ too makes
+// every name one image. A ref that names its registry is loaded under that
+// exact name, and a digest-pinned ref has no RepoTag and cannot be a tag
+// target. Failure is fatal so a stale image is never run silently.
+func aliasLoaded(ctx context.Context, r proc.Runner, prefix []string, uid, ref string) error {
+	args := aliasArgs(prefix, uid, ref)
+	if args == nil {
 		return nil
 	}
-	if i := strings.Index(ref, "/"); i > 0 {
-		if first := ref[:i]; strings.ContainsAny(first, ".:") || first == "localhost" {
-			return nil
-		}
-	}
-	args := localhostAliasArgs(prefix, uid, ref)
 	res, err := r.Run(ctx, nil, args[0], args[1:]...)
 	if err != nil {
-		return fmt.Errorf("loadimage: tagging %s as %s: %w: %s", args[len(args)-2], args[len(args)-1], err, podmanFailure(res.Stderr, res.Stdout))
+		return fmt.Errorf("loadimage: tagging %s as %s: %w: %s", args[len(prefix)+4], strings.Join(args[len(prefix)+5:], " and "), err, podmanFailure(res.Stderr, res.Stdout))
 	}
 	return nil
 }
@@ -263,5 +279,5 @@ func ImageLoadedTar(ctx context.Context, r proc.Runner, prefix []string, uid, im
 	if err != nil {
 		return false
 	}
-	return img.ConfigDigest == jailImageID(ctx, r, prefix, uid, imageRef)
+	return img.ConfigDigest == jailImageID(ctx, r, prefix, uid, imageref.Agent(imageRef))
 }

@@ -154,7 +154,7 @@ func TestCheckImageWithFakeCLI(t *testing.T) {
 	if err := os.WriteFile(cli, []byte(fakeCLI), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	const img = "scionlocal/lever-claude-slim:arm64"
+	const img = "lever.local/lever-claude-slim:arm64"
 	good := map[string]string{
 		"FAKE_IMAGE":      img,
 		"FAKE_ARCH":       "arm64",
@@ -223,7 +223,7 @@ func TestCheckImageWithFakeCLI(t *testing.T) {
 		})
 	}
 
-	if out, code := run(t, "scionlocal/other:arm64", nil); code != 2 {
+	if out, code := run(t, "lever.local/other:arm64", nil); code != 2 {
 		t.Fatalf("a missing image: exit %d, want 2\n%s", code, out)
 	}
 }
@@ -323,7 +323,7 @@ func TestBuildScriptFlavors(t *testing.T) {
 				t.Errorf("base build lacks %q: %s", w, base)
 			}
 		}
-		for _, w := range []string{"--platform linux/arm64", "SCION_BASE=lever-scion-slim:arm64", "LEVER_JAIL_ABI=3", "-t lever-claude-slim:arm64", "-t scionlocal/lever-claude-slim:arm64", "lever-claude/Dockerfile"} {
+		for _, w := range []string{"--platform linux/arm64", "SCION_BASE=lever-scion-slim:arm64", "LEVER_JAIL_ABI=3", "-t lever-claude-slim:arm64", "-t lever.local/lever-claude-slim:arm64", "-t scionlocal/lever-claude-slim:arm64", "lever-claude/Dockerfile"} {
 			if !strings.Contains(layer, w) {
 				t.Errorf("lever layer build lacks %q: %s", w, layer)
 			}
@@ -334,7 +334,7 @@ func TestBuildScriptFlavors(t *testing.T) {
 		if r.code != 0 || len(r.builds) != 1 {
 			t.Fatalf("exit %d, %d builds:\n%s", r.code, len(r.builds), r.out)
 		}
-		for _, w := range []string{"SCION_BASE=scion-claude:arm64", "-t lever-claude:arm64", "-t scionlocal/lever-claude:arm64"} {
+		for _, w := range []string{"SCION_BASE=scion-claude:arm64", "-t lever-claude:arm64", "-t lever.local/lever-claude:arm64", "-t scionlocal/lever-claude:arm64"} {
 			if !strings.Contains(r.builds[0], w) {
 				t.Errorf("build lacks %q: %s", w, r.builds[0])
 			}
@@ -350,9 +350,11 @@ func TestBuildScriptFlavors(t *testing.T) {
 		}
 	})
 	t.Run("slim refuses to overwrite before building anything", func(t *testing.T) {
-		r := run(t, "slim", "scionlocal/lever-claude-slim:arm64", true, 183)
-		if r.code == 0 || len(r.builds) != 0 || !strings.Contains(r.out, "already exists") {
-			t.Fatalf("exit %d, %d builds:\n%s", r.code, len(r.builds), r.out)
+		for _, existing := range []string{"lever.local/lever-claude-slim:arm64", "scionlocal/lever-claude-slim:arm64"} {
+			r := run(t, "slim", existing, true, 183)
+			if r.code == 0 || len(r.builds) != 0 || !strings.Contains(r.out, existing+" already exists") {
+				t.Fatalf("%s: exit %d, %d builds:\n%s", existing, r.code, len(r.builds), r.out)
+			}
 		}
 	})
 	t.Run("slim with binaries staged for the other arch", func(t *testing.T) {

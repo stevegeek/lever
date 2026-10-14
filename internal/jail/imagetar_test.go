@@ -291,7 +291,7 @@ func TestImageTarLabel(t *testing.T) {
 // LEVER_LIVE_ORB_USER / LEVER_LIVE_ORB_UID (its run user), LEVER_TEST_IMAGE_TAR
 // (a `docker save` archive) and LEVER_TEST_IMAGE_REF (a tag it carries).
 // Loads the archive, then checks the tar-digest guard reports it present
-// and the localhost/ alias resolves to the same image.
+// and every alias resolves to the same image.
 func TestLiveLoadImageTar(t *testing.T) {
 	machine, user, uid := os.Getenv("LEVER_LIVE_ORB_MACHINE"), os.Getenv("LEVER_LIVE_ORB_USER"), os.Getenv("LEVER_LIVE_ORB_UID")
 	tarPath, ref := os.Getenv("LEVER_TEST_IMAGE_TAR"), os.Getenv("LEVER_TEST_IMAGE_REF")
@@ -315,11 +315,13 @@ func TestLiveLoadImageTar(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	alias := localhostAliasArgs(prefix, uid, ref)
-	if got := jailImageID(ctx, r, prefix, uid, alias[len(alias)-1]); got != img.ConfigDigest {
-		t.Fatalf("localhost alias %s resolves to %q, want %q", alias[len(alias)-1], got, img.ConfigDigest)
+	alias := aliasArgs(prefix, uid, ref)
+	for _, name := range alias[len(prefix)+4:] {
+		if got := jailImageID(ctx, r, prefix, uid, name); got != img.ConfigDigest {
+			t.Fatalf("alias %s resolves to %q, want %q", name, got, img.ConfigDigest)
+		}
 	}
-	t.Logf("loaded %s from %s; jail id %s; alias %s ok", ref, tarPath, img.ConfigDigest, alias[len(alias)-1])
+	t.Logf("loaded %s from %s; jail id %s; aliases %v ok", ref, tarPath, img.ConfigDigest, alias[len(prefix)+4:])
 }
 
 // TestSameImageRef: the record's image may come back qualified by podman

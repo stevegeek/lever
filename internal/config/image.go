@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/stevegeek/lever/internal/imageref"
 )
 
 // imageArch is the running lever binary's arch, which is the jail's for a
@@ -42,6 +44,17 @@ func (a *App) WorkerImage(g Worker) string {
 		return archImage(g.Image, imageArch)
 	}
 	return a.ManagerImage()
+}
+
+// ManagerAgentImage is the name scion starts the manager on: the jail's
+// podman holds ManagerImage under it (see imageref.Agent).
+func (a *App) ManagerAgentImage() string {
+	return imageref.Agent(a.ManagerImage())
+}
+
+// WorkerAgentImage is WorkerImage under the name scion starts the worker on.
+func (a *App) WorkerAgentImage(g Worker) string {
+	return imageref.Agent(a.WorkerImage(g))
 }
 
 // ImageTagPolicy returns the check applied to every tag an image_tar archive

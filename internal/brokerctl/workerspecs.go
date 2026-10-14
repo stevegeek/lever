@@ -26,7 +26,7 @@ func WorkerSpecs(app *config.App, jailMount, jailUID string) []broker.WorkerSpec
 			WorkspaceSubdir: g.Dir,                          // e.g. "workers/scratch" — relative to the project root (/lever); scion mounts this subtree at /workspace
 			HostWorkspace:   filepath.Join(app.Tree, g.Dir), // <tree>/<dir> — MkdirAll'd before start (scion's guard requires it to exist)
 			TicketDir:       ticketDir,
-			Image:           app.WorkerImage(g),
+			Image:           app.WorkerAgentImage(g),
 			Model:           app.WorkerModel(g), // own model:, else the manager's; empty ⇒ scion decides
 			// Own instructions_file only, never the manager's. Read at dispatch.
 			InstructionsPath: app.WorkerInstructionsPath(g),

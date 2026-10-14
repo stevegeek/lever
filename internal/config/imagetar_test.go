@@ -138,3 +138,26 @@ func TestImageTagPolicy(t *testing.T) {
 		}
 	}
 }
+
+// Agents run a configured image under a qualified name the hub's image
+// registry setting never rewrites; a legacy scionlocal/ ref and its
+// lever.local/ form are one name, so a config may not use both.
+func TestAgentImageNames(t *testing.T) {
+	app, err := LoadNoHostChecks(writeConfig(t, tarHeader+"manager:\n  image: scionlocal/x:1\nworkers:\n  - name: w\n    dir: ws/w\n    image: ghcr.io/o/w:2\n  - name: v\n    dir: ws/v\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := app.ManagerAgentImage(); got != "lever.local/x:1" {
+		t.Errorf("ManagerAgentImage = %q", got)
+	}
+	if got := app.WorkerAgentImage(app.Workers[0]); got != "ghcr.io/o/w:2" {
+		t.Errorf("WorkerAgentImage(w) = %q", got)
+	}
+	if got := app.WorkerAgentImage(app.Workers[1]); got != "lever.local/x:1" {
+		t.Errorf("WorkerAgentImage(v) = %q, want the manager's", got)
+	}
+	body := tarHeader + "manager:\n  image: scionlocal/x:1\nworkers:\n  - name: w\n    dir: ws/w\n    image: lever.local/x:1\n"
+	if _, err := LoadNoHostChecks(writeConfig(t, body)); err == nil || !strings.Contains(err.Error(), "both run in the jail as lever.local/x:1") {
+		t.Fatalf("want the two names refused, got %v", err)
+	}
+}

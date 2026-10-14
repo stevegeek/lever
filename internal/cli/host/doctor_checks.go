@@ -26,6 +26,7 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/fsutil"
 	"github.com/stevegeek/lever/internal/hubapi"
+	"github.com/stevegeek/lever/internal/imageref"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/jailabi"
 	"github.com/stevegeek/lever/internal/logging"
@@ -1099,15 +1100,21 @@ func activityAge(a *scionpkg.Agent, now time.Time) string {
 }
 
 // checkManagerImage compares the image the manager record was created with
-// against manager.image. A record keeps its image for life, so after an edit
-// the version row (which inspects the configured image) reads green while the
-// manager runs something else. Podman may qualify the ref (docker.io/,
-// localhost/), so refs are compared normalised.
-func checkManagerImage(ctx context.Context, project, name, want string, list agentLister) checkResult {
+// against manager.image, under the name agents run it as (imageref.Agent). A
+// record keeps its image for life, so after an edit the version row (which
+// inspects the configured image) reads green while the manager runs something
+// else. Podman may qualify the ref (docker.io/, localhost/), so refs are
+// compared normalised.
+//
+// A record created on an unqualified name, by an older lever, is a warning:
+// scion rewrites that name to the hub's image registry at every start, and
+// any agent can set the registry between applies.
+func checkManagerImage(ctx context.Context, project, name, configured string, list agentLister) checkResult {
 	const check = "manager image"
-	if list == nil || want == "" {
+	if list == nil || configured == "" {
 		return checkResult{check, true, "not checked", ""}
 	}
+	want := imageref.Agent(configured)
 	agents, err := list(ctx, project)
 	if err != nil {
 		return checkResult{check, true, "not checked (could not list agents): " + firstLine(err.Error()), ""}
@@ -1119,12 +1126,23 @@ func checkManagerImage(ctx context.Context, project, name, want string, list age
 	if a.Image == "" {
 		return checkResult{check, true, "not checked (the record reports no image)", ""}
 	}
-	if jail.SameImageRef(a.Image, want) {
-		return checkResult{check, true, fmt.Sprintf("%q runs %s, as configured", name, a.Image), ""}
+	if !jail.SameImageRef(a.Image, want) && !jail.SameImageRef(a.Image, configured) {
+		return checkResult{check, false,
+			fmt.Sprintf("manager %q was created on %s but manager.image is now %s — a resume keeps the record's image", name, a.Image, want),
+			"run `lever up --fresh --keep-conversation` to recreate the manager on the configured image and keep its conversation (plain `--fresh` starts a new one; both back the old one up first)"}
 	}
-	return checkResult{check, false,
-		fmt.Sprintf("manager %q was created on %s but manager.image is now %s — a resume keeps the record's image", name, a.Image, want),
-		"run `lever up --fresh --keep-conversation` to recreate the manager on the configured image and keep its conversation (plain `--fresh` starts a new one; both back the old one up first)"}
+	var bare []string
+	for _, ag := range agents {
+		if ag.Image != "" && !strings.Contains(ag.Image, "@") && !imageref.Qualified(ag.Image) {
+			bare = append(bare, fmt.Sprintf("%s (%s)", ag.Slug, ag.Image))
+		}
+	}
+	if len(bare) > 0 {
+		return warnResult(check,
+			fmt.Sprintf("%s created on an unqualified image name, which scion rewrites to the hub's image registry at every start; an agent can point that registry at its own between applies", strings.Join(bare, ", ")),
+			"recreate them on "+imageref.Registry+"/ names: the manager with `lever up --fresh --keep-conversation`, a worker by recycling or deleting it from the manager")
+	}
+	return checkResult{check, true, fmt.Sprintf("%q runs %s, as configured", name, a.Image), ""}
 }
 
 // networkCheckedAgents is the manager (whose scion slug is the instance name)

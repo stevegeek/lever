@@ -8,7 +8,7 @@ scion:
 broker:
   llm_auth: subscription
 manager:
-  image: scionlocal/lever-claude
+  image: lever.local/lever-claude
   prompt_file: manager.md
   allow_ports: []
 workers:

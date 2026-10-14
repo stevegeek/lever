@@ -92,7 +92,7 @@ framework-image-stage:
 	cp cmd/lever-agent/scionhook/pre-start $(FRAMEWORK_IMAGE_CTX)/scionhook/pre-start
 	chmod +x $(FRAMEWORK_IMAGE_CTX)/scionhook/pre-start
 
-# The slim agent image, scionlocal/lever-claude-slim:<arch>: the same lever
+# The slim agent image, lever.local/lever-claude-slim:<arch>: the same lever
 # layer as lever-image, FROM lever's slim base (image/scion-slim) instead of
 # scion-claude, so it needs no scion image build. The base gets sciontool and
 # scion cross-compiled here from the scion source the jail runs: set
@@ -140,7 +140,7 @@ slim-base-bins:
 # CONTAINER_CLI=podman); runs the image with no network. The expected arch is
 # the image tag's unless LEVER_IMAGE_ARCH is given on the command line or in
 # the environment (the host default would wrongly fail a cross-arch image).
-IMAGE ?= scionlocal/lever-claude-slim:$(LEVER_IMAGE_ARCH)
+IMAGE ?= lever.local/lever-claude-slim:$(LEVER_IMAGE_ARCH)
 .PHONY: image-contract
 image-contract:
 	LEVER_JAIL_ABI="$(LEVER_JAIL_ABI)" LEVER_IMAGE_ARCH=$(if $(filter command line environment,$(origin LEVER_IMAGE_ARCH)),$(LEVER_IMAGE_ARCH)) bash image/contract/check-image.sh "$(IMAGE)"

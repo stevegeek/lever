@@ -33,13 +33,13 @@ func TestWorkerSpecs(t *testing.T) {
 	if w.Name != "worker" || w.WorkspaceSubdir != "workers/worker" ||
 		w.HostWorkspace != filepath.Join("/host/tree", "workers/worker") ||
 		w.TicketDir != "/run/user/501/lever/tickets/worker" ||
-		w.Image != "mgr:img" /* inherits manager */ || w.Model != "mgr-model" /* ditto */ || !w.APIKey {
+		w.Image != "lever.local/mgr:img" /* inherits manager, under the name scion never rewrites */ || w.Model != "mgr-model" /* ditto */ || !w.APIKey {
 		t.Fatalf("bad worker spec: %+v", w)
 	}
 	if w.Recyclable || !specs[1].Recyclable {
 		t.Fatalf("Recyclable = %v/%v, want workers[].recyclable (false/true)", w.Recyclable, specs[1].Recyclable)
 	}
-	if specs[1].Image != "helper:img" || specs[1].Model != "helper-model" || specs[1].APIKey {
+	if specs[1].Image != "lever.local/helper:img" || specs[1].Model != "helper-model" || specs[1].APIKey {
 		t.Fatalf("bad helper spec: %+v", specs[1])
 	}
 	// instructions_file is the worker's OWN or nothing — never inherited from

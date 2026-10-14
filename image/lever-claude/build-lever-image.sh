@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Build the generic lever-claude agent image from the local scion-claude base
 # (or, with LEVER_IMAGE_FLAVOR=slim, lever-claude-slim from lever's slim base),
-# tagged for the local image registry (scionlocal) so scion uses it with no pull.
+# tagged under lever's agent image registry name (lever.local), which scion
+# never rewrites to the hub's image registry. No registry by that name exists:
+# lever loads the image into the jail, so scion runs it with no pull.
 #
 # The bin/ and scionhook/ build-context dirs must be staged first;
 # `make lever-image` does that, then runs this script.
@@ -11,10 +13,12 @@
 # to the jail's arch tag at apply time (internal/config archImage).
 #
 # Env:
-#   LEVER_IMAGE_REGISTRY  registry prefix for the scionlocal tag (default: scionlocal)
+#   LEVER_IMAGE_REGISTRY  registry prefix of the output tag (default: lever.local).
+#                         The default also tags scionlocal/<name>:<arch>, the
+#                         name a lever.yaml from before lever.local still uses
 #   LEVER_IMAGE_ARCH      arch the staged binaries were built for (default: arm64);
 #                         selects the scion-claude:<arch> base and the output tag
-#   LEVER_IMAGE_FORCE=1   overwrite an existing scionlocal/lever-claude:<arch>
+#   LEVER_IMAGE_FORCE=1   overwrite an existing <registry>/lever-claude:<arch>
 #   LEVER_IMAGE_VERSION   lever version the staged binaries were built from, baked
 #                         as the lever_version label (`make lever-image` sets it;
 #                         unset leaves the label empty and `lever doctor` skips
@@ -34,7 +38,7 @@
 set -euo pipefail
 
 CTX="$(cd "$(dirname "$0")" && pwd)"
-REGISTRY="${LEVER_IMAGE_REGISTRY:-scionlocal}"
+REGISTRY="${LEVER_IMAGE_REGISTRY:-lever.local}"
 ARCH="${LEVER_IMAGE_ARCH:-arm64}"
 # Must be Go/docker arch naming — lever appends runtime.GOARCH (arm64/amd64) to a
 # tagless image ref, so a base tagged :aarch64/:x86_64 would never be found.
@@ -60,7 +64,10 @@ case "${FLAVOR}" in
     exit 1
     ;;
 esac
-TARGET="${REGISTRY}/${NAME}:${ARCH}"
+TARGETS=("${REGISTRY}/${NAME}:${ARCH}")
+if [ "${REGISTRY}" = lever.local ]; then TARGETS+=("scionlocal/${NAME}:${ARCH}"); fi
+TAG_ARGS=()
+for t in "${TARGETS[@]}"; do TAG_ARGS+=(-t "${t}"); done
 
 for d in bin scionhook; do
   [ -d "${CTX}/${d}" ] || {
@@ -71,15 +78,17 @@ done
 
 # This tag is also what a customized instance image uses: refuse to silently
 # overwrite one with the generic image.
-if [ "${LEVER_IMAGE_FORCE:-}" != "1" ] && docker image inspect "${TARGET}" >/dev/null 2>&1; then
-  cat >&2 <<EOF
-${TARGET} already exists. Building would overwrite it with the generic image.
+for t in "${TARGETS[@]}"; do
+  if [ "${LEVER_IMAGE_FORCE:-}" != "1" ] && docker image inspect "${t}" >/dev/null 2>&1; then
+    cat >&2 <<EOF
+${t} already exists. Building would overwrite it with the generic image.
 If that tag belongs to a customized instance image, DON'T — point manager.image at a
 different name, or extend the generic image (FROM ${NAME}:${ARCH}). To overwrite anyway,
 re-run with LEVER_IMAGE_FORCE=1.
 EOF
-  exit 1
-fi
+    exit 1
+  fi
+done
 
 if [ "${FLAVOR}" = slim ]; then
   SLIM_CTX="$(cd "${CTX}/../scion-slim" && pwd)"
@@ -136,6 +145,6 @@ fi
 
 PLATFORM_ARGS=()
 [ "${FLAVOR}" = slim ] && PLATFORM_ARGS=(--platform "linux/${ARCH}")
-docker build ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} --build-arg "SCION_BASE=${BASE}" --build-arg "LEVER_VERSION=${LEVER_IMAGE_VERSION:-}" --build-arg "LEVER_JAIL_ABI=${LEVER_JAIL_ABI:-}" -t "${NAME}:${ARCH}" -t "${TARGET}" -f "${CTX}/Dockerfile" "${CTX}"
+docker build ${PLATFORM_ARGS[@]+"${PLATFORM_ARGS[@]}"} --build-arg "SCION_BASE=${BASE}" --build-arg "LEVER_VERSION=${LEVER_IMAGE_VERSION:-}" --build-arg "LEVER_JAIL_ABI=${LEVER_JAIL_ABI:-}" -t "${NAME}:${ARCH}" "${TAG_ARGS[@]}" -f "${CTX}/Dockerfile" "${CTX}"
 
-echo "Built ${NAME}:${ARCH} (+ ${TARGET})."
+echo "Built ${NAME}:${ARCH} (+ ${TARGETS[*]})."

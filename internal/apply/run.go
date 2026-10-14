@@ -798,9 +798,16 @@ func runCredential(ctx context.Context, s Step, d Deps) error {
 	return d.Scion.SecretSet(ctx, "CLAUDE_CODE_OAUTH_TOKEN", tok)
 }
 
-// ImageRegistry is the registry prefix scion rewrites every bare agent image
-// name to: the jail's local image store, which load-image fills.
+// ImageRegistry is the registry prefix scion rewrites a bare agent image name
+// to. Agents lever starts run a qualified name scion never rewrites
+// (imageref.Agent); a record created by an older lever keeps its bare name,
+// which this value resolves to the image load-image tagged for it.
 const ImageRegistry = "scionlocal"
+
+// AgentRuntime is the container runtime the jail's scion starts agents with:
+// load-image fills rootless podman's store, and the warm-up builds podman's
+// layer copy.
+const AgentRuntime = "podman"
 
 func (r *run) registerProject(ctx context.Context, s Step) error {
 	jp := JailPath(s.Target, r.app.Tree, r.d.JailMount)
@@ -1215,7 +1222,7 @@ func (r *run) managerStartOpts(ctx context.Context, jp, task, instructions strin
 		}
 	}
 	return scion.StartOpts{
-		Worker: r.app.Name, Task: task, Project: jp, Image: r.app.ManagerImage(), Harness: "claude",
+		Worker: r.app.Name, Task: task, Project: jp, Image: r.app.ManagerAgentImage(), Harness: "claude",
 		// Empty omits --model. Read only on a fresh create: scion resume has no model
 		// flag.
 		Model: r.app.ManagerModel(),
@@ -1887,7 +1894,7 @@ func (r *run) settleManagerPhase(ctx context.Context, jp string, rec *scion.Agen
 	}
 	if cur.Phase == "created" {
 		return nil, fmt.Errorf("start-manager: manager %q stayed in phase %q for %s and did not settle; nothing was changed. %s",
-			r.app.Name, cur.Phase, time.Duration(b.Attempts)*b.Interval, createdStuckHint(r.app.ManagerImage()))
+			r.app.Name, cur.Phase, time.Duration(b.Attempts)*b.Interval, createdStuckHint(r.app.ManagerAgentImage()))
 	}
 	return nil, fmt.Errorf("start-manager: manager %q stayed in phase %q for %s and did not settle; nothing was changed. Retry once it settles (is a `lever stop` still running?), or run `lever up --fresh` to discard the session and start over",
 		r.app.Name, cur.Phase, time.Duration(b.Attempts)*b.Interval)

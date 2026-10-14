@@ -1524,8 +1524,11 @@ func TestCheckManagerImage(t *testing.T) {
 		wantDetail string
 		wantFix    string
 	}{
-		{"same", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "scionlocal/lever-claude:arm64"}), true, "scionlocal/lever-claude:arm64", ""},
-		{"same, podman-qualified", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "localhost/scionlocal/lever-claude:arm64"}), true, "", ""},
+		{"same", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "lever.local/lever-claude:arm64"}), true, "lever.local/lever-claude:arm64", ""},
+		{"created by an older lever on the bare name", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "scionlocal/lever-claude:arm64"}), true, "assistant (scionlocal/lever-claude:arm64) created on an unqualified image name", "lever up --fresh --keep-conversation"},
+		{"same, podman-qualified bare", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "localhost/scionlocal/lever-claude:arm64"}), true, "unqualified", "--keep-conversation"},
+		{"a worker on a bare name", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "lever.local/lever-claude:arm64"}, scion.Agent{Slug: "w", Image: "scionlocal/lever-claude:arm64"}), true, "w (scionlocal/lever-claude:arm64)", "recycling"},
+		{"a worker on a digest", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "lever.local/lever-claude:arm64"}, scion.Agent{Slug: "w", Image: "x@sha256:aa"}), true, "as configured", ""},
 		{"drifted", listing(scion.Agent{Slug: "assistant", Phase: "suspended", Image: "scionlocal/lever-claude:v1"}), false, "scionlocal/lever-claude:v1", "lever up --fresh"},
 		{"no record", listing(scion.Agent{Slug: "scratch", Phase: "running", Image: "x"}), true, "not checked", ""},
 		{"record without image", listing(scion.Agent{Slug: "assistant", Phase: "running"}), true, "not checked", ""},
@@ -1533,6 +1536,9 @@ func TestCheckManagerImage(t *testing.T) {
 	}
 	for _, c := range cases {
 		r := checkManagerImage(context.Background(), "/lever", "assistant", "scionlocal/lever-claude:arm64", c.list)
+		if c.label == "same" && r.fix != "" {
+			t.Fatalf("same: a fix %q on a healthy row", r.fix)
+		}
 		if r.ok != c.ok {
 			t.Fatalf("%s: ok=%v, want %v (%+v)", c.label, r.ok, c.ok, r)
 		}

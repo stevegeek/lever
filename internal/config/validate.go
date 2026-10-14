@@ -17,6 +17,7 @@ import (
 	"github.com/stevegeek/lever/internal/egress"
 	"github.com/stevegeek/lever/internal/fsutil"
 	"github.com/stevegeek/lever/internal/hubauth"
+	"github.com/stevegeek/lever/internal/imageref"
 	"github.com/stevegeek/lever/internal/opsig"
 	"github.com/stevegeek/lever/internal/state"
 	"github.com/stevegeek/lever/internal/voice"
@@ -320,6 +321,9 @@ func (a *App) Validate() error {
 		return err
 	}
 	if err := a.validateImageTarsDistinct(); err != nil {
+		return err
+	}
+	if err := a.validateAgentImagesDistinct(); err != nil {
 		return err
 	}
 	if err := a.validateBroker(); err != nil {
@@ -1092,6 +1096,33 @@ func validateImageTar(who, image, tar string) error {
 	}
 	if strings.Contains(image, "@") {
 		return fmt.Errorf("config: %s.image_tar %q cannot ship a digest-pinned image (%s): a docker archive is matched by tag, not by manifest digest", who, tar, image)
+	}
+	return nil
+}
+
+// validateAgentImagesDistinct: two configured refs that run under one agent
+// image name (scionlocal/x and lever.local/x) would each re-tag it on load,
+// and one of the agents would run the other's image.
+func (a *App) validateAgentImagesDistinct() error {
+	from := map[string]string{}
+	check := func(ref string) error {
+		agent := imageref.Agent(ref)
+		if agent == "" {
+			return nil
+		}
+		if prev, ok := from[agent]; ok && prev != ref {
+			return fmt.Errorf("config: images %q and %q both run in the jail as %s; name one image one way", prev, ref, agent)
+		}
+		from[agent] = ref
+		return nil
+	}
+	if err := check(a.ManagerImage()); err != nil {
+		return err
+	}
+	for _, g := range a.Workers {
+		if err := check(a.WorkerImage(g)); err != nil {
+			return err
+		}
 	}
 	return nil
 }

@@ -48,7 +48,7 @@ broker:
         - {name: create_card, params: [title, description]}
         # - {name: close_card, params: [number, comment]}
 manager:
-  image: scionlocal/lever-dev-claude:amd64
+  image: lever.local/lever-dev-claude:amd64
   credential_file: secrets/claude-oauth-token
   instructions_file: instructions.md
   obtain:

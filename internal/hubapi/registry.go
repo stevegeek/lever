@@ -9,8 +9,12 @@ import (
 
 const systemRegistryPath = "/api/v1/system/registry"
 
+const registryConflictRetries = 3
+
 // SetImageRegistry sets the hub's agent image registry prefix
-// (PUT /api/v1/system/registry) and requires the hub to echo it back.
+// (PUT /api/v1/system/registry). The hub answers with the request's value, so
+// the check on the answer catches a changed API, not a lost write. A 409 (a
+// concurrent write to the same settings row) is retried a few times.
 //
 // The route takes any loopback caller, an agent included. A hub with
 // DB-backed operational settings stores the value in its endpoints section,
@@ -24,9 +28,17 @@ func (c *Client) SetImageRegistry(ctx context.Context, registry string) error {
 	var out struct {
 		ImageRegistry *string `json:"image_registry"`
 	}
-	if err := c.send(ctx, http.MethodPut, systemRegistryPath, struct {
-		ImageRegistry string `json:"image_registry"`
-	}{registry}, &out); err != nil {
+	var err error
+	for attempt := 0; attempt < registryConflictRetries; attempt++ {
+		err = c.send(ctx, http.MethodPut, systemRegistryPath, struct {
+			ImageRegistry string `json:"image_registry"`
+		}{registry}, &out)
+		var ae *APIError
+		if !errors.As(err, &ae) || ae.Status != http.StatusConflict {
+			break
+		}
+	}
+	if err != nil {
 		return err
 	}
 	if out.ImageRegistry == nil || *out.ImageRegistry != registry {

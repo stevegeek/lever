@@ -960,6 +960,14 @@ func TestHubRoutesTheProxyNeverForwards(t *testing.T) {
 		{"POST", "/api/v1/test-identity-delegations", true},
 		{"POST", "/auth/test-identity/redeem", true},
 		{"GET", "/api/v1/test-infra/status", false},
+		{"POST", "/api/v1/brokers", true},
+		{"POST", "/api/v1/brokers/join", true},
+		{"DELETE", "/api/v1/brokers/b1", true},
+		{"PUT", "/api/v1/runtime-brokers/b1", true},
+		{"DELETE", "/api/v1/runtime-brokers/b1", true},
+		{"POST", "/api/v1/runtime-brokers/b1/heartbeat", true},
+		{"GET", "/api/v1/runtime-brokers", false},
+		{"GET", "/api/v1/runtime-brokers/b1", false},
 	} {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
 			hub := newRecordingHub(t)
@@ -1019,6 +1027,12 @@ func TestFencedRouteSpellings(t *testing.T) {
 		{"POST", "/Auth/Test-Identity/redeem"},
 		{"POST", "/auth/test-identity/redeem/"},
 		{"POST", "/api/v1/Test-Identities"},
+		{"POST", "/api/v1/Brokers"},
+		{"POST", "/api/v1/brokers/"},
+		{"POST", "/api/v1/brokers."},
+		{"POST", "/api/v1/%62rokers/join"},
+		{"POST", "/api/v1/brokers/Join"},
+		{"PATCH", "/api/v1/Runtime-Brokers/b1"},
 	} {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
 			hub := newRecordingHub(t)

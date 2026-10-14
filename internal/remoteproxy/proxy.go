@@ -221,6 +221,10 @@ func mintsCredential(method, p string) bool {
 //     own socket, and a delegation hands the signed-in user's authority to
 //     the agent, which lever assumes hostile.
 //   - Test identities: each mints a credential or a session.
+//   - Broker writes. A remote web user keeps hub-member's broker.create, so
+//     it could register a broker and receive its join token and secret; and
+//     lever-admin links a project's broker only while the hub lists exactly
+//     one, so a stray broker record blocks that link.
 //
 // p is the decoded path. It is compared in lower case, and the feature
 // prefixes without a segment boundary, so no spelling the hub might route
@@ -234,6 +238,11 @@ func refusedRoute(method, p string) bool {
 	}
 	if strings.HasPrefix(p, "/api/v1/admin/experiments") {
 		return method != http.MethodGet && method != http.MethodHead
+	}
+	for _, prefix := range brokerWritePrefixes {
+		if strings.HasPrefix(p, prefix) && method != http.MethodGet && method != http.MethodHead {
+			return true
+		}
 	}
 	if rest, ok := strings.CutPrefix(p, "/api/v1/agents/"); ok {
 		if _, sub, ok := strings.Cut(rest, "/"); ok &&
@@ -276,6 +285,10 @@ var refusedPrefixes = []string{
 	"/api/v1/test-identit", // test-identities and test-identity-delegations
 	"/auth/test-identity",
 }
+
+// brokerWritePrefixes are lower case, with no trailing slash on purpose: the
+// /api/v1/brokers group (create, join, by-id) and the runtime-brokers group.
+var brokerWritePrefixes = []string{"/api/v1/brokers", "/api/v1/runtime-brokers"}
 
 // loginPathPrefix is the hub's login route, bare or /auth/login/<provider>.
 const loginPathPrefix = "/auth/login"

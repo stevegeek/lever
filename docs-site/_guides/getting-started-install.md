@@ -8,6 +8,19 @@ Part of [getting started](/getting-started/). Steps keep their original numberin
 
 ## 1. Install the binaries
 
+With [Homebrew](https://brew.sh) on macOS (Apple Silicon or Intel):
+
+```sh
+brew install stevegeek/tap/lever
+```
+
+This installs the release archive's binaries (below) into Homebrew's `bin` directory;
+`brew upgrade lever` moves to a newer release. The cask also lists the Linux archives, but
+Homebrew's support for casks on Linux is newer and not tested with lever; the release archive or a
+source build is the supported route there. lever starts broker tools with the fixed `PATH`
+`/usr/local/bin:/usr/bin:/bin`, not your shell's, so where Homebrew's `bin` is elsewhere (Apple
+Silicon: `/opt/homebrew/bin`) name a tool by its absolute path in `lever.yaml`, for example `command: [/opt/homebrew/bin/lever-tool-github, ...]`.
+
 A release archive from GitHub holds the same host binaries, ready to run. Its `lever` needs **no Go
 toolchain** for the scion pin of its release (`65531d7f`, the pin in the examples): `lever apply`
 downloads that release's prebuilt scion, checks it against the sha256 built into `lever`, and skips

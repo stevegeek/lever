@@ -87,6 +87,8 @@ dependency. See [core vs instance](docs-site/_guides/core-vs-instance.md).
 ## Build & run
 
 ```bash
+brew install stevegeek/tap/lever  # release binaries: lever + the lever-tool-* host tools (macOS)
+# — or:
 go install github.com/stevegeek/lever/cmd/lever@latest   # host `lever` onto your GOBIN/PATH
 # — or from a clone (requires Go 1.26.9+):
 make install              # build host `lever` + the host tools lever-tool-github, lever-tool-fizzy, lever-tool-whisper, lever-tool-tts → ~/.local/bin (must be on PATH)

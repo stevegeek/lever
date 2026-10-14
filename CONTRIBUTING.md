@@ -81,6 +81,19 @@ only if it matches the embedded digests. Without that step (`make install`, `go 
 embeds no manifest and builds scion as before. Do not run `genrelease` in a checkout you build
 `lever` from for use: its manifest would name assets that are not on any release.
 
+After the release assets are uploaded, goreleaser writes the Homebrew cask (`homebrew_casks` in
+`.goreleaser.yaml`) and pushes it to `Casks/lever.rb` in
+[stevegeek/homebrew-tap](https://github.com/stevegeek/homebrew-tap). The workflow's
+`GITHUB_TOKEN` cannot write to another repository, so this needs a repository secret
+`HOMEBREW_TAP_TOKEN` on the lever repo: a fine-grained personal access token limited to the
+`homebrew-tap` repository, with only **Contents: read and write**. Anyone holding it can change
+what `brew install` runs on users' machines, so keep it to that one repository and renew it before
+it expires (a fine-grained token lasts at most a year). Without the secret, or for a prerelease tag
+(`v1.2.3-rc1`), goreleaser skips the push and the release still succeeds. If the push fails after
+the release is published, the job fails but the release stands; do not re-run the job (the assets
+already exist). Fix the token and update `Casks/lever.rb` in the tap by hand: the new `version`
+and, for each of the four archives, its `sha256` from the release's `checksums.txt`.
+
 ### Bumping the scion pin
 
 Change `ReleasePin` in `internal/provision/scionbin/release.go` and the `version:` of every

@@ -658,6 +658,17 @@ func (h *hubIdentity) registerProject(ctx context.Context, jp, prev string) (str
 	if err != nil {
 		return "", err
 	}
+	if prev == "" && before != "" {
+		// A marker left by an instance whose hub is gone (`lever destroy`, then
+		// `lever up` on the same tree). scion init on a new VM keeps it but
+		// records another local project ID, and the controller PAT's link then
+		// looks up that one, which the hub does not know.
+		h.log("lever: the tree's project marker names project %s from an earlier hub; scion init writes a new one", before)
+		if err := removeJailFile(ctx, h.jr, path.Join(jp, ".scion")); err != nil {
+			return "", errHubIdentity("%w", err)
+		}
+		before = ""
+	}
 	if err := h.sc.InitProject(ctx, jp); err != nil {
 		return "", errHubIdentity("scion init: %w", err)
 	}

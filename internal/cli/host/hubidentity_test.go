@@ -722,6 +722,8 @@ func (s *hiScion) List(context.Context, string) ([]scion.Agent, error) {
 type hiJailRunner struct {
 	t      *testing.T
 	marker string
+	// removed counts removals of the tree's marker.
+	removed int
 	// curl, when set, answers AssertCurl's in-jail curl and the doctor's
 	// plain curl and jail reads; stdin is what RunStdin was given.
 	curl func(env map[string]string, stdin, name string, args []string) (proc.Result, bool)
@@ -736,6 +738,10 @@ func (r *hiJailRunner) run(_ context.Context, env map[string]string, stdin, name
 	if strings.Contains(argv, "podman") {
 		r.t.Errorf("the hub identity code ran %q; it must never touch containers", name)
 		return proc.Result{Code: 1}, errors.New("podman refused by the test")
+	}
+	if name == "sh" && len(args) == 4 && args[0] == "-c" && args[1] == removeJailFileScript && args[3] == hiJailMount+"/.scion" {
+		r.removed++
+		return proc.Result{}, nil
 	}
 	if name == "sh" && len(args) == 4 && args[0] == "-c" && args[2] == "_" && args[3] == hiJailMount+"/.scion" {
 		if r.marker == "" {
@@ -1864,5 +1870,19 @@ func TestHubIdentityPinsExperimentsAndLinksTheBrokerFirst(t *testing.T) {
 			t.Fatalf("pin record = %+v found=%v", rec, found)
 		}
 		hiWantOrder(t, e.hub, "broker link "+hiJailMount, "scion link "+hiJailMount)
+	}
+}
+
+// A fresh hub with a marker left in the tree by an earlier instance gets a new
+// one from scion init; a known project's marker is kept.
+func TestHubIdentityFreshRemovesAStaleMarker(t *testing.T) {
+	e := newHIEnv(t, hiRemoteApp(false))
+	e.mustRun()
+	if e.jr.removed != 1 {
+		t.Fatalf("stale marker removals = %d, want 1", e.jr.removed)
+	}
+	e.mustRun()
+	if e.jr.removed != 1 {
+		t.Fatalf("a recorded project's marker was removed (%d)", e.jr.removed)
 	}
 }

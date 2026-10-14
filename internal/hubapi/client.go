@@ -72,6 +72,8 @@ type APIError struct {
 	Msg    string
 	// NoProject marks ProjectID's answer for a name the hub does not list.
 	NoProject bool
+	// TooLarge marks a reply over the call's reply cap (WithReplyCap).
+	TooLarge bool
 	// Code and Details are scion's error envelope ({"error":{"code",
 	// "details"}}) when a write's answer carried one.
 	Code    string
@@ -129,19 +131,25 @@ func (c *Client) doBody(ctx context.Context, method, path string, body []byte) (
 }
 
 func (c *Client) get(ctx context.Context, path string, out any) error {
+	_, err := c.getSized(ctx, path, out)
+	return err
+}
+
+// getSized is get that also returns the reply body's size.
+func (c *Client) getSized(ctx context.Context, path string, out any) (int, error) {
 	status, body, err := c.do(ctx, http.MethodGet, path)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if status < 200 || status > 299 {
-		return &APIError{Status: status,
+		return 0, &APIError{Status: status,
 			Msg: fmt.Sprintf("GET %s: HTTP %d: %s", path, status, snippet(body))}
 	}
 	if err := json.Unmarshal(body, out); err != nil {
-		return &APIError{
+		return 0, &APIError{
 			Msg: fmt.Sprintf("GET %s: decoding response: %v", path, err)}
 	}
-	return nil
+	return len(body), nil
 }
 
 // snippet caps a body for an error message: a wrong service on the hub port

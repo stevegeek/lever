@@ -84,7 +84,7 @@ func newHIDoctor(t *testing.T, app *config.App) *hiDoctor {
 		switch {
 		case name == "date":
 			return proc.Result{Stdout: strconv.FormatInt(e.now.Unix(), 10) + "\n"}, true
-		case name == "sh" && len(args) == 5 && args[0] == "-c" && args[2] == "_" && assertion != "":
+		case name == "sh" && len(args) == 6 && args[0] == "-c" && args[2] == "_" && assertion != "":
 			if strings.Contains(strings.Join(args, " "), assertion) {
 				t.Error("the assertion is on the jail command line")
 			}

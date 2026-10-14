@@ -34,8 +34,8 @@ func TestAssertCurlSendsTheAssertionOnStdinAndNeverABearer(t *testing.T) {
 	if *signed != 1 {
 		t.Fatalf("signed %d times, want once per request", *signed)
 	}
-	if r.call.Name != "sh" || len(r.call.Args) != 5 || r.call.Args[0] != "-c" {
-		t.Fatalf("argv = %q %q, want sh -c script _ METHOD URL", r.call.Name, r.call.Args)
+	if r.call.Name != "sh" || len(r.call.Args) != 6 || r.call.Args[0] != "-c" {
+		t.Fatalf("argv = %q %q, want sh -c script _ METHOD URL CAP", r.call.Name, r.call.Args)
 	}
 	if r.call.Args[3] != "GET" || r.call.Args[4] != "http://127.0.0.1:8080/api/v1/auth/me" {
 		t.Fatalf("method/url = %q %q", r.call.Args[3], r.call.Args[4])
@@ -334,10 +334,16 @@ func TestAssertCurlSharesJailCurlErrorHandling(t *testing.T) {
 	if !errors.As(err, &ae) {
 		t.Fatalf("want an APIError, got %v", err)
 	}
-	r = &scriptedRunner{res: proc.Result{Stdout: strings.Repeat("x", maxBody+1) + "\n200"}}
+	r = &scriptedRunner{res: proc.Result{Stdout: strings.Repeat("x", DefaultReplyCap+1) + "\n200"}}
 	a, _ = assertCurl(r)
-	if _, _, err := a.Do(context.Background(), "GET", "/api/v1/auth/me"); err == nil || !strings.Contains(err.Error(), "exceeds") {
-		t.Fatalf("want a too-large error, got %v", err)
+	_, _, err = a.Do(context.Background(), "GET", "/api/v1/auth/me")
+	assertTooLarge(t, err, "GET /api/v1/auth/me", "1 MiB")
+	r = &scriptedRunner{res: proc.Result{Stdout: "{}\n200", Code: -1}, err: proc.ErrOutputLimit}
+	a, _ = assertCurl(r)
+	_, _, err = a.Do(WithReplyCap(context.Background(), 8<<20), "GET", "/api/v1/auth/me")
+	assertTooLarge(t, err, "GET /api/v1/auth/me", "8 MiB")
+	if r.limit != 8<<20+statusTrailerRoom || r.call.Args[5] != "8388608" {
+		t.Errorf("output limit=%d cap arg=%q, want the call's cap", r.limit, r.call.Args[5])
 	}
 }
 

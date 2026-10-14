@@ -30,7 +30,7 @@ const AssertionHeader = "X-Lever-Hub-Assertion"
 // bearer takes precedence over the assertion on the hub.
 const assertCurlScript = `IFS= read -r t || exit 1; [ -n "$t" ] || exit 1; ` +
 	`printf '` + AssertionHeader + `: %s\n' "$t" | ` +
-	`exec curl -q -g -sS --noproxy '*' --connect-timeout 5 --max-time 20 ` +
+	`exec curl -q -g -sS --noproxy '*' --connect-timeout 5 --max-time 20 --max-filesize "$3" ` +
 	`-o - -w '\n%{http_code}' -X "$1" ` +
 	`-H @- -H 'Accept: application/json' "$2"`
 
@@ -38,7 +38,7 @@ const assertCurlScript = `IFS= read -r t || exit 1; [ -n "$t" ] || exit 1; ` +
 // environment, like curlBodyScript.
 const assertCurlBodyScript = `IFS= read -r t || exit 1; [ -n "$t" ] || exit 1; ` +
 	`printf '` + AssertionHeader + `: %s\n' "$t" | ` +
-	`exec curl -q -g -sS --noproxy '*' --connect-timeout 5 --max-time 20 ` +
+	`exec curl -q -g -sS --noproxy '*' --connect-timeout 5 --max-time 20 --max-filesize "$3" ` +
 	`-o - -w '\n%{http_code}' -X "$1" ` +
 	`-H @- -H 'Accept: application/json' ` +
 	`-H 'Content-Type: application/json' --data-binary "$LEVER_HUB_BODY" "$2"`
@@ -48,7 +48,7 @@ const assertCurlBodyScript = `IFS= read -r t || exit 1; [ -n "$t" ] || exit 1; `
 // cannot carry a header break.
 const assertCurlIfMatchScript = `IFS= read -r t || exit 1; [ -n "$t" ] || exit 1; ` +
 	`printf '` + AssertionHeader + `: %s\n' "$t" | ` +
-	`exec curl -q -g -sS --noproxy '*' --connect-timeout 5 --max-time 20 ` +
+	`exec curl -q -g -sS --noproxy '*' --connect-timeout 5 --max-time 20 --max-filesize "$3" ` +
 	`-o - -w '\n%{http_code}' -X "$1" ` +
 	`-H @- -H 'Accept: application/json' -H "If-Match: $LEVER_HUB_IF_MATCH" ` +
 	`-H 'Content-Type: application/json' --data-binary "$LEVER_HUB_BODY" "$2"`

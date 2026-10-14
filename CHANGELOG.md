@@ -7,6 +7,20 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Resume and the stored-role check work again once agents carry long tasks.** Every hub call
+  through the jail refused a reply over 64 KiB, and each agent record in the hub's agent list
+  carries its full task text, so a project with a few long tasks could no longer be listed: `lever
+  up` failed to check and resume its agents. Hub replies now have a cap per call: 1 MiB by
+  default and 8 MiB for an agent list page. The agent list is read 50 records a page instead of
+  500, still giving up loudly after 20 pages rather than act on a partial list, and the capability
+  read asks the hub for its compact view, which leaves out the task text. curl stops a reply at the
+  cap (`--max-filesize`) and lever kills a transfer whose output passes it, so a broken peer cannot
+  make lever hold an unbounded reply; a reply over the cap is an error that names the call and
+  the cap, never a truncated body. `lever doctor` has a new *hub agent list* row: it warns when an
+  agent list page passes half the cap and fails when one passes it. (lever#220)
+
 ## [0.39.1] - 2026-10-14
 
 ### Fixed

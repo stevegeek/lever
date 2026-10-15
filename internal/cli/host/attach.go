@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/brokerctl"
+	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
@@ -81,42 +82,52 @@ func detachBeforeAttach(ctx context.Context, w io.Writer, r proc.Runner, slug, p
 	fmt.Fprintf(w, "lever: detached %d other %s attached to %q (--detach-others)\n", n, noun, slug)
 }
 
-// execAttach replaces the process with the backend-wrapped scion attach, the
-// TTY handover `lever up` uses. It returns only on error.
-func execAttach(ctx context.Context, w io.Writer, b backend.Backend, sc *scion.Client, slug, project string, detachOthers bool) error {
-	detachBeforeAttach(ctx, w, b.JailRunner(), slug, project, detachOthers)
-	argv, err := attachArgv(ctx, b, sc, slug, project)
-	if err != nil {
-		return err
-	}
-	bin, err := exec.LookPath(argv[0])
-	if err != nil {
-		return fmt.Errorf("attach: %w", err)
-	}
-	return syscall.Exec(bin, argv, os.Environ()) // hand over the TTY
-}
-
 // runAttach runs the attach as a child and returns when the operator detaches
-// or the session ends, so `lever up` can check the manager after the detach.
-// Meanwhile the terminal's interrupt and quit belong to the attach (the
-// terminal sends them to it too), so lever waits them out; terminate and
-// hangup sent to lever are passed on. They are caught, not ignored, because an
-// ignored signal would be inherited by the child.
+// or the session ends, so `lever up` can check the manager after the detach and
+// the operator's terminal can be restored.
 func runAttach(ctx context.Context, w io.Writer, b backend.Backend, sc *scion.Client, slug, project string, detachOthers bool) error {
 	detachBeforeAttach(ctx, w, b.JailRunner(), slug, project, detachOthers)
 	argv, err := attachArgv(ctx, b, sc, slug, project)
 	if err != nil {
 		return err
 	}
+	return attachChild(argv, os.Stdin, os.Stdout, os.Stderr)
+}
+
+// attachChild runs argv on the operator's terminal. The child stays in lever's
+// process group, which is the terminal's foreground group, so it keeps the
+// controlling terminal, gets SIGWINCH on a resize and stops with lever on a
+// job-control stop. Meanwhile the terminal's interrupt and quit belong to the
+// attach (the terminal sends them to it too), so lever waits them out;
+// terminate and hangup sent to lever are passed on. They are caught, not
+// ignored, because an ignored signal would be inherited by the child; one that
+// lever itself inherited as ignored (nohup) is left so, for the child to
+// inherit too. However the child ends, the terminal's line settings and modes
+// are restored after.
+func attachChild(argv []string, in, out, errw *os.File) error {
 	bin, err := exec.LookPath(argv[0])
 	if err != nil {
 		return fmt.Errorf("attach: %w", err)
 	}
-	c := exec.Command(bin, argv[1:]...)
-	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+	c := &exec.Cmd{Path: bin, Args: argv}
+	// A nil *os.File in the interface fields would not read as unset.
+	if in != nil {
+		c.Stdin = in
+	}
+	if out != nil {
+		c.Stdout = out
+	}
+	if errw != nil {
+		c.Stderr = errw
+	}
 	sigs := make(chan os.Signal, 4)
-	signal.Notify(sigs, os.Interrupt, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP)
+	for _, sig := range []os.Signal{os.Interrupt, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP} {
+		if !signal.Ignored(sig) {
+			signal.Notify(sigs, sig)
+		}
+	}
 	defer signal.Stop(sigs)
+	term := saveAttachTerm(in, out)
 	if err := c.Start(); err != nil {
 		return fmt.Errorf("attach: %w", err)
 	}
@@ -129,12 +140,22 @@ func runAttach(ctx context.Context, w io.Writer, b backend.Backend, sc *scion.Cl
 				_ = c.Process.Signal(sig)
 			}
 		case err := <-done:
+			term.restore(attachEndedAbnormally(err))
 			if err != nil {
 				return fmt.Errorf("attach: %w", err)
 			}
 			return nil
 		}
 	}
+}
+
+// withAttachExitCode makes `lever attach` exit with the status a shell would
+// report for the attach itself.
+func withAttachExitCode(err error) error {
+	if code, ok := attachExitCode(err); ok && code > 0 {
+		return cli.WithExitCode(err, code)
+	}
+	return err
 }
 
 // newAttachCmd attaches to a running agent and does no lifecycle work. It is
@@ -160,13 +181,13 @@ func newAttachCmd(bf BackendFactory) *cobra.Command {
 				return fmt.Errorf("attach: %w (%v) — run `lever up` first", errJailNotUp, err)
 			}
 			// HubTokenSource gives the client the controller PAT.
-			// attachArgv stages it in the guest, since the exec'd argv is public.
+			// attachArgv stages it in the guest, since the attach's argv is public.
 			sc := brokerctl.HostScionClient(b.JailRunner(), state, app.Scion.AgentRole)
 			slug, project, err := attachTarget(app, b.MountDest(), argOrEmpty(args))
 			if err != nil {
 				return err
 			}
-			return execAttach(cmd.Context(), cmd.ErrOrStderr(), b, sc, slug, project, detachOthers)
+			return withAttachExitCode(runAttach(cmd.Context(), cmd.ErrOrStderr(), b, sc, slug, project, detachOthers))
 		},
 	}
 	c.Flags().BoolVar(&detachOthers, "detach-others", false, detachOthersFlagUsage)

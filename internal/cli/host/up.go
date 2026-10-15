@@ -298,7 +298,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				return nil
 			}
 			if !attachTTY {
-				return execAttach(cmd.Context(), cmd.ErrOrStderr(), b, sc, app.Name, project, detachOthers)
+				return runAttach(cmd.Context(), cmd.ErrOrStderr(), b, sc, app.Name, project, detachOthers)
 			}
 			attachErr := runAttach(cmd.Context(), cmd.ErrOrStderr(), b, sc, app.Name, project, detachOthers)
 			if holder := managerLockHolder(app, stateFor(path)); holder != "" {

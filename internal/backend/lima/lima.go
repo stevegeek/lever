@@ -159,8 +159,14 @@ func (l *Lima) ensureVM(ctx context.Context, cfg backend.Config) error {
 	}
 	s := rep.Start("start VM")
 	if status == "Running" {
+		if !created {
+			l.saveGuestLogs(cfg, inst, true)
+		}
 		s.Skip("already running")
 		return nil
+	}
+	if !created {
+		l.saveGuestLogs(cfg, inst, false)
 	}
 	// Lima's own log says what the boot waits for ("Waiting for the
 	// essential requirement 1 of 4: ssh").
@@ -174,6 +180,28 @@ func (l *Lima) ensureVM(ctx context.Context, cfg backend.Config) error {
 	}
 	s.Done(err)
 	return err
+}
+
+// saveGuestLogs never fails the bring-up: the logs are evidence for the
+// operator, not part of containment.
+func (l *Lima) saveGuestLogs(cfg backend.Config, inst realizedInstance, running bool) {
+	if cfg.GuestLogDir == "" {
+		return
+	}
+	save := SaveGuestLogs
+	if running {
+		save = SaveLivePanic
+	}
+	path, err := save(l.instanceDir(inst), cfg.GuestLogDir, time.Now())
+	if cfg.Warn == nil {
+		return
+	}
+	if err != nil {
+		cfg.Warn("jail: warning: saving the VM's console logs: %v", err)
+	}
+	if running && path != "" {
+		cfg.Warn("jail: warning: the VM's console shows a guest kernel panic since the VM started; saved its console logs to %s (`lever doctor`, row \"last guest boot\")", path)
+	}
 }
 
 // realizedInstance is the subset of `limactl list --json <vm>` needed to

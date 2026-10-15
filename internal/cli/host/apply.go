@@ -853,6 +853,12 @@ func bringUpBackend(ctx context.Context, app *config.App, bf BackendFactory, st 
 	cfg.Warn = warn
 	if st.Dir != "" {
 		cfg.HWEFailStamp = st.HWEFailStamp()
+		// An agent could read, forge or delete them there.
+		if !brokerctl.StateInsideTree(app, st) {
+			cfg.GuestLogDir = st.GuestLogs()
+		} else {
+			warn("jail: warning: the state directory (%s) is inside the tree the agents mount, so lever saves no copy of the VM's console logs", state.DirName)
+		}
 	}
 	// The host's scion build runs while the VM boots; the scion step takes it once
 	// the guest confirms the architecture.

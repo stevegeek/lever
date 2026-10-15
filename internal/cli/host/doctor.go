@@ -202,6 +202,14 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 			return checkGuestKernel(app, p, err)
 		},
 		func() checkResult {
+			var p guestBootProbe
+			var err error
+			if app.Backend == config.BackendLima {
+				p, err = readGuestBootProbe(ctx, jr)
+			}
+			return checkLastGuestBoot(app.Backend, state.GuestLogs(), p, err)
+		},
+		func() checkResult {
 			return checkScionTelemetry(ctx, app.EffectiveScionTelemetry(), readJailScionSettings(jr), b.MountDest(), app.Name, listAgents, readContainerEnv)
 		},
 		func() checkResult { return checkAgentCert(state, time.Now()) },

@@ -729,6 +729,40 @@ func checkProjectSharedDirs(ctx context.Context, project string, list sharedDirL
 			"`DELETE /api/v1/projects/<project-uuid>/shared-dirs/<name>` against the hub"}
 }
 
+// agentListSizer returns the size in bytes of the largest page of the
+// project's agent list.
+type agentListSizer func(ctx context.Context, project string) (int, error)
+
+// checkAgentListSize warns while the hub's agent list still fits the reply
+// cap lever reads it under: past the cap, resume and the stored-role check
+// refuse to run. Each record carries its full task text and the agent's own
+// last status message, which scion does not limit, so one agent can fill a page.
+func checkAgentListSize(ctx context.Context, project string, measure agentListSizer) checkResult {
+	const name = "hub agent list"
+	capMiB := hubapi.AgentListReplyCap >> 20
+	if measure == nil {
+		return checkResult{name, true, "not checked", ""}
+	}
+	largest, err := measure(ctx, project)
+	if err != nil {
+		var apiErr *hubapi.APIError
+		if errors.As(err, &apiErr) && apiErr.TooLarge {
+			return checkResult{name, false, err.Error(),
+				"a page of agent records passed what lever reads, so `lever up` cannot check or resume its agents; " +
+					"find the agent with an outsized task or status message (`scion list` in the jail) and delete it, or any agent you no longer need"}
+		}
+		// The roles row reports a hub that answered unusably.
+		return checkResult{name, true, "not checked: " + err.Error(), ""}
+	}
+	detail := fmt.Sprintf("largest page %d KiB of the %d MiB lever reads", largest>>10, capMiB)
+	if largest > hubapi.AgentListReplyCap/2 {
+		return checkResult{name, true, detail,
+			"agent records carry their full task text and last status message; delete agents you no longer need before a page reaches the cap, " +
+				"when `lever up` can no longer check or resume them"}
+	}
+	return checkResult{name, true, detail, ""}
+}
+
 type agentRoleLister func(ctx context.Context, project string) ([]hubapi.Agent, error)
 
 // checkAgentRoles reports agent records that store no authorization role.
@@ -1602,10 +1636,18 @@ func checkGoToolchain(scion config.ScionConfig, prebuilt bool, p doctorProbes) c
 }
 
 // scionPrebuilt reports whether apply downloads the release's prebuilt scion
-// instead of building it. A web UI build still needs the module source, which
-// is fetched with Go. The guest is assumed to run the host's architecture.
+// instead of building it, and its web UI too when the instance serves one (a
+// web UI build needs the module source, which is fetched with Go). The guest
+// is assumed to run the host's architecture.
 func scionPrebuilt(app *config.App) bool {
-	return app.Scion.Version != "" && !app.ScionWebAssets() && scionbin.DownloadsRelease(app.Scion.Version, runtime.GOARCH)
+	return app.Scion.Version != "" && scionbin.DownloadsRelease(app.Scion.Version, runtime.GOARCH) &&
+		(!app.ScionWebAssets() || scionbin.DownloadsWebUI(app.Scion.Version))
+}
+
+// webUIPrebuilt reports whether apply downloads the release's prebuilt scion
+// web UI instead of building it with node.
+func webUIPrebuilt(app *config.App) bool {
+	return app.ScionWebAssets() && app.Scion.Version != "" && scionbin.DownloadsWebUI(app.Scion.Version)
 }
 
 // nodeToolchainProbe validates node and npm for the scion web-asset build. It
@@ -1626,13 +1668,18 @@ func nodeToolchainProbe(r proc.Runner) (string, error) {
 
 // checkNodeToolchain verifies node and npm can build scion's web UI when the
 // instance serves it; otherwise a broken toolchain shows up deep in a failed
-// apply. No UI to build passes.
-func checkNodeToolchain(app *config.App, p doctorProbes) checkResult {
+// apply. No UI to build passes, and so does a missing node when prebuilt
+// (only a failed download builds it).
+func checkNodeToolchain(app *config.App, prebuilt bool, p doctorProbes) checkResult {
 	const name = "node toolchain"
 	if !app.ScionWebAssets() {
 		return checkResult{name, true, "scion web UI build not required", ""}
 	}
 	version, err := p.nodeToolchain()
+	if err != nil && prebuilt {
+		return checkResult{name, true, "not required: lever downloads this release's prebuilt scion web UI for " + app.Scion.Version +
+			" (only a failed download builds it, which needs node and Go)", ""}
+	}
 	if err != nil {
 		fix := ""
 		if errors.Is(err, webassets.ErrNodeToolchain) {
@@ -2186,6 +2233,18 @@ func checkHubRuntime(ctx context.Context, hc *hubapi.Client) checkResult {
 	return checkResult{name, true, apply.AgentRuntime, ""}
 }
 
+// unaskedExperiments returns the experiments lever pins that rec lists
+// neither as off nor as looked for.
+func unaskedExperiments(rec state.HubExperimentsRecord) []string {
+	var out []string
+	for _, n := range pinnedOffNames() {
+		if !slices.Contains(rec.Off, n) && !slices.Contains(rec.Asked, n) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 // checkHubExperiments fails when the hub serves a pinned-off scion experiment
 // (pinnedOffExperiments), probed with the controller PAT, and warns when it is
 // off only by scion's default because lever never pinned it on this hub. The
@@ -2207,20 +2266,41 @@ func checkHubExperiments(ctx context.Context, st state.State, known scopeKnownFu
 	}
 	if len(on) > 0 {
 		return checkResult{name, false,
-			strings.Join(on, " and ") + " on at the hub: an inbound shell and port path into agents (conduit) or hub-held publishing with unauthenticated share links (artifacts), neither reviewed for the jail",
+			strings.Join(on, ", ") + " on at the hub: scion experiments not reviewed for the jail (conduit: an inbound shell and port path into agents; " +
+				"artifacts: hub-held publishing with unauthenticated share links; chat thread groups: project-wide chat groups agents can create)",
 			"run `lever apply`: it pins it off as lever-admin and restarts the hub"}
 	}
 	if !hubHasExperiments(ctx, known, rec, found) {
-		return checkResult{name, true, "off: the jail's scion has no hub experiments, so neither feature exists", ""}
+		return checkResult{name, true, "off: the jail's scion has no hub experiments, so none of these features exists", ""}
 	}
 	if !found || rec.NotApplicable {
 		return warnResult(name,
 			"off by scion's default only: lever has not pinned them off on this hub, so a changed default or an admin's override would turn them on",
 			"run `lever apply`: it pins them off as lever-admin")
 	}
-	if len(rec.Off) == 0 {
-		return checkResult{name, true, "off: this hub registers neither experiment", ""}
+	if missing := unaskedExperiments(rec); len(missing) > 0 {
+		return warnResult(name,
+			"an older lever pinned the experiments on this hub and never looked for "+strings.Join(missing, ", ")+
+				", so a changed default or an admin's override would turn it on",
+			"run `lever apply`: it pins them off as lever-admin")
 	}
-	return checkResult{name, true, fmt.Sprintf("off at the hub; pinned off by lever on %s (%s)",
-		rec.PinnedAt.Format(time.RFC3339), strings.Join(rec.Off, ", ")), ""}
+	if len(rec.Off) == 0 {
+		return checkResult{name, true, "off: this hub registers none of the experiments lever pins", ""}
+	}
+	var probed, unprobed []string
+	for _, e := range pinnedOffExperiments {
+		if !slices.Contains(rec.Off, e.name) {
+			continue
+		}
+		if e.probe == "" {
+			unprobed = append(unprobed, e.name)
+		} else {
+			probed = append(probed, e.name)
+		}
+	}
+	detail := fmt.Sprintf("off at the hub; pinned off by lever on %s (%s)", rec.PinnedAt.Format(time.RFC3339), strings.Join(probed, ", "))
+	if len(unprobed) > 0 {
+		detail += fmt.Sprintf("; %s pinned off on the same apply, which no route can show, so doctor reads only lever's record", strings.Join(unprobed, ", "))
+	}
+	return checkResult{name, true, detail, ""}
 }

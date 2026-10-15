@@ -1035,3 +1035,26 @@ func TestRunningContainerDown(t *testing.T) {
 		}
 	}
 }
+
+// ResumeTask puts both positionals behind --, so a task can never bind as one
+// of scion's flags, and refuses what Start's task checks refuse.
+func TestResumeTaskArgv(t *testing.T) {
+	f := proc.NewFakeRunner()
+	f.Script("scion", proc.Result{})
+	c := New(f, Options{})
+	if err := c.ResumeTask(context.Background(), "m", "/g/m", "boot: read NOTES.md"); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(f.Calls[0].Args, " ")
+	if want := "resume -g /g/m --non-interactive -- m boot: read NOTES.md"; got != want {
+		t.Fatalf("argv = %q, want %q", got, want)
+	}
+	for _, bad := range []string{"", "--config=/x", strings.Repeat("x", TaskArgvBudget+1)} {
+		if err := c.ResumeTask(context.Background(), "m", "/g/m", bad); err == nil {
+			t.Fatalf("task %.20q: want refusal", bad)
+		}
+	}
+	if len(f.Calls) != 1 {
+		t.Fatalf("a refused task reached scion: %d calls", len(f.Calls))
+	}
+}

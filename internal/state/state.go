@@ -65,6 +65,11 @@ func (s State) VoiceModels() string { return filepath.Join(s.Dir, "voice-models"
 // read by the remote proxy before it lets a contact post to an agent.
 func (s State) Sessions() string { return filepath.Join(s.Dir, "sessions.jsonl") }
 
+// ConversationLock is the flock every change to the manager's record takes
+// (lever conversation new and restore, up, apply, stop, reload, and the
+// broker's heal of the manager).
+func (s State) ConversationLock() string { return filepath.Join(s.Dir, "conversation.lock") }
+
 // OperatorSock is the broker's UNIX socket for `lever msg send` (0600,
 // bound only when the state directory is outside the tree).
 func (s State) OperatorSock() string { return filepath.Join(s.Dir, "operator.sock") }

@@ -107,6 +107,20 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 			b.audit("reenrol", cn, "deny", "revoked identity presented an expired leaf — not healing")
 			return
 		}
+	} else if b.lockManager != nil {
+		// The manager's own heal would resume a record a new conversation or
+		// a restore has suspended or stopped on purpose (and a resume of a
+		// stopped one runs the hub's stored task, not the operator's current
+		// prompt). Busy skips the heal without counting it.
+		unlock, err := b.lockManager()
+		if err != nil {
+			b.reenrolMu.Lock()
+			b.reenrolTries[cn] = max(0, b.reenrolTries[cn]-1)
+			b.reenrolMu.Unlock()
+			b.audit("reenrol", cn, "error", "natural lapse: lever is changing the manager (a new conversation, a restore, up, apply, stop or reload); heal skipped, the next lapse retries")
+			return
+		}
+		defer unlock()
 	}
 	// Bounded: the scion CLI has no timeout, and a hung hub would otherwise
 	// hold the worker's lifecycle lock for good.

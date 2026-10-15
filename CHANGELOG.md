@@ -7,6 +7,138 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.40.0] - 2026-10-14
+
+### Added
+
+- **A release ships scion's web UI prebuilt, so remote access on its pin needs no Go or node
+  (lever#205).** The release build also builds scion's web UI at the release pin, with the same
+  `npm ci` and `npm run build` an apply runs, in a job of its own with a read-only token and no
+  credentials or cache shared with the job that builds `lever`, and uploads it as
+  `scion-web_<pin>.tar.gz` (a deterministic archive of a few MB, sourcemaps left out) beside the
+  prebuilt scion binaries; its sha256 and size are embedded in `lever` with theirs. With `remote.enabled` and `scion.version`
+  naming that pin, `lever apply` downloads it instead of fetching the module with Go and building
+  it with node. The download follows the scion binary's rules: https only, from `github.com` and
+  GitHub's release asset hosts, checked against the embedded digest and size before anything is
+  unpacked; a mismatch stops the apply, and a download that cannot happen falls back to the source
+  build. lever unpacks only directories and regular files under plain relative names (no links,
+  devices, absolute paths or `..`), with its own modes and limits on the file count and sizes, and
+  an archive that breaks those rules stops the apply too. The unpacked UI is cached by its digest.
+  `lever doctor`'s *go toolchain* and *node toolchain* rows pass without Go and node when the
+  download applies. `LEVER_SCION_DOWNLOAD=off` builds both from source.
+
+- **A new conversation for the manager, from the host and from the chat page (lever#221).**
+  `lever conversation new` backs the manager's conversation up, then starts the manager again in
+  a new Claude session on the same record and image, which runs the boot prompt as
+  `manager.prompt_file` holds it now (lever reads it before it changes anything and passes it to
+  scion, which also stores it on the record), so a morning stand-up, or an edited prompt, no
+  longer needs `lever up --fresh` and its two-minute recreate. lever suspends
+  the manager for the backup (no backup, no change: the manager is resumed on its own
+  conversation), then stops the record, because scion continues a suspended record with
+  `claude --continue` and starts a stopped one in a new session, and then
+  starts it with the usual resume checks. The real stop ends the old session, so the hub never reads
+  the manager `stopped` over a running claude. A manager in the middle of a turn is left alone
+  (exit 5) unless `--force`. `new`, `restore`, `up`, `apply`, `stop` and `reload` share one lock
+  per instance: while one runs, the others exit 6 with nothing changed and name the command that
+  holds it (none waits; `up` lets go before it attaches, and says so when a new conversation
+  ends the attach). The broker's heal of an expired manager certificate skips while the lock is
+  held, and a new conversation gives up after 20 minutes, so `lever stop` is never refused for
+  longer. After
+  the stop a failure leaves the manager down and names the backup; `lever conversation restore`
+  puts the old conversation back at any time. An operator login on the chat page gets a **New
+  conversation** button in the manager's chat: it asks first (and again before it interrupts a
+  turn), runs `lever conversation new` on the host, once a minute at most, and follows the manager
+  until it runs again; a draft in the box stays. Contacts never get it, and the route refuses
+  them. Every request is in the proxy's audit log. The manager's skill gains a short section on
+  keeping its continuity in files, since a new conversation starts without the old context.
+
+- **A tagged release publishes a Homebrew cask, so `brew install stevegeek/tap/lever` installs
+  lever.** The cask installs `lever` and the four host tools (`lever-tool-github`, `-fizzy`,
+  `-whisper`, `-tts`) from the release archive on macOS (Apple Silicon and Intel), and clears the macOS quarantine flag
+  on them, as the binaries are not notarized. The cask lists the Linux archives too, untested. GoReleaser pushes it to the
+  `stevegeek/homebrew-tap` repository after the release assets are uploaded, with the
+  `HOMEBREW_TAP_TOKEN` repository secret; without the secret, or for a prerelease tag, the release
+  still succeeds and the tap is left alone. (lever#75)
+
+### Changed
+
+- **scion is pinned to `65531d7f`, its nightly-20261014.** The examples, the release's prebuilt
+  scion, the Makefile's `SCION_VERSION`, the Lima e2e and the docs move from `b41cd6fe`. lever's
+  calls to scion's CLI and hub need no change. One change on the scion side is visible: the
+  jail's runtime broker now reads the runtimes, profiles, harness configs and image registry stored
+  in the hub database on SQLite hubs too, so the copy there, whose runtime and registry lever's
+  apply sets as `lever-admin`, wins over the jail's `settings.yaml` for every agent start. So do
+  the profiles and any harness configs stored there. Only a hub admin can write them, except the
+  active profile's runtime, which scion's loopback `PUT /api/v1/system/runtime` lets any jailed
+  agent set (the known issue below); lever sets it back at every apply.
+- **The agent image bakes Claude Code 2.1.300 (was 2.1.296).** The messages lever reads from
+  Claude Code (a stale background session, no conversation to continue), its session records,
+  the agent-view switch and the hook events lever uses are unchanged in 2.1.300. It fixes, among
+  others, the first transcript entry after a resume being lost when a crash cut the transcript's
+  last line short, deny rules for an MCP server whose name holds a double underscore, and 2.1.296
+  running an approved tool call twice in a resumed headless session. It ships with the Jail ABI 5
+  image rebuild below.
+- **lever builds with Go 1.26.9 (was 1.26.4).** `go.mod`, `.tool-versions` and the lever-dev
+  example image move to it. govulncheck found 17 standard-library vulnerabilities that lever's code
+  reaches in 1.26.4 (HTTP/2 and HTTP/1 handling in `net/http`, `crypto/tls`, `net/textproto`,
+  `net/url`, `encoding/asn1`), all fixed in 1.26.9. A Go 1.21 or later downloads 1.26.9 by itself
+  unless `GOTOOLCHAIN=local`.
+
+### Fixed
+
+- **Resume and the stored-role check work again once agents carry long tasks.** Every hub call
+  through the jail refused a reply over 64 KiB, and each agent record in the hub's agent list
+  carries its full task text, so a project with a few long tasks could no longer be listed: `lever
+  up` failed to check and resume its agents. Hub replies now have a cap per call: 1 MiB by
+  default and 8 MiB for an agent list page. The agent list is read 50 records a page instead of
+  500, still giving up loudly after 20 pages rather than act on a partial list, so a project of
+  more than 1,000 agents (10,000 before) now stops `lever up` with that error; the capability
+  read asks the hub for its compact view, which leaves out the task text (an agent's own status
+  message stays in it, and scion does not limit its size: one agent can still fill a page, which
+  stops `lever up` rather than letting it act on a partial list). curl stops a reply at the
+  cap (`--max-filesize`) and lever kills a transfer whose output passes it, so a broken peer cannot
+  make lever hold an unbounded reply; a reply over the cap is an error that names the call and
+  the cap, never a truncated body. `lever doctor` has a new *hub agent list* row: it warns when an
+  agent list page passes half the cap and fails when one passes it. (lever#220)
+
+### Security
+
+- **Two more scion experiments are kept off: chat thread groups and federation.** The new scion
+  registers `hub.chat_thread_groups` (project-wide chat groups that agents can create and rename,
+  shown to project members with read access) and `federation.project_visitors` (users of external issuers
+  acting in projects, and short-lived credentials for peer hubs), both off by scion's default.
+  Every apply now pins them off as `lever-admin` beside conduit and artifacts, and proves thread
+  groups off with `GET /api/v1/thread-groups`; the federation experiment has no route a probe
+  can read, so the hub's experiments answer after the write proves it, and doctor reports it from
+  lever's record. `hub-experiments.json` now
+  records which experiments lever looked for, and doctor's *scion conduit and artifacts* row warns
+  when an older lever wrote it until the next apply. The remote proxy refuses
+  `/api/v1/thread-groups*` for every login, and the new `POST /api/v1/auth/federation-token` falls
+  under its refusal of credential routes.
+
+### Upgrade
+
+- **Jail ABI 5.** The agent image changed (Claude Code 2.1.300, sciontool and, in the slim image,
+  scion from the new pin) and so did the Go version: rebuild the agent image (`make lever-image` or
+  `make lever-image-slim`, then any instance image built from it) and recreate the manager on it
+  with `lever up --fresh --keep-conversation`. Doctor's *agent lever version* row says so. The
+  first `lever apply` installs the new scion pin in the jail.
+- **The manager's skill text changed (lever#221),** so contacts' posts to the manager are
+  refused until it next starts in a new session. The `lever up --fresh --keep-conversation` above
+  does not lift it: the restored conversation keeps the record of the skill it started on. Run
+  `lever conversation new` after it (or `lever up --fresh` without `--keep-conversation`) when
+  contacts use the chat page.
+- **`lever up`, `lever apply`, `lever stop` and `lever reload` now refuse to run (exit 6) while
+  another of them, or a `lever conversation new` or `restore`, runs for the same instance
+  (lever#221).** A script that ran two of them at once for one instance must run them in turn.
+
+### Known issues
+
+- scion's loopback `/api/v1/system/*` writers still run no permission check at this pin: any jailed
+  agent can rename scion's dev user (`PUT /api/v1/system/identity`) or set the hub's runtime and
+  image registry. lever's mitigations are unchanged (see the 0.39.0 security notes). scion's fix
+  for the identity and workstation-settings routes landed after this nightly.
+
 ## [0.39.1] - 2026-10-14
 
 ### Fixed

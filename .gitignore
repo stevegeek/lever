@@ -58,3 +58,6 @@ examples/*/tools/*/lever-tool-*
 /build/
 internal/provision/scionbin/release/*
 !internal/provision/scionbin/release/.gitkeep
+
+# The release workflow drops the prebuilt web UI here (see .goreleaser.yaml).
+/_web-ui/

@@ -2,7 +2,7 @@ name: two-agents-comms
 backend: orbstack
 tree: workspace
 scion:
-  version: b41cd6fe   # pin a scion commit; a lever release ships this one prebuilt
+  version: 65531d7f   # pin a scion commit; a lever release ships this one prebuilt
 # api-key is the secure default (real key never in the container) but needs a
 # Console API key; this demo opts into subscription (your Claude OAuth token).
 broker:

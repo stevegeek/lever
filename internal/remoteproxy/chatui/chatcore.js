@@ -162,6 +162,8 @@ export function agentList(body) {
     tier: body.tier === 'operator' ? 'operator' : 'contact',
     userId: str(body.userId),
     console: str(body.console),
+    // The server offers it to the operator only, and refuses anyone else.
+    newConversation: body.tier === 'operator' && body.newConversation === true,
     agents,
     files: filesConfig(body),
     voice: voiceConfig(body),
@@ -248,6 +250,48 @@ export function wakeText(status, body, name) {
   const word = body && typeof body === 'object' ? str(body.error) : '';
   if (Object.hasOwn(WAKE_TEXT, word)) return WAKE_TEXT[word];
   return `${name} could not be woken (HTTP ${status || 'no answer'}).`;
+}
+
+// A new conversation for the manager (POST /lever/api/new-conversation):
+// the operator's only.
+export const NEW_CONVERSATION_PATH = '/lever/api/new-conversation';
+// After it is accepted the list is read every WAKE_POLL_MS for up to 3 min:
+// the manager is suspended, backed up, stopped and started.
+export const NEW_CONVERSATION_POLLS = 60;
+// After this many reads with the manager still up the page stops waiting.
+export const NEW_CONVERSATION_DOWN_POLLS = 20;
+
+// newConversationOffered: the open chat is the manager's, and the list offers
+// the action.
+export function newConversationOffered(roster, a) {
+  return !!(roster && roster.newConversation && roster.tier === 'operator' && a && a.role === 'manager' && a.access === 'message');
+}
+
+export function newConversationAsk(name) {
+  return `Start ${name} on a new conversation? lever backs up the current one (it can be restored on the host) and ${name} starts again with its boot prompt. Its context is cleared.`;
+}
+
+export function newConversationForceAsk(name) {
+  return `${name} is in the middle of a turn. Interrupt it and start a new conversation anyway?`;
+}
+
+const NEW_CONVERSATION_TEXT = {
+  busy: 'It is in the middle of a turn; nothing was changed.',
+  'in-progress': 'lever is already changing the manager (a new conversation, a restore, or lever up, apply, stop or reload). Try again when it is done.',
+  'not-running': 'It is not running; nothing was changed.',
+  'rate-limited': 'A new conversation was started a moment ago; try again in a minute.',
+  'not-allowed': 'Only the operator can start a new conversation.',
+  unavailable: 'A new conversation is not available on this instance.',
+  failed: 'lever could not start the new conversation; `lever doctor` on the host shows why.',
+  origin: 'The request was refused.',
+};
+
+// One fixed sentence per reason word, never the answer's text.
+export function newConversationText(status, body, name) {
+  const word = body && typeof body === 'object' ? str(body.error) : '';
+  if (Object.hasOwn(NEW_CONVERSATION_TEXT, word)) return NEW_CONVERSATION_TEXT[word];
+  if (!status) return `No answer from the server: ${name}'s new conversation may have started all the same; the list shows when it goes down.`;
+  return `${name}'s new conversation could not be started (HTTP ${status}).`;
 }
 
 // The operator's read-only view of contact conversations (/lever/api/contacts).

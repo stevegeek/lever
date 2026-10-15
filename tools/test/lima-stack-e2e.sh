@@ -5,7 +5,8 @@
 # for an operator and a contact, the experiment and broker fence, a contact
 # removed while an agent loops the controller rename, an agent's image
 # registry, runtime and gcloud settings writes (a worker still starts on lever's
-# image, and the next apply undoes them), `lever stop` and a resume, and doctor. `make test-lima-e2e` covers the jail and the broker
+# image, and the next apply undoes them), `lever stop` and a resume, `lever
+# conversation new` on the running manager, and doctor. `make test-lima-e2e` covers the jail and the broker
 # without scion; this covers what a scion pin bump can break.
 #
 # Needs: Lima >= 2.0, Go, perl, python3. The agent image comes from IMAGE_TAR (a
@@ -17,7 +18,10 @@
 # Env: SCION_VERSION (default: the release pin), IMAGE_TAR, IMAGE (default
 # lever.local/lever-claude-slim), SAVE_IMAGE_TAR (copy the archive lever loaded
 # there, e.g. for the hub auth e2e; a lever.local image is also tagged
-# scionlocal/<name> in it, the name an older lever.yaml uses), LEVER (default ~/.local/bin/lever), NAME,
+# scionlocal/<name> in it, the name an older lever.yaml uses), IMAGE_CACHE (an
+# archive path: reuse the archive an earlier run saved there when the key file
+# beside it matches this tree's in-jail fingerprint, pins, arch and image, else
+# build the image and save it there), LEVER (default ~/.local/bin/lever), NAME,
 # KEEP=1 (leave the VM for inspection).
 set -uo pipefail
 
@@ -129,6 +133,23 @@ remote:
 ${2:-}
 EOF
 }
+# image_key: what the in-guest build depends on. The in-jail sources enter
+# through fingerprint.txt, so a change the fingerprint test has not recorded
+# yet reuses a stale archive.
+image_key() {
+	{
+		echo "$SCION_VERSION $LEVER_VERSION $JAIL_ABI $ARCH $IMAGE"
+		cat "$REPO_ROOT/internal/jailabi/fingerprint.txt" "$REPO_ROOT/image/scion-slim/Dockerfile"
+	} | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
+}
+if [ -z "${IMAGE_TAR:-}" ] && [ -n "${IMAGE_CACHE:-}" ]; then
+	if [ -f "$IMAGE_CACHE" ] && [ "$(cat "$IMAGE_CACHE.key" 2>/dev/null)" = "$(image_key)" ]; then
+		echo "reusing the agent image archive $IMAGE_CACHE"
+		IMAGE_TAR=$IMAGE_CACHE
+	else
+		echo "no reusable archive at $IMAGE_CACHE: building the agent image"
+	fi
+fi
 IMAGE_LINE=""
 if [ -n "${IMAGE_TAR:-}" ]; then
 	ln -f "$IMAGE_TAR" "$INST/img.tar" 2>/dev/null || cp "$IMAGE_TAR" "$INST/img.tar"
@@ -165,6 +186,11 @@ refused() {
 	local login=$1 out; shift
 	out=$(proxy "$login" -w '\n%{http_code}' "$@")
 	[ "${out##*$'\n'}" = 403 ] && [[ "$out" == *"does not forward this route"* ]]
+}
+mintrefused() {
+	local login=$1 out; shift
+	out=$(proxy "$login" -w '\n%{http_code}' "$@")
+	[ "${out##*$'\n'}" = 403 ] && [[ "$out" == *"does not hand out hub credentials"* ]]
 }
 doctor_out=""
 doctor_run() { doctor_out=$(cd "$INST" && timeout 900 "$LEVER" doctor 2>&1); }
@@ -227,6 +253,13 @@ if [ -z "${IMAGE_TAR:-}" ]; then
 	G rm -f /tmp/stack-img.tar
 	IMAGE_LINE="  image_tar: img.tar"
 	write_config "$IMAGE_LINE"
+	if [ -n "${IMAGE_CACHE:-}" ]; then
+		if cp "$INST/img.tar" "$IMAGE_CACHE.tmp" && mv "$IMAGE_CACHE.tmp" "$IMAGE_CACHE" && image_key > "$IMAGE_CACHE.key"; then
+			ok "agent image archive cached at $IMAGE_CACHE"
+		else
+			bad "caching the image archive at $IMAGE_CACHE"
+		fi
+	fi
 fi
 if [ -n "${SAVE_IMAGE_TAR:-}" ]; then
 	if cp "$INST/img.tar" "$SAVE_IMAGE_TAR"; then ok "agent image archive saved to $SAVE_IMAGE_TAR"; else bad "saving the image archive to $SAVE_IMAGE_TAR"; fi
@@ -253,6 +286,9 @@ check "the hub identity record says fresh" grep -q '"mode": *"fresh"' "$INST/.le
 PROJ=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["project_id"])' "$INST/.lever-state/hub-identity.json")
 checkx "the project lists the broker" 'hubbody "/api/v1/projects/$PROJ/providers" | grep -q brokerId'
 check "lever-admin pinned the experiments off" grep -q '"off": *\[' "$INST/.lever-state/hub-experiments.json"
+for x in hub.conduit hub.artifacts hub.chat_thread_groups federation.project_visitors; do
+	check "lever-admin pinned $x off" python3 -c 'import json,sys; sys.exit(sys.argv[2] not in json.load(open(sys.argv[1])).get("off", []))' "$INST/.lever-state/hub-experiments.json" "$x"
+done
 check "no dev token in the jail" G sh -c '! test -e ~/.scion/dev-token'
 cimage() { X inspect -f '{{.ImageName}}' "$1" 2>/dev/null; }
 # The pull must fail, so its status is dropped: under pipefail it would fail
@@ -271,7 +307,7 @@ checkx "lever msg send to the manager" '(cd "$INST" && "$LEVER" msg send --to "$
 checkx "the controller PAT lists notifications (inbox:read)" '[ "$(hub GET /api/v1/notifications)" = 200 ]'
 
 say "the experiment fence on the hub"
-for p in /api/v1/conduit/grant-keys /api/v1/artifacts; do
+for p in /api/v1/conduit/grant-keys /api/v1/artifacts /api/v1/thread-groups; do
 	code=$(hub GET "$p")
 	checkx "hub answers $p with 404 (experiment off): $code" '[ "$code" = 404 ]'
 done
@@ -282,9 +318,11 @@ checkx "the operator has a live session through the proxy ($code)" '[ "$code" = 
 code=$(pcode "$CONTACT" "http://127.0.0.1:$RP/api/v1/auth/me")
 checkx "the contact has a live session through the proxy ($code)" '[ "$code" = 200 ]'
 for login in "$OPERATOR" "$CONTACT"; do
-	for p in /api/v1/conduit /api/v1/conduit/grant-keys /api/v1/artifacts /api/v1/artifacts/shared/x /api/v1/artifacts/view/x /api/v1/admin/conduit/grant-keys/rotate /auth/test-identity/redeem; do
+	for p in /api/v1/conduit /api/v1/conduit/grant-keys /api/v1/artifacts /api/v1/artifacts/shared/x /api/v1/artifacts/view/x /api/v1/admin/conduit/grant-keys/rotate /auth/test-identity/redeem /api/v1/thread-groups; do
 		checkx "proxy refuses $p for $login" 'refused "$login" "http://127.0.0.1:$RP$p"'
 	done
+	checkx "proxy refuses a federation token for $login" \
+		'mintrefused "$login" -X POST -H "Content-Type: application/json" --data "{\"audience\":\"https://peer.example\"}" "http://127.0.0.1:$RP/api/v1/auth/federation-token"'
 	checkx "proxy refuses an experiments write for $login" \
 		'refused "$login" -X PUT -H "Content-Type: application/json" --data "{\"overrides\":{\"hub.conduit\":true}}" "http://127.0.0.1:$RP/api/v1/admin/experiments"'
 	checkx "proxy refuses a broker registration for $login" \
@@ -446,6 +484,72 @@ printf '%s\n' "$doctor_out" | grep -E '^(✗|!) ' | mask_secrets | sed 's/^/    
 check "doctor: remote web role bound after the sign-ins" row_ok "remote web role"
 check "doctor: scion conduit and artifacts after the resume" row_ok "scion conduit and artifacts"
 checkx "doctor: no failed row after the resume" '! printf "%s\n" "$doctor_out" | grep -q "^✗ "'
+
+say "lever conversation new on the running manager"
+# P <args...>: podman in the guest, each argument passed as is (X joins them).
+P() { G sh -c 'XDG_RUNTIME_DIR=/run/user/$(id -u) exec podman "$@"' _ "$@"; }
+# mgrrec <field>: the manager's hub record field (phase, or task from its
+# applied config); "none" with no record.
+mgrrec() {
+	hubbody "/api/v1/agents?projectId=$PROJ" | python3 -c 'import json,sys
+a = [x for x in json.load(sys.stdin).get("agents", []) if x.get("slug") == sys.argv[1]]
+if not a: print("none"); sys.exit()
+print(a[0].get("phase", "") if sys.argv[2] == "phase" else (a[0].get("appliedConfig") or {}).get("task", ""))' "$NAME" "$1"
+}
+# claude_up: a claude process runs in the manager's container.
+claude_up() { P exec "lever--$NAME" sh -c 'for f in /proc/[0-9]*/cmdline; do tr "\000" " " < "$f"; echo; done' 2>/dev/null | grep -qE '(^|/)claude( |$)'; }
+# newest: the newest transcript in the manager's home (its claude session id).
+newest() { P exec --user scion "lever--$NAME" sh -c 'ls -t /home/scion/.claude/projects/*/*.jsonl 2>/dev/null | grep -v stack-e2e-old | head -1' 2>/dev/null; }
+P exec --user scion "lever--$NAME" sh -c 'mkdir -p /home/scion/.claude/projects/-workspace && echo stack-e2e-old > /home/scion/.claude/projects/-workspace/stack-e2e-old.jsonl'
+before=$(newest)
+echo "      | session before: ${before:-(no transcript)}"
+# Held from outside lever: every change to the manager record is refused, and
+# names nothing it changed.
+python3 -c 'import fcntl,sys,time; f=open(sys.argv[1],"a"); fcntl.flock(f,fcntl.LOCK_EX); open(sys.argv[2],"w").close(); time.sleep(120)' \
+	"$INST/.lever-state/conversation.lock" "$WORK/held" &
+holder=$!
+for _ in $(seq 50); do [ -e "$WORK/held" ] && break; sleep 0.1; done
+(cd "$INST" && timeout 300 "$LEVER" conversation new > "$WORK/conv-locked.log" 2>&1); rc=$?
+checkx "conversation new under a held lock exits 6 ($rc)" '[ "$rc" = 6 ]'
+(cd "$INST" && timeout 300 "$LEVER" stop > "$WORK/stop-locked.log" 2>&1); rc=$?
+checkx "lever stop under a held lock exits 6 ($rc)" '[ "$rc" = 6 ]'
+kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+check "the manager still runs after the refusals" running
+MARK="stack-e2e-boot-$$"
+echo "Manager for the stack e2e ($MARK). Do nothing unless asked." > "$INST/manager.md"
+: > "$WORK/conv-samples"
+(while [ ! -e "$WORK/conv-done" ]; do
+	ph=$(mgrrec phase 2>/dev/null); cl=no; claude_up && cl=yes
+	echo "${ph:-unknown} $cl" >> "$WORK/conv-samples"
+done) &
+sampler=$!
+# The manager here never idles (its API key is fake, so every turn retries);
+# the busy refusal itself is unit-tested.
+(cd "$INST" && timeout 900 "$LEVER" conversation new --force > "$WORK/conv-new.log" 2>&1); conv_rc=$?
+touch "$WORK/conv-done"; wait "$sampler"
+tail -3 "$WORK/conv-new.log" | mask_secrets | sed 's/^/      | /'
+echo "      | phases seen: $(awk '{print $1"/"$2}' "$WORK/conv-samples" | uniq | tr '\n' ' ')"
+checkx "conversation new succeeds ($conv_rc)" '[ "$conv_rc" = 0 ]'
+bid=$(sed -n 's/.*the old one is backup \([^ ]*\) (.*/\1/p' "$WORK/conv-new.log" | head -1)
+checkx "it names a backup (${bid:-none})" '[ -n "$bid" ]'
+checkx "the backup is listed" '(cd "$INST" && "$LEVER" conversation list 2>&1) | grep -q "^$bid"'
+# Against an honest manager: the phase is the agent's own report to the hub.
+checkx "the hub never read the manager stopped with claude running" '! grep -q "^stopped yes" "$WORK/conv-samples"'
+check "the manager runs on its new conversation" running
+checkx "the hub reads the manager running ($(mgrrec phase))" '[ "$(mgrrec phase)" = running ]'
+# The hub reads running as soon as the container starts; claude follows.
+for _ in $(seq 1 30); do claude_up && break; sleep 2; done
+check "claude runs in the manager's container" claude_up
+after=$(newest)
+echo "      | session after: ${after:-(no transcript)}"
+checkx "a new claude session" '[ -n "$after" ] && [ "$after" != "$before" ]'
+checkx "the old transcript stays in the home" 'P exec --user scion "lever--$NAME" test -s /home/scion/.claude/projects/-workspace/stack-e2e-old.jsonl'
+checkx "the new session got the current boot prompt" 'P exec "lever--$NAME" sh -c "cat /proc/[0-9]*/cmdline 2>/dev/null" | tr "\000" " " | grep -q "$MARK"'
+checkx "the hub stores the current boot prompt as the record's task" 'mgrrec task | grep -q "$MARK"'
+doctor_run
+printf '%s\n' "$doctor_out" | grep -E '^(✗|!) ' | mask_secrets | sed 's/^/      | /'
+check "doctor: manager agent after the new conversation" row_ok "manager agent"
+checkx "doctor: no failed row after the new conversation" '! printf "%s\n" "$doctor_out" | grep -q "^✗ "'
 
 say "teardown"
 (cd "$INST" && "$LEVER" destroy 2>&1 | tail -1)

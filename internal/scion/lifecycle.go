@@ -656,6 +656,26 @@ func (c *Client) Resume(ctx context.Context, worker, project string) error {
 	return err
 }
 
+// ResumeTask resumes a stopped worker in a fresh session that runs task, and
+// the hub stores task as the record's task for later fresh starts. On a
+// suspended record the hub would instead add task to the continued session,
+// so the caller must have seen the record stopped and hold off every other
+// lifecycle change until this returns.
+//
+// Both positionals sit behind --, as in startArgs: scion parses interspersed
+// flags.
+func (c *Client) ResumeTask(ctx context.Context, worker, project, task string) error {
+	if task == "" {
+		return errors.New("scion resume: empty task (use Resume)")
+	}
+	if err := CheckTask(task); err != nil {
+		return err
+	}
+	args := append([]string{"resume"}, projectFlag(project)...)
+	_, err := c.run(ctx, "", append(args, nonInteractive, "--", worker, task)...)
+	return err
+}
+
 // agentVerb is the argv of a scion verb on one agent, with extra flags.
 func agentVerb(verb, agent, project string, flags ...string) []string {
 	args := append([]string{verb, agent}, flags...)

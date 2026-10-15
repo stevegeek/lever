@@ -298,7 +298,7 @@ func TestBuildScriptFlavors(t *testing.T) {
 			"PATH="+filepath.Join(dir, "path")+string(os.PathListSeparator)+os.Getenv("PATH"),
 			"FAKE_DIR="+dir, "FAKE_ARCH=arm64", "FAKE_EXISTING="+existing,
 			"LEVER_IMAGE_ARCH=arm64", "LEVER_IMAGE_FLAVOR="+flavor, "LEVER_IMAGE_FORCE=",
-			"LEVER_IMAGE_REGISTRY=", "SCION_VERSION=b41cd6fe", "LEVER_JAIL_ABI=3", "LEVER_IMAGE_VERSION=0.37.0")
+			"LEVER_IMAGE_REGISTRY=", "SCION_VERSION=65531d7f", "LEVER_JAIL_ABI=3", "LEVER_IMAGE_VERSION=0.37.0")
 		out, err := cmd.CombinedOutput()
 		r := result{out: string(out)}
 		if ee, ok := err.(*exec.ExitError); ok {
@@ -318,7 +318,7 @@ func TestBuildScriptFlavors(t *testing.T) {
 			t.Fatalf("exit %d, %d builds:\n%s\n%s", r.code, len(r.builds), r.out, strings.Join(r.builds, "\n"))
 		}
 		base, layer := r.builds[0], r.builds[1]
-		for _, w := range []string{"--platform linux/arm64", "SCION_VERSION=b41cd6fe", "-t lever-scion-slim:arm64", "scion-slim/Dockerfile"} {
+		for _, w := range []string{"--platform linux/arm64", "SCION_VERSION=65531d7f", "-t lever-scion-slim:arm64", "scion-slim/Dockerfile"} {
 			if !strings.Contains(base, w) {
 				t.Errorf("base build lacks %q: %s", w, base)
 			}

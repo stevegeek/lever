@@ -27,7 +27,7 @@ import (
 
 // ReleasePin is the scion commit a lever release builds its prebuilt scion
 // binaries from, and the scion.version the examples and docs pin.
-const ReleasePin = "b41cd6fe"
+const ReleasePin = "65531d7f"
 
 // ReleaseDir is the directory, relative to this package, that the release
 // build's generator (GenerateRelease) writes the manifest into and the embed
@@ -67,6 +67,9 @@ type Release struct {
 	// Commit is the full scion commit hash.
 	Commit string           `json:"commit"`
 	Assets map[string]Asset `json:"assets"`
+	// Web is scion's web UI built from the same commit, for remote access.
+	// A manifest without it still serves the binaries.
+	Web *WebAsset `json:"web,omitempty"`
 }
 
 // Asset is one guest architecture's release asset: a gzip of the scion
@@ -87,6 +90,7 @@ const maxReleaseBytes = 1 << 30
 var (
 	releaseVersionRe = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$`)
 	assetNameRe      = regexp.MustCompile(`^scion_[0-9A-Za-z.-]+_linux_(amd64|arm64)\.gz$`)
+	webAssetNameRe   = regexp.MustCompile(`^scion-web_[0-9A-Za-z.-]+\.tar\.gz$`)
 	sha256Re         = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	hexRe            = regexp.MustCompile(`^[0-9a-f]+$`)
 )
@@ -113,6 +117,16 @@ func (r *Release) validate() error {
 			return fmt.Errorf("asset %s: bad sha256", a.Name)
 		case a.Size <= 0 || a.Size > maxReleaseBytes || a.BinarySize <= 0 || a.BinarySize > maxReleaseBytes:
 			return fmt.Errorf("asset %s: bad size", a.Name)
+		}
+	}
+	if w := r.Web; w != nil {
+		switch {
+		case !webAssetNameRe.MatchString(w.Name) || w.Name != WebAssetName(r.ScionVersion):
+			return fmt.Errorf("web asset %q", w.Name)
+		case !sha256Re.MatchString(w.SHA256):
+			return fmt.Errorf("web asset %s: bad sha256", w.Name)
+		case w.Size <= 0 || w.Size > MaxWebArchiveBytes:
+			return fmt.Errorf("web asset %s: bad size", w.Name)
 		}
 	}
 	return nil

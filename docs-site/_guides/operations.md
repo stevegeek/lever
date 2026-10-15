@@ -433,6 +433,81 @@ keep the old mounts; `lever apply` warns.
   the device until they are recreated). Turned off, the row fails while the manager still holds
   the device. See [`nested_virt`](/reference/config/#top-level).
 
+## Start a new conversation
+
+A long conversation fills the manager's context. To start the day clean, without recreating
+anything:
+
+```bash
+lever conversation new
+```
+
+It backs the conversation up, then starts the manager again in a new Claude session on the same
+scion record, in the same image, and the new session runs the manager's boot prompt, so the
+manager opens with whatever that prompt asks for (a stand-up, an overview). The prompt is
+`manager.prompt_file` as it is when the command runs, so an edit since the manager was created
+takes effect without `lever up --fresh`. lever reads it before it changes anything: a prompt it
+cannot read, or one too long for scion's command line, stops the command with the manager
+untouched. scion also stores the prompt on the record, so a later `lever up` that has to start
+the manager in a new session runs the same text. It takes about as long as `lever stop` and `lever up` take for the manager alone. From
+the phone, the [chat page](/remote-access/#a-new-conversation-for-the-manager) has the same action.
+
+What happens, in order:
+
+1. lever reads the manager's record. A manager in the middle of a turn (the hub reads it
+   working) is left alone: the command says so and exits `5`. `--force` interrupts the turn.
+   The record must be running or suspended. A turn that starts in the moment between this look
+   and the suspend is interrupted, as any suspend interrupts it.
+2. It suspends a running manager, so nothing writes the transcripts while they are copied, and
+   backs up `~/.claude/projects` as [`lever conversation backup`](#the-managers-conversation-across---fresh)
+   does (transcripts with no content are not saved, so they push no real backup out). **No backup, no new conversation:** if the backup fails, or lever cannot find the
+   manager's home, the manager is resumed on its own conversation (one that was suspended before
+   stays suspended) and nothing else changes.
+3. It stops the record. scion resumes a suspended record with `claude --continue` and a stopped
+   one in a new session, so the stop is what ends the old session. It is a real stop of the
+   container, not a second claude process, so the hub's phase is true throughout and the manager
+   does not end up reading `stopped` over a running claude. (The phase and activity lever reads
+   here are the manager's own reports to the hub: a manager that lies can hold off a new
+   conversation until `--force`, or skip its own suspend before the backup of its own home; the
+   stop still ends its container.) If lever can see that the stop did
+   not land (the record still reads suspended), a manager it suspended is resumed on its old
+   conversation; if it cannot tell, it starts nothing and says so.
+4. It starts the record, which scion does in a new session with the boot prompt, and runs the same checks as any
+   resume of the manager (the tree mounts, then the wait for claude's session start). The new
+   session is recorded for the contact gate as `lever up --fresh` records one; when the
+   manager's lever skill cannot be read, it is recorded on no skill, and contacts cannot post to
+   the manager until it next starts fresh. With no `prompt_file`, scion gives the session the
+   prompt it stored last (at the manager's last fresh create or new conversation), or none;
+   scion offers no way to clear a stored prompt short of `lever up --fresh`.
+
+From the stop on, the old session cannot be continued by a resume. If a later step fails, the
+manager stays down, and the error names the backup: `lever up` starts the manager (in a new
+session), and `lever conversation restore <id>` after that puts the old conversation back. A new
+conversation is reversible the same way afterwards: `lever conversation restore` with the backup
+it printed puts the old conversation back.
+
+The old transcripts also stay in the manager's home (the new session is a new file beside them),
+until Claude Code's own cleanup removes them. Each new conversation is one of the 10 backups lever
+keeps.
+
+`lever conversation new`, `lever conversation restore`, `lever up`, `lever apply`, `lever stop` and
+`lever reload` share one lock per instance (`.lever-state/conversation.lock`): while one of them runs, the
+others exit `6`, name the command that holds the lock (with its pid and start time), and change
+nothing. None of them waits, since a new conversation can take minutes: run the command again
+once the other has finished. `lever up` lets go of the lock before it attaches you, so a new
+conversation from the chat page can run while you are attached; its stop ends your attach, and
+`lever up` says so instead of reporting the manager dead. The broker's heal of an expired manager
+certificate also skips while the lock is held (the next lapse retries), and a new conversation
+gives up after 20 minutes; to stop one sooner, end the process the refusal names. With the state directory inside the
+tree there are no conversation backups, so no new conversation or restore, and the others take
+no lock.
+
+**Keep the manager's continuity in files.** A new conversation drops everything the manager only
+held in its context. Have the manager keep what must survive in the tree (a log, notes, open
+tasks), and have the boot prompt read it, so a fresh session picks up where the last one left
+off. Messages that arrive while the manager is down wait in the hub as they do across
+`lever stop`; a boot prompt that reads the manager's events picks them up.
+
 ## The manager's conversation across `--fresh`
 
 A manager keeps the image, model, mounts and devices it was created with, so changing one of them
@@ -709,7 +784,7 @@ plausibly make it more likely; it has not been reproduced. The container's own t
   (background sessions are then possible, for example on an image without a writable
   `/etc/claude-code`: check that directory's permissions or rebuild the image). Claude Code documents
   them as equivalent: they turn off background agents and agent view (`claude agents`, `--bg`,
-  `/background`, and the on-demand supervisor). In the Claude Code build lever bakes (2.1.296) the
+  `/background`, and the on-demand supervisor). In the Claude Code build lever bakes (2.1.300) the
   left-arrow shortcut that backgrounds the session and opens agent view is gated on the same
   switch. This is read from that build, **not yet tested in a running container**; doctor's
   `claude background sessions` row is the check that matters.

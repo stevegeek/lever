@@ -76,8 +76,9 @@ its start as it grows. An SSD is the single biggest help on an older machine.
   `dbus-user-session`, `iptables`, `curl` and `netcat-openbsd` when any is missing, and the
   guest release's HWE kernel (`linux-generic-hwe-26.04`) with `guest_kernel: hwe`.
 - **On the host:** the Go modules of the pinned scion (skipped with `scion.binary`), or, for the
-  scion pin of a lever release, that release's prebuilt scion (about 40 MB); with
-  `remote.enabled` and a `version:` or `source:` scion, the npm packages of scion's web UI.
+  scion pin of a lever release, that release's prebuilt scion (about 40 MB) and, with
+  `remote.enabled`, its prebuilt web UI (a few MB); with `remote.enabled` and any other
+  `version:` or a `source:` scion, the npm packages of scion's web UI.
 - **The agent image** is never pulled from inside the jail: `make lever-image` builds it on the host
   (that build downloads its base images and Claude Code), and `lever apply` copies it in. A host
   that only runs an instance can take it as a `docker save` archive (`manager.image_tar`).

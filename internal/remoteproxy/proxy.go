@@ -116,6 +116,11 @@ type Config struct {
 	// Wake asks the broker to resume a worker for a login that may message it.
 	// A refusal is a *WakeError. Nil answers every wake 503.
 	Wake func(ctx context.Context, login, tier, worker string) error
+	// NewConversation backs the manager's conversation up and starts it again
+	// in a fresh session, for an operator login (newconv.go); force interrupts
+	// a turn. A refusal that changed nothing is ErrConversationBusy or
+	// ErrConversationLocked. Nil answers 503 and the page offers no action.
+	NewConversation func(ctx context.Context, force bool) error
 	// MatchAgentMessages reports which agent rows of a contact's DM the
 	// broker's agent ledger recorded. A contact sees only those agent rows;
 	// any error hides every agent row. Nil: no contact answer is rewritten.
@@ -176,6 +181,7 @@ const authAPIPrefix = "/api/v1/auth/"
 // p is the decoded path, which is what scion's ServeMux matches; paths that
 // cleaning would change get a redirect, not a dispatch.
 func mintsCredential(method, p string) bool {
+	p = strings.ToLower(p)
 	if p == strings.TrimSuffix(authAPIPrefix, "/") {
 		return true
 	}
@@ -212,9 +218,10 @@ func mintsCredential(method, p string) bool {
 //     whatever the hub's state.
 //   - /auth/callback/*: no lever login uses it, and through the proxy it could
 //     only churn logins.
-//   - Conduit (the hub's shell, sftp and port relay into agents) and artifacts
-//     (hub-held files with unauthenticated share and view links): lever has
-//     not reviewed either, and both reach past the agent's own surface.
+//   - Conduit (the hub's shell, sftp and port relay into agents), artifacts
+//     (hub-held files with unauthenticated share and view links) and chat
+//     thread groups (project-wide groups agents can create and rename): lever
+//     has not reviewed them, and each reaches past the agent's own surface.
 //   - Experiment writes, which switch those features on. Reading the list
 //     changes nothing and stays admin-only at the hub.
 //   - An agent's port tunnel and delegations: the tunnel is the agent side's
@@ -282,6 +289,7 @@ var refusedPrefixes = []string{
 	"/api/v1/conduit",
 	"/api/v1/admin/conduit",
 	"/api/v1/artifacts",
+	"/api/v1/thread-groups",
 	"/api/v1/test-identit", // test-identities and test-identity-delegations
 	"/auth/test-identity",
 }
@@ -686,6 +694,9 @@ type gate struct {
 	live        liveRequests
 	// revokeEvery overrides revokePoll (tests).
 	revokeEvery time.Duration
+	newConvs    wakeLimiter
+	// newConvWaitFor overrides newConvAnswerWait (tests).
+	newConvWaitFor time.Duration
 }
 
 func (g *gate) audit(line AuditLine) {

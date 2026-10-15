@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/stevegeek/lever/internal/progress"
+	"github.com/stevegeek/lever/internal/provision/scionbin"
 	"github.com/stevegeek/lever/internal/provision/webassets"
 	"github.com/stevegeek/lever/internal/scion/layout"
 )
@@ -19,11 +21,28 @@ import (
 // stale UI. No security boundary rests on it.
 const webDigestFile = ".lever-web-digest"
 
-// EnsureScionWebAssets builds scion's SPA on the HOST and stages it into the
-// guest at layout.WebAssetsDir.
+// prebuiltWebUI is webassets.Prebuilt; a variable so tests can fake the
+// release.
+var prebuiltWebUI = webassets.Prebuilt
+
+// EnsureScionWebAssets builds scion's SPA on the HOST, or downloads the one
+// this lever release ships for the pin, and stages it into the guest at
+// layout.WebAssetsDir.
 func (g Guest) EnsureScionWebAssets(ctx context.Context, spec ScionSpec) error {
 	if !spec.BuildsWebAssets() {
 		return nil
+	}
+	if spec.Version != "" {
+		dist, digest, err := prebuiltWebUI(ctx, spec.Version)
+		if err == nil {
+			return g.stageWebAssets(ctx, dist, digest)
+		}
+		if !scionbin.ReleaseUnavailable(err) {
+			return err
+		}
+		if scionbin.DownloadsWebUI(spec.Version) {
+			progress.From(ctx).Note("prebuilt scion web UI not downloaded; using a source build")
+		}
 	}
 	srcWeb, err := webassets.SourceDir(ctx, g.Host, spec)
 	if err != nil {
@@ -62,7 +81,7 @@ func (g Guest) stageWebAssets(ctx context.Context, dist, digest string) error {
 // -f` on the sentinel catches a directory whose contents were removed but
 // whose marker survived.
 func (g Guest) stagedWebDigest(ctx context.Context) string {
-	script := fmt.Sprintf("test -f %s && cat %s",
+	script := fmt.Sprintf("test -f %s && /bin/cat %s",
 		shellSingleQuote(filepath.Join(layout.WebAssetsDir, filepath.FromSlash(layout.WebAssetsSentinel))),
 		shellSingleQuote(filepath.Join(layout.WebAssetsDir, webDigestFile)))
 	// Absolute path: a bare name resolves on the run user's PATH, which has

@@ -22,6 +22,7 @@ function hubWith(parts = {}) {
     post: (body) => ({ status: 201, body: { id: 'sent1', content: body.content, senderId: 'u1', type: 'instruction', createdAt: new Date(1.8e12).toISOString(), dispatchState: 'dispatched' } }),
     read: () => ({ status: 200, body: { status: 'ok' } }),
     wake: () => ({ status: 202, body: { state: 'starting' } }),
+    newConversation: () => ({ status: 202, body: { state: 'starting' } }),
     contacts: () => ({ status: 200, body: { contacts: [] } }),
     transcript: () => ({ status: 200, body: { contact: 'c@x', agent: 'w1', matched: true, messages: [] } }),
     upload: () => ({ status: 201, body: { id: 'f'.repeat(32), name: 'report.pdf', size: 3, sha256: '0'.repeat(64) }, progress: [50, 100] }),
@@ -37,6 +38,7 @@ function hubWith(parts = {}) {
     if (path.startsWith('/lever/api/contacts/')) return h.transcript(path);
     if (path === '/lever/api/agents') return h.agents();
     if (path.startsWith('/lever/api/agents/') && path.endsWith('/wake')) return h.wake(path);
+    if (path === '/lever/api/new-conversation') return h.newConversation(body);
     if (path.startsWith('/lever/api/files/')) return method === 'POST' ? h.upload(body, path) : h.files(path);
     if (path === '/lever/api/voice/transcribe') return h.transcribe(body, path);
     if (path === '/lever/api/voice/speak') return h.speak(body, path);
@@ -2426,4 +2428,99 @@ test('read-aloud: pagehide stops reading; hiding the page alone does not', async
   await env.pagehide();
   assert.equal(env.speech.cancels, 1);
   assert.equal(b.textContent, '🔊');
+});
+
+test('new conversation: offered on the operator\'s manager chat only', async () => {
+  const offered = () => roster([BOSS(), A('w1')], { newConversation: true });
+  let env = await loadChat(hubWith({ agents: offered }));
+  assert.equal(env.els.newconv.hidden, false);
+  env = await load(hubWith({ agents: offered }), { store: { 'lever-chat-open': 'w1' } });
+  assert.equal(env.els.newconv.hidden, true, 'a worker\'s chat');
+  env = await loadChat(hubWith({ agents: () => roster([BOSS(), A('w1')], { newConversation: true, tier: 'contact' }) }));
+  assert.equal(env.els.newconv.hidden, true, 'a contact');
+  env = await loadChat(hubWith());
+  assert.equal(env.els.newconv.hidden, true, 'not offered by the server');
+});
+
+test('new conversation: asked, posted, followed until it runs again; the draft stays', async () => {
+  let state = 'running';
+  const env = await loadChat(hubWith({
+    agents: () => roster([BOSS({ state, activity: '' }), A('w1')], { newConversation: true }),
+    newConversation: () => {
+      state = 'suspended';
+      return { status: 202, body: { state: 'starting' } };
+    },
+  }));
+  await type(env, 'half typed');
+  env.els.newconv.dispatch('click');
+  await tick(5);
+  assert.equal(env.confirms.length, 1);
+  assert.match(env.confirms[0], /new conversation/);
+  assert.equal(env.count('POST', '/lever/api/new-conversation'), 1);
+  assert.equal(env.calls.find((c) => c.path === '/lever/api/new-conversation').body, undefined, 'no force unless asked');
+  assert.equal(env.els.newconv.disabled, true);
+  await env.runTimers(3000);
+  assert.equal(env.els.note.textContent, 'starting boss on a new conversation…');
+  state = 'stopped';
+  await env.runTimers(3000);
+  state = 'running';
+  await env.runTimers(3000);
+  await tick(5);
+  assert.equal(env.els.newconv.disabled, false);
+  assert.equal(env.els.note.hidden, true);
+  assert.equal(env.els.error.hidden, true);
+  assert.equal(env.els.text.value, 'half typed');
+  assert.equal(env.store['lever-chat-draft:boss'], 'half typed');
+  assert.equal(sends(env).length, 0);
+});
+
+test('new conversation: declined, nothing is posted', async () => {
+  const env = await loadChat(hubWith({ agents: () => roster([BOSS()], { newConversation: true }) }));
+  env.confirmAnswers.push(false);
+  env.els.newconv.dispatch('click');
+  await tick(5);
+  assert.equal(env.count('POST', '/lever/api/new-conversation'), 0);
+});
+
+test('new conversation: mid-turn is asked again and only then forced', async () => {
+  const bodies = [];
+  const env = await loadChat(hubWith({
+    agents: () => roster([BOSS()], { newConversation: true }),
+    newConversation: (body) => {
+      bodies.push(body);
+      return body && body.force ? { status: 202, body: {} } : { status: 409, body: { error: 'busy' } };
+    },
+  }));
+  env.els.newconv.dispatch('click');
+  await tick(5);
+  assert.equal(env.confirms.length, 2);
+  assert.match(env.confirms[1], /middle of a turn/);
+  assert.deepEqual(bodies, [undefined, { force: true }]);
+
+  const env2 = await loadChat(hubWith({ agents: () => roster([BOSS()], { newConversation: true }), newConversation: () => ({ status: 409, body: { error: 'busy' } }) }));
+  env2.confirmAnswers.push(true, false);
+  env2.els.newconv.dispatch('click');
+  await tick(5);
+  assert.equal(env2.count('POST', '/lever/api/new-conversation'), 1, 'not forced when declined');
+  assert.equal(env2.els.newconv.disabled, false);
+});
+
+test('new conversation: a refusal shows fixed text', async () => {
+  const env = await loadChat(hubWith({ agents: () => roster([BOSS()], { newConversation: true }), newConversation: () => ({ status: 409, body: { error: 'in-progress' } }) }));
+  env.els.newconv.dispatch('click');
+  await tick(5);
+  assert.equal(env.els.error.textContent, 'lever is already changing the manager (a new conversation, a restore, or lever up, apply, stop or reload). Try again when it is done.');
+  assert.equal(env.els.newconv.disabled, false);
+});
+
+test('new conversation: a manager that never goes down is reported after a minute', async () => {
+  const env = await loadChat(hubWith({ agents: () => roster([BOSS({ activity: '' })], { newConversation: true }) }));
+  env.els.newconv.dispatch('click');
+  await tick(5);
+  for (let i = 0; i < 19; i++) await env.runTimers(3000);
+  assert.equal(env.els.error.hidden, true, 'not before a minute');
+  await env.runTimers(3000);
+  await tick(5);
+  assert.match(env.els.error.textContent, /has not gone down yet/);
+  assert.equal(env.els.newconv.disabled, false);
 });

@@ -57,6 +57,19 @@ func TestReleaseManifestEmbedded(t *testing.T) {
 	if err != nil || len(all) != len(rel.Assets) {
 		t.Fatalf("asset directory holds %v, want only the manifest's %d assets", all, len(rel.Assets))
 	}
+	// Remote access on a host without Go or node needs the web UI too.
+	// genrelease unpacked it with lever's rules before writing the manifest.
+	if rel.Web == nil || rel.Web.Name != scionbin.WebAssetName(scionbin.ReleasePin) {
+		t.Fatalf("manifest web asset = %+v, want %s", rel.Web, scionbin.WebAssetName(scionbin.ReleasePin))
+	}
+	web, err := os.ReadFile(filepath.Join(assets, rel.Web.Name))
+	if err != nil || int64(len(web)) != rel.Web.Size || sum(web) != rel.Web.SHA256 {
+		t.Fatalf("web asset %s does not match the manifest (err %v)", rel.Web.Name, err)
+	}
+	all, err = filepath.Glob(filepath.Join(assets, scionbin.WebAssetName("*")))
+	if err != nil || len(all) != 1 {
+		t.Fatalf("asset directory holds web assets %v, want only %s", all, rel.Web.Name)
+	}
 }
 
 // The examples pin the scion the release ships prebuilt, so a new instance

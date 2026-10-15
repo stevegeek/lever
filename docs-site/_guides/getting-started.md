@@ -41,7 +41,7 @@ two workers; see [system requirements & sizing](/getting-started/requirements/).
 - **macOS on Apple Silicon** with [OrbStack](https://orbstack.dev) running (`backend: orbstack`,
   used by this walkthrough). A `lima` backend also exists for macOS and Linux; see
   [backends](/reference/backends/).
-- **Go 1.26+** — to build the binaries, and on `PATH` at runtime: `lever apply`/`lever up`
+- **Go 1.26.9+** (an older Go 1.21 or later downloads it by itself, unless `GOTOOLCHAIN=local`) — to build the binaries, and on `PATH` at runtime: `lever apply`/`lever up`
   cross-compile the pinned Scion engine into the jail. A lever from a release archive needs no Go
   for the scion pin of its release: it downloads that release's prebuilt scion (see
   [prebuilt scion](/reference/config/#prebuilt-scion)). A version-manager shim (asdf, mise) that is

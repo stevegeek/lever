@@ -57,13 +57,24 @@ export async function load(hub, opts = {}) {
   doc.title = '';
   doc.body = new FakeNode('body');
   // The state chat.html starts in.
-  for (const id of ['older', 'error', 'terminal', 'console', 'composer', 'ask', 'viewonly', 'listnote', 'note', 'label', 'contacts', 'contacts-title', 'refresh', 'readonly', 'push', 'pushnote', 'attach', 'files', 'filespanel', 'filesnote', 'upload']) doc.getElementById(id).hidden = true;
+  for (const id of ['older', 'error', 'terminal', 'console', 'composer', 'ask', 'viewonly', 'listnote', 'note', 'label', 'contacts', 'contacts-title', 'refresh', 'readonly', 'push', 'pushnote', 'attach', 'files', 'filespanel', 'filesnote', 'upload', 'newconv']) doc.getElementById(id).hidden = true;
   // fieldsEnabled: what a browser that restores form state over a reload leaves.
   for (const id of ['text', 'send']) doc.getElementById(id).disabled = !opts.fieldsEnabled;
   globalThis.document = doc;
   env.document = doc;
   const winListeners = {};
-  globalThis.window = { matchMedia: () => ({ matches: env.pointerFine }), addEventListener: (t, f) => (winListeners[t] ||= []).push(f) };
+  // confirm answers from env.confirmAnswers in turn (true once they run out)
+  // and records each question in env.confirms.
+  env.confirms = [];
+  env.confirmAnswers = [];
+  globalThis.window = {
+    matchMedia: () => ({ matches: env.pointerFine }),
+    addEventListener: (t, f) => (winListeners[t] ||= []).push(f),
+    confirm: (q) => {
+      env.confirms.push(q);
+      return env.confirmAnswers.length ? env.confirmAnswers.shift() : true;
+    },
+  };
   // pagehide is the page being closed, navigated away from or frozen.
   env.hide = async () => {
     doc.visibilityState = 'hidden';

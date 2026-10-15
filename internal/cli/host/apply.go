@@ -484,6 +484,11 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 				}
 				return nil
 			}
+			unlock, err := lockLifecycle(app, stateFor(path), "lever apply")
+			if err != nil {
+				return err
+			}
+			defer unlock()
 			run, pctx, err := startBringup(cmd, app, stateFor(path), "apply", progressMode)
 			if err != nil {
 				return err

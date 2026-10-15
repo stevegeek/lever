@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/apply"
@@ -136,6 +137,12 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			unlock, err := lockLifecycle(app, stateFor(path), "lever up")
+			if err != nil {
+				return err
+			}
+			release := sync.OnceFunc(unlock)
+			defer release()
 			// The first line of every up, before the jail is touched: what runs, on which
 			// backend. A VM boot can take a minute and is never silent.
 			run, pctx, err := startBringup(cmd, app, stateFor(path), "up", progressMode)
@@ -284,6 +291,8 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			stop()
 			// The list ends before the attach: from here the terminal is the manager's.
 			run.finish(nil)
+			// An attach can last all day; a new conversation must not wait on it.
+			release()
 			if noAttach {
 				cmd.Printf("application %q is up.\n", app.Name)
 				return nil
@@ -292,6 +301,11 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				return execAttach(cmd.Context(), cmd.ErrOrStderr(), b, sc, app.Name, project, detachOthers)
 			}
 			attachErr := runAttach(cmd.Context(), cmd.ErrOrStderr(), b, sc, app.Name, project, detachOthers)
+			if holder := managerLockHolder(app, stateFor(path)); holder != "" {
+				// Its stop ended the attach; the manager is down by design.
+				cmd.PrintErrf("lever: the attach ended because %s is changing the manager; `lever up` attaches again once it has finished.\n", holder)
+				return attachErr
+			}
 			if err := apply.CheckManagerAfterDetach(cmd.Context(), deps, app.Name, project); err != nil {
 				return err
 			}

@@ -14,21 +14,30 @@ import (
 // pinnedExperiment is a scion hub experiment lever keeps off, with a read-only
 // route the hub answers 404 exactly while the experiment is off. An older scion
 // lacks the route and answers 404 too, which is also "off". The controller PAT
-// and lever-admin can read both routes; only lever-admin reads the admin view.
+// and lever-admin can read every probe route; only lever-admin reads the admin
+// view. An experiment with no probe is proved off by the admin view alone.
 type pinnedExperiment struct {
 	name  string
 	probe string
 }
 
-// pinnedOffExperiments are the experiments lever pins off. hub.conduit adds an
-// inbound shell, sftp and port path into every agent, reaching the jail
-// loopback and any Unix socket; hub.artifacts adds hub-held publishing with
-// unauthenticated share links beside lever's reviewed file paths. scion reads
-// both per request from the hub database, except conduit's relay, which starts
-// only with the hub.
+// pinnedOffExperiments are the experiments lever pins off, so that a changed
+// scion default cannot turn one on. hub.conduit adds an inbound shell, sftp
+// and port path into every agent, reaching the jail loopback and any Unix
+// socket; hub.artifacts adds hub-held publishing with unauthenticated share
+// links beside lever's reviewed file paths. hub.chat_thread_groups lets agents
+// create and rename project-wide chat groups that project members with read
+// access see, and copies users' personal groups into the project. federation.project_visitors
+// admits users of external issuers and mints this hub's users credentials for
+// peer hubs; its only route is POST and also needs the hub's OIDC provider,
+// which lever does not configure, so no GET tells whether it is on. scion reads
+// all of them per request from the hub database, except conduit's relay,
+// which starts only with the hub.
 var pinnedOffExperiments = []pinnedExperiment{
 	{name: "hub.conduit", probe: "/api/v1/conduit/grant-keys"},
 	{name: "hub.artifacts", probe: "/api/v1/artifacts?mine=1"},
+	{name: "hub.chat_thread_groups", probe: "/api/v1/thread-groups"},
+	{name: "federation.project_visitors"},
 }
 
 // experimentsScope is the UAT scope of scion's experiments admin route. The
@@ -73,6 +82,9 @@ func hubExperimentsSupport(ctx context.Context, known scopeKnownFunc, rec state.
 func liveExperiments(ctx context.Context, hc *hubapi.Client) ([]string, error) {
 	var live []string
 	for _, e := range pinnedOffExperiments {
+		if e.probe == "" {
+			continue
+		}
 		served, err := hc.RouteServed(ctx, e.probe)
 		if err != nil {
 			return nil, fmt.Errorf("probing %s: %w", e.name, err)
@@ -132,15 +144,15 @@ func pinExperimentsOff(ctx context.Context, hc *hubapi.Client, now time.Time) (s
 				return state.HubExperimentsRecord{}, fmt.Errorf("the hub does not report %s overridden off after the write", name)
 			}
 		}
-		return state.HubExperimentsRecord{Off: registered, Revision: got.Revision, PinnedAt: now}, nil
+		return state.HubExperimentsRecord{Off: registered, Asked: pinnedOffNames(), Revision: got.Revision, PinnedAt: now}, nil
 	}
 }
 
 // experimentsPin is ensureHubExperimentsOff's seams.
 type experimentsPin struct {
 	// admin is the hub as lever-admin: the experiments admin route is
-	// hub-admin only, and the probes need no token, so this also works on a
-	// fresh hub before the controller PAT exists.
+	// hub-admin only, and lever-admin signs every probe route, so this also
+	// works on a fresh hub before the controller PAT exists.
 	admin *hubapi.Client
 	st    state.State
 	known scopeKnownFunc
@@ -150,13 +162,13 @@ type experimentsPin struct {
 	log, warn  func(format string, args ...any)
 }
 
-// ensureHubExperimentsOff pins scion's conduit and artifacts experiments off
-// as lever-admin on every apply of a scion that has them, then proves both
-// probe routes answer 404. An experiment that was on before the pin restarts
+// ensureHubExperimentsOff pins scion's experiments in pinnedOffExperiments off
+// as lever-admin on every apply of a scion that has them, then proves every
+// probe route answers 404. An experiment that was on before the pin restarts
 // the hub, since conduit's relay starts only with the hub and a pin alone
 // would leave a running relay. A probe that gets no answer fails the apply
 // rather than pass as off. A scion that cannot say whether it has hub
-// experiments is probed too: a hub without them answers 404 to both probes.
+// experiments is probed too: a hub without them answers 404 to every probe.
 func ensureHubExperimentsOff(ctx context.Context, p experimentsPin) error {
 	rec, found, err := p.st.LoadHubExperimentsRecord()
 	if err != nil {
@@ -166,7 +178,7 @@ func ensureHubExperimentsOff(ctx context.Context, p experimentsPin) error {
 	if !has && sure {
 		return nil
 	}
-	names := strings.Join(pinnedOffNames(), " and ")
+	names := strings.Join(pinnedOffNames(), ", ")
 	on, err := liveExperiments(ctx, p.admin)
 	if err != nil {
 		return fmt.Errorf("hub experiments: could not tell whether %s are off: %w", names, err)

@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-const agentsPath = "GET /api/v1/agents?limit=500&projectId=" + leverUUID
+const agentsPath = "GET /api/v1/agents?limit=50&projectId=" + leverUUID
 
 func agentsScript(body string) *fakeDoer {
 	return &fakeDoer{
@@ -93,6 +93,55 @@ func TestAgentsFailsRatherThanTruncate(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "page") {
 		t.Errorf("error should say paging gave up, got %v", err)
+	}
+	if n := len(f.calls) - 1; n != agentPageCap {
+		t.Errorf("made %d list calls, want the %d-page limit", n, agentPageCap)
+	}
+}
+
+// capDoer records the reply cap each call's context carried.
+type capDoer struct {
+	*fakeDoer
+	caps map[string]int
+}
+
+func (c *capDoer) Do(ctx context.Context, method, path string) (int, []byte, error) {
+	if c.caps == nil {
+		c.caps = map[string]int{}
+	}
+	c.caps[method+" "+path] = ReplyCap(ctx)
+	return c.fakeDoer.Do(ctx, method, path)
+}
+
+func agentRecords(prefix string, n int) string {
+	recs := make([]string, n)
+	for i := range recs {
+		recs[i] = fmt.Sprintf(`{"slug":"%s%d","appliedConfig":{"agentRole":"baseline"}}`, prefix, i)
+	}
+	return strings.Join(recs, ",")
+}
+
+func TestAgentsPagesAtFiftyUnderTheAgentListCap(t *testing.T) {
+	f := agentsScript(`{"agents":[` + agentRecords("a", 50) + `],"nextCursor":"c2"}`)
+	f.replies[agentsPath+"&cursor=c2"] = reply{status: 200, body: `{"agents":[` + agentRecords("b", 3) + `]}`}
+	d := &capDoer{fakeDoer: f}
+	got, largest, err := (&Client{T: d}).AgentsLargestPage(context.Background(), "lever", "hub")
+	if err != nil {
+		t.Fatalf("Agents: %v", err)
+	}
+	if len(got) != 53 || got[52].Slug != "b2" {
+		t.Fatalf("got %d agents, want both pages (53)", len(got))
+	}
+	if want := len(f.replies[agentsPath].body); largest != want {
+		t.Errorf("largest page = %d, want %d (the first page)", largest, want)
+	}
+	for _, k := range []string{agentsPath, agentsPath + "&cursor=c2"} {
+		if d.caps[k] != AgentListReplyCap {
+			t.Errorf("%s ran with cap %d, want the agent list cap", k, d.caps[k])
+		}
+	}
+	if c := d.caps["GET /api/v1/projects"]; c != DefaultReplyCap {
+		t.Errorf("the project lookup ran with cap %d, want the default", c)
 	}
 }
 

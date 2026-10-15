@@ -53,6 +53,11 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 			if ia.app != nil {
 				st = stateFor(ia.path)
 				appName = ia.app.Name
+				unlock, err := lockLifecycle(ia.app, st, "lever stop")
+				if err != nil {
+					return err
+				}
+				defer unlock()
 				if *machine == "" {
 					stopHostDaemons(cmd, st)
 				}

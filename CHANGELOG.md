@@ -7,6 +7,34 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`lever up` starts the remote-access proxy when it only resumes the manager.** After a VM
+  or host restart, `up` resumed the manager without `apply`, and so never started the proxy: the
+  chat page stayed down until the next `lever apply`. An `up` that resumes the manager or finds it
+  running now starts the proxy when it is not serving and leaves a serving one alone. It starts
+  it only when the stamp the proxy left records this lever binary and the current `remote:` config,
+  so a changed config or an upgrade still waits for `lever apply`, and so does turning remote
+  access back on (an apply with it off removes the stamp); a running proxy with an older config is
+  not restarted. When the proxy cannot start, `up` succeeds and warns at the end with
+  the fix. (lever#225)
+- **No false "reboot pending" when a GA kernel update lands under `guest_kernel: hwe`.** The
+  check compared the running kernel with `/boot/vmlinuz`, which names the kernel installed last,
+  so an `unattended-upgrades` update of the GA 6.8 kernel on a guest running the HWE 7.0 kernel
+  reported a reboot that `lever stop` and `lever up` could never clear: grub boots the newest
+  kernel. Apply, up and doctor now compare with what grub boots next: the first entry of
+  `/boot/grub/grub.cfg` while grub's default is entry 0, otherwise the newest `/boot/vmlinuz-*` by
+  version. The GA metapackage is deliberately not held, so the fallback kernel stays patched.
+  (lever#226)
+
+### Docs
+
+- **The sizing guide recommends `manager.resources` for a manager that runs heavy work.** A
+  manager that runs `nested_virt` or large builds should have a memory (and CPU) limit, so an
+  out-of-memory kill stays inside its container rather than pressing on the whole guest, its hub
+  and the workers. The new section gives an example for a guest sized like `examples/lever-dev`
+  (18 GiB and 6 CPUs on its 24 GiB, 8-CPU guest) and how to size the limit; the config reference links to it. (lever#227)
+
 ## [0.41.1] - 2026-10-15
 
 ### Fixed

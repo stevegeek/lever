@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"net"
 	"net/http/httptest"
 	"os"
@@ -74,9 +75,22 @@ func TestFenceRemoteLoginsStopsTheProxyWhenRemoteIsOff(t *testing.T) {
 	if err := fenceRemoteLogins(loadInstance(t, remoteBase+grantsUsers), st, stop); err != nil || stops != 0 {
 		t.Fatalf("on: err %v stops %d", err, stops)
 	}
+	if err := os.WriteFile(st.RemoteStamp(), []byte("v\nh\n1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := fenceRemoteLogins(loadInstance(t, remoteBase+grantsUsers), st, stop); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(st.RemoteStamp()); err != nil {
+		t.Fatalf("remote on: the stamp must stay: %v", err)
+	}
 	off := loadInstance(t, "remote:\n  enabled: false\n  base_url: \"https://vm.exe.xyz:8445\"\n")
 	if err := fenceRemoteLogins(off, st, stop); err != nil || stops != 1 {
 		t.Fatalf("off: err %v stops %d", err, stops)
+	}
+	// Else re-enabling remote access lets up restart the proxy before an apply.
+	if _, err := os.Stat(st.RemoteStamp()); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("remote off: the stamp must go, stat = %v", err)
 	}
 	if g, err := st.LoadRemoteGrants(); err != nil || g.Enabled || len(g.Logins) != 0 {
 		t.Fatalf("off fence %+v %v", g, err)

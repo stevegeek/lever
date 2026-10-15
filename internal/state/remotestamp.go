@@ -152,3 +152,16 @@ func (s State) RemoteStampMatches(version, hash string) bool {
 	}
 	return strings.TrimSpace(string(b)) == strings.TrimSpace(remoteStampContent(version, hash, pid))
 }
+
+// RemoteStampRecords reports whether the stamp records this version and
+// remote config, whatever pid it names: the stamp outlives its proxy until
+// `lever down`, so after a restart it is the config the last proxy enforced.
+// Unlike RemoteStampMatches it vouches for no running process.
+func (s State) RemoteStampRecords(version, hash string) bool {
+	b, err := os.ReadFile(s.RemoteStamp())
+	if err != nil {
+		return false
+	}
+	lines := strings.Split(string(b), "\n")
+	return len(lines) >= 3 && version != "" && hash != "" && lines[0] == version && lines[1] == hash
+}

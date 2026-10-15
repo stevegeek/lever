@@ -218,6 +218,37 @@ func (rc *remoteController) Start(ctx context.Context) error {
 	return nil
 }
 
+// errRemoteProxyNeedsApply: up does not converge a changed remote config or
+// binary itself. Both wrap it.
+var (
+	errRemoteProxyNeedsApply = errors.New("the proxy needs `lever apply`")
+	errRemoteProxyStale      = fmt.Errorf("%w: a proxy started with another remote config or lever binary is still running", errRemoteProxyNeedsApply)
+	errRemoteProxyNoStamp    = fmt.Errorf("%w: it is not running, and no proxy has run this lever binary with the current remote config", errRemoteProxyNeedsApply)
+)
+
+// EnsureForUp restarts the proxy on up's paths that skip apply.Run (a resume,
+// or a manager already running), as after a restart of the host or the VM.
+// A healthy current proxy is left alone. It starts one only when the stamp
+// records this binary and this remote config: a changed config is apply's to
+// converge (hub identity, broker, grants), and a stale proxy that is still
+// running stays fenced by the login grants rather than restarted here.
+func (rc *remoteController) EnsureForUp(ctx context.Context) error {
+	hash := rc.cfgHash()
+	_, found, alive := rc.state.RemoteStatus()
+	live := found && alive
+	if live && rc.state.RemoteStampMatches(rc.version, hash) && tcpDial(rc.addr()) == nil {
+		progress.From(ctx).Note("running")
+		return nil
+	}
+	if !rc.state.RemoteStampRecords(rc.version, hash) {
+		if live {
+			return errRemoteProxyStale
+		}
+		return errRemoteProxyNoStamp
+	}
+	return rc.Start(ctx)
+}
+
 // recordStamp waits until remote.pid names pid: the proxy binds its port
 // before it writes that file.
 func (rc *remoteController) recordStamp(ctx context.Context, pid int, hash string) error {
@@ -739,6 +770,8 @@ type applyWiring struct {
 	cmd        *cobra.Command // for Log; nil ⇒ stderr
 	// rep, when set, takes the Log lines so they print above its live line.
 	rep *progress.Reporter
+	// remote is Deps.StartRemoteProxy's controller, for up's EnsureForUp.
+	remote *remoteController
 }
 
 type applyOpts struct {
@@ -800,6 +833,7 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 	}
 
 	rc := newRemoteController(app, st, configPath, selfExe, w.log)
+	w.remote = rc
 
 	w.deps = w.newDeps(bc, rc, sessionSecret)
 	return w, nil

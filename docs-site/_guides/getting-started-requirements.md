@@ -106,6 +106,35 @@ changed agent image adds its load and preparation time to the next apply, minute
 `nested_virt` and starts whole Lima VMs inside the jail to test lever itself. An ordinary instance
 needs a fraction of that; start from the tables above.
 
+## Cap a manager that runs heavy work
+
+Unset, `manager.resources` leaves the manager container without a memory limit. When the manager
+itself runs nested VMs (`nested_virt`) or large builds and test suites, a runaway job can then use
+up the whole guest: the guest's kernel kills whatever it picks (the hub, a worker, podman), or the
+guest stalls or panics under memory pressure. Set
+[`manager.resources`](/reference/config/#manager) so that the out-of-memory kill stays inside the
+manager's container and the guest, its hub and the workers keep running:
+
+```yaml
+cpus: 8
+memory: 24GiB
+nested_virt: true
+manager:
+  resources: { memory: 18GiB, cpu: "6" }
+```
+
+For a guest sized like `examples/lever-dev` (24 GiB and 8 CPUs, a manager that starts Lima VMs
+and compiles large Go packages; the example itself sets no limit), 18 GiB and 6 CPUs leave about
+6 GiB and 2 CPUs for the guest, the hub and a worker. Size the limit as the guest's `memory` minus the guest, the hub and the workers
+you run at once (the table [above](#where-the-memory-goes)); a nested VM's memory counts against
+the manager's limit, since its QEMU runs inside the manager's container. Limit the jobs too where
+you can (`GOMEMLIMIT`, a build's parallelism), so that one build does not take the manager with
+it.
+
+The limits are set when the manager is created: a change reaches it at the next
+`lever up --fresh --keep-conversation` (it backs the conversation up and resumes the new manager
+on it).
+
 ## A small-machine profile
 
 For a 2-core host with 8 GB of RAM and an SSD, running a manager and one or two workers (Lima):

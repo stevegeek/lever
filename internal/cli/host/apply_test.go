@@ -888,3 +888,114 @@ func TestAgentRevoked(t *testing.T) {
 		t.Fatal("an unreadable list must fail closed")
 	}
 }
+
+// stampedRemoteState records a stamp for (version, hash) and leaves remote.pid
+// naming a dead pid, as a host or VM restart leaves them.
+func stampedRemoteState(t *testing.T, version, hash string) state.State {
+	t.Helper()
+	dir := t.TempDir()
+	st := state.ForConfig(dir)
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(st.RemotePID(), []byte("2147483646\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WriteRemoteStamp(version, hash); err != nil {
+		t.Fatal(err)
+	}
+	return st
+}
+
+// TestEnsureForUpRestartsTheLastAppliedProxy: after a restart, up starts the
+// proxy the last apply ran when the binary and remote config are unchanged.
+// The stand-in never listens, so the not-listening error proves the spawn.
+func TestEnsureForUpRestartsTheLastAppliedProxy(t *testing.T) {
+	st := stampedRemoteState(t, "v-test", "hash-test")
+	rc := shortenRemoteProxyStartWait(&remoteController{state: st, configPath: filepath.Join(st.Dir, "lever.yaml"), port: 48995,
+		selfExe: "/usr/bin/true", version: "v-test", cfgHash: func() string { return "hash-test" }})
+	testutil.WantErrIs(t, rc.EnsureForUp(context.Background()), errRemoteProxyNotListening)
+	if _, err := os.Stat(st.RemoteLog()); err != nil {
+		t.Fatalf("remote.log not created by the spawn: %v", err)
+	}
+}
+
+// TestEnsureForUpLeavesAChangedConfigToApply: without a stamp for this binary
+// and config, up neither starts a proxy nor stops a running one.
+func TestEnsureForUpLeavesAChangedConfigToApply(t *testing.T) {
+	cases := map[string]struct{ version, hash string }{
+		"config changed": {"v-test", "hash-OLD"},
+		"binary changed": {"v-OLD", "hash-test"},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			st := stampedRemoteState(t, c.version, c.hash)
+			rc := &remoteController{state: st, configPath: "/x/lever.yaml", port: 48994,
+				selfExe: "/no/such/lever-binary", version: "v-test", cfgHash: func() string { return "hash-test" }}
+			testutil.WantErrIs(t, rc.EnsureForUp(context.Background()), errRemoteProxyNoStamp)
+			if _, err := os.Stat(st.RemoteLog()); err == nil {
+				t.Fatal("up spawned a proxy for a config the last apply did not start")
+			}
+		})
+	}
+	t.Run("never applied", func(t *testing.T) {
+		st := state.ForConfig(t.TempDir())
+		rc := &remoteController{state: st, configPath: "/x/lever.yaml", port: 48994,
+			selfExe: "/no/such/lever-binary", version: "v-test", cfgHash: func() string { return "hash-test" }}
+		testutil.WantErrIs(t, rc.EnsureForUp(context.Background()), errRemoteProxyNoStamp)
+	})
+	t.Run("stale proxy running", func(t *testing.T) {
+		dir := t.TempDir()
+		st := state.ForConfig(dir)
+		if err := os.MkdirAll(st.Dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		proxy, proxyDone := testutil.StartServeProcess(t, state.RemoteDaemon, filepath.Join(dir, "lever.yaml"))
+		if err := os.WriteFile(st.RemotePID(), []byte(strconv.Itoa(proxy.Process.Pid)+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.WriteRemoteStamp("v-test", "hash-OLD"); err != nil {
+			t.Fatal(err)
+		}
+		rc := &remoteController{state: st, configPath: "/x/lever.yaml", port: 48994,
+			selfExe: "/no/such/lever-binary", version: "v-test", cfgHash: func() string { return "hash-test" }}
+		testutil.WantErrIs(t, rc.EnsureForUp(context.Background()), errRemoteProxyStale)
+		select {
+		case <-proxyDone:
+			t.Fatal("up stopped a running proxy; converging it is apply's job")
+		default:
+		}
+	})
+}
+
+// TestEnsureForUpLeavesAHealthyProxyAlone: a live, listening, current proxy
+// is neither stopped nor respawned.
+func TestEnsureForUpLeavesAHealthyProxyAlone(t *testing.T) {
+	dir := t.TempDir()
+	st := state.ForConfig(dir)
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	proxy, proxyDone := testutil.StartServeProcess(t, state.RemoteDaemon, filepath.Join(dir, "lever.yaml"))
+	if err := os.WriteFile(st.RemotePID(), []byte(strconv.Itoa(proxy.Process.Pid)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	if err := st.WriteRemoteStamp("v-test", "hash-test"); err != nil {
+		t.Fatal(err)
+	}
+	rc := &remoteController{state: st, configPath: "/x/lever.yaml", port: ln.Addr().(*net.TCPAddr).Port,
+		selfExe: "/no/such/lever-binary", version: "v-test", cfgHash: func() string { return "hash-test" }}
+	if err := rc.EnsureForUp(context.Background()); err != nil {
+		t.Fatalf("EnsureForUp on a healthy proxy = %v, want nil", err)
+	}
+	select {
+	case <-proxyDone:
+		t.Fatal("the healthy proxy was stopped")
+	default:
+	}
+}

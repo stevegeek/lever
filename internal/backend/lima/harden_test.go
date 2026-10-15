@@ -53,7 +53,7 @@ func TestEnsureUpGAKernelInstallsNothing(t *testing.T) {
 	if rootBashScript(f, "apt-get install") >= 0 {
 		t.Error("ga must not install the HWE kernel")
 	}
-	if rootBashScript(f, "/boot/vmlinuz") < 0 {
+	if rootBashScript(f, guest.BootKernelFunc) < 0 {
 		t.Error("ga still reports a pending reboot")
 	}
 }
@@ -72,7 +72,7 @@ func (r fakeGuestRunner) Run(ctx context.Context, env map[string]string, name st
 		case strings.Contains(s, guest.CrashSysctlPath):
 			r.FakeRunner.Calls = append(r.FakeRunner.Calls, proc.Call{Name: name, Args: args})
 			return r.crash, nil
-		case strings.Contains(s, "/boot/vmlinuz"):
+		case strings.Contains(s, guest.BootKernelFunc):
 			r.FakeRunner.Calls = append(r.FakeRunner.Calls, proc.Call{Name: name, Args: args})
 			return r.kernel, nil
 		}
@@ -85,7 +85,7 @@ func TestEnsureUpReportsRebootAndWarnings(t *testing.T) {
 	scriptedVM(f)
 	r := fakeGuestRunner{FakeRunner: f,
 		crash:  proc.Result{Stdout: "reboot: the kernel command line gets efi_pstore.pstore_disable=1 at the next boot\n"},
-		kernel: proc.Result{Stdout: "warn: guest_kernel hwe: installing it failed\nreboot: the guest runs kernel 6.8.0-146-generic; the default kernel is now 6.17.0-5-generic\n"},
+		kernel: proc.Result{Stdout: "warn: guest_kernel hwe: installing it failed\nreboot: the guest runs kernel 6.8.0-146-generic; the next boot starts 6.17.0-5-generic\n"},
 	}
 	l := New(r, vm, common.Options{})
 	var lines []string
@@ -123,7 +123,7 @@ const stampMID = "0123456789abcdef0123456789abcdef"
 
 // kernelScriptOf returns the last kernel script the fake saw.
 func kernelScriptOf(f *proc.FakeRunner) string {
-	i := rootBashScript(f, "/boot/vmlinuz")
+	i := rootBashScript(f, guest.BootKernelFunc)
 	if i < 0 {
 		return ""
 	}

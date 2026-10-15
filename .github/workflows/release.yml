@@ -62,3 +62,6 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Fine-grained PAT: Contents read/write on stevegeek/homebrew-tap only.
+          # Unset, .goreleaser.yaml skips the cask (#75).
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

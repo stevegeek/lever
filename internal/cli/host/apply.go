@@ -994,7 +994,10 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		ContainerStartedBeforeBoot: func(ctx context.Context, ref string) (bool, error) {
 			return jail.ContainerStartedBeforeBoot(ctx, b.JailRunner(), ref)
 		},
-		AgentRevoked: agentRevoked(w.app, st),
+		// StaleContainer lets a manager resume clear a hub stop claim that only
+		// removing the manager's stopped container releases.
+		StaleContainer: jail.ContainerJanitor{R: b.JailRunner()},
+		AgentRevoked:   agentRevoked(w.app, st),
 		// GuestBoot lets start-manager and up recover a manager record a hard VM kill
 		// left "running".
 		GuestBoot: jailGuestBoot{jr: b.JailRunner(), st: st},

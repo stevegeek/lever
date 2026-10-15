@@ -1274,6 +1274,7 @@ Both open the hub database directly; `recover-authz` refuses while a hub runs. T
 | `lever apply`/`up` fails at `start-manager`: "manager … stayed in phase \"created\" … and did not settle"; the guest's `~/.scion/server.log` shows `context canceled` on a start about every 30 s | the first rootless start of a large image (several GB) builds podman's user-namespace layer copy, which can take longer than scion's ~30 s start timeout; scion then deletes the partial work and starts again from zero, every time. lever 0.34.2 and later warms the copy of every image in the `load-image` step on every apply (fast once warm; a warning there means the warm-up failed) | in the guest, as the jail user: `podman run --rm --userns=keep-id:uid=1000,gid=1000 --entrypoint true <image>` (it can take a few minutes), then `lever up --fresh` — a manager that never left phase created has no conversation to lose |
 | `lever up` fails: "manager … cannot be resumed: <dir> mounted by the manager record but no longer on the host" (before 0.30.0: podman `statfs /lever/<dir>: no such file or directory`) | the manager was created with `manager.read_only` naming `<dir>` (or a worker dir while the list was set); the record keeps that mount for life, and the directory was deleted after the entry was removed from `lever.yaml`. lever reads the mounts off the stopped manager container, or, with no container, off the hub record, and refuses every resume (the forced resume of an `error` phase too); it only warns when it keeps a running manager as it is | recreate the directory (`mkdir`, empty is enough) and run `lever up` again; to drop the mount, run `lever up --fresh --keep-conversation`. Keep a removed entry's directory until that fresh create |
 | `lever up` exits **3**: "resume (or resume --force) of the manager failed. lever did NOT delete the manager …" | scion could not resume the manager record (a late runtime broker, a container whose state the VM lost, a wedged harness). lever keeps the record and the conversation; it never starts a fresh manager on its own after a failed resume | run `lever up` again — a transient failure clears; `lever doctor` (manager row) for the cause. To give the session up, run `lever up --fresh` (it backs the conversation up first; `--keep-conversation` resumes the new manager on it). In a script, test the exit code (3), not the text: the message ends with the hub's own words after "Cause:" |
+| `lever up` exits **3**: "… the hub holds a stop claim on the manager …" | the hub refuses every resume while a stopped container from an interrupted start exists, and lever could not clear it (a failed backup, a container still running, or a claim the hub kept past the wait) | running `lever up` again does not help until the cause the message names is gone: see [a stop claim the hub never releases](#a-stop-claim-the-hub-never-releases) |
 | `lever up`/`apply` fails at `start-manager`: "did not come up … the harness is not live — cause: no conversation to continue" | the manager was never sent a message, so its home holds no transcript, and the resume's `claude --continue` found nothing to continue. `lever up` starts such a manager fresh on its own once it has checked the home from the guest, when the resume ran in its bring-up (on a terminal too: a resumed manager is attached only after claude reports its session start); this message means it could not prove the home empty (the line before it says why), the resume was `up`'s own (a suspended manager under a running hub, or after a guest restart), or the command was `lever apply` | `lever stop && lever up` (the resume then runs in the bring-up, which makes the fresh start when the line before did not give a reason), or `lever up --fresh`: it backs up any transcript first, so nothing is lost ([the manager's conversation across `--fresh`](#the-managers-conversation-across---fresh)) |
 | `lever up` exits **4**: "the hub refused resume of the manager. lever kept the manager …" | the hub refused the call: a controller token without `agent:lifecycle`, or a phase that cannot be resumed now | `lever apply` (it re-mints a token whose scopes changed, while agents run), or wait and retry. Do **not** answer exit 4 with `--fresh` |
 | Changed `manager.image` (or rebuilt under a new tag) but the manager still runs the old image; doctor's `manager image` row fails | a manager record keeps the image it was created with — `lever up` resumes it unchanged, and a `stop && up` is a resume too | `lever up --fresh` — the bring-up deletes the record once the hub is up and creates the manager on the configured image (add `--keep-conversation` to keep the conversation; plain `--fresh` starts a new one after backing the old one up; before 0.21 the flag was silently dropped after `stop`) |
@@ -1623,6 +1624,53 @@ started before the guest's current boot (`State.StartedAt` against `btime` in `/
 container podman never started is not evidence. When the boot id or the start time cannot be read,
 or the suspend does not take, `lever up` behaves as before and names `lever stop`, then
 `lever up`.
+
+### A stop claim the hub never releases
+
+A VM that goes down while the manager is starting can leave the hub holding a *stop claim* on
+the manager: the hub turns a start it cannot confirm into a stop, and releases the claim only once
+the broker's inventory shows the container gone or exited. After the reboot podman may list the
+manager's container as `Created`, which the hub counts as running, so the claim is never
+released and every resume is refused with
+`start_in_progress: A stop is in progress for this agent (since HH:MM) ... (status: 409)`.
+`lever doctor`'s *manager agent* row names a stopped, suspended or error record over a `Created`
+container.
+
+`lever up` (and `lever apply`, and `lever conversation restore`) recover from it on their own when
+the resume gets that answer:
+
+1. lever asks podman, as the jail user, for the manager's container (`<project>--<manager>`, the
+   name lever derives itself). It acts only when podman reports the container with no process in
+   it: created, configured, initialized, exited or stopped. A running or paused container is never
+   touched; the hub stops it itself, and lever waits.
+2. It commits the container to `lever.local/<container>-backup:<UTC time>` and keeps the newest two
+   such images, removing older ones. When the writable layer is over 2 GiB, or podman cannot measure it
+   within a minute, it takes no backup and says so: scion's own resume removes a stopped container without a copy, and a copy of that size
+   on the guest's grow-only disk costs more than it saves. When the commit fails, lever removes
+   nothing and stops with the fix by hand.
+3. It looks again, and removes the container by the id it inspected, without `--force` (podman
+   refuses to remove a running container).
+4. It retries the resume for up to about three minutes: the hub releases the claim on its next
+   sweep after a broker heartbeat shows the container gone.
+
+The resume creates a new container. Whatever was written outside the agent home and the mounted
+tree (packages installed by hand, files in `/tmp`) is gone, as after any resume of a stopped
+manager; the backup image holds it. The conversation is in the agent home, a bind mount, and is
+kept. The backup image also holds the container's configuration, including its environment, in
+the jail user's podman storage; remove it with `podman rmi` once you no longer need it.
+
+When the claim is still held after the wait (the broker may be offline: the hub keeps claims while
+it is), lever stops with the manager and its conversation kept. By hand, in the guest as the jail
+user:
+
+```sh
+podman ps -a --filter name='^<project>--<manager>$'      # must not show it Up
+podman commit <project>--<manager> lever.local/<project>--<manager>-backup:manual   # optional
+podman rm <project>--<manager>
+```
+
+then, within about two minutes, `lever up`. Workers are not covered: the broker resumes them, and
+lever does not remove containers on that path.
 
 ### If a nested VM wedges the guest
 

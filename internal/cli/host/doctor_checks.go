@@ -923,6 +923,13 @@ func checkManagerLive(ctx context.Context, project, name string, list agentListe
 				stoppedResumeFix}
 		}
 	}
+	if strings.EqualFold(a.ContainerStatus, "created") &&
+		(a.Phase == scionpkg.PhaseStopped || a.Phase == scionpkg.PhaseSuspended || a.Phase == scionpkg.PhaseError) {
+		return checkResult{check, false,
+			fmt.Sprintf("manager %q is not live: phase %s over a container podman lists as created (a start the VM's power-off interrupted leaves one) — the hub counts a created container as running, so a stop claim it holds on the manager is released only once that container is removed, and every resume is refused with `start_in_progress: A stop is in progress`",
+				name, scionpkg.BoundedQuote(a.Phase)),
+			"run `lever up`: when the hub refuses the resume that way, lever backs the stopped container up as an image, removes it, waits for the hub to release the claim and resumes (the conversation is in the agent home and is kept). " + apply.StopClaimManualFix(ref)}
+	}
 	fix := "run `lever up` to resume it"
 	if a.Phase == scionpkg.PhaseStopped {
 		fix = stoppedResumeFix

@@ -45,7 +45,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: scion-web-ui
-          path: build/web-ui
+          path: _web-ui
       - name: verify version constant matches tag
         run: |
           V="${GITHUB_REF_NAME#v}"

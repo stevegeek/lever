@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.41.0] - 2026-10-15
+
 ### Added
 
 - **The chat page can send dictation at once and read new replies aloud, per device.** A
@@ -38,6 +40,11 @@ version bump moves the block under the new version heading.
   -race`), jq, ripgrep, less and iproute2, so it works on the slim base, and `build.sh` takes
   `LEVER_BASE` and `LEVER_DEV_TAG` to build on `lever-claude-slim`. Only the example changes; the
   lever agent images do not ship a browser.
+
+### Upgrade
+
+- **Jail ABI 5, unchanged.** Only host code and the lever-dev example changed: the agent image
+  and the manager need no rebuild. Reload the chat page after the upgrade.
 
 ## [0.40.0] - 2026-10-14
 

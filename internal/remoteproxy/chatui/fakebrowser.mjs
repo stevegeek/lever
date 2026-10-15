@@ -57,7 +57,7 @@ export async function load(hub, opts = {}) {
   doc.title = '';
   doc.body = new FakeNode('body');
   // The state chat.html starts in.
-  for (const id of ['older', 'error', 'terminal', 'console', 'composer', 'ask', 'viewonly', 'listnote', 'note', 'label', 'contacts', 'contacts-title', 'refresh', 'readonly', 'push', 'pushnote', 'attach', 'files', 'filespanel', 'filesnote', 'upload', 'newconv']) doc.getElementById(id).hidden = true;
+  for (const id of ['older', 'error', 'terminal', 'console', 'composer', 'ask', 'viewonly', 'listnote', 'note', 'label', 'contacts', 'contacts-title', 'refresh', 'readonly', 'push', 'pushnote', 'attach', 'files', 'filespanel', 'filesnote', 'upload', 'newconv', 'readvoice', 'readvoicepick']) doc.getElementById(id).hidden = true;
   // fieldsEnabled: what a browser that restores form state over a reload leaves.
   for (const id of ['text', 'send']) doc.getElementById(id).disabled = !opts.fieldsEnabled;
   globalThis.document = doc;

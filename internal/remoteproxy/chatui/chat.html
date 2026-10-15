@@ -40,17 +40,17 @@
 </section>
 <section id="pane-chat" class="pane">
   <header>
-    <button id="back" type="button" aria-label="Back to the agent list">Back</button>
+    <button id="back" class="iconbtn" type="button" aria-label="Back to the agent list" title="Back to the agent list"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M15 18l-6-6 6-6"/></svg></button>
     <div class="who">
       <h1><span id="agent">Chat</span> <span id="label" class="label" hidden></span></h1>
       <p id="state" class="state"></p>
     </div>
-    <nav>
-      <button id="refresh" type="button" hidden>Refresh</button>
-      <button id="newconv" type="button" hidden>New conversation</button>
-      <button id="files" type="button" hidden>Files</button>
-      <select id="readvoice" aria-label="Read-aloud voice" hidden></select>
-      <a id="terminal" hidden>Terminal</a>
+    <nav class="tools">
+      <button id="refresh" class="iconbtn" type="button" aria-label="Refresh" title="Refresh" hidden><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 12a8 8 0 1 1-2.34-5.66L20 8.5"/><path d="M20 3.5v5h-5"/></svg></button>
+      <button id="newconv" class="iconbtn" type="button" aria-label="New conversation" title="New conversation" hidden><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 14.5a2 2 0 0 1-2 2H8l-4 4v-14a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2z"/><path d="M12 7.5v6M9 10.5h6"/></svg></button>
+      <button id="files" class="iconbtn" type="button" aria-label="Files" title="Files" aria-controls="filespanel" aria-expanded="false" hidden><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3.5 7a2 2 0 0 1 2-2h4l2 2.5h7a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg></button>
+      <span id="readvoicepick" class="iconbtn voicepick" title="Read-aloud voice" hidden><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M11 5L6.5 9H3v6h3.5l4.5 4z"/><path d="M15.5 9a4.5 4.5 0 0 1 0 6M18.5 6a8.5 8.5 0 0 1 0 12"/></svg><select id="readvoice" aria-label="Read-aloud voice" hidden></select></span>
+      <a id="terminal" class="iconbtn" aria-label="Terminal" title="Terminal" hidden><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 17l5-5-5-5"/><path d="M12.5 18h7"/></svg></a>
     </nav>
   </header>
   <main id="scroll">

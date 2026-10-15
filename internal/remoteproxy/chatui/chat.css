@@ -49,7 +49,7 @@ body {
   #pane-list { flex: 0 0 18rem; border-right: 1px solid var(--line); }
   #back { display: none; }
 }
-#back, #refresh, #push, #newconv {
+#push {
   padding: 6px 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -58,8 +58,8 @@ body {
   font: inherit;
   font-size: 14px;
 }
-#push, #newconv { cursor: pointer; }
-#push:disabled, #newconv:disabled { opacity: .5; cursor: default; }
+#push { cursor: pointer; }
+#push:disabled { opacity: .5; cursor: default; }
 .label { font-weight: 400; color: var(--muted); }
 .label::before { content: "· "; }
 .listscroll { padding-left: 0; padding-right: 0; }
@@ -114,7 +114,33 @@ h1 { margin: 0; font-size: 17px; font-weight: 600; overflow: hidden; text-overfl
 .state.bad::before { background: var(--bad); }
 .state.bad { color: var(--bad); }
 nav { display: flex; gap: 8px; }
-nav a {
+/* The chat header's controls are icons, each named by aria-label and title,
+   so they fit beside the agent name on a 360px phone; the name gives way
+   (.who, ellipsis), the controls never wrap or leave the screen. */
+nav.tools { flex: none; gap: 4px; }
+.iconbtn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.iconbtn:disabled { opacity: .5; cursor: default; }
+.ico { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; pointer-events: none; }
+#files[aria-expanded="true"] { background: var(--mine); border-color: var(--mine); color: var(--mine-text); }
+@media (max-width: 719.98px) {
+  #pane-chat header { gap: 8px; padding-left: max(8px, env(safe-area-inset-left)); padding-right: max(8px, env(safe-area-inset-right)); }
+}
+nav a:not(.iconbtn) {
   padding: 6px 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -236,13 +262,18 @@ textarea {
   font-size: 14px;
   cursor: pointer;
 }
+/* The voice picker is the speaker icon with the native select laid over it,
+   transparent: a tap or a key opens the browser's own list of voices. */
 #readvoice {
-  max-width: 9rem;
-  padding: 6px 4px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel);
-  color: var(--text);
-  font: inherit;
-  font-size: 14px;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  font-size: 16px;
+  cursor: pointer;
 }
+.voicepick:focus-within { outline: 2px solid var(--mine); outline-offset: 2px; }

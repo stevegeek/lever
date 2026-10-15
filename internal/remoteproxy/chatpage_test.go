@@ -466,7 +466,7 @@ func TestChatPageHasNoMarkupSink(t *testing.T) {
 		`createElement\('option'\)`:  1,
 		`createElement\('ul'\)`:      1,
 		`createElement\('span'\)`:    1,
-		`setAttribute\(`:             3,
+		`setAttribute\(`:             4,
 		`setAttribute\('href', `:     2,
 		`setAttribute\('download', `: 1,
 		`new XMLHttpRequest\(`:       1,

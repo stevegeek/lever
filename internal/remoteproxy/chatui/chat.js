@@ -126,6 +126,7 @@ const el = {
   mic: $('mic'),
   voice: $('voice'),
   readvoice: $('readvoice'),
+  readvoicepick: $('readvoicepick'),
   newconv: $('newconv'),
 };
 
@@ -1192,6 +1193,7 @@ function syncReadVoice() {
     chosen = v ? v.voiceURI : '';
   }
   el.readvoice.hidden = !chat || options.length < 2;
+  el.readvoicepick.hidden = el.readvoice.hidden;
   const key = `${sv ? 'server' : 'device'}\n${options.map((o) => o.value).join('\n')}`;
   if (el.readvoice.hidden || key === readVoices) return;
   readVoices = key;
@@ -1208,11 +1210,16 @@ function saveReadVoice(value) {
   keep(serverSpeech() ? SERVER_VOICE_KEY : READ_VOICE_KEY, value);
 }
 
+// The Files button is an icon: its open state is aria-expanded, not a label.
+function filesShown(open) {
+  el.files.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
 function closeFiles() {
   filesOpen = false;
   filesSeq++;
   el.filespanel.hidden = true;
-  setText(el.files, 'Files');
+  filesShown(false);
   el.filelist.replaceChildren();
   showFilesNote('');
 }
@@ -1955,7 +1962,7 @@ el.files.addEventListener('click', () => {
   }
   filesOpen = true;
   el.filespanel.hidden = false;
-  setText(el.files, 'Hide files');
+  filesShown(true);
   void loadFiles();
 });
 window.addEventListener('resize', grow);

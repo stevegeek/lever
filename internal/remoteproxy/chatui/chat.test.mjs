@@ -1911,9 +1911,24 @@ test('files panel closes and clears when the chat changes', async () => {
     files: () => ({ status: 200, body: { files: [{ id: 'e'.repeat(32), name: 'a.pdf', size: 1, direction: 'sent' }] } }) }));
   env.els.files.dispatch('click');
   await tick(5);
+  assert.equal(env.els.files.attrs['aria-expanded'], 'true', 'the icon button says the panel is open');
+  assert.equal(env.els.files.children.length, 0, 'no label text is written over the icon');
   env.els.back.dispatch('click');
   assert.equal(env.els.filespanel.hidden, true);
   assert.equal(env.els.filelist.children.length, 0);
+  assert.equal(env.els.files.attrs['aria-expanded'], 'false');
+});
+
+test('the Files button toggles the panel and its expanded state', async () => {
+  const env = await loadChat(hubWith({ agents: withFiles([BOSS()]), files: () => ({ status: 200, body: { files: [] } }) }));
+  env.els.files.dispatch('click');
+  await tick(5);
+  assert.equal(env.els.filespanel.hidden, false);
+  assert.equal(env.els.files.attrs['aria-expanded'], 'true');
+  env.els.files.dispatch('click');
+  assert.equal(env.els.filespanel.hidden, true);
+  assert.equal(env.els.files.attrs['aria-expanded'], 'false');
+  assert.equal(env.els.files.textContent, '', 'the button keeps its icon, not a text label');
 });
 
 test('the chat note names the file as the server stored it', async () => {
@@ -2233,6 +2248,7 @@ test('read-aloud: the voice choice is offered with two local voices and kept per
   const other = { name: 'Other', lang: 'de-DE', voiceURI: 'local-de', localService: true };
   const env = await loadChat(hubWith({ agents: readAloudAgents, history: () => ({ status: 200, body: { messages: [msg(1)] } }) }), { speech: { voices: [LOCAL, other, NETWORK] } });
   assert.equal(env.els.readvoice.hidden, false);
+  assert.equal(env.els.readvoicepick.hidden, false, 'the speaker icon over the select shows with it');
   assert.deepEqual(env.els.readvoice.children.map((o) => o.value), ['local-en', 'local-de']);
   env.els.readvoice.value = 'local-de';
   env.els.readvoice.dispatch('change');
@@ -2241,6 +2257,7 @@ test('read-aloud: the voice choice is offered with two local voices and kept per
   assert.equal(env.speech.spoken[0].voice, other);
   const one = await loadChat(hubWith({ agents: readAloudAgents }), { speech: { voices: [LOCAL, NETWORK] } });
   assert.equal(one.els.readvoice.hidden, true, 'one local voice: nothing to choose');
+  assert.equal(one.els.readvoicepick.hidden, true);
 });
 test('read-aloud: off unless the roster offers it (remote.voice off or read_aloud false)', async () => {
   const env = await loadChat(hubWith({ history: () => ({ status: 200, body: { messages: [msg(1)] } }) }), { speech: { voices: [LOCAL, { name: 'Other', lang: 'de-DE', voiceURI: 'local-de', localService: true }] } });

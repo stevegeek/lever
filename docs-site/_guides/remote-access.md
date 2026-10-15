@@ -854,10 +854,10 @@ The proxy builds the list for each login on the server, from `lever.yaml`; the p
 is given and nothing else.
 
 - **An operator** sees the manager and every configured worker, and may message all of them.
-  The page also has two links: **Terminal** (per agent) opens the hub web UI's terminal for that
+  The page also has two links: **Terminal** (per agent, the `>_` icon) opens the hub web UI's terminal for that
   agent, for the times you need Claude Code itself; **Console** opens the hub's full web UI,
   which stays at its own paths (`/agents`, `/chat`, ...). Only `/` leads to the chat page. The
-  manager's chat has a **New conversation** button
+  manager's chat has a **New conversation** button (the speech bubble with a plus)
   ([below](#a-new-conversation-for-the-manager)).
 - **A [contact](#contacts-chat-only-logins)** sees the agents of its entry: those in `agents:` it
   may message, those in `see:` it may only see (name, label and state, greyed as "view only";
@@ -1233,7 +1233,7 @@ encoded slash, which the proxy refuses on every path (`400`, audit `deny-path`).
 - **What it shows.** Each contact in `allowed_users`, the agents it may message (its `agents:`
   list; a `see:` agent has no conversation), and, per agent, the whole direct conversation
   between them: read-only (no composer, no read marker, no event stream), newest at the bottom,
-  read again every 30 seconds while it is open and with **Refresh**. "Load earlier messages"
+  read again every 30 seconds while it is open and with **Refresh** (the circular arrow). "Load earlier messages"
   pages back. With `agent_messages` on, every agent message the contact is not shown (see
   [Messages agents start](#messages-agents-start)) is marked "not shown to the contact", so you
   can spot an agent that writes to a contact outside the rules. An agent message that a record
@@ -1397,7 +1397,7 @@ covers it.
 - **What a login does.** In a chat with an agent it may message (never a `see:` agent), the
   paperclip uploads one file at a time, with progress. After the upload, the page sends the chat
   message "📎 uploaded <name>" through the normal send path, so the agent verifies it as that
-  login's message. The **Files** button lists the login's own uploads to that agent and the files
+  login's message. The **Files** button (the folder icon) lists the login's own uploads to that agent and the files
   the agent shared with it, with a download link for each. An operator also sees each contact's
   files in the [operator's view](#the-operators-view-of-contact-conversations), read-only, and may
   download them.
@@ -1736,7 +1736,7 @@ to your own host, never to a cloud speech service.
   each answer with Web Audio, so it plays on iPhone Safari too, even with the ring switch on silent
   (Safari 16.4 and later). If the first part cannot be had (the tool is down, busy or over a limit),
   the device's on-device voice reads the whole message instead; a later failure stops with a note.
-  A tap stops it, and so does hiding or leaving the page. The voice picker lists the server voices;
+  A tap stops it, and so does hiding or leaving the page. The voice picker (the speaker icon in the header) lists the server voices;
   the choice is kept per device, apart from the device-voice choice.
 - **The route.** Only for a verified login with read-aloud (`voice: false` turns it off), with
   `X-Lever-Voice: 1` from the page's own origin, a JSON body `{agent, id, text, voice}` of at most

@@ -7,6 +7,18 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **lever keeps the Lima VM's console logs across VM restarts.** Lima recreates `serial*.log` and
+  `ha.stderr.log` on every VM start, so a `lever stop`, `lever up` after a guest kernel panic lost
+  the trace. Before `lever apply` or `lever up` starts a stopped Lima VM, lever now copies them to
+  `.lever-state/guest-logs/<UTC time>/` (0700, files 0600, the last 4 MiB of each, links never
+  followed). Sets holding a panic line are kept apart as `-panic` sets, the 5 newest of each kind.
+  An apply against a running VM whose console shows a panic saves it once per VM run and warns.
+  Nothing is saved when the state directory is inside the agents' tree. Doctor's new
+  *last guest boot* row warns when the previous guest boot ended without a clean shutdown, and
+  prints the first panic line of the newest saved set, sanitized and bounded. (lever#224)
+
 ### Fixed
 
 - **`lever up` starts the remote-access proxy when it only resumes the manager.** After a VM

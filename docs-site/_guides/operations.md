@@ -1639,13 +1639,45 @@ or the suspend does not take, `lever up` behaves as before and names `lever stop
    `lever up`, which resumes the manager (above).
 2. If the guest stays wedged (no answer from `limactl shell <vm> true`, QEMU at full CPU), stop
    it on the host: `limactl stop --force <vm>`, or kill its QEMU process. Then `lever up`.
-3. Keep the evidence before it rotates. The guest console goes to the Lima instance directory on
-   the host (`~/.lima/<vm>/serial*.log`), which holds the oops even when the guest could not
-   write its disk. After the reboot, `journalctl -k -b -1` in the guest may have the previous
-   boot's kernel log, but journald rarely flushes the oops itself before a panic: trust the
-   serial log.
-4. Check `lever doctor`: the *guest crash recovery* and *guest kernel* rows should be green. Add
-   the host and guest kernels and the outcome to the table above.
+3. Keep the evidence. The guest console goes to the Lima instance directory on the host
+   (`~/.lima/<vm>/serial*.log`), which holds the oops even when the guest could not write its
+   disk, and Lima recreates those files on every VM start. lever saves them first (see
+   [saved guest console logs](#saved-guest-console-logs)). After the reboot,
+   `journalctl -k -b -1` in the guest may have the previous boot's kernel log, but journald
+   rarely flushes the oops itself before a panic: trust the serial log.
+4. Check `lever doctor`: the *guest crash recovery* and *guest kernel* rows should be green, and
+   *last guest boot* names the saved logs and their first panic line. Add the host and guest
+   kernels and the outcome to the table above.
+
+### Saved guest console logs
+
+Lima recreates the VM's console and host-agent logs (`serial.log`, `serialp.log`, `serialv.log`
+and `ha.stderr.log` in the instance directory, `limactl list <vm> --format '{{.Dir}}'`) each
+time the VM starts, and the guest keeps no crash record of its own (EFI pstore is off, above). So
+before `lever apply` or `lever up` starts a stopped Lima VM, lever copies those files to
+`.lever-state/guest-logs/<UTC time>/` (for example `20261015T030405Z`; the directory is 0700,
+each file 0600). Empty files are skipped, each copy keeps only the last 4 MiB of its file, and a
+link or any other non-regular file is not copied (the apply warns). A set whose serial log holds
+a kernel panic, oops or `BUG:` line is named `<UTC time>-panic` and kept apart from the others,
+so routine restarts do not push it out. lever keeps the 5 newest sets of each kind: at most ten
+sets, 160 MiB in the worst case.
+
+A panic the guest recovers from by itself (it reboots 10 s later) leaves the VM process running,
+so its trace stays in the live `serial.log` until the VM next restarts. `lever apply` and
+`lever up` against a running VM look for such a line in that log and, once per VM run, save a
+`-panic` set and warn; a later trace in the same run reaches the set saved before the next
+start. A failed save is a warning; it never stops the bring-up. lever saves nothing when
+`.lever-state` is inside the tree the agents mount (they could read, forge or delete the copies
+there; apply warns), and `lever provision`, which runs without a `lever.yaml`, saves nothing.
+
+Doctor's *last guest boot* row reads the guest's journal (`journalctl -b -1` through
+`sudo -n`): it warns when the previous boot did not end with a clean shutdown, with the time of
+its last journal entry, and when the newest saved set holds a panic line, which it prints. Treat
+that line as a lead, not proof: any process in the guest, an agent's container included, can get
+a line of that shape onto the console, so doctor prints only one line, cut to 200 characters with
+control characters replaced. Only messages from the guest's PID 1 decide whether the previous
+boot shut down cleanly. The row is a warning, never a failure, and not applicable on OrbStack.
+Delete old sets by hand when you no longer need them.
 
 ### Breaking a reboot loop
 

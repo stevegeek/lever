@@ -100,6 +100,10 @@ func (s State) GuestBoot() string { return filepath.Join(s.Dir, "guest-boot.json
 // retries.
 func (s State) HWEFailStamp() string { return filepath.Join(s.Dir, "hwe-install-failed.json") }
 
+// GuestLogs holds the jail VM's console logs, saved before each VM start
+// and when a running VM's console shows a kernel panic (0700, each file 0600).
+func (s State) GuestLogs() string { return filepath.Join(s.Dir, "guest-logs") }
+
 // PushDir holds the remote proxy's Web Push key, subscriptions and last
 // send result (remote.push), each 0600.
 func (s State) PushDir() string { return filepath.Join(s.Dir, "push") }

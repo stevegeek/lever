@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.41.1] - 2026-10-15
+
 ### Fixed
 
 - **A release publishes the Homebrew cask again.** GoReleaser accepts a repository token only as
@@ -16,6 +18,10 @@ version bump moves the block under the new version heading.
   before it reads the token, so a release without the secret still skips the cask. A new test reads
   `.goreleaser.yaml` and fails CI on a token GoReleaser would refuse, or on one whose upload is not
   skipped when its variable is unset. (lever#75)
+
+### Upgrade
+
+- **Jail ABI 5, unchanged.** Only the release configuration changed: nothing to rebuild or apply.
 
 ## [0.41.0] - 2026-10-15
 

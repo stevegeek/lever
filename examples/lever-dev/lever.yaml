@@ -48,7 +48,10 @@ broker:
         - {name: create_card, params: [title, description]}
         # - {name: close_card, params: [number, comment]}
 manager:
-  image: lever.local/lever-dev-claude:amd64
+  image: lever.local/lever-dev-claude-slim:amd64
+  # Nested VMs and Go builds run in this container: cap it so an OOM stays
+  # inside it instead of pressuring the guest (24 GiB, 8 CPUs).
+  resources: {memory: 18GiB, cpu: "6"}
   credential_file: secrets/claude-oauth-token
   instructions_file: instructions.md
   obtain:

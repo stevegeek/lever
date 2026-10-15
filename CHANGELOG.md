@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.42.0] - 2026-10-15
+
 ### Added
 
 - **lever keeps the Lima VM's console logs across VM restarts.** Lima recreates `serial*.log` and
@@ -57,6 +59,12 @@ version bump moves the block under the new version heading.
   a `server.hub.conduit` block from the jail's `settings.yaml` (lever never writes one, and agents
   can write that file) and restarts the hub when it did. See the new SSH and VS Code guide.
 
+### Changed
+
+- **The lever-dev example runs on the slim image with resource limits.** Its `manager.image` is
+  `lever.local/lever-dev-claude-slim:amd64` and it sets `manager.resources` to 18 GiB and 6 CPUs,
+  so nested VMs and Go builds in the manager hit the container's limit before the guest's.
+
 ### Fixed
 
 - **`lever up` starts the remote-access proxy when it only resumes the manager.** After a VM
@@ -103,6 +111,13 @@ version bump moves the block under the new version heading.
   out-of-memory kill stays inside its container rather than pressing on the whole guest, its hub
   and the workers. The new section gives an example for a guest sized like `examples/lever-dev`
   (18 GiB and 6 CPUs on its 24 GiB, 8-CPU guest) and how to size the limit; the config reference links to it. (lever#227)
+
+### Upgrade
+
+- **Jail ABI 5, unchanged.** Only host code changed: no agent image rebuild. Run `lever apply`
+  after upgrading; it restarts the broker, which `manager.daily_reset` needs. `ssh.enabled` has no
+  effect until lever pins a scion with the conduit controls.
+
 
 ## [0.41.1] - 2026-10-15
 

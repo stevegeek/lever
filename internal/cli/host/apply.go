@@ -218,9 +218,13 @@ func (rc *remoteController) Start(ctx context.Context) error {
 	return nil
 }
 
-// errRemoteProxyNeedsApply: up found no proxy serving the config the last
-// apply started, and does not converge a changed one itself.
-var errRemoteProxyNeedsApply = errors.New("the remote config or the lever binary changed since the proxy last ran")
+// errRemoteProxyNeedsApply: up does not converge a changed remote config or
+// binary itself. Both wrap it.
+var (
+	errRemoteProxyNeedsApply = errors.New("the proxy needs `lever apply`")
+	errRemoteProxyStale      = fmt.Errorf("%w: a proxy started with another remote config or lever binary is still running", errRemoteProxyNeedsApply)
+	errRemoteProxyNoStamp    = fmt.Errorf("%w: it is not running, and no proxy has run this lever binary with the current remote config", errRemoteProxyNeedsApply)
+)
 
 // EnsureForUp restarts the proxy on up's paths that skip apply.Run (a resume,
 // or a manager already running), as after a restart of the host or the VM.
@@ -230,13 +234,17 @@ var errRemoteProxyNeedsApply = errors.New("the remote config or the lever binary
 // running stays fenced by the login grants rather than restarted here.
 func (rc *remoteController) EnsureForUp(ctx context.Context) error {
 	hash := rc.cfgHash()
-	if _, found, alive := rc.state.RemoteStatus(); found && alive &&
-		rc.state.RemoteStampMatches(rc.version, hash) && tcpDial(rc.addr()) == nil {
+	_, found, alive := rc.state.RemoteStatus()
+	live := found && alive
+	if live && rc.state.RemoteStampMatches(rc.version, hash) && tcpDial(rc.addr()) == nil {
 		progress.From(ctx).Note("running")
 		return nil
 	}
 	if !rc.state.RemoteStampRecords(rc.version, hash) {
-		return errRemoteProxyNeedsApply
+		if live {
+			return errRemoteProxyStale
+		}
+		return errRemoteProxyNoStamp
 	}
 	return rc.Start(ctx)
 }

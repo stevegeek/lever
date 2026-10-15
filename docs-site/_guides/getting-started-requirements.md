@@ -123,9 +123,9 @@ manager:
   resources: { memory: 18GiB, cpu: "6" }
 ```
 
-This is the shape for `examples/lever-dev`: a 24 GiB, 8-CPU guest whose manager starts Lima VMs
-and compiles large Go packages. 18 GiB and 6 CPUs leave about 6 GiB and 2 CPUs for the guest, the
-hub and a worker. Size the limit as the guest's `memory` minus the guest, the hub and the workers
+For a guest sized like `examples/lever-dev` (24 GiB and 8 CPUs, a manager that starts Lima VMs
+and compiles large Go packages; the example itself sets no limit), 18 GiB and 6 CPUs leave about
+6 GiB and 2 CPUs for the guest, the hub and a worker. Size the limit as the guest's `memory` minus the guest, the hub and the workers
 you run at once (the table [above](#where-the-memory-goes)); a nested VM's memory counts against
 the manager's limit, since its QEMU runs inside the manager's container. Limit the jobs too where
 you can (`GOMEMLIMIT`, a build's parallelism), so that one build does not take the manager with

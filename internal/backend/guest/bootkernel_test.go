@@ -222,6 +222,18 @@ func TestBootKernelIsWhatGrubBoots(t *testing.T) {
 	}
 }
 
+// TestBootKernelReadsOnlyTheFirstEntry: a first entry without a linux line
+// (a custom script's entry ahead of 10_linux) is not answered from a later
+// entry's kernel.
+func TestBootKernelReadsOnlyTheFirstEntry(t *testing.T) {
+	cfg := strings.Replace(ubuntuGrubCfg("0", "/boot", "6.8.0-147-generic"), "### BEGIN /etc/grub.d/10_linux ###\n",
+		"### BEGIN /etc/grub.d/06_custom ###\nmenuentry 'Custom' {\n\tlinuxefi /boot/vmlinuz-6.8.0-147-generic\n}\n### BEGIN /etc/grub.d/10_linux ###\n", 1)
+	l := bootLayout{kernels: []string{"6.8.0-147-generic", "7.0.0-38-generic"}, link: "6.8.0-147-generic", grub: cfg}
+	if got := runBootKernel(t, l); got != "7.0.0-38-generic" {
+		t.Errorf("boot_kernel = %q, want the newest kernel, not the second entry's", got)
+	}
+}
+
 // TestBootKernelPrintsOnlyAVersion: a name with characters no kernel version
 // has is not printed.
 func TestBootKernelPrintsOnlyAVersion(t *testing.T) {

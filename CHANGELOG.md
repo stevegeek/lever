@@ -14,8 +14,9 @@ version bump moves the block under the new version heading.
   chat page stayed down until the next `lever apply`. An `up` that resumes the manager or finds it
   running now starts the proxy when it is not serving and leaves a serving one alone. It starts
   it only when the stamp the proxy left records this lever binary and the current `remote:` config,
-  so a changed config or an upgrade still waits for `lever apply`; a running proxy with an older
-  config is not restarted. When the proxy cannot start, `up` succeeds and warns at the end with
+  so a changed config or an upgrade still waits for `lever apply`, and so does turning remote
+  access back on (an apply with it off removes the stamp); a running proxy with an older config is
+  not restarted. When the proxy cannot start, `up` succeeds and warns at the end with
   the fix. (lever#225)
 - **No false "reboot pending" when a GA kernel update lands under `guest_kernel: hwe`.** The
   check compared the running kernel with `/boot/vmlinuz`, which names the kernel installed last,
@@ -31,8 +32,8 @@ version bump moves the block under the new version heading.
 - **The sizing guide recommends `manager.resources` for a manager that runs heavy work.** A
   manager that runs `nested_virt` or large builds should have a memory (and CPU) limit, so an
   out-of-memory kill stays inside its container rather than pressing on the whole guest, its hub
-  and the workers. The new section gives the `examples/lever-dev` shape (18 GiB and 6 CPUs on a
-  24 GiB, 8-CPU guest) and how to size the limit; the config reference links to it. (lever#227)
+  and the workers. The new section gives an example for a guest sized like `examples/lever-dev`
+  (18 GiB and 6 CPUs on its 24 GiB, 8-CPU guest) and how to size the limit; the config reference links to it. (lever#227)
 
 ## [0.41.1] - 2026-10-15
 

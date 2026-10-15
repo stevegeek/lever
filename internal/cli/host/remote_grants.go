@@ -71,7 +71,15 @@ func fenceRemoteLogins(app *config.App, st state.State, stop func() error) error
 		return fmt.Errorf("writing the remote login grants: %w", err)
 	}
 	if !app.RemoteEnabled() {
-		return stop()
+		if err := stop(); err != nil {
+			return err
+		}
+		// The stamp is what lets up start the proxy without an apply. Turning remote
+		// access back on must go through apply: the off apply revoked the remote PAT
+		// and suspended the logins' hub users, and the config hash cannot tell.
+		if err := removeIfPresent(st.RemoteStamp()); err != nil {
+			return fmt.Errorf("removing the remote proxy stamp: %w", err)
+		}
 	}
 	return nil
 }

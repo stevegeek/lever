@@ -932,7 +932,7 @@ func TestEnsureForUpLeavesAChangedConfigToApply(t *testing.T) {
 			st := stampedRemoteState(t, c.version, c.hash)
 			rc := &remoteController{state: st, configPath: "/x/lever.yaml", port: 48994,
 				selfExe: "/no/such/lever-binary", version: "v-test", cfgHash: func() string { return "hash-test" }}
-			testutil.WantErrIs(t, rc.EnsureForUp(context.Background()), errRemoteProxyNeedsApply)
+			testutil.WantErrIs(t, rc.EnsureForUp(context.Background()), errRemoteProxyNoStamp)
 			if _, err := os.Stat(st.RemoteLog()); err == nil {
 				t.Fatal("up spawned a proxy for a config the last apply did not start")
 			}
@@ -942,7 +942,7 @@ func TestEnsureForUpLeavesAChangedConfigToApply(t *testing.T) {
 		st := state.ForConfig(t.TempDir())
 		rc := &remoteController{state: st, configPath: "/x/lever.yaml", port: 48994,
 			selfExe: "/no/such/lever-binary", version: "v-test", cfgHash: func() string { return "hash-test" }}
-		testutil.WantErrIs(t, rc.EnsureForUp(context.Background()), errRemoteProxyNeedsApply)
+		testutil.WantErrIs(t, rc.EnsureForUp(context.Background()), errRemoteProxyNoStamp)
 	})
 	t.Run("stale proxy running", func(t *testing.T) {
 		dir := t.TempDir()
@@ -959,7 +959,7 @@ func TestEnsureForUpLeavesAChangedConfigToApply(t *testing.T) {
 		}
 		rc := &remoteController{state: st, configPath: "/x/lever.yaml", port: 48994,
 			selfExe: "/no/such/lever-binary", version: "v-test", cfgHash: func() string { return "hash-test" }}
-		testutil.WantErrIs(t, rc.EnsureForUp(context.Background()), errRemoteProxyNeedsApply)
+		testutil.WantErrIs(t, rc.EnsureForUp(context.Background()), errRemoteProxyStale)
 		select {
 		case <-proxyDone:
 			t.Fatal("up stopped a running proxy; converging it is apply's job")

@@ -13,11 +13,11 @@ const BootKernelFunc = "boot_kernel"
 // it to the older kernel, while GRUB still boots the newest.
 //
 //   - grub.cfg, when its only default is entry 0 (Ubuntu's GRUB_DEFAULT=0):
-//     the first menuentry's linux line. grub-mkconfig leaves the file
+//     the first menuentry's own linux line. grub-mkconfig leaves the file
 //     world-readable unless it holds a password. ${next_entry} is a one-shot
 //     grub-reboot choice, which lever never sets.
-//   - Otherwise (no grub.cfg, unreadable, another default, or a linux line
-//     without a vmlinuz-<version>): the newest /boot/vmlinuz-* by version
+//   - Otherwise (no grub.cfg, unreadable, another default, or a first entry
+//     without a linux vmlinuz-<version> line): the newest /boot/vmlinuz-* by version
 //     sort, the kernel Ubuntu's 10_linux puts first.
 //
 // Only the version's own characters are printed, since callers show it.
@@ -27,7 +27,7 @@ func BootKernelShell(boot string) string {
   bk_cfg=` + q(boot+"/grub/grub.cfg") + `
   bk=
   if [ -r "$bk_cfg" ] && [ "$(sed -n 's/^[[:space:]]*set default="\(.*\)"[[:space:]]*$/\1/p' "$bk_cfg" | grep -vF '${next_entry}' | sort -u)" = 0 ]; then
-    bk=$(awk '/^[[:space:]]*menuentry[[:space:]]/ { m = 1; next } m && $1 == "linux" { print $2; exit }' "$bk_cfg")
+    bk=$(awk 'm && ($1 == "}" || $1 == "menuentry" || $1 == "submenu") { exit } /^[[:space:]]*menuentry[[:space:]]/ { m = 1; next } m && $1 == "linux" { print $2; exit }' "$bk_cfg")
     case "$bk" in */vmlinuz-*) bk=${bk##*/vmlinuz-} ;; *) bk= ;; esac
   fi
   if [ -z "$bk" ]; then

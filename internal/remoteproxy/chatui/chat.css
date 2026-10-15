@@ -262,18 +262,52 @@ textarea {
   font-size: 14px;
   cursor: pointer;
 }
-/* The voice picker is the speaker icon with the native select laid over it,
-   transparent: a tap or a key opens the browser's own list of voices. */
-#readvoice {
+/* The settings panel drops from the chat header's right edge, over the
+   messages, and never wider than the screen. */
+#pane-chat header { position: relative; }
+.settings {
   position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  opacity: 0;
-  font-size: 16px;
-  cursor: pointer;
+  top: calc(100% + 4px);
+  right: max(8px, env(safe-area-inset-right));
+  z-index: 10;
+  width: min(20rem, calc(100vw - 16px));
+  max-height: calc(100dvh - 80px);
+  overflow-y: auto;
+  padding: 4px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 6px 24px rgb(0 0 0 / .18);
+  font-size: 15px;
 }
-.voicepick:focus-within { outline: 2px solid var(--mine); outline-offset: 2px; }
+.setrow { padding: 10px 0; }
+.setrow:not([hidden]) ~ .setrow { border-top: 1px solid var(--line); }
+.setrow label { display: block; margin-bottom: 6px; font-weight: 600; }
+.setrow.check { display: grid; grid-template-columns: auto 1fr; column-gap: 10px; align-items: center; }
+.setrow.check label { margin: 0; }
+.setrow input[type="checkbox"] { width: 20px; height: 20px; margin: 0; accent-color: var(--mine); }
+.setrow .help { grid-column: 2; margin: 4px 0 0; font-size: 13px; color: var(--muted); }
+#readvoice {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 16px;
+}
+#settings[aria-expanded="true"] { background: var(--mine); border-color: var(--mine); color: var(--mine-text); }
+/* Auto-send on: a dot on the mic, so a recording is known to go at once. */
+#mic { position: relative; }
+#mic.autosend::after {
+  content: "";
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--mine);
+}

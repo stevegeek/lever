@@ -156,7 +156,7 @@ test('the chat header controls are named icons', () => {
   const html = readFileSync(new URL('./chat.html', import.meta.url), 'utf8');
   const header = /<section id="pane-chat"[\s\S]*?<header>([\s\S]*?)<\/header>/.exec(html)[1];
   for (const [id, tag, name] of [['back', 'button', 'Back to the agent list'], ['refresh', 'button', 'Refresh'], ['newconv', 'button', 'New conversation'],
-    ['files', 'button', 'Files'], ['terminal', 'a', 'Terminal']]) {
+    ['files', 'button', 'Files'], ['settings', 'button', 'Settings'], ['terminal', 'a', 'Terminal']]) {
     const m = new RegExp(`<${tag} id="${id}"([^>]*)>([\\s\\S]*?)</${tag}>`).exec(header);
     assert.ok(m, id);
     assert.match(m[1], new RegExp(`aria-label="${name}"`), `${id} aria-label`);
@@ -165,6 +165,22 @@ test('the chat header controls are named icons', () => {
     assert.match(m[2], /^<svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false">(<path d="[^"<>]+"\/>)+<\/svg>$/, `${id}: one hidden icon, no text`);
   }
   assert.match(header, /<button id="files"[^>]*aria-controls="filespanel" aria-expanded="false"/);
-  assert.match(header, /<span id="readvoicepick" class="iconbtn voicepick" title="Read-aloud voice" hidden><svg [^>]*aria-hidden="true"[^>]*>[\s\S]*?<\/svg><select id="readvoice" aria-label="Read-aloud voice" hidden><\/select><\/span>/);
+  assert.match(header, /<button id="settings"[^>]*aria-controls="settingspanel" aria-expanded="false"/);
   assert.match(css, /nav\.tools \{ flex: none;/, 'the controls never shrink; the name gives way');
+});
+
+// The settings panel: each control has a visible label tied to it, each
+// option its help text, and no control sits outside the panel.
+test('the settings panel labels its controls', () => {
+  const html = readFileSync(new URL('./chat.html', import.meta.url), 'utf8');
+  const panel = /<div id="settingspanel" class="settings" role="group" aria-label="[^"]+" hidden>([\s\S]*?)\n {4}<\/div>\n {2}<\/header>/.exec(html);
+  assert.ok(panel, 'the panel sits in the chat header, hidden at first');
+  assert.match(panel[1], /<div id="readvoicerow" class="setrow" hidden><label for="readvoice">[^<]+<\/label><select id="readvoice"><\/select><\/div>/);
+  for (const id of ['autosend', 'autoread']) {
+    assert.match(panel[1], new RegExp(`<div id="${id}row" class="setrow check" hidden><input id="${id}" type="checkbox" aria-describedby="${id}help"><label for="${id}">[^<]+</label><p id="${id}help" class="help">[^<]+</p></div>`), id);
+  }
+  assert.match(panel[1], /background tab may not play/);
+  assert.equal((html.match(/id="readvoice"/g) || []).length, 1);
+  assert.match(css, /\.settings \{\n {2}position: absolute;/);
+  assert.match(css, /#mic\.autosend::after/);
 });

@@ -26,6 +26,14 @@ version bump moves the block under the new version heading.
   version. The GA metapackage is deliberately not held, so the fallback kernel stays patched.
   (lever#226)
 
+### Docs
+
+- **The sizing guide recommends `manager.resources` for a manager that runs heavy work.** A
+  manager that runs `nested_virt` or large builds should have a memory (and CPU) limit, so an
+  out-of-memory kill stays inside its container rather than pressing on the whole guest, its hub
+  and the workers. The new section gives the `examples/lever-dev` shape (18 GiB and 6 CPUs on a
+  24 GiB, 8-CPU guest) and how to size the limit; the config reference links to it. (lever#227)
+
 ## [0.41.1] - 2026-10-15
 
 ### Fixed

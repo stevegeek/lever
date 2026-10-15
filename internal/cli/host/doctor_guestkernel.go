@@ -19,7 +19,7 @@ type guestKernelProbe struct {
 	sysctl         map[string]string // key (kernel.panic) -> value
 	cmdline        bool              // guest.EFIPstoreCmdline is on /proc/cmdline
 	efiPstore      bool              // the EFI pstore backend may be registered
-	running, deflt string            // uname -r; the kernel /boot/vmlinuz names
+	running, deflt string            // uname -r; the kernel GRUB boots next (guest.BootKernelShell)
 	release        string            // VERSION_ID of /etc/os-release
 	hwePkg         string            // the guest release's HWE package; "" when lever knows none
 	hwe            bool              // hwePkg is installed
@@ -37,9 +37,8 @@ func guestKernelProbeScript() string {
 	b.WriteString(guest.EFIPstoreActiveShell)
 	b.WriteString("if efi_pstore_active /sys/module; then echo efi_pstore=active; else echo efi_pstore=off; fi\n")
 	b.WriteString("echo \"running=$(uname -r)\"\n")
-	// readlink -f prints a missing path as it is: only a vmlinuz-<version> target
-	// names a default kernel.
-	b.WriteString("d=$(readlink -f /boot/vmlinuz 2>/dev/null); case \"$d\" in */vmlinuz-*) d=${d##*/vmlinuz-} ;; *) d= ;; esac; echo \"default=$d\"\n")
+	b.WriteString(guest.BootKernelShell("/boot"))
+	b.WriteString("echo \"default=$(" + guest.BootKernelFunc + ")\"\n")
 	// dash exits on a "." whose file it cannot open, || or not.
 	b.WriteString("VERSION_ID=; if [ -r /etc/os-release ]; then . /etc/os-release; fi\n")
 	b.WriteString(guest.HWEPackageShell())
@@ -159,7 +158,7 @@ func checkGuestKernel(app *config.App, p guestKernelProbe, perr error) checkResu
 	}
 	switch {
 	case p.deflt != "" && p.deflt != p.running:
-		return warnResult(name, detail+"; the default kernel is "+p.deflt+" (reboot pending)", lima.RebootAdvice)
+		return warnResult(name, detail+"; the next boot starts "+p.deflt+" (reboot pending)", lima.RebootAdvice)
 	case flavour == config.GuestKernelHWE && p.hwePkg == "":
 		return warnResult(name, detail+"; the guest's Ubuntu release has no HWE kernel lever installs (it knows "+strings.Join(guest.HWEReleases, " and ")+")",
 			"recreate the VM on lever's current image ("+lima.RecreateAdvice+"), or set guest_kernel: ga")

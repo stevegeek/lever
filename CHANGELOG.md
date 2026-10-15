@@ -17,6 +17,14 @@ version bump moves the block under the new version heading.
   so a changed config or an upgrade still waits for `lever apply`; a running proxy with an older
   config is not restarted. When the proxy cannot start, `up` succeeds and warns at the end with
   the fix. (lever#225)
+- **No false "reboot pending" when a GA kernel update lands under `guest_kernel: hwe`.** The
+  check compared the running kernel with `/boot/vmlinuz`, which names the kernel installed last,
+  so an `unattended-upgrades` update of the GA 6.8 kernel on a guest running the HWE 7.0 kernel
+  reported a reboot that `lever stop` and `lever up` could never clear: grub boots the newest
+  kernel. Apply, up and doctor now compare with what grub boots next: the first entry of
+  `/boot/grub/grub.cfg` while grub's default is entry 0, otherwise the newest `/boot/vmlinuz-*` by
+  version. The GA metapackage is deliberately not held, so the fallback kernel stays patched.
+  (lever#226)
 
 ## [0.41.1] - 2026-10-15
 

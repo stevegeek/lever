@@ -100,7 +100,7 @@ func TestCheckGuestKernel(t *testing.T) {
 		{"ga no nested", lima(false, ""), probeWith("6.17.0-5-generic", "6.8.0-146-generic", "6.17.0-5-generic", "6.8.0-146-generic", "hwe=1", "hwe=0"),
 			"running 6.8.0-146-generic (guest_kernel ga)", ""},
 		{"reboot pending", lima(true, ""), probeWith("running=6.17.0-5-generic", "running=6.8.0-146-generic"),
-			"the default kernel is 6.17.0-5-generic (reboot pending)", "lever stop"},
+			"the next boot starts 6.17.0-5-generic (reboot pending)", "lever stop"},
 		{"hwe missing", lima(true, ""), probeWith("hwe=1", "hwe=0"), "linux-generic-hwe-26.04 is not installed", "lever apply"},
 		{"nested on ga", lima(true, "ga"), probeWith("6.17.0-5-generic", "6.8.0-146-generic", "6.17.0-5-generic", "6.8.0-146-generic"),
 			"nested_virt runs on the 24.04 GA kernel", "guest_kernel: ga is set explicitly"},
@@ -132,7 +132,7 @@ func TestReadGuestKernelProbeUsesJail(t *testing.T) {
 		t.Fatalf("got %+v, %v", p, err)
 	}
 	script := f.Calls[0].Args[len(f.Calls[0].Args)-1]
-	for _, want := range []string{"/proc/sys/kernel/panic_on_oops", "/proc/sys/kernel/softlockup_panic", "/proc/cmdline", "/sys/module", "uname -r", "/boot/vmlinuz", "/etc/os-release", guest.HWEPackage("24.04"), guest.HWEPackage("26.04")} {
+	for _, want := range []string{"/proc/sys/kernel/panic_on_oops", "/proc/sys/kernel/softlockup_panic", "/proc/cmdline", "/sys/module", "uname -r", "/boot/grub/grub.cfg", "/etc/os-release", guest.HWEPackage("24.04"), guest.HWEPackage("26.04")} {
 		if !strings.Contains(script, want) {
 			t.Errorf("probe missing %q", want)
 		}

@@ -1521,7 +1521,7 @@ the [live test plan](https://github.com/stevegeek/lever/blob/main/CONTRIBUTING.m
 checks it.
 
 **A guest booted without grub.** The command-line parameter reaches the kernel through grub, and
-the pending-reboot check reads `/boot/vmlinuz`. A guest that boots a kernel directly (a Lima
+the kernel check reads grub's `/boot/grub/grub.cfg`. A guest that boots a kernel directly (a Lima
 template whose `images` entry sets `kernel:`, rather than the cloud image's grub) never gets the
 parameter, so apply and doctor report "reboot pending" for it forever. lever's own template boots
 the cloud image through grub; with a custom one, add `efi_pstore.pstore_disable=1` to that
@@ -1567,6 +1567,14 @@ warns that a reboot is pending until the guest runs the new kernel (`lever stop`
 The GA kernel stays installed; grub's *Advanced options* menu still offers it. lever counts the
 package installed only when dpkg says `install ok installed`.
 
+The GA kernel also keeps getting updates (`unattended-upgrades` installs them), and lever does
+not hold its metapackage: it is the kernel grub falls back to, so it should stay patched. Such an
+update points `/boot/vmlinuz` at the GA kernel, because that link names the kernel installed
+last, but grub still boots the newest kernel. The pending-reboot check therefore asks what grub
+boots next: the first entry of `/boot/grub/grub.cfg` while grub's default is entry 0 (Ubuntu's
+`GRUB_DEFAULT=0`), and otherwise (another `GRUB_DEFAULT`, or no readable `grub.cfg`) the newest
+`/boot/vmlinuz-*` by version, the kernel Ubuntu's grub lists first.
+
 The install normally happens on the VM's first apply, before lever's egress chain exists, so it
 reaches the Ubuntu mirrors under either posture. `apt-get update` and the install each wait up to
 2 minutes for the apt and dpkg locks, which cloud-init or `apt-daily` may hold on a fresh VM.
@@ -1583,7 +1591,7 @@ Later, when the package is still missing:
   stamp does not apply to it.
 
 Doctor's *guest kernel* row shows the guest's Ubuntu release and `uname -r`, and warns when
-`/boot/vmlinuz` names another kernel (a reboot is pending), when `guest_kernel` is `hwe` and the
+grub boots another kernel next (a reboot is pending), when `guest_kernel` is `hwe` and the
 release's package is missing or the release has none lever knows, and when `nested_virt` runs on a
 6.8 kernel.
 

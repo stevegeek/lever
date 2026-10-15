@@ -31,7 +31,8 @@ func ConfigHash(app *config.App) string {
 	// ManagerClaude is in the manager's envelope: a restart reopens the
 	// bootstrap latch so the next apply re-stages bootstrap.json. Shared
 	// folders and read-only entries feed worker specs and guards a stale
-	// broker would keep enforcing with old values.
+	// broker would keep enforcing with old values. The broker schedules the
+	// daily reset on the time it read at start.
 	return state.HashJSON(struct {
 		Broker          config.Broker
 		Workers         []config.Worker
@@ -43,8 +44,9 @@ func ConfigHash(app *config.App) string {
 		ManagerClaude   *wire.Claude          `json:",omitempty"`
 		SharedFolders   []config.SharedFolder `json:",omitempty"`
 		ManagerReadOnly []string              `json:",omitempty"`
+		DailyReset      string                `json:",omitempty"`
 	}{app.Broker, app.Workers, app.Scion, ChatConfigured(app), WebSenders(app), agentMessagesStampOf(app), filesStampOf(app), app.ManagerClaude(),
-		app.SharedFolders, app.Manager.ReadOnly})
+		app.SharedFolders, app.Manager.ReadOnly, app.Manager.DailyReset})
 }
 
 // agentMessagesStamp is the part of remote.agent_messages the broker acts on.

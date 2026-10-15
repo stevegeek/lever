@@ -70,6 +70,11 @@ func (s State) Sessions() string { return filepath.Join(s.Dir, "sessions.jsonl")
 // broker's heal of the manager).
 func (s State) ConversationLock() string { return filepath.Join(s.Dir, "conversation.lock") }
 
+// DailyReset is the broker's record of the manager's daily new conversation
+// (package dailyreset); DailyResetLock keeps two brokers' schedulers apart.
+func (s State) DailyReset() string     { return filepath.Join(s.Dir, "daily-reset.json") }
+func (s State) DailyResetLock() string { return filepath.Join(s.Dir, "daily-reset.lock") }
+
 // OperatorSock is the broker's UNIX socket for `lever msg send` (0600,
 // bound only when the state directory is outside the tree).
 func (s State) OperatorSock() string { return filepath.Join(s.Dir, "operator.sock") }

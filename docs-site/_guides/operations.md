@@ -508,6 +508,48 @@ tasks), and have the boot prompt read it, so a fresh session picks up where the 
 off. Messages that arrive while the manager is down wait in the hub as they do across
 `lever stop`; a boot prompt that reads the manager's events picks them up.
 
+### A new conversation every day
+
+`manager.daily_reset` makes the new conversation once a day on its own:
+
+```yaml
+manager:
+  daily_reset: "06:30"     # 24-hour HH:MM, host local time; omit to turn it off
+```
+
+The broker runs `lever conversation new` at that time, the same command with the same backup and
+checks, in its own session (a broker restart does not cut it short), its output appended to
+`.lever-state/logs/conversation-new.log`. It reads the time when it starts, so a change takes
+effect when `lever apply` restarts the broker (or `lever reload`). It runs only while lever is up
+and the manager is running, never with `--force`, and records the new session for the contact gate
+as the command from your terminal does, so contacts can post to the manager after it.
+
+- **Busy, locked or not running:** a manager in the middle of a turn, another change to the
+  manager holding the lock (`lever up`, `apply`, `stop`, `reload`, a new conversation from the
+  chat page, the broker's certificate heal), or a manager that is not running changes nothing;
+  the broker tries again every 10 minutes for 2 hours from the set time, then gives up for the day.
+- **A failure is not retried** that day. The next day's runs as usual.
+- **Once a day at most.** The day is claimed in `.lever-state/daily-reset.json` (the host's
+  record: last attempt, result, next due) before the run starts, so a broker restart or a second
+  broker never starts it twice, and a clock set back does not repeat a day that has run.
+- **Sleep and clock changes:** a host asleep at the time (or a broker that was down) runs it once
+  when it wakes, if that is still within the 2 hours; later, that day is skipped. On a day the
+  clocks go forward over the time it runs at the first minute after the jump; on a day the time
+  happens twice it runs at the first.
+- `lever doctor`'s *daily reset* row shows the time, when it is next due and the last result; it
+  warns after a failure, a day given up, or a run whose end the broker did not record.
+
+Each run is one of the 10 conversation backups lever keeps: with no other new conversation, the
+backups go back 10 days. A manager waiting for an answer is not busy, so the reset goes ahead
+over a question it asked (or a terminal attached to it, which the stop ends). The daily runs
+leave no bring-up record (doctor's *last bring-up* row); their output is in the log above.
+
+What the manager can do about it: its busy report, a stop of its own, or a run it makes fail (the
+backup of its home, for one) holds off or ends that day's reset, and doctor then warns. It cannot
+start a reset, move the time, or turn it off: the schedule is in `lever.yaml` and the record in
+the state directory, neither of which the agent can reach. With the state directory inside the
+tree there is no daily reset.
+
 ## The manager's conversation across `--fresh`
 
 A manager keeps the image, model, mounts and devices it was created with, so changing one of them

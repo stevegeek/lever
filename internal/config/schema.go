@@ -186,6 +186,9 @@ type Manager struct {
 	// resume included.
 	ClaudeSettings   ClaudeSettings `yaml:"claude_settings"`
 	AfterCompactNote string         `yaml:"after_compact_note"`
+	// DailyReset is "HH:MM", host local time: the broker starts the manager
+	// on a new conversation once a day then. Empty is off.
+	DailyReset string `yaml:"daily_reset"`
 	// Resources is create-time only.
 	Resources      Resources       `yaml:"resources"`
 	AllowPorts     []int           `yaml:"allow_ports"`

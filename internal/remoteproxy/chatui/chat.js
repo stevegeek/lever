@@ -126,6 +126,14 @@ const el = {
   mic: $('mic'),
   voice: $('voice'),
   readvoice: $('readvoice'),
+  readvoicerow: $('readvoicerow'),
+  settings: $('settings'),
+  settingspanel: $('settingspanel'),
+  autosend: $('autosend'),
+  autosendrow: $('autosendrow'),
+  autoread: $('autoread'),
+  autoreadrow: $('autoreadrow'),
+  readhint: $('readhint'),
   newconv: $('newconv'),
 };
 
@@ -285,6 +293,7 @@ function nearBottom() {
 function render(toBottom) {
   const stick = toBottom || nearBottom();
   const frag = document.createDocumentFragment();
+  speakButtons.clear();
   let shown = 0;
   for (const m of sortedMessages(messages)) {
     const kind = classify(m, chat.userId, chat.id);
@@ -546,9 +555,14 @@ function applyHistory(res) {
     el.older.hidden = !olderCursor;
   }
   const first = !loaded;
+  // New agent replies, for auto read-aloud: never the first page, and never
+  // a restart, which may be a page of history the chat had not shown.
+  const fresh = restart ? [] : sortedMessages(new Map(items.filter((m) => typeof m.id === 'string' && !messages.has(m.id) &&
+    classify(m, chat.userId, chat.id) === 'agent').map((m) => [m.id, m])));
   loaded = true;
   for (const m of items) fromHistory.add(m.id);
   if (mergeMessages(messages, items) || restart) render(first);
+  queueReplies(chat, fresh);
 }
 
 let acted = false;
@@ -766,9 +780,9 @@ function syncAttach() {
 }
 
 // Dictation (remote.voice): the clip is resampled to 16 kHz mono WAV and
-// posted to lever; its text goes into the message box for review and is
-// never sent by itself.
-let recording = null; // {recorder, stream, chunks, started, max, agent, timer, discard, done}
+// posted to lever; its text goes into the message box for review, or with
+// the device's auto-send option on is sent at once through send().
+let recording = null; // {recorder, stream, chunks, started, max, agent, chat, autoSend, timer, discard, done}
 let transcribing = false;
 
 const micSupported = () => !!(navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function') &&
@@ -781,9 +795,13 @@ function showVoice(text) {
 
 // The mic stays shown while recording: it is the stop control.
 function syncMic() {
-  el.mic.hidden = !recording && !(roster && roster.voice && chat && micSupported());
+  el.mic.hidden = !recording && !micOffered();
   el.mic.disabled = transcribing || (!recording && (!chat || !chat.view || !chat.view.input));
-  el.mic.className = recording ? 'recording' : '';
+  const auto = autoSendOn();
+  el.mic.className = `${recording ? 'recording' : ''}${auto ? ' autosend' : ''}`.trim();
+  const name = auto ? 'Dictate and send: tap to record, tap again to stop and send' : 'Dictate: tap to record, tap again to stop';
+  el.mic.setAttribute('aria-label', name);
+  el.mic.title = name;
   setText(el.mic, recording ? '■' : '🎤');
 }
 
@@ -801,6 +819,8 @@ async function toggleMic() {
   const c = chat;
   const cfg = roster && roster.voice;
   if (!c || !cfg || transcribing || micStarting || !micSupported()) return;
+  // The speaker would be recorded.
+  stopReading();
   showError('');
   let stream;
   // One permission prompt at a time.
@@ -813,6 +833,8 @@ async function toggleMic() {
   } finally {
     micStarting = false;
   }
+  // A reply that began while the prompt was up would be recorded.
+  stopReading();
   // The page went away while the prompt was up: nothing to record for.
   if (chat !== c || recording || document.visibilityState === 'hidden') {
     stopTracks(stream);
@@ -826,7 +848,7 @@ async function toggleMic() {
     showError('This browser cannot record here.');
     return;
   }
-  const r = { recorder, stream, chunks: [], started: Date.now(), max: cfg.maxSeconds, agent: c.name, timer: 0, discard: false, done: false };
+  const r = { recorder, stream, chunks: [], started: Date.now(), max: cfg.maxSeconds, agent: c.name, chat: c, autoSend: autoSendOn(), timer: 0, discard: false, done: false };
   recorder.addEventListener('dataavailable', (ev) => {
     if (ev.data && ev.data.size) r.chunks.push(ev.data);
   });
@@ -913,6 +935,10 @@ async function finishDictation(r) {
       showError('Nothing was heard in the recording.');
       return;
     }
+    if (r.autoSend && autoSendOn() && chat === r.chat) {
+      sendTranscript(text);
+      return;
+    }
     placeTranscript(r.agent, text);
   } catch {
     showError('The recording could not be read in this browser.');
@@ -936,6 +962,33 @@ async function toWAV(buf, max) {
   source.start();
   const out = await mix.startRendering();
   return encodeWAV(out.getChannelData(0));
+}
+
+// Auto-send: the transcript goes after what is in the box, and the whole box
+// is sent through send(), as a tap on Send would. finishDictation calls it
+// only while the chat the recording started in is the one shown, as the same
+// chat object: a chat left and opened again, or moved to a new hub record,
+// is a new one. A transcript never goes to another chat.
+function sendTranscript(text) {
+  const v = el.text.value.trimEnd();
+  el.text.value = insertText(v, v.length, v.length, text).value;
+  saveDraft();
+  grow();
+  if (sending || held) {
+    showError('The dictation is in the message box: press Send when the message before it has gone.');
+    return;
+  }
+  // An earlier attempt without a clear answer keeps its key only for the
+  // same text: sent with the dictation added, it could arrive twice.
+  if (chat.unsent) {
+    showError('The dictation is in the message box, after a message that may not have arrived: look at the conversation, then press Send.');
+    return;
+  }
+  if (!chat.view || !chat.view.input) {
+    showError('The dictation is in the message box; it was not sent, as the chat cannot take a message now.');
+    return;
+  }
+  void send();
 }
 
 function placeTranscript(agent, text) {
@@ -967,6 +1020,10 @@ const SPEAK_PATH = '/lever/api/voice/speak';
 const SPEAK_MS = 7 * 60000;
 let speaking = null; // {id, button, stop}: the message being read
 let audioCtx = null; // one per page, made and resumed on a tap
+const speakButtons = new Map(); // message id → its speaker in the list shown
+const replyQueue = []; // new agent replies waiting to be read aloud by themselves
+let audioUnlocked = false; // a tap has let this page play sound
+let hintShown = false; // the tap-to-enable hint has been shown once
 
 const speechOn = () => !!(window.speechSynthesis && typeof window.SpeechSynthesisUtterance === 'function');
 const serverSpeech = () => (roster && roster.readAloud && roster.speech) || null;
@@ -1003,8 +1060,18 @@ function speakButton(m) {
   const on = !!speaking && speaking.id === m.id;
   if (on) speaking.button = b;
   setText(b, on ? '⏹' : '🔊');
-  b.addEventListener('click', () => speak(m, b));
+  speakButtons.set(m.id, b);
+  b.addEventListener('click', () => {
+    // A tap on any speaker ends the replies queued to be read by themselves.
+    replyQueue.length = 0;
+    speak(m, b);
+  });
   return b;
+}
+
+function stopReading() {
+  replyQueue.length = 0;
+  stopSpeaking();
 }
 
 function stopSpeaking() {
@@ -1019,7 +1086,83 @@ function finished(s) {
   if (speaking !== s) return;
   speaking = null;
   setText(s.button, '🔊');
+  // A microtask, so a server voice that falls back to the device voice has
+  // taken speaking again before the next reply would start.
+  if (replyQueue.length) void Promise.resolve().then(readNextReply);
 }
+
+// Device options (localStorage, per login, like the push opt-in): on a
+// shared device one login's choice never sends or speaks for another.
+const autoSendKey = () => `lever-auto-send:${roster ? roster.login : ''}`;
+const autoReadKey = () => `lever-auto-read:${roster ? roster.login : ''}`;
+const micOffered = () => !!(roster && roster.voice && chat && micSupported());
+// Storage off: the choice lasts for this page load.
+const optionMemo = new Map();
+function option(key) {
+  const v = kept(key);
+  return v === '1' || v === '0' ? v === '1' : optionMemo.get(key) === true;
+}
+function setOption(key, on) {
+  optionMemo.set(key, on);
+  keep(key, on ? '1' : '0');
+}
+const autoSendOn = () => micOffered() && option(autoSendKey());
+const autoReadOn = () => !!chat && readAloudOn() && option(autoReadKey());
+
+// Only replies the open chat's history read brought after the first one
+// (refresh, never loadOlder or a restart) reach here.
+// The microphone may be open: anything played now could be recorded and,
+// with auto-send, sent as the login's own words.
+const micBusy = () => !!recording || micStarting || transcribing;
+
+// At most REPLY_QUEUE replies wait, the newest: an agent that floods the chat
+// cannot keep the device (and the login's server-voice allowance) busy for
+// longer than that without a tap.
+const REPLY_QUEUE = 3;
+function queueReplies(c, fresh) {
+  if (!fresh.length || chat !== c || !autoReadOn() || micBusy() || document.visibilityState !== 'visible') return;
+  replyQueue.push(...fresh);
+  replyQueue.splice(0, Math.max(0, replyQueue.length - REPLY_QUEUE));
+  if (!audioUnlocked) {
+    if (!hintShown) {
+      hintShown = true;
+      el.readhint.hidden = false;
+    }
+    return;
+  }
+  readNextReply();
+}
+
+function readNextReply() {
+  while (!speaking && replyQueue.length && audioUnlocked && !micBusy()) {
+    const m = replyQueue.shift();
+    const b = speakButtons.get(m.id);
+    if (b && chat && messages.has(m.id)) speak(m, b);
+  }
+}
+
+// Browsers play sound only after a tap. The first tap on the page, with the
+// auto-read option on, wakes both read-aloud paths: Web Audio is resumed, and
+// an empty utterance is spoken, which iOS needs before it speaks one later.
+// A tap on the agent list counts too: it runs before the chat it opens.
+function unlockAudio() {
+  if (audioUnlocked || !readAloudOn() || !option(autoReadKey())) return;
+  audioUnlocked = true;
+  el.readhint.hidden = true;
+  if (serverSpeech()) {
+    const ctx = audioContext();
+    if (ctx && typeof ctx.resume === 'function') void ctx.resume().catch(() => {});
+  }
+  if (speechOn() && !speaking) {
+    try {
+      window.speechSynthesis.speak(new window.SpeechSynthesisUtterance(''));
+    } catch {
+      // the device voice stays locked; the server voice may still play
+    }
+  }
+  readNextReply();
+}
+for (const type of ['click', 'keydown', 'touchend']) document.addEventListener(type, unlockAudio, { capture: true, passive: true });
 
 function speak(m, button) {
   const again = !!speaking && speaking.id === m.id;
@@ -1191,9 +1334,10 @@ function syncReadVoice() {
     const v = pickVoice(voices, savedReadVoice(), speechLang());
     chosen = v ? v.voiceURI : '';
   }
-  el.readvoice.hidden = !chat || options.length < 2;
+  el.readvoicerow.hidden = !chat || options.length < 2;
+  syncSettings();
   const key = `${sv ? 'server' : 'device'}\n${options.map((o) => o.value).join('\n')}`;
-  if (el.readvoice.hidden || key === readVoices) return;
+  if (el.readvoicerow.hidden || key === readVoices) return;
   readVoices = key;
   el.readvoice.replaceChildren(...options.map((o) => {
     const opt = document.createElement('option');
@@ -1208,11 +1352,48 @@ function saveReadVoice(value) {
   keep(serverSpeech() ? SERVER_VOICE_KEY : READ_VOICE_KEY, value);
 }
 
+// An icon button shows its panel's state with aria-expanded, not a label.
+function expanded(button, open) {
+  button.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+function filesShown(open) {
+  expanded(el.files, open);
+}
+
+// The settings button shows while any of its options applies to this chat.
+function syncSettings() {
+  el.autosendrow.hidden = !micOffered();
+  el.autoreadrow.hidden = !(chat && readAloudOn());
+  el.autosend.checked = option(autoSendKey());
+  el.autoread.checked = option(autoReadKey());
+  el.settings.hidden = el.readvoicerow.hidden && el.autosendrow.hidden && el.autoreadrow.hidden;
+  if (!el.settings.hidden) return;
+  // Focus inside a panel that goes would fall to the page's body.
+  const inside = !!document.activeElement && el.settingspanel.contains(document.activeElement);
+  closeSettings(false);
+  if (inside) el.back.focus();
+}
+
+function openSettings() {
+  el.settingspanel.hidden = false;
+  expanded(el.settings, true);
+  const first = [[el.readvoicerow, el.readvoice], [el.autosendrow, el.autosend], [el.autoreadrow, el.autoread]].find(([row]) => !row.hidden);
+  if (first) first[1].focus();
+}
+
+function closeSettings(refocus) {
+  if (el.settingspanel.hidden) return;
+  el.settingspanel.hidden = true;
+  expanded(el.settings, false);
+  if (refocus) el.settings.focus();
+}
+
 function closeFiles() {
   filesOpen = false;
   filesSeq++;
   el.filespanel.hidden = true;
-  setText(el.files, 'Files');
+  filesShown(false);
   el.filelist.replaceChildren();
   showFilesNote('');
 }
@@ -1327,7 +1508,9 @@ function fileRow(agent, f, sender = '') {
 }
 
 function resetHistory() {
-  stopSpeaking();
+  stopReading();
+  speakButtons.clear();
+  el.readhint.hidden = true;
   messages.clear();
   fromHistory.clear();
   generation++;
@@ -1944,6 +2127,33 @@ el.attach.addEventListener('click', () => {
 el.file.addEventListener('change', () => void upload(el.file.files && el.file.files[0]));
 el.mic.addEventListener('click', () => void toggleMic());
 el.readvoice.addEventListener('change', () => saveReadVoice(el.readvoice.value));
+el.settings.addEventListener('click', () => {
+  if (el.settingspanel.hidden) openSettings();
+  else closeSettings(true);
+});
+document.addEventListener('keydown', (ev) => {
+  if (ev.key !== 'Escape' || el.settingspanel.hidden) return;
+  ev.preventDefault();
+  closeSettings(true);
+});
+// A tap outside the panel closes it, as a menu does.
+document.addEventListener('pointerdown', (ev) => {
+  if (el.settingspanel.hidden || !ev.target || el.settingspanel.contains(ev.target) || el.settings.contains(ev.target)) return;
+  closeSettings(false);
+});
+el.autosend.addEventListener('change', () => {
+  setOption(autoSendKey(), el.autosend.checked);
+  syncMic();
+});
+el.autoread.addEventListener('change', () => {
+  setOption(autoReadKey(), el.autoread.checked);
+  if (el.autoread.checked) {
+    unlockAudio();
+    return;
+  }
+  stopReading();
+  el.readhint.hidden = true;
+});
 if (speechOn() && typeof window.speechSynthesis.addEventListener === 'function') {
   // Voices load late in some browsers.
   window.speechSynthesis.addEventListener('voiceschanged', syncReadVoice);
@@ -1955,13 +2165,14 @@ el.files.addEventListener('click', () => {
   }
   filesOpen = true;
   el.filespanel.hidden = false;
-  setText(el.files, 'Hide files');
+  filesShown(true);
   void loadFiles();
 });
 window.addEventListener('resize', grow);
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'hidden') return;
   dropHiddenDictation();
+  replyQueue.length = 0;
   // A server voice stops with the page hidden, as dictation does: its
   // requests would go on in the background.
   if (speaking && speaking.aborts) stopSpeaking();
@@ -1969,7 +2180,7 @@ document.addEventListener('visibilitychange', () => {
 // pagehide also stops reading aloud.
 window.addEventListener('pagehide', () => {
   dropHiddenDictation();
-  stopSpeaking();
+  stopReading();
 });
 
 void start();

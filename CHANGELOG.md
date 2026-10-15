@@ -7,6 +7,29 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **The chat page can send dictation at once and read new replies aloud, per device.** A
+  settings button (a sliders icon) in the chat header opens a small panel with the read-aloud
+  voice, which moved there from the header, and two options that start off. "Send dictation at
+  once" adds the transcription after any typed text and sends the box, but only to the chat that
+  was open when the recording started; an empty or failed transcription sends nothing, and the
+  mic shows a dot while it is on. "Read new replies aloud" reads each new agent reply that arrives
+  while the chat is open, one after another, never the history; the first tap on the page lets
+  it play, and a tap on a speaker or the mic stops it. Both are kept in the browser per login and
+  change nothing the server allows.
+
+### Changed
+
+- **The chat page's header is icons, so it fits on a phone.** Back, Refresh, New conversation,
+  Files and Terminal are icon buttons (inline SVG, each named by `aria-label` and `title`), and
+  the read-aloud voice picker is in the new settings panel. On a
+  360 px screen every control now shows on one line and the agent name and state shorten with an
+  ellipsis; before, New conversation wrapped onto two lines, the voice menu took a third of the
+  width and Terminal fell off the right edge. Files shows its open state by colour
+  (`aria-expanded`) instead of the text "Hide files". New conversation still asks before it
+  starts.
+
 ### Fixed
 
 - **The lever-dev example image keeps Playwright's Chromium where agents can run it.** It was

@@ -466,7 +466,7 @@ func TestChatPageHasNoMarkupSink(t *testing.T) {
 		`createElement\('option'\)`:  1,
 		`createElement\('ul'\)`:      1,
 		`createElement\('span'\)`:    1,
-		`setAttribute\(`:             3,
+		`setAttribute\(`:             5, // the mic's name says when dictation is sent at once
 		`setAttribute\('href', `:     2,
 		`setAttribute\('download', `: 1,
 		`new XMLHttpRequest\(`:       1,
@@ -490,7 +490,7 @@ func TestChatPageHasNoMarkupSink(t *testing.T) {
 		`createBufferSource\(`:          2, // dictation's resampling and read-aloud's playback
 		`decodeAudioData\(`:             2, // the same two
 		`getUserMedia\(`:                1,
-		`speechSynthesis\.speak\(`:      1,
+		`speechSynthesis\.speak\(`:      2, // a message, and the empty utterance that unlocks the device voice on a tap
 		`pickVoice\(`:                   2,
 		`location\.reload\(\)`:          0,
 	} {

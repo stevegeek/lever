@@ -209,6 +209,9 @@ This invites each login's hub user and binds the [remote web role](#the-remote-w
 project-create ceiling before anyone signs in, mints the **remote PAT** (see
 [below](#the-remote-pat)), and starts the proxy as a daemonized child, the same lifecycle pattern
 as the broker: `apply`/`up` start it, `lever stop` stops it alongside the rest of the instance.
+An `up` that only resumes the manager (after `lever stop`, or a host or VM restart) starts the
+proxy again when the lever binary and the `remote:` config are the ones it last ran with; after a
+change it warns and leaves the start to `lever apply`, which converges the hub side first.
 
 All of it runs against the live hub, as lever's own hub identities, while agents run: no container
 has to stop. The first apply with remote access on (including flipping it on later) restarts the

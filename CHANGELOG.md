@@ -7,6 +7,17 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`lever up` starts the remote-access proxy when it only resumes the manager.** After a VM
+  or host restart, `up` resumed the manager without `apply`, and so never started the proxy: the
+  chat page stayed down until the next `lever apply`. An `up` that resumes the manager or finds it
+  running now starts the proxy when it is not serving and leaves a serving one alone. It starts
+  it only when the stamp the proxy left records this lever binary and the current `remote:` config,
+  so a changed config or an upgrade still waits for `lever apply`; a running proxy with an older
+  config is not restarted. When the proxy cannot start, `up` succeeds and warns at the end with
+  the fix. (lever#225)
+
 ## [0.41.1] - 2026-10-15
 
 ### Fixed

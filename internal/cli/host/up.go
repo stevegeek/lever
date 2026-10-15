@@ -12,6 +12,7 @@ import (
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/convbackup"
+	"github.com/stevegeek/lever/internal/progress"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/termsafe"
 )
@@ -288,9 +289,17 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				return err
 			}
 			apply.RecordGuestBoot(ctx, deps)
+			// apply.Run starts the proxy on the apply path.
+			var remoteWarn string
+			if decision != upApply {
+				remoteWarn = ensureRemoteForUp(ctx, rep, app, w.remote.EnsureForUp)
+			}
 			stop()
 			// The list ends before the attach: from here the terminal is the manager's.
 			run.finish(nil)
+			if remoteWarn != "" {
+				logLine(cmd.ErrOrStderr(), "%s", remoteWarn)
+			}
 			// An attach can last all day; a new conversation must not wait on it.
 			release()
 			if noAttach {
@@ -402,4 +411,28 @@ func managerPhase(ctx context.Context, sc *scion.Client, project, name string) (
 		return a.Phase, nil
 	}
 	return "", nil
+}
+
+// ensureRemoteForUp runs ensure (remoteController.EnsureForUp) when remote
+// access is on. A proxy that is not serving does not fail the up: the manager
+// is up, and the returned warning, printed once the list has ended, says how
+// to bring the proxy back.
+func ensureRemoteForUp(ctx context.Context, rep *progress.Reporter, app *config.App, ensure func(context.Context) error) string {
+	if !app.RemoteEnabled() {
+		return ""
+	}
+	rep.Group("remote", 0)
+	step := rep.Start("remote proxy")
+	err := ensure(ctx)
+	switch {
+	case err == nil:
+		step.Done(nil)
+		return ""
+	case errors.Is(err, errRemoteProxyNeedsApply):
+		step.Skip("needs `lever apply`")
+		return "lever: the remote-access proxy is not running: " + err.Error() + ". Run `lever apply` to start it with the current config."
+	default:
+		step.Done(err)
+		return "lever: the remote-access proxy did not start: " + err.Error() + ". Run `lever apply` once the cause is fixed; `lever doctor` checks the proxy."
+	}
 }

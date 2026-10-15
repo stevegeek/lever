@@ -38,6 +38,25 @@ version bump moves the block under the new version heading.
   `/boot/grub/grub.cfg` while grub's default is entry 0, otherwise the newest `/boot/vmlinuz-*` by
   version. The GA metapackage is deliberately not held, so the fallback kernel stays patched.
   (lever#226)
+- **`lever up` gets past a hub stop claim that a VM power-off left behind (lever#223).** When the
+  VM went down while the manager was starting, the hub turned the start it could not confirm into
+  a stop claim, which it releases only once the broker reports the container gone or exited. After
+  the reboot podman listed the manager's container as `Created`, which the hub counts as running, so
+  every `lever up` failed with `start_in_progress: A stop is in progress for this agent` and said
+  that running it again would clear a transient failure, which it never did. Now, when the manager's
+  resume (in `lever up`, `lever apply` and `lever conversation restore`) gets that refusal, lever
+  asks podman for the manager's container, by the name lever derives from the project and the
+  manager, and, only when podman reports it with no process in it (created, exited or stopped),
+  commits it to a backup image `lever.local/<container>-backup:<UTC time>` (the newest two are kept),
+  looks again, removes it by its id without `--force`, and retries the resume for up to about three
+  minutes while the hub releases the claim. A failed backup removes nothing; a running or paused
+  container is never removed. A writable layer over 2 GiB, or one podman cannot measure within a minute, is removed
+  without a backup, and the output says so: scion's own resume removes a stopped container without a copy, and a 17 GB copy
+  on the guest's grow-only disk costs more than it saves. The conversation lives in the agent home,
+  a bind mount, and is not touched. When the claim stays held, the error says why and gives the fix
+  by hand, not "a transient failure clears". `lever doctor`'s *manager agent* row names a stopped,
+  suspended or error record over a `Created` container as this state, with the fix. Workers are
+  not covered: the broker resumes them, and lever does not remove containers on that path.
 
 ### Docs
 

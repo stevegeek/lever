@@ -50,8 +50,11 @@ type convOps struct {
 	// (apply.BeginManagerResume): the host tree before it, the mounts read back
 	// after it. newConvOps always sets it.
 	beginResume func(ctx context.Context) (managerResume, error)
-	now         func() time.Time
-	suspendWait apply.RetryBudget
+	// clearStopClaim runs a resume through apply.ResumeClearingStopClaim; nil
+	// runs it as is.
+	clearStopClaim func(ctx context.Context, resume func() error) error
+	now            func() time.Time
+	suspendWait    apply.RetryBudget
 	// session begins the record of a new conversation's fresh session (see
 	// newConversation).
 	session func() sessionBegin
@@ -83,9 +86,19 @@ func newConvOps(w *applyWiring, app *config.App, st state.State) convOps {
 		beginResume: func(ctx context.Context) (managerResume, error) {
 			return apply.BeginManagerResume(ctx, w.deps, app, project, "conversation")
 		},
+		clearStopClaim: func(ctx context.Context, resume func() error) error {
+			return apply.ResumeClearingStopClaim(ctx, w.deps, app.Name, project, "conversation", resume)
+		},
 		session:  func() sessionBegin { return beginFreshSession(app, st) },
 		bootTask: func() (string, error) { return apply.ManagerTask(app) },
 	}
+}
+
+func (o convOps) resumeClearing(ctx context.Context, resume func() error) error {
+	if o.clearStopClaim == nil {
+		return resume()
+	}
+	return o.clearStopClaim(ctx, resume)
 }
 
 // startResume refuses without beginResume: a resume whose mounts nobody reads
@@ -361,13 +374,8 @@ func (o convOps) restore(ctx context.Context, id string, backupFirst bool) (err 
 	if err != nil {
 		return fmt.Errorf("%w; the conversation is restored, but the manager stays suspended: fix that, then run `lever up`", err)
 	}
-	if err := o.sc.Resume(ctx, o.app.Name, project); err != nil {
-		if scion.IsRefusedByHub(err) {
-			err = apply.HubRefusedResume("resume", err)
-		} else {
-			err = apply.ResumeFailed("resume", err)
-		}
-		return guard.AfterFailure(ctx, err)
+	if err := o.resumeClearing(ctx, func() error { return o.sc.Resume(ctx, o.app.Name, project) }); err != nil {
+		return guard.AfterFailure(ctx, apply.ResumeError("resume", err))
 	}
 	if err := guard.Resumed(ctx); err != nil {
 		return err

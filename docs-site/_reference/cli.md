@@ -86,7 +86,7 @@ text from the jail):
 
 | Code | Meaning |
 |---|---|
-| `3` | lever could not resume the manager. The record and its conversation are kept. Run `lever up` again (a transient failure clears) and `lever doctor` for the cause; `lever up --fresh` starts a new conversation (it backs up the old one first). |
+| `3` | lever could not resume the manager. The record and its conversation are kept. Run `lever up` again (a transient failure clears; a hub stop claim, which the message names, does not) and `lever doctor` for the cause; `lever up --fresh` starts a new conversation (it backs up the old one first). |
 | `4` | The hub refused the resume (a token without the lifecycle scope, or a phase that cannot be resumed now). The manager is kept. Do **not** answer this with `--fresh`. |
 | `5` | `lever conversation new`: the manager is in the middle of a turn. Nothing was changed; try again later, or pass `--force`. |
 | `6` | `lever conversation new` or `restore`, `lever up`, `lever apply`, `lever stop`, `lever reload`: another of these is changing this instance's manager; the message names it. Nothing was changed. |

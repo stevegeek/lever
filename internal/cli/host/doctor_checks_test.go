@@ -1334,6 +1334,9 @@ func TestCheckManagerLive(t *testing.T) {
 		{"crashed", listing(scion.Agent{Slug: "assistant", Phase: "error", ContainerStatus: "Exited (1) 3 seconds ago"}), false, `phase "error"`, "--force"},
 		{"suspended", listing(scion.Agent{Slug: "assistant", Phase: "suspended", ContainerStatus: "stopped"}), false, `phase "suspended"`, "resume"},
 		{"running record, dead container", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Exited (1) 2 seconds ago"}), false, "Exited (1)", "lever up"},
+		// A created container under a stopped record holds a hub stop claim for good.
+		{"stopped over a created container", listing(scion.Agent{Slug: "assistant", Phase: "stopped", ContainerStatus: "Created"}), false, "stop claim", "podman rm lever--assistant"},
+		{"starting over a created container", listing(scion.Agent{Slug: "assistant", Phase: "starting", ContainerStatus: "Created"}), false, `phase "starting"`, "lever up"},
 		// A blank column is "cannot tell", as `lever up` reads it.
 		{"running record, blank column", listing(scion.Agent{Slug: "assistant", Phase: "running"}), true, "no container status", ""},
 	}

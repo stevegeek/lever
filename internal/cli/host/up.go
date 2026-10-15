@@ -109,13 +109,8 @@ func resumeForUp(ctx context.Context, deps apply.Deps, app *config.App, project 
 		return nil, err
 	}
 	if err := resume(ctx); err != nil {
-		if scion.IsRefusedByHub(err) {
-			err = apply.HubRefusedResume("resume", err)
-		} else {
-			err = apply.ResumeFailed("resume", err)
-		}
 		// The container may have started all the same.
-		return nil, guard.AfterFailure(ctx, err)
+		return nil, guard.AfterFailure(ctx, apply.ResumeError("resume", err))
 	}
 	if err := guard.Resumed(ctx); err != nil {
 		return nil, err
@@ -261,7 +256,9 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 					// The resume and its gate can run over a minute: print progress about every
 					// 15 s, or hand the stages to the progress list.
 					prog = apply.StartProgress(ctx, deps, "up", app.Name, "asking scion to resume the container")
-					return sc.Resume(ctx, app.Name, project)
+					return apply.ResumeClearingStopClaim(ctx, deps, app.Name, project, "up", func() error {
+						return sc.Resume(ctx, app.Name, project)
+					})
 				})
 				defer prog.Stop()
 				if err != nil {

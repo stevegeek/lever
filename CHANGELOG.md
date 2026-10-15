@@ -34,6 +34,22 @@ version bump moves the block under the new version heading.
 
 ### Fixed
 
+- **`lever attach` and `lever up` put the terminal back after the attach ends (lever#228).** The
+  agent's tmux turns on mouse reporting, focus events, bracketed paste, extended keys, keypad
+  modes and the alternate screen, and only turns them off when its client exits normally; an
+  attach that died (a dropped connection, a stopped container, a crashed tmux) left the terminal
+  printing escape sequences on a mouse scroll, with the cursor mid-text. The attach now runs as a
+  child of lever (`lever attach` no longer replaces the lever process), and when it returns,
+  however it ended, lever restores the terminal's line settings saved before the attach and writes
+  a fixed sequence that turns those modes off. After an attach that did not exit 0 it also leaves
+  the alternate screen, starts a new line and drops input queued for the dead client (mouse
+  reports the shell would echo); after a clean detach typeahead is kept and the alternate screen
+  is left alone, since leaving it again moves the cursor on some terminals. Nothing is written
+  when stdout is not a terminal. `lever attach` still exits with the attach's own status (128+n
+  when signal n killed it) and now also prints the error; `lever up` with a stdin that is not a
+  terminal exits 1 when the attach fails, as on a terminal, instead of with the attach's status,
+  which could read as one of `up`'s own exit codes.
+
 - **The lever-dev example image keeps Playwright's Chromium where agents can run it.** It was
   installed under `~/.cache`, which scion's home mount hides at runtime; it now lives in
   `/opt/ms-playwright` (`PLAYWRIGHT_BROWSERS_PATH`). The image also installs gcc (for `go test

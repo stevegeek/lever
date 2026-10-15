@@ -7,6 +7,15 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The lever-dev example image keeps Playwright's Chromium where agents can run it.** It was
+  installed under `~/.cache`, which scion's home mount hides at runtime; it now lives in
+  `/opt/ms-playwright` (`PLAYWRIGHT_BROWSERS_PATH`). The image also installs gcc (for `go test
+  -race`), jq, ripgrep, less and iproute2, so it works on the slim base, and `build.sh` takes
+  `LEVER_BASE` and `LEVER_DEV_TAG` to build on `lever-claude-slim`. Only the example changes; the
+  lever agent images do not ship a browser.
+
 ## [0.40.0] - 2026-10-14
 
 ### Added

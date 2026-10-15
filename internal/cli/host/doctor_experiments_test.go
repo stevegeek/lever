@@ -64,7 +64,7 @@ func TestCheckHubExperiments(t *testing.T) {
 			if tc.hub != nil {
 				tc.hub(h)
 			}
-			r := checkHubExperiments(context.Background(), st, tc.known, &hubapi.Client{T: h})
+			r := checkHubExperiments(context.Background(), st, false, tc.known, &hubapi.Client{T: h})
 			if r.name != "scion conduit and artifacts" {
 				t.Fatalf("row name = %q", r.name)
 			}
@@ -92,7 +92,7 @@ func TestCheckHubExperimentsCorruptRecord(t *testing.T) {
 	if err := os.WriteFile(st.HubExperiments(), []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	r := checkHubExperiments(context.Background(), st, knowsExperiments(true), &hubapi.Client{T: newFakeExperimentsHub()})
+	r := checkHubExperiments(context.Background(), st, false, knowsExperiments(true), &hubapi.Client{T: newFakeExperimentsHub()})
 	if r.ok || !strings.Contains(r.fix, "hub-experiments.json") {
 		t.Fatalf("row = %+v, want a failure naming the record", r)
 	}

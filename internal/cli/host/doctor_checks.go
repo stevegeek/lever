@@ -2250,13 +2250,18 @@ func unaskedExperiments(rec state.HubExperimentsRecord) []string {
 // off only by scion's default because lever never pinned it on this hub. The
 // pin is read from hub-experiments.json, so doctor needs no admin call. An
 // unreachable hub is not a finding; one that answered unusably is.
-func checkHubExperiments(ctx context.Context, st state.State, known scopeKnownFunc, hc *hubapi.Client) checkResult {
+//
+// With ssh on, conduit served is the ssh row's (checkSSH) when lever turned it
+// on.
+func checkHubExperiments(ctx context.Context, st state.State, sshOn bool, known scopeKnownFunc, hc *hubapi.Client) checkResult {
 	const name = "scion conduit and artifacts"
 	rec, found, err := st.LoadHubExperimentsRecord()
 	if err != nil {
 		return checkResult{name, false, err.Error(), "remove " + stateDirName() + "/hub-experiments.json, then run `lever apply`"}
 	}
-	on, err := liveExperiments(ctx, hc)
+	served, err := liveExperiments(ctx, hc)
+	conduitOn := sshOn && slices.Contains(rec.On, conduitExperiment)
+	on := strayExperiments(served, conduitOn)
 	if err != nil {
 		if hubAnswered(err) {
 			return checkResult{name, false, "could not probe the hub: " + err.Error(),
@@ -2301,6 +2306,9 @@ func checkHubExperiments(ctx context.Context, st state.State, known scopeKnownFu
 	detail := fmt.Sprintf("off at the hub; pinned off by lever on %s (%s)", rec.PinnedAt.Format(time.RFC3339), strings.Join(probed, ", "))
 	if len(unprobed) > 0 {
 		detail += fmt.Sprintf("; %s pinned off on the same apply, which no route can show, so doctor reads only lever's record", strings.Join(unprobed, ", "))
+	}
+	if conduitOn {
+		detail += "; " + conduitExperiment + " on for `lever ssh` (its own row)"
 	}
 	return checkResult{name, true, detail, ""}
 }

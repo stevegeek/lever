@@ -232,7 +232,7 @@ func TestEnsureHubExperimentsOffCorruptRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := newFakeExperimentsHub()
-	err := ensureHubExperimentsOff(context.Background(), experimentsPin{admin: &hubapi.Client{T: h}, st: st,
+	_, err := ensureHubExperiments(context.Background(), experimentsPin{admin: &hubapi.Client{T: h}, st: st,
 		known: knowsExperiments(true), now: time.Now, log: func(string, ...any) {}, warn: func(string, ...any) {}})
 	if err == nil || len(h.calls) != 0 {
 		t.Fatalf("err = %v calls = %v, want a failure before any hub call", err, h.calls)
@@ -308,7 +308,7 @@ func TestEnsureHubExperimentsOff(t *testing.T) {
 				log:        func(string, ...any) {},
 				warn:       func(string, ...any) { warns++ },
 			}
-			err := ensureHubExperimentsOff(context.Background(), p)
+			_, err := ensureHubExperiments(context.Background(), p)
 			if tc.wantErr == "" && err != nil {
 				t.Fatal(err)
 			}
@@ -355,4 +355,107 @@ func (a *secondProbeHub) DoBody(ctx context.Context, method, path string, body [
 		}
 	}
 	return a.fakeExperimentsHub.DoBody(ctx, method, path, body)
+}
+
+func TestEnsureHubExperimentsConduitOn(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// liveBefore: conduit already on and served.
+		liveBefore bool
+		// policy answers conduitPolicyLive, one entry per call (the last
+		// repeats); nil func when noCheck.
+		policy      []error
+		noCheck     bool
+		olderScion  bool
+		wantOn      bool
+		wantRestart int
+		wantErr     string
+		wantWarn    bool
+		wantTrueOut bool // the hub ends with conduit overridden on
+	}{
+		{name: "policy live: on, hub restarted", policy: []error{nil}, wantOn: true, wantRestart: 1, wantTrueOut: true},
+		{name: "already on: no restart", liveBefore: true, policy: []error{nil}, wantOn: true, wantTrueOut: true},
+		{name: "policy not live: stays off", policy: []error{errors.New("not lever's")}, wantWarn: true},
+		{name: "policy not live, conduit was on: pinned off and restarted", liveBefore: true, policy: []error{errors.New("not lever's")},
+			wantWarn: true, wantRestart: 1},
+		{name: "no way to check the policy: stays off", noCheck: true, wantWarn: true},
+		{name: "policy lost in the restart: backed off", policy: []error{nil, errors.New("gone")}, wantRestart: 2,
+			wantErr: "lever pinned conduit off again"},
+		{name: "no hub experiments: stays off", olderScion: true, policy: []error{nil}, wantWarn: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := state.ForConfig(t.TempDir())
+			h := newFakeExperimentsHub()
+			if tc.liveBefore {
+				h.overrides["hub.conduit"] = true
+			}
+			restarts, warns, checks := 0, 0, 0
+			p := experimentsPin{
+				admin: &hubapi.Client{T: h}, st: st, known: knowsExperiments(!tc.olderScion), now: time.Now,
+				restartHub: func(context.Context) error { restarts++; return nil },
+				conduitOn:  true,
+				log:        func(string, ...any) {},
+				warn:       func(string, ...any) { warns++ },
+			}
+			if !tc.noCheck {
+				p.conduitPolicyLive = func(context.Context) error {
+					e := tc.policy[min(checks, len(tc.policy)-1)]
+					checks++
+					return e
+				}
+			}
+			on, err := ensureHubExperiments(context.Background(), p)
+			if tc.wantErr == "" && err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("err = %v, want %q", err, tc.wantErr)
+			}
+			if on != tc.wantOn || restarts != tc.wantRestart || (warns > 0) != tc.wantWarn {
+				t.Fatalf("on=%v restarts=%d warns=%d; want on=%v restarts=%d warn=%v (%v)", on, restarts, warns, tc.wantOn, tc.wantRestart, tc.wantWarn, h.calls)
+			}
+			if h.overrides["hub.conduit"] != tc.wantTrueOut {
+				t.Fatalf("hub.conduit override = %v, want %v", h.overrides["hub.conduit"], tc.wantTrueOut)
+			}
+			for _, put := range h.puts {
+				for n, v := range put {
+					if v != nil && *v && n != "hub.conduit" {
+						t.Fatalf("PUT turned %s on", n)
+					}
+				}
+			}
+			for _, n := range []string{"hub.artifacts", "hub.chat_thread_groups", "federation.project_visitors"} {
+				if !tc.olderScion && h.overrides[n] {
+					t.Fatalf("%s left on", n)
+				}
+			}
+			rec, found, _ := st.LoadHubExperimentsRecord()
+			if tc.olderScion {
+				return
+			}
+			if !found || slices.Contains(rec.On, "hub.conduit") != tc.wantTrueOut || slices.Contains(rec.Off, "hub.conduit") == tc.wantTrueOut {
+				t.Fatalf("record = %+v (found %v)", rec, found)
+			}
+		})
+	}
+}
+
+func TestPinExperimentsConduitOnTouchesOnlyConduit(t *testing.T) {
+	h := newFakeExperimentsHub()
+	h.overrides["web.agent_edit"] = true
+	rec, err := pinExperiments(context.Background(), &hubapi.Client{T: h}, time.Now(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(rec.On, []string{"hub.conduit"}) || slices.Contains(rec.Off, "hub.conduit") || len(rec.Off) != 3 {
+		t.Fatalf("record = %+v", rec)
+	}
+	if !h.overrides["hub.conduit"] || !h.overrides["web.agent_edit"] || h.overrides["hub.artifacts"] {
+		t.Fatalf("overrides = %v", h.overrides)
+	}
+	h = newFakeExperimentsHub()
+	h.registered = []string{"hub.artifacts"}
+	if _, err := pinExperiments(context.Background(), &hubapi.Client{T: h}, time.Now(), true); err == nil {
+		t.Fatal("a hub without hub.conduit cannot have it turned on")
+	}
 }

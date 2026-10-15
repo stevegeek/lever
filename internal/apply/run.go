@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -201,6 +202,11 @@ type Deps struct {
 	// scion.ServerOpts.Env). It also carries the assertion key's fingerprint,
 	// so a hub started before a key change is detected and restarted.
 	HubAuthEnv map[string]string
+	// HubConduitEnv reads the running hub's conduit environment, which
+	// scion's RunningHub does not report, so HubRestartReason compares the
+	// conduit policy HubAuthEnv carries (HubEnv) too. Optional: nil reads
+	// none.
+	HubConduitEnv func(ctx context.Context) (map[string]string, error)
 	// EnsureProjectProvider runs before each hub link (whose agent sync needs a
 	// broker) and again when the project settles: when the instance's hub
 	// project lists no runtime broker, it links the jail's broker to it as
@@ -595,6 +601,17 @@ func (r *run) scionServer(ctx context.Context) error {
 	live, err := r.d.Scion.RunningHub(ctx)
 	if err != nil {
 		return fmt.Errorf("hub auth: %w", err)
+	}
+	if live.Running && r.d.HubConduitEnv != nil {
+		env, err := r.d.HubConduitEnv(ctx)
+		if err != nil {
+			return fmt.Errorf("hub conduit policy: %w", err)
+		}
+		live.Env = maps.Clone(live.Env)
+		if live.Env == nil {
+			live.Env = map[string]string{}
+		}
+		maps.Copy(live.Env, env)
 	}
 	reason := HubRestartReason(live, opts)
 	if reason == "" && guestChanged && live.Running {

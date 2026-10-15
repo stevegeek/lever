@@ -244,8 +244,11 @@ Two things need more than the controller's authority, and `lever-admin` does the
   (hub-held publishing with unauthenticated share links), `hub.chat_thread_groups` (project-wide
   chat groups that agents can create and rename, and that project members with read access see) and
   `federation.project_visitors` (users of external issuers acting in projects, and credentials for
-  peer hubs), as `lever-admin` through scion's admin experiments route. It never writes `true` and
-  leaves every other override as it is. All four are off by scion's default; the explicit override
+  peer hubs), as `lever-admin` through scion's admin experiments route. It never writes `true`,
+  except for `hub.conduit` when the operator opts into [`lever ssh`](/ssh/) on a scion with the
+  hub's conduit controls, and only after reading lever's conduit policy back from the running hub
+  (lever's gateway port denied to every tunnel and forward, SSH socket forwarding off); it leaves
+  every other override as it is. All four are off by scion's default; the explicit override
   keeps them off if a later scion changes the default. lever records what it wrote, and which
   experiments it looked for, in `.lever-state/hub-experiments.json`; on a hub without the route (an
   older scion) it records "not applicable". Before and after the write lever asks the hub whether

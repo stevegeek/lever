@@ -1352,3 +1352,26 @@ func TestRefusedNavigationCarriesNoReason(t *testing.T) {
 		t.Errorf("the hub was reached: %v", got)
 	}
 }
+
+// TestConduitSessionRefusedToWebLogins: a web login's injected hub session is
+// a user principal, the principal scion opens `scion tunnel` and `scion ssh`
+// sessions for. `lever ssh` turns conduit on at the hub, so the proxy must
+// never forward the session upgrade, however it is spelled.
+func TestConduitSessionRefusedToWebLogins(t *testing.T) {
+	for _, target := range []string{"/api/v1/conduit", "/api/v1/conduit?agent=a1", "/api/v1/conduit/", "/api/v1/CONDUIT"} {
+		hub := newRecordingHub(t)
+		var lines []AuditLine
+		h := NewHandler(Config{Target: mustURL(t, hub.URL), Session: testSession(),
+			ServeHost: "mac.ts.net", Audit: func(l AuditLine) { lines = append(lines, l) }})
+		r := proxyRequest(http.MethodGet, target, nil)
+		r.Header.Set("Connection", "Upgrade")
+		r.Header.Set("Upgrade", "websocket")
+		r.Header.Set("Sec-WebSocket-Version", "13")
+		r.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+		rw := httptest.NewRecorder()
+		h.ServeHTTP(rw, r)
+		if rw.Code != http.StatusForbidden || hub.hits() != 0 || len(lines) != 1 || lines[0].Decision != DecisionDenyRoute {
+			t.Fatalf("%s: status %d, hub hits %d, audit %+v; want 403 before the hub", target, rw.Code, hub.hits(), lines)
+		}
+	}
+}

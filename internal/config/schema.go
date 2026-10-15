@@ -300,6 +300,17 @@ type Operator struct {
 	DirectiveExpiryMax time.Duration `yaml:"directive_expiry_max"`
 }
 
+// SSH is the opt-in `lever ssh`: an SSH session into an agent over scion's
+// hub relay (conduit), for the host operator only. Off, lever keeps the
+// relay pinned off. On, it needs a scion with the hub's conduit controls,
+// and lever keeps the relay off until it can prove they are in force.
+type SSH struct {
+	Enabled bool `yaml:"enabled"`
+	// DenyPorts are agent-local ports no tunnel or SSH forward may reach,
+	// added to the ones lever always denies (its own listeners in the agent).
+	DenyPorts []int `yaml:"deny_ports"`
+}
+
 // Remote configures the opt-in remote-access proxy: a host-side reverse
 // proxy that injects the operator's hub session behind an authenticating
 // front that sets a verified identity header. The hub web UI is enabled only
@@ -455,6 +466,8 @@ type App struct {
 	GuestProfile string `yaml:"guest_profile"`
 	// TreeBackup snapshots the tree on the host (off by default).
 	TreeBackup TreeBackup `yaml:"tree_backup"`
+	// SSH opts the operator into `lever ssh` (off by default).
+	SSH SSH `yaml:"ssh"`
 
 	dir string // instance root (the config file's directory)
 }

@@ -241,7 +241,13 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult { return checkHubAuthentication(ctx, hubAuth, jailScion.RunningHub) },
 		func() checkResult { return checkHubIdentities(ctx, hubAuth) },
 		func() checkResult { return checkRemoteWebRole(ctx, app, hubAuth) },
-		func() checkResult { return checkHubExperiments(ctx, state, jailScion.KnowsUATScope, hc) },
+		func() checkResult {
+			return checkHubExperiments(ctx, state, app.SSHEnabled(), jailScion.KnowsUATScope, hc)
+		},
+		func() checkResult {
+			return checkSSH(ctx, app, state, sshDoctor{sc: jailConduit{jr}, hc: hc, list: listAgents, env: readContainerEnv,
+				project: b.MountDest(), agents: append([]string{app.Name}, workerNames...)})
+		},
 		func() checkResult { return checkHubRuntime(ctx, hc) },
 		func() checkResult { return checkProjectSharedDirs(ctx, project, listSharedDirs) },
 		func() checkResult { return checkAgentRoles(ctx, project, rolesSupported, listAgentRoles) },

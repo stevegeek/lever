@@ -92,7 +92,7 @@ func (g Guest) EnsureHubAuth(ctx context.Context, spec types.HubAuth) (bool, err
 	if err != nil {
 		return false, err
 	}
-	updated, oidcRemoved, changed, err := hubAuthSettingsConverged(existing, spec, hasServerYAML)
+	updated, restart, changed, err := hubAuthSettingsConverged(existing, spec, hasServerYAML)
 	if err != nil {
 		return false, err
 	}
@@ -101,8 +101,12 @@ func (g Guest) EnsureHubAuth(ctx context.Context, spec types.HubAuth) (bool, err
 			return false, err
 		}
 	}
-	return keyChanged || oidcRemoved, nil
+	return keyChanged || restart, nil
 }
+
+// keyConduit is the hub's relay block (server.hub.conduit), which lever never
+// writes.
+const keyConduit = "conduit"
 
 // HubAuthSettings is the auth block lever writes under `server:` for anyone
 // reading settings.yaml. The hub itself takes these values from the
@@ -126,12 +130,13 @@ func HubAuthSettings(spec types.HubAuth) map[string]any {
 
 // hubAuthSettingsConverged drops `oidc_login` (scion builds its OAuth service
 // whenever the block is present, whatever the auth mode, and env cannot unset
-// it), writes lever's auth keys and admin_emails, and keeps the web-only
+// it) and `hub.conduit`, reporting either as a reason to restart the hub,
+// writes lever's auth keys and admin_emails, and keeps the web-only
 // settings in line with RemoteOn. It edits the parsed document, so every other
 // key and comment survives, and decides "changed" semantically. Keys under
 // `auth` lever does not own (email, display_name: scion's identity route
 // writes them) are left alone.
-func hubAuthSettingsConverged(existing []byte, spec types.HubAuth, hasServerYAML bool) (out []byte, oidcRemoved, changed bool, err error) {
+func hubAuthSettingsConverged(existing []byte, spec types.HubAuth, hasServerYAML bool) (out []byte, restart, changed bool, err error) {
 	doc, err := layout.ParseSettings(existing)
 	if err != nil {
 		return nil, false, false, fmt.Errorf("guest: parse the jail's %s: %w", layout.SettingsRel, err)
@@ -158,7 +163,7 @@ func hubAuthSettingsConverged(existing []byte, spec types.HubAuth, hasServerYAML
 	}
 	if layout.MapGet(server, layout.KeyOIDCLogin) != nil {
 		layout.MapDelete(server, layout.KeyOIDCLogin)
-		oidcRemoved, changed = true, true
+		restart, changed = true, true
 	}
 	auth := layout.MapGet(server, layout.KeyAuth)
 	if auth != nil && auth.Kind != yaml.MappingNode {
@@ -199,6 +204,14 @@ func hubAuthSettingsConverged(existing []byte, spec types.HubAuth, hasServerYAML
 		hub = layout.NewMapping()
 		layout.MapSet(server, "hub", hub)
 	}
+	// lever starts the hub with its conduit policy in the env, which wins over
+	// the file; the rest of the block (an internal relay listener, longer
+	// stream lifetimes, more allowed ports) is the relay's attack surface,
+	// and agents can write this file through the workstation routes.
+	if layout.MapGet(hub, keyConduit) != nil {
+		layout.MapDelete(hub, keyConduit)
+		restart, changed = true, true
+	}
 	var admins yaml.Node
 	if err := admins.Encode([]string{spec.AdminEmail}); err != nil {
 		return nil, false, false, fmt.Errorf("guest: encode server.hub.admin_emails: %w", err)
@@ -229,5 +242,5 @@ func hubAuthSettingsConverged(existing []byte, spec types.HubAuth, hasServerYAML
 	if err != nil {
 		return nil, false, false, err
 	}
-	return out, oidcRemoved, true, nil
+	return out, restart, true, nil
 }

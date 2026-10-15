@@ -7,7 +7,48 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.41.0] - 2026-10-15
+
+### Added
+
+- **The chat page can send dictation at once and read new replies aloud, per device.** A
+  settings button (a sliders icon) in the chat header opens a small panel with the read-aloud
+  voice, which moved there from the header, and two options that start off. "Send dictation at
+  once" adds the transcription after any typed text and sends the box, but only to the chat that
+  was open when the recording started; an empty or failed transcription sends nothing, and the
+  mic shows a dot while it is on. "Read new replies aloud" reads each new agent reply that arrives
+  while the chat is open, one after another, never the history; the first tap on the page lets
+  it play, and a tap on a speaker or the mic stops it. Both are kept in the browser per login and
+  change nothing the server allows.
+
+### Changed
+
+- **The chat page's header is icons, so it fits on a phone.** Back, Refresh, New conversation,
+  Files and Terminal are icon buttons (inline SVG, each named by `aria-label` and `title`), and
+  the read-aloud voice picker is in the new settings panel. On a
+  360 px screen every control now shows on one line and the agent name and state shorten with an
+  ellipsis; before, New conversation wrapped onto two lines, the voice menu took a third of the
+  width and Terminal fell off the right edge. Files shows its open state by colour
+  (`aria-expanded`) instead of the text "Hide files". New conversation still asks before it
+  starts.
+
 ### Fixed
+
+- **`lever attach` and `lever up` put the terminal back after the attach ends (lever#228).** The
+  agent's tmux turns on mouse reporting, focus events, bracketed paste, extended keys, keypad
+  modes and the alternate screen, and only turns them off when its client exits normally; an
+  attach that died (a dropped connection, a stopped container, a crashed tmux) left the terminal
+  printing escape sequences on a mouse scroll, with the cursor mid-text. The attach now runs as a
+  child of lever (`lever attach` no longer replaces the lever process), and when it returns,
+  however it ended, lever restores the terminal's line settings saved before the attach and writes
+  a fixed sequence that turns those modes off. After an attach that did not exit 0 it also leaves
+  the alternate screen, starts a new line and drops input queued for the dead client (mouse
+  reports the shell would echo); after a clean detach typeahead is kept and the alternate screen
+  is left alone, since leaving it again moves the cursor on some terminals. Nothing is written
+  when stdout is not a terminal. `lever attach` still exits with the attach's own status (128+n
+  when signal n killed it) and now also prints the error; `lever up` with a stdin that is not a
+  terminal exits 1 when the attach fails, as on a terminal, instead of with the attach's status,
+  which could read as one of `up`'s own exit codes.
 
 - **The lever-dev example image keeps Playwright's Chromium where agents can run it.** It was
   installed under `~/.cache`, which scion's home mount hides at runtime; it now lives in
@@ -15,6 +56,11 @@ version bump moves the block under the new version heading.
   -race`), jq, ripgrep, less and iproute2, so it works on the slim base, and `build.sh` takes
   `LEVER_BASE` and `LEVER_DEV_TAG` to build on `lever-claude-slim`. Only the example changes; the
   lever agent images do not ship a browser.
+
+### Upgrade
+
+- **Jail ABI 5, unchanged.** Only host code and the lever-dev example changed: the agent image
+  and the manager need no rebuild. Reload the chat page after the upgrade.
 
 ## [0.40.0] - 2026-10-14
 

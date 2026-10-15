@@ -1911,9 +1911,24 @@ test('files panel closes and clears when the chat changes', async () => {
     files: () => ({ status: 200, body: { files: [{ id: 'e'.repeat(32), name: 'a.pdf', size: 1, direction: 'sent' }] } }) }));
   env.els.files.dispatch('click');
   await tick(5);
+  assert.equal(env.els.files.attrs['aria-expanded'], 'true', 'the icon button says the panel is open');
+  assert.equal(env.els.files.children.length, 0, 'no label text is written over the icon');
   env.els.back.dispatch('click');
   assert.equal(env.els.filespanel.hidden, true);
   assert.equal(env.els.filelist.children.length, 0);
+  assert.equal(env.els.files.attrs['aria-expanded'], 'false');
+});
+
+test('the Files button toggles the panel and its expanded state', async () => {
+  const env = await loadChat(hubWith({ agents: withFiles([BOSS()]), files: () => ({ status: 200, body: { files: [] } }) }));
+  env.els.files.dispatch('click');
+  await tick(5);
+  assert.equal(env.els.filespanel.hidden, false);
+  assert.equal(env.els.files.attrs['aria-expanded'], 'true');
+  env.els.files.dispatch('click');
+  assert.equal(env.els.filespanel.hidden, true);
+  assert.equal(env.els.files.attrs['aria-expanded'], 'false');
+  assert.equal(env.els.files.textContent, '', 'the button keeps its icon, not a text label');
 });
 
 test('the chat note names the file as the server stored it', async () => {
@@ -2232,7 +2247,8 @@ test('read-aloud: no on-device voice reads nothing; no speech API shows no speak
 test('read-aloud: the voice choice is offered with two local voices and kept per device', async () => {
   const other = { name: 'Other', lang: 'de-DE', voiceURI: 'local-de', localService: true };
   const env = await loadChat(hubWith({ agents: readAloudAgents, history: () => ({ status: 200, body: { messages: [msg(1)] } }) }), { speech: { voices: [LOCAL, other, NETWORK] } });
-  assert.equal(env.els.readvoice.hidden, false);
+  assert.equal(env.els.readvoicerow.hidden, false);
+  assert.equal(env.els.settings.hidden, false, 'the settings button that holds it shows');
   assert.deepEqual(env.els.readvoice.children.map((o) => o.value), ['local-en', 'local-de']);
   env.els.readvoice.value = 'local-de';
   env.els.readvoice.dispatch('change');
@@ -2240,12 +2256,16 @@ test('read-aloud: the voice choice is offered with two local voices and kept per
   env.els.list.children[0].children.find((c) => c.className === 'speak').dispatch('click');
   assert.equal(env.speech.spoken[0].voice, other);
   const one = await loadChat(hubWith({ agents: readAloudAgents }), { speech: { voices: [LOCAL, NETWORK] } });
-  assert.equal(one.els.readvoice.hidden, true, 'one local voice: nothing to choose');
+  assert.equal(one.els.readvoicerow.hidden, true, 'one local voice: nothing to choose');
+  assert.equal(one.els.autoreadrow.hidden, false, 'reading new replies aloud is still offered');
+  assert.equal(one.els.settings.hidden, false);
 });
 test('read-aloud: off unless the roster offers it (remote.voice off or read_aloud false)', async () => {
   const env = await loadChat(hubWith({ history: () => ({ status: 200, body: { messages: [msg(1)] } }) }), { speech: { voices: [LOCAL, { name: 'Other', lang: 'de-DE', voiceURI: 'local-de', localService: true }] } });
   assert.equal(env.els.list.children[0].children.some((c) => c.className === 'speak'), false);
-  assert.equal(env.els.readvoice.hidden, true);
+  assert.equal(env.els.readvoicerow.hidden, true);
+  assert.equal(env.els.autoreadrow.hidden, true);
+  assert.equal(env.els.settings.hidden, true, 'no option applies: no settings button');
 });
 
 
@@ -2523,4 +2543,350 @@ test('new conversation: a manager that never goes down is reported after a minut
   await tick(5);
   assert.match(env.els.error.textContent, /has not gone down yet/);
   assert.equal(env.els.newconv.disabled, false);
+});
+
+// Device options in the settings panel: auto-send for dictation, and reading
+// new replies aloud by themselves. Both are kept per login on the device.
+const bothAgents = (agents = [BOSS(), A('w1')]) => () => roster(agents, { voice: { maxSeconds: 300 }, readAloud: true });
+const AUTO_SEND = 'lever-auto-send:op';
+const AUTO_READ = 'lever-auto-read:op';
+async function dictate(env) {
+  env.els.mic.dispatch('click');
+  await tick(5);
+  env.els.mic.dispatch('click');
+  await tick(20);
+}
+
+test('settings: the panel opens and closes as a disclosure, and offers only what applies', async () => {
+  let env = await loadChat(hubWith({ agents: bothAgents() }), { media: {}, speech: { voices: [LOCAL] } });
+  assert.equal(env.els.settings.hidden, false);
+  assert.equal(env.els.settingspanel.hidden, true);
+  assert.equal(env.els.readvoicerow.hidden, true, 'one voice: nothing to choose');
+  assert.equal(env.els.autosendrow.hidden, false);
+  assert.equal(env.els.autoreadrow.hidden, false);
+  env.els.settings.dispatch('click');
+  assert.equal(env.els.settingspanel.hidden, false);
+  assert.equal(env.els.settings.attrs['aria-expanded'], 'true');
+  assert.equal(env.focused(), env.els.autosend, 'focus moves to the first option shown');
+  env.document.dispatch('keydown', { key: 'Escape' });
+  assert.equal(env.els.settingspanel.hidden, true);
+  assert.equal(env.els.settings.attrs['aria-expanded'], 'false');
+  assert.equal(env.focused(), env.els.settings, 'Escape gives focus back to the button');
+  env.els.settings.dispatch('click');
+  env.document.dispatch('pointerdown', { target: env.els.autosend });
+  assert.equal(env.els.settingspanel.hidden, true, 'the panel in the fake holds no children: any target is outside');
+  env.els.settings.dispatch('click');
+  env.els.settingspanel.append(env.els.autosend);
+  env.document.dispatch('pointerdown', { target: env.els.autosend });
+  assert.equal(env.els.settingspanel.hidden, false, 'a tap inside keeps it open');
+  env.document.dispatch('pointerdown', { target: env.els.list });
+  assert.equal(env.els.settingspanel.hidden, true, 'a tap outside closes it');
+  env.els.settings.dispatch('click');
+  env.els.settings.dispatch('click');
+  assert.equal(env.els.settingspanel.hidden, true, 'a second tap on the button closes it');
+  // No dictation for the login, or a browser that cannot record: no auto-send.
+  env = await loadChat(hubWith({ agents: readAloudAgents }), { media: {}, speech: { voices: [LOCAL] } });
+  assert.equal(env.els.autosendrow.hidden, true);
+  assert.equal(env.els.autoreadrow.hidden, false);
+  env = await loadChat(hubWith({ agents: bothAgents() }));
+  assert.equal(env.els.settings.hidden, true, 'no recording and no speech here: nothing to set');
+  // A see-only agent: nothing applies, and an open panel closes.
+  env = await loadChat(hubWith({ agents: bothAgents([BOSS(), A('w1', { access: 'see' })]) }), { media: {}, speech: { voices: [LOCAL] } });
+  env.els.settings.dispatch('click');
+  env.els.agents.children[1].children[0].dispatch('click');
+  assert.equal(env.els.settings.hidden, true);
+  assert.equal(env.els.settingspanel.hidden, true);
+});
+
+test('settings: kept per login on the device, and working for the visit when storage throws', async () => {
+  let env = await loadChat(hubWith({ agents: bothAgents() }), { media: {}, speech: { voices: [LOCAL] } });
+  env.els.autosend.checked = true;
+  env.els.autosend.dispatch('change');
+  env.els.autoread.checked = true;
+  env.els.autoread.dispatch('change');
+  assert.equal(env.local[AUTO_SEND], '1');
+  assert.equal(env.local[AUTO_READ], '1');
+  assert.match(env.els.mic.className, /\bautosend\b/, 'the mic shows auto-send is on');
+  assert.match(env.els.mic.attrs['aria-label'], /^Dictate and send/);
+  env.els.autosend.checked = false;
+  env.els.autosend.dispatch('change');
+  assert.equal(env.local[AUTO_SEND], '0');
+  assert.doesNotMatch(env.els.mic.className, /autosend/);
+  assert.match(env.els.mic.attrs['aria-label'], /^Dictate: tap/);
+  // A reload keeps them; another login on the device does not see them.
+  env = await loadChat(hubWith({ agents: bothAgents() }), { media: {}, speech: { voices: [LOCAL] }, local: { [AUTO_SEND]: '1', [AUTO_READ]: '1' } });
+  assert.equal(env.els.autosend.checked, true);
+  assert.equal(env.els.autoread.checked, true);
+  env = await loadChat(hubWith({ agents: () => ({ ...bothAgents()(), body: { ...bothAgents()().body, login: 'c@x', tier: 'contact' } }) }),
+    { media: {}, speech: { voices: [LOCAL] }, local: { [AUTO_SEND]: '1', [AUTO_READ]: '1' } });
+  assert.equal(env.els.autosend.checked, false);
+  assert.equal(env.els.autoread.checked, false);
+  // Storage off: the page works, and a choice lasts for the visit.
+  env = await loadChat(hubWith({ agents: bothAgents() }), { media: {}, speech: { voices: [LOCAL] }, localThrows: true });
+  assert.equal(env.els.autosend.checked, false);
+  env.els.autosend.checked = true;
+  env.els.autosend.dispatch('change');
+  assert.match(env.els.mic.className, /autosend/);
+  await type(env, 'typed');
+  await dictate(env);
+  assert.equal(sends(env).length, 1);
+});
+
+test('auto-send off: the transcript waits in the box', async () => {
+  const env = await loadChat(hubWith({ agents: bothAgents() }), { media: {} });
+  await type(env, 'typed');
+  await dictate(env);
+  assert.equal(env.els.text.value, 'typed hello from the mic');
+  assert.equal(sends(env).length, 0);
+});
+
+test('auto-send on: the transcript goes after the typed text and the whole box is sent', async () => {
+  const env = await loadChat(hubWith({ agents: bothAgents() }), { media: {}, local: { [AUTO_SEND]: '1' } });
+  await type(env, 'Look at this:  ');
+  env.els.text.selectionStart = 0;
+  env.els.text.selectionEnd = 0;
+  await dictate(env);
+  assert.equal(sends(env).length, 1);
+  assert.equal(sends(env)[0].body.content, 'Look at this: hello from the mic', 'appended, not put at the cursor');
+  assert.equal(sends(env)[0].path, `${HISTORY}`);
+  assert.equal(env.els.text.value, '', 'sent: the box is clear');
+  assert.equal(env.store['lever-chat-draft:boss'], '');
+  // With an empty box only the dictation goes.
+  await dictate(env);
+  assert.equal(sends(env)[1].body.content, 'hello from the mic');
+});
+
+test('auto-send on: an empty or failed transcription sends nothing and says why', async () => {
+  for (const [answer, words] of [[{ status: 200, body: { text: '' } }, 'Nothing was heard in the recording.'],
+    [{ status: 429, body: { error: 'quota' } }, 'Not transcribed: too much dictation today; try again tomorrow'], [{ down: true }, /^Not transcribed: /]]) {
+    const env = await loadChat(hubWith({ agents: bothAgents(), transcribe: () => answer }), { media: {}, local: { [AUTO_SEND]: '1' } });
+    await type(env, 'typed');
+    await dictate(env);
+    assert.equal(sends(env).length, 0, JSON.stringify(answer));
+    if (typeof words === 'string') assert.equal(env.els.error.textContent, words);
+    else assert.match(env.els.error.textContent, words);
+    assert.equal(env.els.text.value, 'typed');
+  }
+  // A clip too short to hold a word is not even transcribed.
+  const env = await loadChat(hubWith({ agents: bothAgents() }), { media: { decoded: { length: 100, sampleRate: 48000 } }, local: { [AUTO_SEND]: '1' } });
+  await dictate(env);
+  assert.equal(transcribes(env).length, 0);
+  assert.equal(sends(env).length, 0);
+});
+
+test('auto-send on: a chat changed while transcribing sends nothing; the text goes to the first chat\'s draft', async () => {
+  let release;
+  const slow = () => new Promise((r) => { release = () => r({ status: 200, body: { text: 'for boss only' } }); });
+  // Another chat opened meanwhile.
+  let env = await loadChat(hubWith({ agents: bothAgents(), transcribe: slow }), { media: {}, local: { [AUTO_SEND]: '1' } });
+  await type(env, 'boss draft');
+  await dictate(env);
+  env.els.agents.children[1].children[0].dispatch('click');
+  await tick(5);
+  assert.equal(env.els.agent.textContent, 'w1');
+  release();
+  await tick(20);
+  assert.equal(sends(env).length, 0);
+  assert.equal(env.els.text.value, '', 'w1\'s box is untouched');
+  assert.equal(env.store['lever-chat-draft:boss'], 'boss draft for boss only');
+  // The same chat left and opened again is not the chat the recording
+  // started in: the text waits in the box.
+  env = await loadChat(hubWith({ agents: bothAgents(), transcribe: slow }), { media: {}, local: { [AUTO_SEND]: '1' } });
+  await dictate(env);
+  env.els.back.dispatch('click');
+  env.els.agents.children[0].children[0].dispatch('click');
+  await tick(5);
+  release();
+  await tick(20);
+  assert.equal(sends(env).length, 0);
+  assert.equal(env.els.text.value, 'for boss only');
+  // Turned off while transcribing: nothing is sent.
+  env = await loadChat(hubWith({ agents: bothAgents(), transcribe: slow }), { media: {}, local: { [AUTO_SEND]: '1' } });
+  await dictate(env);
+  env.els.autosend.checked = false;
+  env.els.autosend.dispatch('change');
+  release();
+  await tick(20);
+  assert.equal(sends(env).length, 0);
+  assert.equal(env.els.text.value, 'for boss only');
+});
+
+// replyArrives: the hub's newest page now holds more messages, and a poll
+// reads it.
+async function replyArrives(env, hub, list) {
+  hub.parts.history = () => ({ status: 200, body: { messages: list } });
+  await env.poll();
+}
+
+test('auto read-aloud: only new replies, after the first tap, one after another', async () => {
+  const hub = hubWith({ agents: bothAgents(), history: () => ({ status: 200, body: { messages: [msg(1)] } }) });
+  const env = await loadChat(hub, { speech: { voices: [LOCAL] }, local: { [AUTO_READ]: '1' } });
+  assert.equal(env.speech.spoken.length, 0, 'the history loaded on open is not read');
+  await replyArrives(env, hub, [msg(2), msg(1)]);
+  assert.equal(env.speech.spoken.length, 0, 'no tap yet: nothing may play');
+  assert.equal(env.els.readhint.hidden, false, 'the page says a tap is needed');
+  env.document.dispatch('click');
+  await tick(5);
+  assert.equal(env.els.readhint.hidden, true);
+  assert.deepEqual(env.speech.spoken.map((u) => u.text), ['', 'msg 2'], 'the tap wakes the device voice, then the waiting reply plays');
+  await replyArrives(env, hub, [msg(5), msg(4, { senderId: 'u1' }), msg(3), msg(2), msg(1)]);
+  assert.deepEqual(env.speech.spoken.map((u) => u.text), ['', 'msg 2'], 'queued behind the one playing; the login\'s own message is never read');
+  env.endSpeech();
+  await tick(5);
+  assert.deepEqual(env.speech.spoken.map((u) => u.text).slice(2), ['msg 3']);
+  env.endSpeech();
+  await tick(5);
+  assert.deepEqual(env.speech.spoken.map((u) => u.text).slice(2), ['msg 3', 'msg 5']);
+  env.endSpeech();
+  await tick(5);
+  assert.equal(env.speech.spoken.length, 4);
+  // The hint shows once a visit.
+  await replyArrives(env, hub, [msg(6), msg(5), msg(4, { senderId: 'u1' }), msg(3), msg(2), msg(1)]);
+  assert.equal(env.els.readhint.hidden, true);
+});
+
+test('auto read-aloud: never history paged back, a restart, another chat, or with the option off', async () => {
+  const hub = hubWith({ agents: bothAgents(), history: (path) => (path.includes('cursor=C1')
+    ? { status: 200, body: { messages: [msg(2), msg(1)] } } : { status: 200, body: { messages: [msg(10)], nextCursor: 'C1' } }) });
+  let env = await loadChat(hub, { speech: { voices: [LOCAL] }, local: { [AUTO_READ]: '1' } });
+  env.document.dispatch('click');
+  env.els.older.dispatch('click');
+  await tick(10);
+  assert.equal(env.rows().length, 3);
+  assert.deepEqual(env.speech.spoken.map((u) => u.text), [''], 'older messages are not read');
+  // A full page with nothing held is a restart: none of it is read.
+  await replyArrives(env, hub, page(200));
+  assert.deepEqual(env.speech.spoken.map((u) => u.text), ['']);
+  // The option off: a new reply waits for a tap on its speaker.
+  env = await loadChat(hub, { speech: { voices: [LOCAL] } });
+  env.document.dispatch('click');
+  await replyArrives(env, hub, [msg(11), msg(10)]);
+  assert.equal(env.speech.spoken.length, 0);
+  // Another chat: w1's reply is not boss's, and changing chat drops the queue.
+  const h2 = hubWith({ agents: bothAgents(), history: () => ({ status: 200, body: { messages: [msg(1)] } }) });
+  env = await loadChat(h2, { speech: { voices: [LOCAL] }, local: { [AUTO_READ]: '1' } });
+  await replyArrives(env, h2, [msg(3), msg(2), msg(1)]);
+  env.els.agents.children[1].children[0].dispatch('click');
+  await tick(5);
+  env.document.dispatch('click');
+  await tick(5);
+  assert.deepEqual(env.speech.spoken.map((u) => u.text), [''], 'the replies queued for boss went with its chat');
+});
+
+test('auto read-aloud: a mic tap or a speaker tap stops it and empties the queue', async () => {
+  const hub = hubWith({ agents: bothAgents(), history: () => ({ status: 200, body: { messages: [msg(1)] } }) });
+  let env = await loadChat(hub, { media: {}, speech: { voices: [LOCAL] }, local: { [AUTO_READ]: '1' } });
+  env.document.dispatch('click');
+  await replyArrives(env, hub, [msg(3), msg(2), msg(1)]);
+  assert.deepEqual(env.speech.spoken.map((u) => u.text), ['', 'msg 2']);
+  env.els.mic.dispatch('click');
+  await tick(5);
+  assert.equal(env.speech.cancels, 1, 'reading stops as recording starts');
+  env.endSpeech();
+  await tick(5);
+  assert.equal(env.speech.spoken.length, 2, 'msg 3 is not read');
+  // A reply that arrives while recording is not read either.
+  await replyArrives(env, hub, [msg(4), msg(3), msg(2), msg(1)]);
+  assert.equal(env.speech.spoken.length, 2);
+  env.els.mic.dispatch('click');
+  await tick(20);
+  // A speaker tap: that message plays, the rest of the queue goes.
+  hub.parts.history = () => ({ status: 200, body: { messages: [msg(1)] } });
+  env = await loadChat(hub, { speech: { voices: [LOCAL] }, local: { [AUTO_READ]: '1' } });
+  env.document.dispatch('click');
+  await replyArrives(env, hub, [msg(3), msg(2), msg(1)]);
+  speaker(env, 0).dispatch('click');
+  assert.deepEqual(env.speech.spoken.map((u) => u.text), ['', 'msg 2', 'msg 1']);
+  env.endSpeech();
+  await tick(5);
+  assert.equal(env.speech.spoken.length, 3, 'msg 3 was dropped from the queue');
+  // Turning the option off stops it too.
+  await replyArrives(env, hub, [msg(5), msg(4), msg(3), msg(2), msg(1)]);
+  assert.equal(env.speech.spoken.length, 4);
+  env.els.autoread.checked = false;
+  env.els.autoread.dispatch('change');
+  assert.equal(env.speech.cancels >= 1, true);
+  env.endSpeech();
+  await tick(5);
+  assert.equal(env.speech.spoken.length, 4);
+});
+
+test('auto read-aloud, server voice: the first tap resumes Web Audio, and a reply plays through lever\'s voice', async () => {
+  const hub = hubWith({ agents: () => roster([BOSS(), A('w1')], { readAloud: true, speech: SPEECH }), history: () => ({ status: 200, body: { messages: [msg(1)] } }) });
+  const env = await loadChat(hub, { audio: {}, local: { [AUTO_READ]: '1' } });
+  assert.equal(env.audio.resumes, 0);
+  env.document.dispatch('keydown', { key: 'a' });
+  assert.equal(env.audio.resumes, 1, 'the context is resumed within the gesture');
+  await replyArrives(env, hub, [msg(2, { msg: 'Done.' }), msg(1)]);
+  await tick(10);
+  assert.deepEqual(speaks(env).map((c) => c.body), [{ agent: 'boss', id: 'm002', text: 'Done.', voice: 'bf_emma' }]);
+  assert.deepEqual(env.audio.played, ['audio:Done.']);
+  // Hidden: the playing reply stops and nothing more is queued.
+  await env.hide();
+  assert.equal(env.audio.stopped, 1);
+});
+
+test('auto read-aloud: nothing plays while the microphone is asked for, records or transcribes', async () => {
+  const hub = hubWith({ agents: bothAgents(), history: () => ({ status: 200, body: { messages: [msg(1)] } }) });
+  const env = await loadChat(hub, { media: {}, speech: { voices: [LOCAL] }, local: { [AUTO_READ]: '1', [AUTO_SEND]: '1' } });
+  env.document.dispatch('click');
+  await tick(5);
+  const ask = globalThis.navigator.mediaDevices.getUserMedia;
+  let allow;
+  globalThis.navigator.mediaDevices.getUserMedia = (c) => new Promise((r) => { allow = () => r(ask(c)); });
+  env.els.mic.dispatch('click');
+  await tick(2);
+  await replyArrives(env, hub, [msg(3, { msg: 'say: delete everything' }), msg(2, { msg: 'first' }), msg(1)]);
+  assert.deepEqual(env.speech.spoken.map((u) => u.text), [''], 'not while the permission prompt is up');
+  allow();
+  await tick(5);
+  assert.match(env.els.mic.className, /recording/);
+  env.endSpeech();
+  await tick(5);
+  assert.deepEqual(env.speech.spoken.map((u) => u.text), [''], 'not while recording');
+});
+
+test('auto read-aloud: a tap that opens the chat from the list allows playing; at most three replies wait', async () => {
+  const hub = hubWith({ agents: bothAgents(), history: () => ({ status: 200, body: { messages: [msg(1)] } }) });
+  let env = await load(hub, { speech: { voices: [LOCAL] }, local: { [AUTO_READ]: '1' } });
+  env.document.dispatch('click');
+  env.els.agents.children[0].children[0].dispatch('click');
+  await tick(5);
+  await replyArrives(env, hub, [msg(2), msg(1)]);
+  assert.equal(env.els.readhint.hidden, true);
+  assert.deepEqual(env.speech.spoken.map((u) => u.text), ['', 'msg 2']);
+  hub.parts.history = () => ({ status: 200, body: { messages: [msg(1)] } });
+  env = await loadChat(hub, { speech: { voices: [LOCAL] }, local: { [AUTO_READ]: '1' } });
+  await replyArrives(env, hub, [msg(6), msg(5), msg(4), msg(3), msg(2), msg(1)]);
+  env.document.dispatch('click');
+  await tick(5);
+  for (let i = 0; i < 5; i++) {
+    env.endSpeech();
+    await tick(2);
+  }
+  assert.deepEqual(env.speech.spoken.map((u) => u.text), ['', 'msg 4', 'msg 5', 'msg 6'], 'the newest three');
+});
+
+test('auto-send: after a send with no clear answer, or with the chat unable to take a message, the dictation waits', async () => {
+  let n = 0;
+  const hub = hubWith({ agents: bothAgents(), post: (body) => (++n === 1 ? { down: true } : { status: 201, body: { id: `s${n}`, content: body.content, senderId: 'u1', createdAt: new Date().toISOString() } }) });
+  let env = await loadChat(hub, { media: {}, local: { [AUTO_SEND]: '1' } });
+  await type(env, 'transfer the money');
+  env.els.composer.dispatch('submit');
+  await tick(20);
+  await dictate(env);
+  assert.equal(sends(env).length, 1, 'only the first, unclear attempt');
+  assert.equal(env.els.text.value, 'transfer the money hello from the mic');
+  assert.match(env.els.error.textContent, /may not have arrived/);
+  // The list reads the agent as not taking messages by the time the clip is back.
+  let release;
+  const h2 = hubWith({ agents: bothAgents(), transcribe: () => new Promise((r) => { release = () => r({ status: 200, body: { text: 'hi' } }); }) });
+  env = await loadChat(h2, { media: {}, local: { [AUTO_SEND]: '1' } });
+  await dictate(env);
+  h2.parts.agents = bothAgents([BOSS({ state: 'error' }), A('w1')]);
+  await env.poll();
+  release();
+  await tick(20);
+  assert.equal(sends(env).length, 0);
+  assert.equal(env.els.text.value, 'hi');
 });

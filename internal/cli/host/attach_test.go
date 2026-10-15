@@ -5,11 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"testing"
 
-	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/cli/clitest"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/jail"
@@ -147,8 +145,8 @@ func stubDetachOthers(t *testing.T, n int, err error) *[]string {
 	return &refs
 }
 
-// noAttachBinary empties PATH, so execAttach and runAttach return before they
-// exec.
+// noAttachBinary empties PATH, so runAttach returns before it starts the
+// attach.
 func noAttachBinary(t *testing.T) {
 	t.Helper()
 	t.Setenv("PATH", t.TempDir())
@@ -187,32 +185,25 @@ func TestDetachBeforeAttach(t *testing.T) {
 	}
 }
 
-// Both attach paths (execAttach for `lever attach` and `lever up` off a
-// terminal, runAttach for `lever up` on one) detach other terminals only
-// when asked, and before they attach.
-func TestAttachPathsDetachOnlyWhenAsked(t *testing.T) {
-	paths := map[string]func(context.Context, io.Writer, backend.Backend, *scion.Client, string, string, bool) error{
-		"execAttach": execAttach,
-		"runAttach":  runAttach,
-	}
-	for name, attach := range paths {
-		for _, detachOthers := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/detach-others=%t", name, detachOthers), func(t *testing.T) {
-				noAttachBinary(t)
-				refs := stubDetachOthers(t, 1, nil)
-				sb := &stubBackend{runner: proc.NewFakeRunner()}
-				sc := scion.New(proc.NewFakeRunner(), scion.Options{HubEndpoint: scion.DefaultHubEndpoint})
-				var out bytes.Buffer
-				err := attach(context.Background(), &out, sb, sc, "assistant", "/lever", detachOthers)
-				testutil.WantErrContaining(t, err, "stub-attach")
-				if got := len(*refs) == 1 && (*refs)[0] == "lever--assistant"; got != detachOthers || len(*refs) > 1 {
-					t.Fatalf("detach refs = %q with --detach-others=%t", *refs, detachOthers)
-				}
-				if said := strings.Contains(out.String(), "detached 1 other terminal"); said != detachOthers {
-					t.Errorf("output %q with --detach-others=%t", out.String(), detachOthers)
-				}
-			})
-		}
+// The attach (`lever attach`, and `lever up` on a terminal or off one)
+// detaches other terminals only when asked, and before it attaches.
+func TestAttachDetachesOnlyWhenAsked(t *testing.T) {
+	for _, detachOthers := range []bool{false, true} {
+		t.Run(fmt.Sprintf("detach-others=%t", detachOthers), func(t *testing.T) {
+			noAttachBinary(t)
+			refs := stubDetachOthers(t, 1, nil)
+			sb := &stubBackend{runner: proc.NewFakeRunner()}
+			sc := scion.New(proc.NewFakeRunner(), scion.Options{HubEndpoint: scion.DefaultHubEndpoint})
+			var out bytes.Buffer
+			err := runAttach(context.Background(), &out, sb, sc, "assistant", "/lever", detachOthers)
+			testutil.WantErrContaining(t, err, "stub-attach")
+			if got := len(*refs) == 1 && (*refs)[0] == "lever--assistant"; got != detachOthers || len(*refs) > 1 {
+				t.Fatalf("detach refs = %q with --detach-others=%t", *refs, detachOthers)
+			}
+			if said := strings.Contains(out.String(), "detached 1 other terminal"); said != detachOthers {
+				t.Errorf("output %q with --detach-others=%t", out.String(), detachOthers)
+			}
+		})
 	}
 }
 

@@ -854,10 +854,10 @@ The proxy builds the list for each login on the server, from `lever.yaml`; the p
 is given and nothing else.
 
 - **An operator** sees the manager and every configured worker, and may message all of them.
-  The page also has two links: **Terminal** (per agent) opens the hub web UI's terminal for that
+  The page also has two links: **Terminal** (per agent, the `>_` icon) opens the hub web UI's terminal for that
   agent, for the times you need Claude Code itself; **Console** opens the hub's full web UI,
   which stays at its own paths (`/agents`, `/chat`, ...). Only `/` leads to the chat page. The
-  manager's chat has a **New conversation** button
+  manager's chat has a **New conversation** button (the speech bubble with a plus)
   ([below](#a-new-conversation-for-the-manager)).
 - **A [contact](#contacts-chat-only-logins)** sees the agents of its entry: those in `agents:` it
   may message, those in `see:` it may only see (name, label and state, greyed as "view only";
@@ -1233,7 +1233,7 @@ encoded slash, which the proxy refuses on every path (`400`, audit `deny-path`).
 - **What it shows.** Each contact in `allowed_users`, the agents it may message (its `agents:`
   list; a `see:` agent has no conversation), and, per agent, the whole direct conversation
   between them: read-only (no composer, no read marker, no event stream), newest at the bottom,
-  read again every 30 seconds while it is open and with **Refresh**. "Load earlier messages"
+  read again every 30 seconds while it is open and with **Refresh** (the circular arrow). "Load earlier messages"
   pages back. With `agent_messages` on, every agent message the contact is not shown (see
   [Messages agents start](#messages-agents-start)) is marked "not shown to the contact", so you
   can spot an agent that writes to a contact outside the rules. An agent message that a record
@@ -1397,7 +1397,7 @@ covers it.
 - **What a login does.** In a chat with an agent it may message (never a `see:` agent), the
   paperclip uploads one file at a time, with progress. After the upload, the page sends the chat
   message "📎 uploaded <name>" through the normal send path, so the agent verifies it as that
-  login's message. The **Files** button lists the login's own uploads to that agent and the files
+  login's message. The **Files** button (the folder icon) lists the login's own uploads to that agent and the files
   the agent shared with it, with a download link for each. An operator also sees each contact's
   files in the [operator's view](#the-operators-view-of-contact-conversations), read-only, and may
   download them.
@@ -1502,9 +1502,10 @@ covers it.
 
 With `landing: chat` and `remote.voice` on, the chat page has a mic beside the message box. A
 login taps it, speaks, and taps again; the clip is transcribed on your host by a Whisper model,
-and the text lands in the message box at the cursor. **It is never sent by itself**: the login
-reads it, corrects what Whisper got wrong, and presses Send. What is sent is an ordinary typed
-message, with the usual chat ledger and provenance.
+and the text lands in the message box at the cursor. **By default it is never sent by itself**:
+the login reads it, corrects what Whisper got wrong, and presses Send. A login may turn on
+[auto-send](#the-settings-panel) on its own device instead. Either way, what is sent is an
+ordinary typed message, with the usual chat ledger and provenance.
 
 The transcription runs in the first-party broker tool [`lever-tool-whisper`](/whisper-tool/),
 which runs whisper.cpp's `whisper-server` as its child. The proxy hands each clip to the tool over
@@ -1516,6 +1517,41 @@ browser's own on-device speech synthesis (`read_aloud: device`, the default), or
 neural voice on your host ([server voices](#server-voices), `read_aloud: server`), falling back to
 the device's voice when that is down. `read_aloud: off` turns it off. With voice off, the page
 shows neither.
+
+### The settings panel
+
+The sliders icon in the chat header opens a small panel of settings for this device. It shows
+only what applies to the open chat: the **read-aloud voice** (when there are two or more voices to
+choose from), and two options, each a checkbox that starts off.
+
+- **Send dictation at once.** When the transcription comes back, its text is added after
+  whatever is already typed in the box (with a space), and the whole box is sent as if you had
+  pressed Send. An empty transcription, a refusal or an error sends nothing and shows the usual
+  note. The mic shows a small blue dot while this is on. Only text from your own recording on
+  this page is ever sent, and only to the chat that was open when you started recording: if you
+  open another chat (or leave and reopen the same one) while the clip is transcribed, nothing is
+  sent and the text waits in the first chat's draft. It also waits in the box, unsent, when the
+  message before it had no clear answer (sending both together could store that one twice) or
+  the chat cannot take a message just then. Shown only when the login has dictation and
+  the browser can record.
+- **Read new replies aloud.** Each new agent reply that arrives while the chat is open and the
+  page is shown is read with the usual read-aloud (the same voice choice, server or device),
+  one after another. History loaded when the chat opens, or with "Load earlier messages", is
+  never read, nor is a reply that arrives while the microphone is asked for, records or
+  transcribes, or while the page is hidden. At most three replies wait, the newest; an agent
+  that writes faster than they are read loses the older ones, and server voices stay within the
+  login's usual read-aloud limits.
+  Browsers play sound only after a tap: the first tap anywhere on the page (or turning the option
+  on) allows it for the visit, and a reply that arrives before that shows "Tap anywhere on the
+  page to let new replies be read aloud" once, then plays after the tap. A tap on any speaker
+  button, or starting a recording, stops it and drops the replies waiting (a reply that arrives
+  after that is read again). A locked phone or a
+  background tab may not play. Shown only when read-aloud is on for the login.
+
+The options are kept in the browser's local storage, per login, so on a shared device one login's
+choice never applies to another. With storage blocked (some private windows), a choice lasts until
+the page is reloaded. They change nothing on the server: a contact may use them as well as an
+operator, and what each login may send, and to whom, is checked by the proxy as for any message.
 
 ```yaml
 remote:
@@ -1736,7 +1772,8 @@ to your own host, never to a cloud speech service.
   each answer with Web Audio, so it plays on iPhone Safari too, even with the ring switch on silent
   (Safari 16.4 and later). If the first part cannot be had (the tool is down, busy or over a limit),
   the device's on-device voice reads the whole message instead; a later failure stops with a note.
-  A tap stops it, and so does hiding or leaving the page. The voice picker lists the server voices;
+  A tap stops it, and so does hiding or leaving the page. The voice picker (in the
+  [settings panel](#the-settings-panel), the sliders icon in the header) lists the server voices;
   the choice is kept per device, apart from the device-voice choice.
 - **The route.** Only for a verified login with read-aloud (`voice: false` turns it off), with
   `X-Lever-Voice: 1` from the page's own origin, a JSON body `{agent, id, text, voice}` of at most

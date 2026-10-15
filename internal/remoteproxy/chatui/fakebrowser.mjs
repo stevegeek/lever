@@ -34,7 +34,12 @@ class FakeNode {
   setAttribute(k, v) {
     this.attrs[k] = v;
   }
-  focus() {}
+  focus() {
+    FakeNode.focused = this;
+  }
+  contains(n) {
+    return n === this || this.children.some((c) => c.contains(n));
+  }
   setSelectionRange(a, b) {
     this.selectionStart = a;
     this.selectionEnd = b;
@@ -57,7 +62,7 @@ export async function load(hub, opts = {}) {
   doc.title = '';
   doc.body = new FakeNode('body');
   // The state chat.html starts in.
-  for (const id of ['older', 'error', 'terminal', 'console', 'composer', 'ask', 'viewonly', 'listnote', 'note', 'label', 'contacts', 'contacts-title', 'refresh', 'readonly', 'push', 'pushnote', 'attach', 'files', 'filespanel', 'filesnote', 'upload', 'newconv']) doc.getElementById(id).hidden = true;
+  for (const id of ['older', 'error', 'terminal', 'console', 'composer', 'ask', 'viewonly', 'listnote', 'note', 'label', 'contacts', 'contacts-title', 'refresh', 'readonly', 'push', 'pushnote', 'attach', 'files', 'filespanel', 'filesnote', 'upload', 'newconv', 'readvoicerow', 'settings', 'settingspanel', 'autosendrow', 'autoreadrow', 'readhint']) doc.getElementById(id).hidden = true;
   // fieldsEnabled: what a browser that restores form state over a reload leaves.
   for (const id of ['text', 'send']) doc.getElementById(id).disabled = !opts.fieldsEnabled;
   globalThis.document = doc;
@@ -279,7 +284,14 @@ export async function load(hub, opts = {}) {
     await tick(5);
   };
   env.local = { ...opts.local };
-  globalThis.localStorage = { getItem: (k) => env.local[k] ?? null, setItem: (k, v) => (env.local[k] = String(v)), removeItem: (k) => delete env.local[k] };
+  // opts.localThrows: storage off, as in a private window that refuses it.
+  const local = (f) => (...a) => {
+    if (opts.localThrows) throw new Error('SecurityError');
+    return f(...a);
+  };
+  globalThis.localStorage = { getItem: local((k) => env.local[k] ?? null), setItem: local((k, v) => (env.local[k] = String(v))), removeItem: local((k) => delete env.local[k]) };
+  FakeNode.focused = null;
+  env.focused = () => FakeNode.focused;
   globalThis.sessionStorage = { getItem: (k) => env.store[k] ?? null, setItem: (k, v) => (env.store[k] = String(v)), removeItem: (k) => delete env.store[k] };
   globalThis.EventSource = class {
     static CLOSED = 2;

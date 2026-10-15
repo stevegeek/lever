@@ -1132,6 +1132,11 @@ func (w *applyWiring) ensureHubIdentity(ctx context.Context) error {
 			if err := w.sc.ServerStop(ctx); err != nil {
 				return err
 			}
+			// Again here: agents can rewrite settings.yaml since the
+			// scion-server step converged it, and the hub reads it at start.
+			if _, err := w.ensureHubAuth(ctx); err != nil {
+				return err
+			}
 			opts := apply.HubServerOpts(w.app, w.deps.HubSessionSecret, w.deps.HubAuthEnv)
 			opts.Progress = w.deps.Log
 			if err := w.sc.ServerStart(ctx, opts); err != nil {

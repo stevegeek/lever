@@ -105,7 +105,7 @@ func TestSSHClientArgvKeepsTheOperatorsMachineOut(t *testing.T) {
 	}
 	joined := strings.Join(argv, "\x00")
 	for _, want := range []string{"-F\x00none", "ForwardAgent=no", "ForwardX11=no", "ClearAllForwardings=yes", "PermitLocalCommand=no",
-		"StrictHostKeyChecking=yes", "UpdateHostKeys=no", "GlobalKnownHostsFile=/dev/null", "HostKeyAlias=lever.inst.w1",
+		"StrictHostKeyChecking=yes", "UpdateHostKeys=no", "SendEnv=-*", "IdentityAgent=none", "PasswordAuthentication=no", "GlobalKnownHostsFile=/dev/null", "HostKeyAlias=lever.inst.w1",
 		"UserKnownHostsFile=\"" + st.SSHKnownHosts() + "\"", "ControlPath=none", "BatchMode=yes",
 		"ProxyCommand='/usr/local/bin/lever' ssh --proxy --config '" + cfg + "' -- w1"} {
 		if !strings.Contains(joined, want) {
@@ -127,11 +127,11 @@ func TestSSHConfigOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := b.String()
-	if !strings.HasPrefix(out, "# lever ssh: put these blocks above any `Host *` block") {
+	if !strings.HasPrefix(out, "# lever ssh: put these blocks above any `Host *` block") || !strings.Contains(out, "Host * !lever.*") {
 		t.Errorf("output does not say where the blocks go:\n%s", out)
 	}
 	for _, want := range []string{"Host lever.inst.inst\n", "Host lever.inst.w1\n", "  ForwardAgent no\n", "  ForwardX11 no\n",
-		"  StrictHostKeyChecking yes\n", "  UserKnownHostsFile \"" + st.SSHKnownHosts() + "\"\n",
+		"  StrictHostKeyChecking yes\n", "  SendEnv -*\n", "  IdentityAgent none\n", "  PubkeyAuthentication no\n", "  KbdInteractiveAuthentication no\n", "  UserKnownHostsFile \"" + st.SSHKnownHosts() + "\"\n",
 		"  ProxyCommand '/usr/local/bin/lever' ssh --proxy --config '" + cfg + "' -- w1\n",
 		`#   "remote.SSH.localServerDownload": "always",`, `#   "remote.autoForwardPorts": false,`,
 		`#   "remote.SSH.enableAgentForwarding": false,`} {
@@ -268,5 +268,21 @@ func TestImagePolicyScriptShape(t *testing.T) {
 		if !strings.Contains(imagePolicyScript, want) {
 			t.Errorf("script lacks %q", want)
 		}
+	}
+}
+
+// A probe that did not answer keeps the policy env of a hub lever started
+// with it.
+func TestSSHGateKeepsThePolicyWhenTheProbeFails(t *testing.T) {
+	app, _, _ := sshTestApp(t)
+	app.SSH.Enabled = false
+	live := conduit.LiveHub{Running: true, Env: apply.HubEnv("i", "fp", app, true)}
+	g := newSSHGate(context.Background(), app, fakeConduitScion{err: conduit.ErrProbe, hub: live}, &imageRunner{})
+	if !g.controls || g.on {
+		t.Fatalf("gate = %+v", g)
+	}
+	g = newSSHGate(context.Background(), app, fakeConduitScion{err: conduit.ErrProbe, hub: conduit.LiveHub{Running: true}}, &imageRunner{})
+	if g.controls {
+		t.Fatalf("a hub without the policy env: %+v", g)
 	}
 }

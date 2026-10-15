@@ -144,8 +144,12 @@ func sshHostAlias(app *config.App, slug string) string {
 // sshClientOptions are the options every `lever ssh` connection runs with,
 // interactive or from `lever ssh-config`: the host key pinned under the
 // alias in lever's own file, and nothing the agent's end could use against
-// the operator's machine (agent and X11 forwarding, remote forwards, local
-// commands, a shared control socket).
+// the operator's machine (agent and X11 forwarding, local commands, a shared
+// control socket, the operator's environment, keys or a password prompt: the
+// agent's SSH server asks for no authentication, and a server that does is
+// not lever's). Options ssh adds up across blocks (RemoteForward,
+// LocalForward, SendEnv, IdentityFile) can still come from a later Host *
+// block; the interactive client reads no config file for that reason.
 func sshClientOptions(alias, knownHosts, proxyCommand string) [][2]string {
 	return [][2]string{
 		{"ProxyCommand", proxyCommand},
@@ -161,6 +165,14 @@ func sshClientOptions(alias, knownHosts, proxyCommand string) [][2]string {
 		{"PermitLocalCommand", "no"},
 		{"ControlMaster", "no"},
 		{"ControlPath", "none"},
+		{"SendEnv", "-*"},
+		{"IdentitiesOnly", "yes"},
+		{"IdentityAgent", "none"},
+		{"PubkeyAuthentication", "no"},
+		{"PasswordAuthentication", "no"},
+		{"KbdInteractiveAuthentication", "no"},
+		{"GSSAPIAuthentication", "no"},
+		{"HostbasedAuthentication", "no"},
 	}
 }
 

@@ -3,12 +3,16 @@ package conduit
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/proc"
 )
@@ -170,5 +174,53 @@ func TestTunnelSSHArgv(t *testing.T) {
 	want := []string{"env", "SCION_HUB_ENDPOINT=http://127.0.0.1:8080", "scion", "tunnel", "--stdio", "--ssh", "--project", "p-1", "w1"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("argv = %q", got)
+	}
+}
+
+// A decoy hub (an agent's process named like scion's daemon, its pid written
+// into the agent-writable pid file) reads as no hub.
+func TestLiveHubScriptRefusesADecoy(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".scion"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", "-c", "sleep 30; :", "scion", "server")
+	cmd.Env = append(os.Environ(), EnvPrefix+"DENYPORTS=8462")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	for i := 0; ; i++ {
+		b, _ := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", cmd.Process.Pid))
+		if strings.Contains(string(b), "server") {
+			break
+		}
+		if i > 200 {
+			t.Fatal("the decoy did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	pidFile := filepath.Join(home, ".scion", "server.pid")
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(cmd.Process.Pid)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run := func(exe string) string {
+		c := exec.Command("sh", "-c", liveHubScript, "_", ".scion/server.pid", exe)
+		c.Env = append(os.Environ(), "HOME="+home)
+		out, err := c.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(out)
+	}
+	if out := run(ScionPath); out != "" {
+		t.Fatalf("a process that is not %s read as the hub: %q", ScionPath, out)
+	}
+	exe, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", cmd.Process.Pid))
+	if err != nil {
+		t.Fatalf("reading the decoy's exe: %v", err)
+	}
+	if out := run(exe); !strings.Contains(out, EnvPrefix+"DENYPORTS=8462") {
+		t.Fatalf("the probe does not read a matching process: %q", out)
 	}
 }

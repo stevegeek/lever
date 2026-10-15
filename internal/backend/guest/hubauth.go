@@ -208,6 +208,9 @@ func hubAuthSettingsConverged(existing []byte, spec types.HubAuth, hasServerYAML
 	// the file; the rest of the block (an internal relay listener, longer
 	// stream lifetimes, more allowed ports) is the relay's attack surface,
 	// and agents can write this file through the workstation routes.
+	if layout.MapGet(hub, "<<") != nil {
+		return nil, false, false, fmt.Errorf("guest: `server.hub` in the jail's %s uses a YAML merge key, which can hide keys lever must check; remove it", layout.SettingsRel)
+	}
 	if layout.MapGet(hub, keyConduit) != nil {
 		layout.MapDelete(hub, keyConduit)
 		restart, changed = true, true

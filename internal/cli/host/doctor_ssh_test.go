@@ -76,8 +76,11 @@ func TestCheckSSH(t *testing.T) {
 		t.Fatalf("ssh off adds a row: %+v", r)
 	}
 	app.SSH.Enabled = true
-	if r := checkSSH(ctx, app, st, d(fakeConduitScion{controls: false}, served, false)); !r.ok || r.fix == "" || !strings.Contains(r.detail, "conduit controls") {
+	if r := checkSSH(ctx, app, st, d(fakeConduitScion{controls: false}, newFakeExperimentsHub(), false)); !r.ok || r.fix == "" || !strings.Contains(r.detail, "conduit controls") {
 		t.Fatalf("no controls: %+v", r)
+	}
+	if r := checkSSH(ctx, app, st, d(fakeConduitScion{controls: false}, served, false)); r.ok {
+		t.Fatalf("no controls, conduit served: %+v", r)
 	}
 	saveOn(false)
 	if r := checkSSH(ctx, app, st, d(fakeConduitScion{controls: true, hub: live}, served, false)); r.fix == "" || !strings.Contains(r.detail, "not turned conduit on") {

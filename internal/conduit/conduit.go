@@ -218,11 +218,18 @@ type LiveHub struct {
 
 // liveHubScript prints the server's pid, then only its EnvPrefix entries,
 // filtered in the guest: the daemon's environment can hold the session secret
-// and a hub token. The cmdline test matches scion's own daemon argv.
+// and a hub token. Agents can write the pid file (scion's workstation routes
+// write under $HOME) and run processes the guest sees as the jail user, so
+// the process must also be the root-installed scion ($2) in the reader's own
+// pid and user namespaces, not a decoy in a container; anything else reads as
+// no hub.
 const liveHubScript = `f="$HOME/$1"
-[ -f "$f" ] || exit 0
+[ -f "$f" ] && [ ! -L "$f" ] || exit 0
 pid=$(tr -cd '0-9' < "$f")
 [ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ] || exit 0
+[ "$(readlink "/proc/$pid/exe")" = "$2" ] || exit 0
+[ "$(readlink "/proc/$pid/ns/pid")" = "$(readlink /proc/self/ns/pid)" ] || exit 0
+[ "$(readlink "/proc/$pid/ns/user")" = "$(readlink /proc/self/ns/user)" ] || exit 0
 case "$(tr '\000' ' ' < "/proc/$pid/cmdline")" in
 *scion*" server "*) ;;
 *) exit 0 ;;
@@ -231,10 +238,13 @@ printf '%s\n' "$pid"
 tr '\000' '\n' < "/proc/$pid/environ" | grep '^` + EnvPrefix + `' || true
 `
 
+// ScionPath is where lever installs the jail's scion, root-owned.
+const ScionPath = "/usr/local/bin/scion"
+
 // ReadLiveHub reads the running hub's conduit environment from /proc in the
 // jail.
 func ReadLiveHub(ctx context.Context, r proc.Runner) (LiveHub, error) {
-	res, err := r.Run(ctx, nil, "sh", "-c", liveHubScript, "_", layout.ServerPIDRel)
+	res, err := r.Run(ctx, nil, "sh", "-c", liveHubScript, "_", layout.ServerPIDRel, ScionPath)
 	if err != nil {
 		return LiveHub{}, fmt.Errorf("reading the running hub's conduit settings: %w", err)
 	}

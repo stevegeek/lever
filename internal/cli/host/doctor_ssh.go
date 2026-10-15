@@ -44,6 +44,10 @@ func checkSSH(ctx context.Context, app *config.App, st state.State, d sshDoctor)
 	case err != nil:
 		return checkResult{name, false, firstLine(err.Error()) + "; conduit stays off", "is the machine up? `lever apply`"}
 	case !controls:
+		if served, err := d.hc.RouteServed(ctx, conduitProbeRoute()); err == nil && served {
+			return checkResult{name, false, "the hub serves conduit, but the jail's scion has no conduit controls to restrict it",
+				"run `lever apply`: it pins conduit off and restarts the hub"}
+		}
 		return warnResult(name, errNoConduitControls.Error(), "pin a scion that has them (scion.version), then `lever apply`; until then `lever ssh` refuses")
 	}
 	rec, _, err := st.LoadHubExperimentsRecord()

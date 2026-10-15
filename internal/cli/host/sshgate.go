@@ -69,6 +69,14 @@ func newSSHGate(ctx context.Context, app *config.App, sc conduitScion, jr proc.R
 	g := sshGate{enabled: app.SSHEnabled(), policy: apply.ConduitPolicy(app), sc: sc}
 	controls, err := sc.ConduitControls(ctx)
 	g.controls = err == nil && controls
+	if err != nil {
+		// A probe that did not answer must not drop the policy from a hub
+		// lever started with it: conduit may still be on until the
+		// experiments pin turns it off later in this apply.
+		if live, lerr := sc.LiveHub(ctx); lerr == nil && len(live.Env) > 0 {
+			g.controls = true
+		}
+	}
 	if !g.enabled {
 		return g
 	}

@@ -72,9 +72,14 @@ func writeSSHConfig(w io.Writer, app *config.App, st state.State, exe, configPat
 		return err
 	}
 	var b strings.Builder
-	// ssh takes the first value it reads for each option, so a Host * block
-	// above these (ForwardAgent yes, say) would win over them.
-	b.WriteString("# lever ssh: put these blocks above any `Host *` block in ~/.ssh/config\n\n")
+	// ssh takes the first value it reads for most options, so a Host * block
+	// above these (ForwardAgent yes, say) would win over them; and it adds up
+	// RemoteForward, LocalForward, SendEnv and IdentityFile from every block,
+	// so a Host * block below must exclude these hosts.
+	b.WriteString("# lever ssh: put these blocks above any `Host *` block in ~/.ssh/config, and exclude\n" +
+		"# lever.* from every Host * block (Host * !lever.*): ssh adds RemoteForward, LocalForward,\n" +
+		"# SendEnv and IdentityFile from every block that matches, and a forward hands the agent a\n" +
+		"# way into your machine.\n\n")
 	for _, name := range names {
 		slug, err := sshAgentName(app, name)
 		if err != nil {

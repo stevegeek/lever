@@ -100,9 +100,12 @@ comments, the VS Code settings these hosts need:
 The jail's egress keeps the agent from downloading VS Code's server, so VS Code downloads it on
 your machine and copies it over (`localServerDownload`). The rest keep VS Code from opening
 forwards between the agent and your machine on its own. Put the blocks at the **top** of
-`~/.ssh/config`, above any `Host *` block: ssh takes the first value it reads for each option, so
-a `Host *` block above them (with `ForwardAgent yes`, say) would win over lever's. Then open the
-host with *Remote-SSH: Connect to Host*.
+`~/.ssh/config`, above any `Host *` block, and exclude lever's hosts from every `Host *` block
+(`Host * !lever.*`). ssh takes the first value it reads for most options, so a `Host *` block
+above lever's (with `ForwardAgent yes`, say) would win over them; and it adds up `RemoteForward`,
+`LocalForward`, `SendEnv` and `IdentityFile` from every block that matches, so a `RemoteForward`
+in a `Host *` block below would hand the agent's end a way into your machine. Then open the host
+with *Remote-SSH: Connect to Host*.
 
 ## What it exposes, and what it does not
 
@@ -117,9 +120,12 @@ host with *Remote-SSH: Connect to Host*.
   so nothing on your machine ends up holding the agent's capabilities. They are not a boundary
   against what you run in the shell.
 - **The agent controls its end.** Treat the session like `lever attach`: a hostile agent can
-  show you anything, and it chose the host key the hub reports. lever's client options turn off
-  agent forwarding, X11, remote forwards, local commands and connection sharing, so its end has
-  no path back into your machine through SSH. VS Code is different: its remote server runs in the
+  show you anything, and it chose the host key the hub reports (it can even serve the session
+  itself). lever's client options turn off agent and X11 forwarding, local commands, connection
+  sharing, sending your environment and every authentication but none (no key, agent or password
+  is offered); interactive `lever ssh` also reads none of your ssh config and clears every port
+  forward. With `lever ssh-config` your own `Host *` blocks still apply (see above): keep forwards
+  out of them for lever's hosts. VS Code is different: its remote server runs in the
   agent, and VS Code trusts it (extensions run there, and it can ask the client to forward ports
   or open links). Open a hostile agent's workspace in VS Code only as you would open an untrusted
   repository.

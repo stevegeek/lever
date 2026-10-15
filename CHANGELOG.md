@@ -18,6 +18,20 @@ version bump moves the block under the new version heading.
   Nothing is saved when the state directory is inside the agents' tree. Doctor's new
   *last guest boot* row warns when the previous guest boot ended without a clean shutdown, and
   prints the first panic line of the newest saved set, sanitized and bounded. (lever#224)
+- **A new conversation for the manager once a day (lever#222).** `manager.daily_reset: "HH:MM"`
+  (24-hour, host local time) has the broker run `lever conversation new` at that time each day,
+  with its backup and boot prompt, while the manager is running. It never interrupts a turn: a
+  manager that is busy, not running, or under another change (the conversation lock) is tried
+  again every 10 minutes for 2 hours, then the day is skipped; a failure is not retried. The day
+  is claimed in `.lever-state/daily-reset.json` before the run, so it runs at most once a day
+  across broker restarts and clock changes; a time the clocks skip runs at the first minute after
+  the jump, a time that happens twice runs at the first, and a host asleep at the time runs it on
+  waking if still within the 2 hours. The new session counts for the contact gate as one started
+  from the terminal. `lever doctor` gains a *daily reset* row (next due, last result; a warning
+  after a failure or a skipped day); the daily runs leave no bring-up record. The manager can hold
+  a day's reset off (busy, stopped) or make it fail, never start one or change the schedule. Off
+  with the state directory inside the tree. A new hidden exit code `7` from
+  `lever conversation new --by daily` means the manager was not running.
 
 ### Fixed
 

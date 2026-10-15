@@ -5,15 +5,47 @@ on:
 permissions:
   contents: write
 jobs:
+  # scion's web UI build runs npm's install scripts, so it gets its own job
+  # with a read-only token, no persisted credentials and no shared cache: it
+  # can change only the archive it hands over, which the release job pins.
+  webui:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: go run ./internal/provision/scionbin/genrelease -web-only -assets build/web-ui
+      - uses: actions/upload-artifact@v4
+        with:
+          name: scion-web-ui
+          path: build/web-ui/
+          if-no-files-found: error
   goreleaser:
+    needs: webui
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # No Go cache: one written in this run (by the webui job's scripts)
+      # must not feed the build of lever.
       - uses: actions/setup-go@v5
         with:
           go-version: stable
+          cache: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: scion-web-ui
+          path: _web-ui
       - name: verify version constant matches tag
         run: |
           V="${GITHUB_REF_NAME#v}"

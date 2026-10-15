@@ -94,6 +94,10 @@ tool creates it again on the next push.
 1. Read `LIMA_SHA256` for the x86_64 tarball from the release `SHA256SUMS`.
 2. Pick the Playwright version: `npm view playwright version`.
 3. `cd ~/lever-dev/image && LIMA_VERSION=... LIMA_SHA256=... PLAYWRIGHT_VERSION=... ./build.sh`
+   On the slim base (`make lever-image-slim`), add
+   `LEVER_BASE=lever.local/lever-claude-slim:amd64 LEVER_DEV_TAG=lever.local/lever-dev-claude-slim:amd64`.
+   Playwright's Chromium is installed in `/opt/ms-playwright` (`PLAYWRIGHT_BROWSERS_PATH`), not under
+   the home, which scion mounts over at runtime.
 
 ## 8. Bring-up
 

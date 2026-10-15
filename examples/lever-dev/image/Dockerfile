@@ -15,16 +15,21 @@ USER root
 COPY --from=go /usr/local/go /usr/local/go
 ENV PATH=/usr/local/go/bin:/home/scion/go/bin:$PATH
 RUN apt-get update \
- && apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf make git file curl procps openssh-client ca-certificates \
+ && apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf make git file curl procps openssh-client ca-certificates gcc libc6-dev jq ripgrep less iproute2 \
  && rm -rf /var/lib/apt/lists/*
 RUN test -n "$LIMA_VERSION" && test -n "$LIMA_SHA256" \
  && curl -fsSLo /tmp/lima.tgz "https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-Linux-x86_64.tar.gz" \
  && echo "${LIMA_SHA256}  /tmp/lima.tgz" | sha256sum -c - \
  && tar -xzf /tmp/lima.tgz -C /usr/local && rm /tmp/lima.tgz
-RUN test -n "$PLAYWRIGHT_VERSION" && npx -y "playwright@${PLAYWRIGHT_VERSION}" install-deps chromium
+# Playwright's Chromium, for lever's browser tests of the chat page. It lives
+# outside the home: scion mounts the agent's home over /home/scion at runtime,
+# which would hide a browser installed under ~/.cache.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN test -n "$PLAYWRIGHT_VERSION" \
+ && npx -y "playwright@${PLAYWRIGHT_VERSION}" install --with-deps chromium \
+ && chmod -R a+rX /opt/ms-playwright
 # Lima's sockets must live on container-local disk, not the 9p tree mount.
 ENV LIMA_HOME=/home/scion/.lima
 LABEL go_version=${GO_VERSION} lima_version=${LIMA_VERSION} playwright_version=${PLAYWRIGHT_VERSION}
 RUN chown -R scion:scion /home/scion
 USER scion
-RUN npx -y "playwright@${PLAYWRIGHT_VERSION}" install chromium

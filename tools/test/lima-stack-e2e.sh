@@ -537,6 +537,8 @@ checkx "the backup is listed" '(cd "$INST" && "$LEVER" conversation list 2>&1) |
 checkx "the hub never read the manager stopped with claude running" '! grep -q "^stopped yes" "$WORK/conv-samples"'
 check "the manager runs on its new conversation" running
 checkx "the hub reads the manager running ($(mgrrec phase))" '[ "$(mgrrec phase)" = running ]'
+# The hub reads running as soon as the container starts; claude follows.
+for _ in $(seq 1 30); do claude_up && break; sleep 2; done
 check "claude runs in the manager's container" claude_up
 after=$(newest)
 echo "      | session after: ${after:-(no transcript)}"

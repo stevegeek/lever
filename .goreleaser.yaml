@@ -115,8 +115,11 @@ homebrew_casks:
     repository:
       owner: stevegeek
       name: homebrew-tap
-      token: '{{ index .Env "HOMEBREW_TAP_TOKEN" }}'
-    skip_upload: '{{ if or (not (index .Env "HOMEBREW_TAP_TOKEN")) .Prerelease }}true{{ else }}false{{ end }}'
+      # GoReleaser takes a repository token only as exactly {{ .Env.NAME }}.
+      # It reads it only when uploading, after skip_upload, so an unset
+      # secret skips the cask instead of failing on the missing variable.
+      token: '{{ .Env.HOMEBREW_TAP_TOKEN }}'
+    skip_upload: '{{ if or (not (isEnvSet "HOMEBREW_TAP_TOKEN")) .Prerelease }}true{{ else }}false{{ end }}'
     commit_msg_template: "lever {{ .Tag }}"
     homepage: https://lever.to
     description: Jailed multi-agent orchestration for Claude Code

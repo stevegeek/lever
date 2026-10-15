@@ -7,6 +7,22 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.41.1] - 2026-10-15
+
+### Fixed
+
+- **A release publishes the Homebrew cask again.** GoReleaser accepts a repository token only as
+  a bare `{{ .Env.NAME }}`, and refused the cask's templated token at the end of the 0.41.0
+  release, after every asset was up, so the tap got no cask. The token is now
+  `{{ .Env.HOMEBREW_TAP_TOKEN }}`; `skip_upload` checks `isEnvSet`, which GoReleaser applies
+  before it reads the token, so a release without the secret still skips the cask. A new test reads
+  `.goreleaser.yaml` and fails CI on a token GoReleaser would refuse, or on one whose upload is not
+  skipped when its variable is unset. (lever#75)
+
+### Upgrade
+
+- **Jail ABI 5, unchanged.** Only the release configuration changed: nothing to rebuild or apply.
+
 ## [0.41.0] - 2026-10-15
 
 ### Added

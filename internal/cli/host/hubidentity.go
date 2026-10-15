@@ -79,6 +79,9 @@ type hubIdentity struct {
 	// restartHub stops and starts the live hub and waits for its broker; only
 	// a pinned-off scion experiment found on needs it.
 	restartHub func(ctx context.Context) error
+	// ssh is the `lever ssh` decision for this apply (sshGate); the zero
+	// value keeps conduit off.
+	ssh sshGate
 	// linkBroker makes the project at a jail path list a runtime broker
 	// (ensureProjectProvider); nil skips it.
 	linkBroker func(ctx context.Context, jp string) error
@@ -208,10 +211,12 @@ func (h *hubIdentity) run(ctx context.Context) error {
 	if err := h.suspendRemovedLogins(ctx, &rec, defs); err != nil {
 		return err
 	}
-	if err := ensureHubExperimentsOff(ctx, experimentsPin{
+	conduitOn, err := ensureHubExperiments(ctx, experimentsPin{
 		admin: h.admin, st: h.st, known: h.scopeKnown(), now: h.guestNow,
-		restartHub: h.restartHub, log: h.log, warn: h.warn,
-	}); err != nil {
+		restartHub: h.restartHub, conduitOn: h.ssh.on, conduitPolicyLive: h.ssh.policyLive,
+		log: h.log, warn: h.warn,
+	})
+	if err != nil {
 		return errHubIdentity("%w", err)
 	}
 
@@ -257,7 +262,13 @@ func (h *hubIdentity) run(ctx context.Context) error {
 	}
 
 	lifecycle := h.controllerLifecycle(ctx)
-	role, err := ensureProjectRole(ctx, h.admin, defs, controllerRoleName, controllerRoleDescription, controllerRolePermissions(lifecycle), h.warn)
+	perms := controllerRolePermissions(lifecycle)
+	if conduitOn {
+		// `lever ssh` mints its tunnel token as the controller, and a token
+		// carries only what its issuer holds on the project.
+		perms = append(perms, portAccessPermission)
+	}
+	role, err := ensureProjectRole(ctx, h.admin, defs, controllerRoleName, controllerRoleDescription, perms, h.warn)
 	if err != nil {
 		return errHubIdentity("%w", err)
 	}
@@ -274,6 +285,9 @@ func (h *hubIdentity) run(ctx context.Context) error {
 
 	if err := h.mintPATs(ctx, mode, rec.ProjectID, controllerPATScopes(lifecycle, h.controllerInbox(ctx))); err != nil {
 		return err
+	}
+	if !conduitOn {
+		h.revokeSSHTokens(ctx, mode)
 	}
 
 	// The PAT cannot register a project, so the link comes after the REST
@@ -999,4 +1013,32 @@ func probeControllerAuthority(ctx context.Context, pat *hubapi.Client, sc identi
 func forbidden(err error) bool {
 	var ae *hubapi.APIError
 	return errors.As(err, &ae) && ae.Status == http.StatusForbidden
+}
+
+// revokeSSHTokens revokes, best effort, the tunnel tokens `lever ssh` minted
+// and did not revoke itself (a killed process), once conduit is off: each
+// carries agent:attach and agent:port_access, which reach agents through
+// routes other than conduit too. A failure leaves the record for the next
+// apply.
+func (h *hubIdentity) revokeSSHTokens(ctx context.Context, mode string) {
+	ids, err := h.st.SSHTokens()
+	if err != nil || len(ids) == 0 {
+		if err != nil {
+			h.warn("hub-identity: %v", err)
+		}
+		return
+	}
+	if _, err := h.assertController(ctx, mode); err != nil {
+		h.warn("hub-identity: the `lever ssh` tokens %s stay valid until they expire or the next apply revokes them: %v", strings.Join(ids, ", "), err)
+		return
+	}
+	for _, id := range ids {
+		if err := h.ctl.RevokeToken(ctx, id); err != nil && !errors.Is(err, hubapi.ErrNotFound) {
+			h.warn("hub-identity: the `lever ssh` token %s stays valid until it expires or the next apply revokes it: %v", id, err)
+			continue
+		}
+		if err := h.st.ForgetSSHToken(id); err != nil {
+			h.warn("hub-identity: %v", err)
+		}
+	}
 }

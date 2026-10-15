@@ -32,6 +32,30 @@ version bump moves the block under the new version heading.
   a day's reset off (busy, stopped) or make it fail, never start one or change the schedule. Off
   with the state directory inside the tree. A new hidden exit code `7` from
   `lever conversation new --by daily` means the manager was not running.
+- **Opt-in `lever ssh` and VS Code Remote-SSH into an agent, over scion's hub relay
+  (lever#208).** `ssh.enabled: true` in `lever.yaml` asks for it; it needs a scion whose hub has
+  the conduit controls (`server.hub.conduit.disable_ssh`, `deny_ports` and
+  `disable_ssh_socket_forwarding`) and agent images built from one. lever tells by behaviour: the
+  jail's scion must accept those settings (`scion config validate` on a scratch file) and each
+  agent image's `sciontool` must read `SCION_CONDUIT_POLICY`. The scion lever pins today has
+  neither, so on it nothing changes: apply keeps conduit pinned off and warns, `lever ssh`
+  refuses, and doctor's new *lever ssh* row says why; a scion pin bump turns it on. On a scion
+  with the controls the hub always starts with lever's conduit policy in its environment (not in
+  `settings.yaml`, which agents can rewrite): port 8462, each agent's lever gateway, and
+  `ssh.deny_ports` denied to every tunnel, port proxy and SSH forward, SSH socket forwarding off,
+  and SSH itself off unless `ssh.enabled`. With ssh on, apply turns `hub.conduit` on as
+  lever-admin only after reading the policy back from the running hub, restarts the hub, reads it
+  back again and checks conduit is served, and turns it off again (with a restart) when any of that
+  fails; the other experiments stay off. `lever ssh NAME` runs your `ssh` with none of your ssh
+  config and agent, X11 and port forwarding off; its ProxyCommand, `lever ssh --proxy`, runs `scion
+  tunnel --stdio --ssh` through the jail runner (no port forward), with a 12-hour token it mints as
+  lever's controller per connection (`agent:attach`, `agent:port_access` and two reads, the
+  instance project only) and revokes at the end, and pins the agent's host key in
+  `.lever-state/ssh/known_hosts`. `lever ssh-config` prints Host blocks for VS Code and the
+  settings it needs (`remote.SSH.localServerDownload: always`, `remote.autoForwardPorts: false`).
+  The remote proxy still refuses conduit to every web login. Every apply, ssh on or off, also drops
+  a `server.hub.conduit` block from the jail's `settings.yaml` (lever never writes one, and agents
+  can write that file) and restarts the hub when it did. See the new SSH and VS Code guide.
 
 ### Fixed
 

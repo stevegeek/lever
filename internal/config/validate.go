@@ -350,6 +350,15 @@ func (a *App) Validate() error {
 	if err := a.validateRemote(); err != nil {
 		return err
 	}
+	return a.validateSSH()
+}
+
+func (a *App) validateSSH() error {
+	for _, p := range a.SSH.DenyPorts {
+		if p < 1 || p > 65535 {
+			return fmt.Errorf("config: ssh.deny_ports: port %d is outside 1-65535", p)
+		}
+	}
 	return nil
 }
 

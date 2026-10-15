@@ -28,6 +28,7 @@ import (
 	"github.com/stevegeek/lever/internal/backend/types"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/cli"
+	"github.com/stevegeek/lever/internal/conduit"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/httpjson"
 	"github.com/stevegeek/lever/internal/hubapi"
@@ -763,6 +764,8 @@ type applyWiring struct {
 	clock            hubauth.Clock
 	signer           *hubauth.Signer
 	resetHubIdentity bool
+	// ssh is this apply's `lever ssh` decision.
+	ssh sshGate
 	// brokerHost is what agents dial the host by:
 	// the host-alias IP when the backend has one. Under closed-internet egress DNS
 	// is dropped; the IP is allowlisted and is a SAN on the broker cert.
@@ -813,6 +816,10 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 	w := &applyWiring{b: b, sc: sc, app: app, jr: jr, state: st, cmd: opts.Cmd, rep: opts.Rep, resetHubIdentity: opts.ResetHubIdentity}
 	if err := w.initHubAuth(ctx); err != nil {
 		return nil, err
+	}
+	w.ssh = newSSHGate(ctx, app, jailConduit{jr}, jr)
+	if w.ssh.why != "" {
+		w.log("lever: warning: %s", w.ssh.why)
 	}
 	aliasV4 := b.HostAliasV4()
 	w.brokerHost = cmp.Or(aliasV4, b.HostToolAlias())
@@ -963,9 +970,13 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		// unlink/init race; see the register-project case in internal/apply/run.go).
 		RemoveJailFile: w.removeJailFile,
 
-		EnsureHubIdentity:     w.ensureHubIdentity,
-		EnsureHubAuth:         w.ensureHubAuth,
-		HubAuthEnv:            apply.HubAuthEnv(w.instanceID, w.hubKey.Fingerprint()),
+		EnsureHubIdentity: w.ensureHubIdentity,
+		EnsureHubAuth:     w.ensureHubAuth,
+		HubAuthEnv:        apply.HubEnv(w.instanceID, w.hubKey.Fingerprint(), w.app, w.ssh.controls),
+		HubConduitEnv: func(ctx context.Context) (map[string]string, error) {
+			live, err := conduit.ReadLiveHub(ctx, w.jr)
+			return live.Env, err
+		},
 		ProjectLinked:         w.projectLinked,
 		EnsureProjectProvider: w.ensureProjectProvider,
 
@@ -1159,8 +1170,14 @@ func (w *applyWiring) ensureHubIdentity(ctx context.Context) error {
 		keyFP:     w.hubKey.Fingerprint(),
 		guestNow:  w.clock.Now,
 		reset:     w.resetHubIdentity,
+		ssh:       w.ssh,
 		restartHub: func(ctx context.Context) error {
 			if err := w.sc.ServerStop(ctx); err != nil {
+				return err
+			}
+			// Again here: agents can rewrite settings.yaml since the
+			// scion-server step converged it, and the hub reads it at start.
+			if _, err := w.ensureHubAuth(ctx); err != nil {
 				return err
 			}
 			opts := apply.HubServerOpts(w.app, w.deps.HubSessionSecret, w.deps.HubAuthEnv)

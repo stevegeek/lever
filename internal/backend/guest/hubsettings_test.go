@@ -345,3 +345,28 @@ func writtenSettings(f *proc.FakeRunner) (written string, writes int) {
 	}
 	return written, writes
 }
+
+// Every apply drops server.hub.conduit: lever never writes it, and an agent
+// could, through the workstation routes, to open the relay's internal listener
+// the next time the hub starts with conduit on.
+func TestHubAuthSettingsDropsTheConduitBlock(t *testing.T) {
+	existing := []byte("server:\n  hub:\n    admin_emails: [lever-admin@lever.local]\n    conduit:\n      internal_listen: 0.0.0.0:9810\n      tcp_allowed_ports: [8462]\n")
+	out, restart, changed, err := hubAuthSettingsConverged(existing, testHubAuth(false), false)
+	if err != nil || !changed || !restart {
+		t.Fatalf("changed=%v restart=%v err=%v", changed, restart, err)
+	}
+	if _, ok := serverBlock(t, out)["hub"].(map[string]any)["conduit"]; ok {
+		t.Fatalf("conduit block kept:\n%s", out)
+	}
+	again, _, changed, err := hubAuthSettingsConverged(out, testHubAuth(false), false)
+	if err != nil || changed || string(again) != string(out) {
+		t.Fatalf("second pass changed=%v err=%v", changed, err)
+	}
+}
+
+func TestHubAuthSettingsRefusesAMergeKeyUnderHub(t *testing.T) {
+	existing := []byte("x: &c\n  conduit:\n    internal_listen: 0.0.0.0:9810\nserver:\n  hub:\n    <<: *c\n")
+	if _, _, _, err := hubAuthSettingsConverged(existing, testHubAuth(false), false); err == nil || !strings.Contains(err.Error(), "merge key") {
+		t.Fatalf("err = %v, want a merge-key refusal", err)
+	}
+}

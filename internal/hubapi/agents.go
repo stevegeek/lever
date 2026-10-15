@@ -223,3 +223,19 @@ func FindAgent(agents []Agent, slugOrName string) (Agent, bool) {
 	}
 	return Agent{}, false
 }
+
+// AgentSSHHostKey returns the SSH host key the agent reported for its current
+// run (GET /api/v1/agents/{id}, sshHostKey), "" when it reported none. The
+// agent chose it: callers validate it before use.
+func (c *Client) AgentSSHHostKey(ctx context.Context, agentID string) (string, error) {
+	if !idSegment(agentID) {
+		return "", &APIError{Msg: fmt.Sprintf("agent id %q is not a plain id", agentID)}
+	}
+	var a struct {
+		SSHHostKey string `json:"sshHostKey"`
+	}
+	if err := c.get(ctx, "/api/v1/agents/"+agentID, &a); err != nil {
+		return "", err
+	}
+	return a.SSHHostKey, nil
+}

@@ -145,8 +145,8 @@ func stubDetachOthers(t *testing.T, n int, err error) *[]string {
 	return &refs
 }
 
-// noAttachBinary empties PATH, so runAttach returns before it starts the
-// attach.
+// noAttachBinary empties PATH, so the attach fails before it starts
+// anything.
 func noAttachBinary(t *testing.T) {
 	t.Helper()
 	t.Setenv("PATH", t.TempDir())

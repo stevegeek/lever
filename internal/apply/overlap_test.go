@@ -90,13 +90,18 @@ func TestLoadImageRunsAlongsideTheHubSteps(t *testing.T) {
 	}
 }
 
-// The fake runtime broker never reports online, so start-manager makes its
-// own runtime-broker wait and that call shows when it began.
+// The hub kept running and its fake runtime broker never reports online, so
+// start-manager makes its own runtime-broker wait and that call shows when
+// it began.
 func TestStartManagerWaitsForTheImagesAndTheBroker(t *testing.T) {
 	var warmed, healthy atomic.Bool
 	var mu sync.Mutex
 	var ready []bool // per WaitBrokerReady call; start-manager's is the last
+	_, f := newObserveFirstApp(t)
+	keptHub(f, helloApp(""))
 	_, err := runWithProgress(t, Deps{
+		Scion:      scion.New(&agentLifecycleRunner{FakeRunner: f, slug: "hello"}, scion.Options{}),
+		HubAuthEnv: testHubAuthEnv(),
 		WarmImage: func(context.Context, string) error {
 			time.Sleep(20 * time.Millisecond)
 			warmed.Store(true)

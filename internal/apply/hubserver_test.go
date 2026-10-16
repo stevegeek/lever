@@ -9,11 +9,13 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/hubauth"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/wait"
 )
 
 func testHubAuthEnv() map[string]string { return HubAuthEnv("inst1", "sha256:fp1") }
@@ -322,6 +324,115 @@ func TestScionServerFailsWhenTheHubCannotBeRead(t *testing.T) {
 	}
 	if f.Called(proc.ArgvPrefix("scion", "server", "start")) {
 		t.Fatal("started a hub without knowing what runs")
+	}
+}
+
+// TestScionServerHoldsAStartedHubToItsBroker: a hub lever started from down
+// must have its runtime broker online before the step passes, and one that
+// never registers fails the step instead of failing every agent start later.
+func TestScionServerHoldsAStartedHubToItsBroker(t *testing.T) {
+	old := hubStartedBroker
+	hubStartedBroker = wait.Attempts(old.Name, 3, time.Millisecond)
+	t.Cleanup(func() { hubStartedBroker = old })
+	for _, c := range []struct {
+		name    string
+		answers []bool
+		wantErr bool
+	}{
+		{name: "online at once", answers: []bool{true}},
+		{name: "online at the second look", answers: []bool{false, true}},
+		{name: "never online", answers: []bool{false, false, false}, wantErr: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := scionOKRunner()
+			app := helloApp(t.TempDir())
+			var global int
+			err := runApply(app, Deps{
+				Scion:      hubScion(f, app),
+				HubAuthEnv: testHubAuthEnv(),
+				WaitBrokerReady: func(_ context.Context, project string) (bool, error) {
+					if project != scionGlobalProject {
+						return true, nil
+					}
+					global++
+					return c.answers[min(global, len(c.answers))-1], nil
+				},
+			})
+			if c.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "runtime broker did not come online") {
+					t.Fatalf("err = %v, want the broker postcondition", err)
+				}
+				if f.Called(proc.ArgvPrefix("scion", "start")) {
+					t.Fatal("an agent was started on a hub with no runtime broker")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if global != len(c.answers) {
+				t.Fatalf("global broker looks = %d, want %d", global, len(c.answers))
+			}
+		})
+	}
+}
+
+// TestScionServerPinsBeforeItsOneRestart: a running hub that must restart
+// gets the database settings it reads at start first, then exactly one
+// stop and start with its settings converged again in between. A failed
+// pin is logged and the restart goes on. A hub that is kept, or started
+// from down, is not pinned here.
+func TestScionServerPinsBeforeItsOneRestart(t *testing.T) {
+	app := helloApp("")
+	stale := runningHubOut(42, matchingHubArgv(app), HubAuthEnv("inst1", "sha256:old"))
+	keep := runningHubOut(42, matchingHubArgv(app), testHubAuthEnv())
+	for _, c := range []struct {
+		name               string
+		live               string
+		pinErr             error
+		wantPins, wantAuth int
+		wantCalls          []string
+	}{
+		{name: "restart", live: stale, wantPins: 1, wantAuth: 2, wantCalls: []string{"stop", "start"}},
+		{name: "restart, the pin fails", live: stale, pinErr: errors.New("hub experiments before the restart: boom"), wantPins: 1, wantAuth: 2, wantCalls: []string{"stop", "start"}},
+		{name: "kept", live: keep, wantAuth: 1, wantCalls: []string{"start"}},
+		{name: "down", live: "", wantAuth: 1, wantCalls: []string{"start"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := scionOKRunner()
+			scriptRunningHub(f, c.live)
+			a := helloApp(t.TempDir())
+			sink := &logSink{}
+			var pins, auths int
+			var stoppedAtPin bool
+			err := runApply(a, Deps{
+				Scion:      hubScion(f, a),
+				HubAuthEnv: testHubAuthEnv(),
+				Log:        sink.logf,
+				EnsureHubAuth: func(context.Context) (bool, error) {
+					auths++
+					return false, nil
+				},
+				BeforeHubRestart: func(context.Context) error {
+					pins++
+					stoppedAtPin = f.Called(proc.ArgvPrefix("scion", "server", "stop"))
+					return c.pinErr
+				},
+			})
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			r := scionServerRun{f: f}
+			if got := r.serverCalls(); !slices.Equal(got, c.wantCalls) {
+				t.Fatalf("server calls = %q, want %q", got, c.wantCalls)
+			}
+			if pins != c.wantPins || auths != c.wantAuth || stoppedAtPin {
+				t.Fatalf("pins %d (want %d), auth converges %d (want %d), pinned after the stop %v", pins, c.wantPins, auths, c.wantAuth, stoppedAtPin)
+			}
+			if c.pinErr != nil && !slices.ContainsFunc(sink.lines, func(l string) bool { return strings.Contains(l, "boom") }) {
+				t.Fatalf("the failed pin was not logged: %q", sink.lines)
+			}
+		})
 	}
 }
 

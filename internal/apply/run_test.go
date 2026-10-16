@@ -75,7 +75,7 @@ func fillDeps(d Deps) Deps {
 		d.EnsureProjectProvider = func(context.Context, string) error { return nil }
 	}
 	if d.WaitBrokerReady == nil {
-		d.WaitBrokerReady = func(context.Context, string) (bool, error) { return false, nil }
+		d.WaitBrokerReady = func(context.Context, string) (bool, error) { return true, nil }
 	}
 	if d.MintManagerBootstrap == nil {
 		d.MintManagerBootstrap = func(context.Context) (BootstrapMaterial, error) {
@@ -727,17 +727,26 @@ func TestStartManagerObserveListRetriesOnTransientThenSucceeds(t *testing.T) {
 	}
 }
 
-// TestStartManagerWaitsForBrokerReadyBeforeActing: the readiness gate must run
-// before the observe/create, or it races the broker's async registration.
+// keptHub answers the hub probe with a hub started as lever starts it for
+// app, so the scion-server step keeps it and only looks at its broker.
+func keptHub(f *proc.FakeRunner, app *config.App) {
+	scriptRunningHub(f, runningHubOut(42, matchingHubArgv(app), testHubAuthEnv()))
+}
+
+// TestStartManagerWaitsForBrokerReadyBeforeActing: on a hub that kept
+// running with no online runtime broker, the readiness gate must run before
+// the observe/create, or it races the broker's async registration.
 func TestStartManagerWaitsForBrokerReadyBeforeActing(t *testing.T) {
 	app, f := newObserveFirstApp(t)
+	keptHub(f, app)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello"} // absent record → create
 	var waitCalls, startCallsAtGate int
 	deps := Deps{
-		Scion: scion.New(r, scion.Options{}),
+		Scion:      scion.New(r, scion.Options{}),
+		HubAuthEnv: testHubAuthEnv(),
 		WaitBrokerReady: func(ctx context.Context, project string) (bool, error) {
 			if project == "global" {
-				return false, nil // scion-server's wait after the hub start: timed out
+				return false, nil // the kept hub's broker is not online
 			}
 			waitCalls++
 			startCallsAtGate = r.startCalls
@@ -787,12 +796,14 @@ func TestStartManagerSkipsTheBrokerWaitWhenScionServerSawItOnline(t *testing.T) 
 // it touches any record.
 func TestStartManagerBrokerReadyErrorAbortsBeforeActing(t *testing.T) {
 	app, f := newObserveFirstApp(t)
+	keptHub(f, app)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello"}
 	deps := Deps{
-		Scion: scion.New(r, scion.Options{}),
+		Scion:      scion.New(r, scion.Options{}),
+		HubAuthEnv: testHubAuthEnv(),
 		WaitBrokerReady: func(ctx context.Context, project string) (bool, error) {
 			if project == "global" {
-				return false, nil // scion-server's wait after the hub start: timed out
+				return false, nil // the kept hub's broker is not online
 			}
 			return false, context.Canceled
 		},
@@ -2874,27 +2885,31 @@ func TestRegisterFailsWhenHubEndpointRepairFails(t *testing.T) {
 // TestScionServerWaitsForTheBroker: a just-started hub registers its runtime
 // broker only after it serves, so the step waits for it before
 // register-project's hub link, via scion's global settings since the tree may
-// not be a project yet. It waits after a restart and after a plain start.
+// not be a project yet. It waits after a plain start and on a kept hub.
 func TestScionServerWaitsForTheBroker(t *testing.T) {
-	for _, changed := range []bool{false, true} {
+	for _, kept := range []bool{false, true} {
 		f := scionOKRunner()
 		app := &config.App{Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 			Manager: config.Manager{Image: "img"},
 			Remote:  config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"}}
+		if kept {
+			keptHub(f, app)
+		}
 		var waits []string
 		deps := Deps{
-			Scion:         hubScion(f, app),
-			EnsureHubAuth: func(context.Context) (bool, error) { return changed, nil },
+			Scion:      hubScion(f, app),
+			HubAuthEnv: testHubAuthEnv(),
 			WaitBrokerReady: func(_ context.Context, project string) (bool, error) {
 				waits = append(waits, project)
-				return false, nil
+				// A kept hub's broker is only looked at: not online is no failure.
+				return !kept, nil
 			},
 		}
 		if err := runApply(app, deps); err != nil {
-			t.Fatalf("changed=%v: Run: %v", changed, err)
+			t.Fatalf("kept=%v: Run: %v", kept, err)
 		}
 		if len(waits) < 1 || waits[0] != "global" || slices.Index(waits[1:], "global") >= 0 {
-			t.Errorf("changed=%v: waits = %q, want one wait on scion's global settings, first (before register-project)", changed, waits)
+			t.Errorf("kept=%v: waits = %q, want one wait on scion's global settings, first (before register-project)", kept, waits)
 		}
 	}
 }

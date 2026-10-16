@@ -115,7 +115,7 @@ func runAcceptance(ctx context.Context, cmd *cobra.Command, app *config.App, con
 	// bootstrap step still deposits <mount>/.lever/bootstrap.json.
 	rep := progress.From(ctx)
 	rep.Group("jail", 0)
-	w, err := buildApplyDeps(ctx, app, configPath, bf, applyOpts{Cmd: cmd, Rep: rep})
+	w, err := buildApplyDeps(ctx, app, configPath, bf, applyOpts{Cmd: cmd, Rep: rep, Locked: true})
 	if err != nil {
 		return fmt.Errorf("acceptance: bring-up deps: %w", err)
 	}

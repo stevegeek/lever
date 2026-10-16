@@ -1062,8 +1062,10 @@ func stepFingerprints(app *config.App, st state.State) apply.StepFingerprints {
 type lifecycleSteps struct{ st state.State }
 
 func (l lifecycleSteps) Matches(step, inputs string) bool { return l.st.StepMatches(step, inputs) }
-func (l lifecycleSteps) Record(step, inputs string) error { return l.st.RecordStep(step, inputs, time.Now()) }
-func (l lifecycleSteps) Forget(step string) error         { return l.st.ForgetStep(step) }
+func (l lifecycleSteps) Record(step, inputs string) error {
+	return l.st.RecordStep(step, inputs, time.Now())
+}
+func (l lifecycleSteps) Forget(step string) error { return l.st.ForgetStep(step) }
 
 // convergeDigest is the config a bring-up converges on, as lever loaded it.
 func convergeDigest(app *config.App) string { return state.HashJSON(app) }

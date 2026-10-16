@@ -198,9 +198,9 @@ type Deps struct {
 	// work that step's own check still vouches for. It never gates a fence.
 	// nil skips nothing.
 	Fingerprints StepFingerprints
-	Scion     *scion.Client
-	ReadCred  func(path string) (string, error) // nil ⇒ defaultReadCred
-	JailMount string                            // jail path where app.Tree is bind-mounted (e.g. "/lever"); "" disables translation
+	Scion        *scion.Client
+	ReadCred     func(path string) (string, error) // nil ⇒ defaultReadCred
+	JailMount    string                            // jail path where app.Tree is bind-mounted (e.g. "/lever"); "" disables translation
 	// HubSessionSecret is the hub's session-cookie signing key, passed to every
 	// hub start (HubServerOpts) so browser sessions survive hub restarts. It is
 	// argv-only: a running hub keeps its old key, and apply does not restart the

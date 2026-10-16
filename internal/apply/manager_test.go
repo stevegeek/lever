@@ -500,4 +500,3 @@ func TestTokenResetUnderTheLock(t *testing.T) {
 		}
 	}
 }
-

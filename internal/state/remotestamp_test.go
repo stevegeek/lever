@@ -140,4 +140,3 @@ func TestWriteRemoteStampLeavesNoStaleRecordOnFailure(t *testing.T) {
 		t.Error("a failed write must remove the previous stamp, not leave it describing a process nothing can identify")
 	}
 }
-

@@ -142,8 +142,6 @@ type convFixture struct {
 	home      string
 	tree      string
 	logs      []string
-	gated     int
-	guard     *fakeResumeGuard
 	mounts    *fakeMountChecks
 	boots     *fakeConvBoot
 	roleErr   error
@@ -191,37 +189,6 @@ func (b *fakeConvBoot) Recorded() (string, error) {
 }
 func (b *fakeConvBoot) Record(id string) error { b.records = append(b.records, id); return nil }
 
-// fakeResumeGuard records the checks around a resume, in order, and fails the
-// step named in failAt.
-type fakeResumeGuard struct {
-	steps  []string
-	failAt string
-}
-
-func (g *fakeResumeGuard) step(name string) error {
-	g.steps = append(g.steps, name)
-	if g.failAt == name {
-		return errors.New(name + " refused")
-	}
-	return nil
-}
-
-func (g *fakeResumeGuard) begin(context.Context) (managerResume, error) {
-	if err := g.step("begin"); err != nil {
-		return nil, err
-	}
-	return g, nil
-}
-func (g *fakeResumeGuard) Resumed(context.Context) error { return g.step("resumed") }
-func (g *fakeResumeGuard) Live(context.Context) error    { return g.step("live") }
-func (g *fakeResumeGuard) Settle(context.Context) error  { return g.step("settle") }
-func (g *fakeResumeGuard) AfterFailure(_ context.Context, cause error) error {
-	if err := g.step("after-failure"); err != nil {
-		return errors.Join(cause, err)
-	}
-	return cause
-}
-
 func newConvFixture(t *testing.T) *convFixture {
 	t.Helper()
 	if out, err := exec.Command("tar", "--version").Output(); err != nil || !strings.Contains(string(out), "GNU tar") {
@@ -249,7 +216,7 @@ func newConvFixture(t *testing.T) *convFixture {
 	if err := os.Mkdir(filepath.Join(tree, "kb"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	f := &convFixture{sc: &fakeConvScion{phase: scion.PhaseRunning}, agentHome: ah, home: home, tree: tree, guard: &fakeResumeGuard{},
+	f := &convFixture{sc: &fakeConvScion{phase: scion.PhaseRunning}, agentHome: ah, home: home, tree: tree,
 		mounts: &fakeMountChecks{}, boots: &fakeConvBoot{}}
 	app := &config.App{Name: "mgr", Tree: tree}
 	app.Manager.ReadOnly = []string{"kb"}
@@ -258,7 +225,6 @@ func newConvFixture(t *testing.T) *convFixture {
 		app:   app,
 		st:    state.State{Dir: stDir},
 		guest: convbackup.Guest{R: proc.RealRunner{}, Workspace: "/lever", Agent: "mgr"},
-		sc:    f.sc,
 		log:   log,
 		deps: apply.Deps{
 			ManagerVerbs: f.sc, JailMount: "/lever", ManagerLock: apply.HeldManagerLock, Log: log,
@@ -269,11 +235,6 @@ func newConvFixture(t *testing.T) *convFixture {
 			ManagerPhaseWait: apply.RetryBudget{Attempts: 3, Interval: time.Millisecond},
 			BrokerStartRetry: apply.RetryBudget{Attempts: 1, Interval: time.Millisecond},
 		},
-		verifyRole:  func(context.Context) error { return nil },
-		gate:        func(context.Context) error { f.gated++; return nil },
-		beginResume: f.guard.begin,
-		suspendWait: apply.RetryBudget{Attempts: 3, Interval: time.Millisecond},
-		recordBoot:  func(ctx context.Context) { _ = f.guard.step("boot") },
 	}
 	return f
 }

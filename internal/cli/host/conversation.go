@@ -20,7 +20,6 @@ import (
 	"github.com/stevegeek/lever/internal/sessionrec"
 	"github.com/stevegeek/lever/internal/state"
 	"github.com/stevegeek/lever/internal/termsafe"
-	"github.com/stevegeek/lever/internal/wait"
 )
 
 // `lever up --fresh` deletes the manager's record, and scion deletes the home
@@ -28,79 +27,32 @@ import (
 // first (package convbackup), and --keep-conversation or `lever conversation
 // restore` puts them back into the new record's home.
 
-type convScion interface {
-	List(ctx context.Context, project string) ([]scion.Agent, error)
-	Suspend(ctx context.Context, worker, project string) error
-	Resume(ctx context.Context, worker, project string) error
-	ResumeTask(ctx context.Context, worker, project, task string) error
-	Stop(ctx context.Context, worker, project string) error
-}
-
 type convOps struct {
 	app   *config.App
 	st    state.State
 	guest convbackup.Guest
-	sc    convScion // the new conversation only
 	log   func(format string, args ...any)
 	// deps carries the manager's lifecycle (apply.EnsureManager), which
-	// suspends, resumes and gates the manager around a restore.
-	deps        apply.Deps
-	verifyRole  func(ctx context.Context) error
-	gate        func(ctx context.Context) error
-	beginResume func(ctx context.Context) (managerResume, error)
-	now         func() time.Time
-	suspendWait apply.RetryBudget
+	// suspends, stops, resumes and gates the manager around a restore or a
+	// new conversation.
+	deps apply.Deps
+	now  func() time.Time
 	// session begins the record of a new conversation's fresh session (see
 	// newConversation).
 	session func() sessionBegin
 	// bootTask reads the boot prompt a new conversation's session runs.
 	bootTask func() (string, error)
-	// recordBoot notes the guest boot the manager now runs in, once it passed
-	// its liveness gate (apply.RecordGuestBoot); nil records nothing.
-	recordBoot func(ctx context.Context)
-}
-
-// live is the end of every resume that passed its gate: the mounts are read
-// back, then the guest boot is recorded, so a later up does not take this
-// boot for one the manager never ran in.
-func (o convOps) live(ctx context.Context, guard managerResume) error {
-	if err := guard.Live(ctx); err != nil {
-		return err
-	}
-	if o.recordBoot != nil {
-		o.recordBoot(ctx)
-	}
-	return nil
-}
-
-type managerResume interface {
-	Resumed(ctx context.Context) error
-	Live(ctx context.Context) error
-	Settle(ctx context.Context) error
-	AfterFailure(ctx context.Context, cause error) error
 }
 
 func newConvOps(w *applyWiring, app *config.App, st state.State) convOps {
-	project := w.b.MountDest()
 	return convOps{
-		app:   app,
-		st:    st,
-		guest: convbackup.Guest{R: w.b.JailRunner(), Workspace: project, Agent: app.Name},
-		sc:    w.sc,
-		log:   w.deps.Log,
-		deps:  w.deps,
-		verifyRole: func(ctx context.Context) error {
-			return w.deps.VerifyAgentRole(ctx, hubProjectKey(project), app.Name)
-		},
-		gate: func(ctx context.Context) error {
-			return apply.WaitManagerLive(ctx, w.deps, app.Name, project, nil)
-		},
-		beginResume: func(ctx context.Context) (managerResume, error) {
-			return apply.BeginManagerResume(ctx, w.deps, app, project, "conversation")
-		},
-		session:    func() sessionBegin { return beginFreshSession(app, st) },
-		bootTask:   func() (string, error) { return apply.ManagerTask(app) },
-		recordBoot: func(ctx context.Context) { apply.RecordGuestBoot(ctx, w.deps) },
+		app:      app,
+		st:       st,
+		guest:    convbackup.Guest{R: w.b.JailRunner(), Workspace: w.b.MountDest(), Agent: app.Name},
+		log:      w.deps.Log,
+		deps:     w.deps,
+		session:  func() sessionBegin { return beginFreshSession(app, st) },
+		bootTask: func() (string, error) { return apply.ManagerTask(app) },
 	}
 }
 
@@ -108,15 +60,6 @@ func newConvOps(w *applyWiring, app *config.App, st state.State) convOps {
 func (o convOps) ensure(ctx context.Context, q apply.ManagerRequest) (apply.ManagerResult, error) {
 	q.Subject = "conversation"
 	return apply.EnsureManager(ctx, o.app, o.deps, q)
-}
-
-// startResume refuses without beginResume: a resume whose mounts nobody reads
-// back is never made.
-func (o convOps) startResume(ctx context.Context) (managerResume, error) {
-	if o.beginResume == nil {
-		return nil, errors.New("internal error: no resume checks wired")
-	}
-	return o.beginResume(ctx)
 }
 
 // errConvStateInTree: a backup holds the whole conversation and whatever
@@ -343,39 +286,6 @@ func (o convOps) restore(ctx context.Context, id string, backupFirst bool) (err 
 	return err
 }
 
-// resumeAfterFailure resumes a manager this code suspended, through the
-// pre-role record guard, on its own context (ctx may be what was cancelled).
-// how names the conversation ("" leaves it out).
-func (o convOps) resumeAfterFailure(ctx context.Context, cause error, how string) error {
-	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
-	defer cancel()
-	if o.verifyRole != nil {
-		if gerr := o.verifyRole(rctx); gerr != nil {
-			return fmt.Errorf("%w; the manager stays suspended: %w", cause, gerr)
-		}
-	}
-	guard, gerr := o.startResume(rctx)
-	if gerr != nil {
-		return fmt.Errorf("%w; the manager stays suspended: %w", cause, gerr)
-	}
-	if rerr := o.sc.Resume(rctx, o.app.Name, o.guest.Workspace); rerr != nil {
-		err := fmt.Errorf("%w; the manager is suspended and resuming it failed (%s): run `lever up`", cause, termsafe.Sanitize(scion.ErrSummary(rerr)))
-		return guard.AfterFailure(rctx, err)
-	}
-	// No liveness gate here: Settle checks until the container runs.
-	verr := guard.Resumed(rctx)
-	if verr == nil {
-		verr = guard.Settle(rctx)
-	}
-	if verr != nil {
-		return fmt.Errorf("%w; resuming the manager after that failed its mount check: %w", cause, verr)
-	}
-	if how != "" {
-		how = " " + how
-	}
-	return fmt.Errorf("%w; the manager was resumed%s", cause, how)
-}
-
 func verifyStored(store convbackup.Store, id string) error {
 	rc, err := store.Open(id)
 	if err != nil {
@@ -386,32 +296,6 @@ func verifyStored(store convbackup.Store, id string) error {
 		return fmt.Errorf("backup %s is damaged, nothing was restored: %w", id, err)
 	}
 	return nil
-}
-
-// waitPhase waits until the hub reads the manager in phase with no live
-// container, within suspendWait. last is the phase/container status last
-// seen; an exhausted wait Is wait.ErrTimeout.
-func (o convOps) waitPhase(ctx context.Context, phase string) (last string, err error) {
-	s := wait.ManagerStopped
-	if b := o.suspendWait; b.Attempts > 0 {
-		s = wait.Attempts(s.Name, b.Attempts, b.Interval)
-	}
-	err = wait.For(ctx, s, func(ctx context.Context) wait.Result {
-		agents, err := o.sc.List(ctx, o.guest.Workspace)
-		if err != nil {
-			return wait.NotYetErr(err)
-		}
-		rec := scion.FindAgent(agents, o.app.Name)
-		if rec == nil {
-			return wait.Fatal(errors.New("the manager record disappeared"))
-		}
-		last = rec.Phase + "/" + rec.ContainerStatus
-		if rec.Phase == phase && !scion.ContainerLive(rec.ContainerStatus) {
-			return wait.Ready()
-		}
-		return wait.NotYet(last)
-	})
-	return last, err
 }
 
 func (o convOps) latestSession() (sessionrec.Record, bool, error) {

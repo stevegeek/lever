@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
@@ -71,8 +72,8 @@ func TestNewConversation(t *testing.T) {
 	if f.sc.phase != scion.PhaseRunning {
 		t.Fatalf("phase %q", f.sc.phase)
 	}
-	if got := strings.Join(f.guard.steps, ","); got != "begin,resumed,live,boot" || f.gated != 1 {
-		t.Fatalf("checks = %q gated %d", got, f.gated)
+	if f.mounts.checks != 1 || len(f.boots.records) != 1 {
+		t.Fatalf("mount checks %d boots %v: want the mounts read back after the start, then the guest boot recorded", f.mounts.checks, f.boots.records)
 	}
 	if sess.asked != 1 || sess.began != 1 || sess.committed != 1 {
 		t.Fatalf("session = %+v", sess)
@@ -107,7 +108,7 @@ func TestNewConversationBusy(t *testing.T) {
 		t.Fatalf("forced: %v", err)
 	}
 	for _, act := range []string{"", "completed", "stalled", "waiting_for_input", "blocked"} {
-		if managerBusy(act) {
+		if apply.ManagerBusy(act) {
 			t.Errorf("%q counts as busy", act)
 		}
 	}
@@ -178,13 +179,14 @@ func TestNewConversationFailureAfterStop(t *testing.T) {
 	}{
 		{"start fails", func(f *convFixture, _ *newConvSession) { f.sc.resumeErr = errors.New("broker down") }, "suspend,stop,resume-fresh"},
 		{"session begin fails", func(_ *convFixture, s *newConvSession) { s.beginErr = errors.New("disk full") }, "suspend,stop"},
-		{"resume check refuses", func(f *convFixture, _ *newConvSession) { f.guard.failAt = "begin" }, "suspend,stop"},
-		{"role guard refuses", func(f *convFixture, _ *newConvSession) {
-			f.ops.verifyRole = func(context.Context) error { return errors.New("pre-role record") }
+		{"resume check refuses", func(f *convFixture, _ *newConvSession) {
+			if err := os.Remove(filepath.Join(f.tree, "kb")); err != nil {
+				t.Fatal(err)
+			}
 		}, "suspend,stop"},
-		{"gate fails", func(f *convFixture, _ *newConvSession) {
-			f.ops.gate = func(context.Context) error { return errors.New("claude died") }
-		}, "suspend,stop,resume-fresh"},
+		{"role guard refuses", func(f *convFixture, _ *newConvSession) { f.roleErr = errors.New("pre-role record") }, "suspend,stop"},
+		{"gate fails", func(f *convFixture, _ *newConvSession) { f.sc.deadAfterResume = true }, "suspend,stop,resume-fresh"},
+		{"mount check refuses", func(f *convFixture, _ *newConvSession) { f.mounts.answers = []string{"elsewhere"} }, "suspend,stop,resume-fresh,suspend"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, sess := newConvFixtureWith(t)

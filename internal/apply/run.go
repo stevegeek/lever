@@ -2159,15 +2159,6 @@ func (r *run) waitManagerLive(ctx context.Context, jp string, acted bool, onHarn
 	return withHarnessDeathHint(ctx, r.d, err, jp, r.app.Name)
 }
 
-// WaitManagerLive is the full gate (live, harness running, settle window) for a
-// path that just acted on the manager (lever up after its own scion resume),
-// with the same budget and harness-death hint as the start-manager step. prog
-// may be nil.
-func WaitManagerLive(ctx context.Context, d Deps, name, project string, prog *Progress) error {
-	err := gateManagerLive(ctx, d, d.ManagerLiveRetry.or(defaultManagerLiveRetry), name, project, "up", prog, gateOpts{})
-	return withHarnessDeathHint(ctx, d, err, project, name)
-}
-
 // observeAttempts bounds CheckManagerAfterDetach's list retries: enough to
 // ride out a transient hub error, short enough that an answer arrives in
 // seconds.

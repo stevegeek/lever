@@ -34,7 +34,53 @@ const (
 	// its conversation (ManagerRequest.WhileSuspended) and resumes it on
 	// what its home now holds.
 	ManagerRestore
+	// ManagerNewSession ends the manager's session and starts it again in a
+	// new one on the same record: suspend, the caller's backup
+	// (WhileSuspended), stop, and a resume with the boot task. The hub
+	// resumes a suspended record with claude --continue and a stopped one in
+	// a fresh session; a real stop, not a second claude process, ends the
+	// old session, so the shared SessionEnd hook then reports a phase that is
+	// true.
+	ManagerNewSession
 )
+
+// The refusals of ManagerNewSession a caller tells apart. Nothing was
+// changed.
+var (
+	// ErrManagerBusy: the manager reports a turn in progress.
+	ErrManagerBusy = errors.New("the manager is in the middle of a turn")
+	// ErrManagerNotRunning: RunningOnly found the manager not running.
+	ErrManagerNotRunning = errors.New("the manager is not running")
+)
+
+// ErrSessionEnded marks a ManagerNewSession failure after the stop: the old
+// session can no longer be continued, and nothing resumes the manager.
+var ErrSessionEnded = errors.New("the manager's old session has ended")
+
+// ErrStopUnconfirmed marks a ManagerNewSession whose stop did not read in
+// time: lever cannot tell whether the old session ended, and started
+// nothing.
+var ErrStopUnconfirmed = errors.New("the manager's stop is unconfirmed")
+
+// markedError is an error that Is its mark, with its own message.
+type markedError struct {
+	err, mark error
+}
+
+func (e markedError) Error() string        { return e.err.Error() }
+func (e markedError) Unwrap() error        { return e.err }
+func (e markedError) Is(target error) bool { return target == e.mark }
+
+// ManagerBusy reads the hub's activity for a turn in progress. The activity
+// is the agent's own report: an agent can hold off a new session this way,
+// never bring one about.
+func ManagerBusy(activity string) bool {
+	switch activity {
+	case scion.ActivityWorking, "thinking", "executing":
+		return true
+	}
+	return false
+}
 
 func (i ManagerIntent) String() string {
 	switch i {
@@ -44,6 +90,8 @@ func (i ManagerIntent) String() string {
 		return "fresh"
 	case ManagerRestore:
 		return "restore"
+	case ManagerNewSession:
+		return "new-session"
 	}
 	return fmt.Sprintf("intent(%d)", int(i))
 }
@@ -68,7 +116,18 @@ type ManagerRequest struct {
 	// started, so no wait for it is needed.
 	BrokerOnline bool
 
-	// WhileSuspended (Restore) runs once the hub reads the manager suspended
+	// Task (NewSession) is the boot prompt the new session runs; "" leaves
+	// the hub's stored task.
+	Task string
+	// Force (NewSession) interrupts a turn the manager is in the middle of.
+	Force bool
+	// RunningOnly (NewSession) leaves a manager that is not running alone.
+	RunningOnly bool
+	// BeginSession (NewSession) runs once the old session has ended and
+	// returns the commit that records the new one once it started.
+	BeginSession func() (commit func() error, err error)
+
+	// WhileSuspended (Restore, NewSession) runs once the hub reads the manager suspended
 	// with no live container, so no agent process runs while its files
 	// change. An error resumes a manager this call suspended, on its own
 	// conversation; after it returns nil nothing resumes it but the plan.
@@ -161,6 +220,11 @@ func EnsureManager(ctx context.Context, app *config.App, d Deps, q ManagerReques
 			return ManagerResult{}, fmt.Errorf("%s: internal error: the manager's lifecycle is not wired", subject)
 		}
 		return r.swapConversation(ctx, jp, q)
+	case ManagerNewSession:
+		if q.WhileSuspended == nil || q.BeginSession == nil || d.VerifyAgentRole == nil {
+			return ManagerResult{}, fmt.Errorf("%s: internal error: the manager's lifecycle is not wired", subject)
+		}
+		return r.newSession(ctx, jp, q)
 	}
 	return ManagerResult{}, fmt.Errorf("%s: internal error: unknown manager intent %s", subject, q.Intent)
 }
@@ -174,8 +238,8 @@ func cmpOr(a, b string) string {
 
 // managerObservation is the one reading of the manager a plan is made from.
 type managerObservation struct {
-	present          bool
-	phase, container string
+	present                    bool
+	phase, container, activity string
 	// restarted: the record reads running, the guest booted anew since the
 	// manager last ran live, and podman shows its container not running.
 	restarted bool
@@ -190,7 +254,7 @@ func observationOf(rec *scion.Agent) managerObservation {
 	if rec == nil {
 		return managerObservation{}
 	}
-	return managerObservation{present: true, phase: rec.Phase, container: rec.ContainerStatus}
+	return managerObservation{present: true, phase: rec.Phase, container: rec.ContainerStatus, activity: rec.Activity}
 }
 
 // managerVerb is the one change a plan makes to the record.
@@ -202,6 +266,8 @@ const (
 	verbResume
 	verbResumeForce
 	verbDeleteCreate
+	// verbResumeTask resumes a stopped record in a new session with a task.
+	verbResumeTask
 )
 
 func (v managerVerb) String() string {
@@ -214,6 +280,8 @@ func (v managerVerb) String() string {
 		return "resume --force"
 	case verbDeleteCreate:
 		return "delete+create"
+	case verbResumeTask:
+		return "stop+resume"
 	}
 	return ""
 }
@@ -224,7 +292,9 @@ type managerPlan struct {
 	recover bool
 	// suspend: suspend the record and wait until it reads suspended.
 	suspend bool
-	verb    managerVerb
+	// stop: stop the suspended record and wait until it reads stopped.
+	stop bool
+	verb managerVerb
 	// mustCreate: a create that finds a record fails rather than keeps it.
 	mustCreate bool
 }
@@ -272,6 +342,23 @@ func planManager(q ManagerRequest, name string, o managerObservation) (managerPl
 			return managerPlan{verb: verbResume}, nil
 		}
 		return managerPlan{}, fmt.Errorf("manager %q is in phase %s; a restore needs it running or suspended (`lever up --no-attach` first)", name, scion.BoundedQuote(o.phase))
+	case ManagerNewSession:
+		// The phase and the agent's activity decide; the container column
+		// does not.
+		switch {
+		case !o.present:
+			return managerPlan{}, errors.New("there is no manager record; run `lever up` first")
+		case o.phase == scion.PhaseRunning:
+			if !q.Force && ManagerBusy(o.activity) {
+				return managerPlan{}, ErrManagerBusy
+			}
+			return managerPlan{suspend: true, stop: true, verb: verbResumeTask}, nil
+		case q.RunningOnly:
+			return managerPlan{}, ErrManagerNotRunning
+		case o.phase == scion.PhaseSuspended:
+			return managerPlan{stop: true, verb: verbResumeTask}, nil
+		}
+		return managerPlan{}, fmt.Errorf("manager %q is in phase %s; a new conversation needs it running or suspended (`lever up` first)", name, scion.BoundedQuote(o.phase))
 	}
 	return managerPlan{}, fmt.Errorf("%s: internal error: unknown manager intent %s", q.subject(), q.Intent)
 }
@@ -664,4 +751,103 @@ func (r *run) backupBeforeDelete(ctx context.Context, jp string, rec *scion.Agen
 		err = r.resumeAfterFailure(ctx, jp, err, "")
 	}
 	return err
+}
+
+// newSession is ManagerNewSession. Up to the stop every failure resumes the
+// manager, when this call suspended it, on its own conversation. After the
+// stop no resume can continue the old session, so a failure leaves the
+// manager stopped, marked ErrSessionEnded.
+func (r *run) newSession(ctx context.Context, jp string, q ManagerRequest) (res ManagerResult, err error) {
+	sc := r.d.managerScion()
+	agents, err := sc.List(ctx, jp)
+	if err != nil {
+		return res, fmt.Errorf("the hub does not answer (%s); nothing was changed", termsafe.Sanitize(scion.ErrSummary(err)))
+	}
+	p, err := planManager(q, r.app.Name, observationOf(scion.FindAgent(agents, r.app.Name)))
+	if err != nil {
+		return res, err
+	}
+	suspended, stopped := false, false
+	if p.suspend {
+		r.d.Log("conversation: suspending manager %q to back up its conversation", r.app.Name)
+		if err := sc.Suspend(ctx, r.app.Name, jp); err != nil {
+			return res, fmt.Errorf("suspending the manager failed, nothing was changed: %s", termsafe.Sanitize(scion.ErrSummary(err)))
+		}
+		suspended = true
+	}
+	defer func() {
+		if err != nil && suspended && !stopped {
+			err = r.resumeAfterFailure(ctx, jp, err, "on its own conversation")
+		}
+	}()
+	if last, err := r.waitPhase(ctx, jp, scion.PhaseSuspended); err != nil {
+		return res, fmt.Errorf("the manager did not suspend (last seen %s); nothing was changed", scion.BoundedQuote(last))
+	}
+	if err := q.WhileSuspended(ctx); err != nil {
+		return res, err
+	}
+	r.d.Log("conversation: stopping manager %q to end its session", r.app.Name)
+	if serr := sc.Stop(ctx, r.app.Name, jp); serr != nil && r.stillSuspended(ctx, jp) {
+		return res, fmt.Errorf("stopping the manager failed, so its session was not ended: %s", termsafe.Sanitize(scion.ErrSummary(serr)))
+	}
+	if last, werr := r.waitPhase(ctx, jp, scion.PhaseStopped); werr != nil {
+		if r.stillSuspended(ctx, jp) {
+			return res, fmt.Errorf("the manager did not stop (last seen %s), so its session was not ended", scion.BoundedQuote(last))
+		}
+		stopped = true
+		return res, markedError{fmt.Errorf("the manager did not stop in time (last seen %s), so lever cannot tell whether its session ended and started nothing", scion.BoundedQuote(last)), ErrStopUnconfirmed}
+	}
+	stopped = true
+	ended := func(err error) error { return markedError{err, ErrSessionEnded} }
+	commit, err := q.BeginSession()
+	if err != nil {
+		return res, ended(fmt.Errorf("recording the new session failed: %w", err))
+	}
+	if err := r.d.VerifyAgentRole(ctx, path.Base(jp), r.app.Name); err != nil {
+		return res, ended(err)
+	}
+	guard, err := BeginManagerResume(ctx, r.d, r.app, jp, r.subjectName())
+	if err != nil {
+		return res, ended(err)
+	}
+	r.d.Log("conversation: starting manager %q in a new session", r.app.Name)
+	res.Verb = p.verb.String()
+	// The task is the current manager.prompt_file, which the hub also stores
+	// as the record's task. With none the hub falls back to the task it
+	// stored at the last fresh create or new conversation; it offers no way to
+	// clear that.
+	resume := func() error { return sc.ResumeTask(ctx, r.app.Name, jp, q.Task) }
+	if q.Task == "" {
+		resume = func() error { return sc.Resume(ctx, r.app.Name, jp) }
+	}
+	if err := r.resumeClearing(ctx, jp, resume); err != nil {
+		// Not ResumeFailed: its exit code and its "conversation kept" are not
+		// true once the old session has ended.
+		return res, ended(guard.AfterFailure(ctx, fmt.Errorf("starting the manager failed: %s", termsafe.Sanitize(scion.ErrSummary(err)))))
+	}
+	if err := guard.Resumed(ctx); err != nil {
+		return res, ended(err)
+	}
+	if err := commit(); err != nil {
+		r.d.Log("conversation: warning: the new session was not recorded on a skill (%v); contacts cannot post to the manager until it next starts fresh", err)
+	}
+	if err := r.gateResumed(ctx, jp); err != nil {
+		return res, ended(guard.AfterFailure(ctx, err))
+	}
+	if err := guard.Live(ctx); err != nil {
+		return res, ended(err)
+	}
+	RecordGuestBoot(ctx, r.d)
+	return res, nil
+}
+
+// stillSuspended reports whether the hub reads the manager suspended: a stop
+// that did not land left the old session resumable.
+func (r *run) stillSuspended(ctx context.Context, jp string) bool {
+	agents, err := r.d.managerScion().List(ctx, jp)
+	if err != nil {
+		return false
+	}
+	rec := scion.FindAgent(agents, r.app.Name)
+	return rec != nil && rec.Phase == scion.PhaseSuspended
 }

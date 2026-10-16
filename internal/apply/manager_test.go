@@ -244,3 +244,47 @@ func TestFreshBackupSuspendsAndResumesOnFailure(t *testing.T) {
 		})
 	}
 }
+
+// TestPlanManagerNewSession: the phase and the agent's activity decide; a
+// busy manager is left alone unless forced, and RunningOnly leaves any
+// manager that is not running alone.
+func TestPlanManagerNewSession(t *testing.T) {
+	plan := func(q ManagerRequest, o managerObservation) string {
+		q.Intent = ManagerNewSession
+		p, err := planManager(q, "m", o)
+		switch {
+		case errors.Is(err, ErrManagerBusy):
+			return "busy"
+		case errors.Is(err, ErrManagerNotRunning):
+			return "not-running"
+		case err != nil:
+			return "refuse"
+		}
+		return fmt.Sprintf("suspend=%v stop=%v %s", p.suspend, p.stop, p.verb)
+	}
+	running := managerObservation{present: true, phase: scion.PhaseRunning, container: "Up 1 minute"}
+	busy := running
+	busy.activity = scion.ActivityWorking
+	suspended := managerObservation{present: true, phase: scion.PhaseSuspended}
+	errored := managerObservation{present: true, phase: scion.PhaseError}
+	for _, c := range []struct {
+		q    ManagerRequest
+		o    managerObservation
+		want string
+	}{
+		{ManagerRequest{}, running, "suspend=true stop=true stop+resume"},
+		{ManagerRequest{}, busy, "busy"},
+		{ManagerRequest{Force: true}, busy, "suspend=true stop=true stop+resume"},
+		{ManagerRequest{RunningOnly: true}, busy, "busy"},
+		{ManagerRequest{}, suspended, "suspend=false stop=true stop+resume"},
+		{ManagerRequest{RunningOnly: true}, suspended, "not-running"},
+		{ManagerRequest{}, errored, "refuse"},
+		{ManagerRequest{RunningOnly: true}, errored, "not-running"},
+		{ManagerRequest{}, managerObservation{}, "refuse"},
+		{ManagerRequest{RunningOnly: true}, managerObservation{}, "refuse"},
+	} {
+		if got := plan(c.q, c.o); got != c.want {
+			t.Errorf("%+v over %+v: %s, want %s", c.q, c.o, got, c.want)
+		}
+	}
+}

@@ -26,18 +26,16 @@ type GuestBoot interface {
 // guestRestartedUnder reports whether rec is a running manager record left
 // over from an ended guest boot. Only podman's answer counts as evidence the
 // container is dead: the hub briefly reports "created" for a container that
-// is starting. Any read that fails answers no. With no boot id kept, podman's
-// start time stands in for it (startedInEndedBoot).
+// is starting. Any podman or boot id read that fails answers no. With no
+// boot id kept, or a record that cannot be read, podman's start time stands
+// in for it (startedInEndedBoot).
 func guestRestartedUnder(ctx context.Context, d Deps, project, name string, rec *scion.Agent) bool {
 	if rec == nil || rec.Phase != scion.PhaseRunning || d.GuestBoot == nil {
 		return false
 	}
 	was, err := d.GuestBoot.Recorded()
-	if err != nil {
-		return false
-	}
 	ref := jail.ContainerName(path.Base(project), name)
-	if was == "" {
+	if err != nil || was == "" {
 		return startedInEndedBoot(ctx, d, ref)
 	}
 	now, err := d.GuestBoot.Current(ctx)

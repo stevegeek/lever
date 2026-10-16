@@ -13,11 +13,12 @@ import (
 type fakeGuestBoot struct {
 	current, recorded string
 	currentErr        error
+	recordedErr       error
 	records           []string
 }
 
 func (g *fakeGuestBoot) Current(context.Context) (string, error) { return g.current, g.currentErr }
-func (g *fakeGuestBoot) Recorded() (string, error)               { return g.recorded, nil }
+func (g *fakeGuestBoot) Recorded() (string, error)               { return g.recorded, g.recordedErr }
 func (g *fakeGuestBoot) Record(id string) error {
 	g.records = append(g.records, id)
 	g.recorded = id
@@ -166,6 +167,15 @@ func TestGuestRestartedUnderWithoutRecord(t *testing.T) {
 				}
 			}
 		})
+	}
+	// An unreadable record (a corrupt lifecycle.json) is no record: podman's
+	// start time decides.
+	unreadable := &fakeGuestBoot{current: bootB, recorded: bootA, recordedErr: errors.New("lifecycle.json: unexpected end of JSON input")}
+	for _, before := range []bool{true, false} {
+		d := Deps{GuestBoot: unreadable, ContainerRunning: podmanSays(false), ContainerStartedBeforeBoot: startedBefore(before, nil)}
+		if got := guestRestartedUnder(context.Background(), d, "/lever", "hello", running); got != before {
+			t.Errorf("unreadable record, started before the boot %t: got %t", before, got)
+		}
 	}
 	// A kept boot id decides alone: the same boot is never a restart,
 	// whatever podman's start time says.

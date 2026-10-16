@@ -6,7 +6,9 @@
 # removed while an agent loops the controller rename, an agent's image
 # registry, runtime and gcloud settings writes (a worker still starts on lever's
 # image, and the next apply undoes them), `lever stop` and a resume, `lever
-# conversation new` on the running manager, and doctor. `make test-lima-e2e` covers the jail and the broker
+# up` applying a config change, a warm `lever up`, `lever up --wait` under a
+# held lock, `lever up` over a stale hub pid file (a live decoy and a dead
+# pid), `lever conversation new` on the running manager, and doctor. `make test-lima-e2e` covers the jail and the broker
 # without scion; this covers what a scion pin bump can break.
 #
 # Needs: Lima >= 2.0, Go, perl, python3. The agent image comes from IMAGE_TAR (a
@@ -484,6 +486,79 @@ printf '%s\n' "$doctor_out" | grep -E '^(✗|!) ' | mask_secrets | sed 's/^/    
 check "doctor: remote web role bound after the sign-ins" row_ok "remote web role"
 check "doctor: scion conduit and artifacts after the resume" row_ok "scion conduit and artifacts"
 checkx "doctor: no failed row after the resume" '! printf "%s\n" "$doctor_out" | grep -q "^✗ "'
+
+say "lever up applies a config change, with no lever apply"
+# upna <log> [args...]: `lever up --no-attach`, which runs the whole plan.
+upna() { local log=$1; shift; (cd "$INST" && timeout 1800 "$LEVER" up --no-attach "$@" > "$log" 2>&1); }
+CONTACT2=contact2@example.com
+ppid0=$(cat "$INST/.lever-state/remote.pid" 2>/dev/null)
+write_config "$IMAGE_LINE" "    - { login: $CONTACT2, tier: contact, agents: [$NAME] }"
+upna "$WORK/up-config.log"; rc=$?
+tail -4 "$WORK/up-config.log" | mask_secrets | sed 's/^/      | /'
+checkx "up with an edited config succeeds ($rc)" '[ "$rc" = 0 ]'
+check "up says the config changed since the last bring-up" grep -q "the config changed since the last bring-up" "$WORK/up-config.log"
+checkx "up invited the new contact" 'python3 -c "import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))[\"users\"].get(sys.argv[2]) else 1)" "$INST/.lever-state/hub-identity.json" "$CONTACT2"'
+checkx "up restarted the proxy on the new config" '[ "$ppid0" != "$(cat "$INST/.lever-state/remote.pid")" ]'
+code=$(pcode "$CONTACT2" "http://127.0.0.1:$RP/api/v1/auth/me")
+checkx "the new contact signs in through the proxy ($code)" '[ "$code" = 200 ]'
+write_config "$IMAGE_LINE"
+upna "$WORK/up-config2.log"; rc=$?
+checkx "up with the contact removed succeeds ($rc)" '[ "$rc" = 0 ]'
+code=$(pcode "$CONTACT2" "http://127.0.0.1:$RP/api/v1/auth/me")
+checkx "the removed contact is refused ($code)" '[ "$code" = 403 ]'
+check "the manager still runs" running
+
+say "a warm lever up changes nothing"
+hpid0=$(G sh -c 'tr -cd 0-9 < ~/.scion/server.pid')
+mstart0=$(X inspect -f '{{.State.StartedAt}}' "lever--$NAME")
+ppid0=$(cat "$INST/.lever-state/remote.pid" 2>/dev/null)
+t0=$SECONDS
+upna "$WORK/up-warm.log"; rc=$?
+echo "      | warm up took $((SECONDS - t0))s"
+checkx "a warm up succeeds ($rc)" '[ "$rc" = 0 ]'
+check "it skips the warm-up a finished one covers" grep -q "already loaded and warmed" "$WORK/up-warm.log"
+checkx "it says nothing changed" '! grep -q "changed since the last bring-up" "$WORK/up-warm.log"'
+checkx "the hub was not restarted" '[ "$hpid0" = "$(G sh -c "tr -cd 0-9 < ~/.scion/server.pid")" ]'
+checkx "the manager container was not restarted" '[ "$mstart0" = "$(X inspect -f "{{.State.StartedAt}}" "lever--$NAME")" ]'
+checkx "the proxy was kept" '[ "$ppid0" = "$(cat "$INST/.lever-state/remote.pid")" ]'
+
+say "lever up --wait waits out a held lifecycle lock"
+python3 -c 'import fcntl,sys,time; f=open(sys.argv[1],"a"); fcntl.flock(f,fcntl.LOCK_EX); open(sys.argv[2],"w").close(); time.sleep(15)' \
+	"$INST/.lever-state/conversation.lock" "$WORK/held-wait" &
+holder=$!
+for _ in $(seq 50); do [ -e "$WORK/held-wait" ] && break; sleep 0.1; done
+upna "$WORK/up-locked.log"; rc=$?
+checkx "up under a held lock exits 6 at once ($rc)" '[ "$rc" = 6 ]'
+upna "$WORK/up-wait.log" --wait 3m; rc=$?
+wait "$holder" 2>/dev/null
+checkx "up --wait runs once the holder lets go ($rc)" '[ "$rc" = 0 ]'
+check "up --wait said what it waited for" grep -q "waiting up to 3m0s" "$WORK/up-wait.log"
+
+say "a stale hub pid file naming a live process, then lever up"
+# After a guest reboot server.pid names the old hub's pid, and the pid
+# sequence repeats, so a new process can hold it. A decoy holds it here.
+(cd "$INST" && timeout 900 "$LEVER" stop --keep-vm 2>&1 | tail -2)
+checkx "the hub is down after stop --keep-vm" '! G curl -sf -m 5 -o /dev/null http://127.0.0.1:8080/healthz'
+decoy=$(G sh -c 'nohup setsid sleep 1800 </dev/null >/dev/null 2>&1 & echo $! | tee ~/.scion/server.pid')
+checkx "a decoy holds the pid server.pid names ($decoy)" 'G kill -0 "$decoy"'
+upna "$WORK/up-decoy.log"; rc=$?
+tail -4 "$WORK/up-decoy.log" | mask_secrets | sed 's/^/      | /'
+checkx "up over the decoy succeeds ($rc)" '[ "$rc" = 0 ]'
+hpid=$(G sh -c 'tr -cd 0-9 < ~/.scion/server.pid')
+checkx "server.pid names a new hub, not the decoy ($hpid)" '[ -n "$hpid" ] && [ "$hpid" != "$decoy" ]'
+check "the hub serves" G curl -sf -m 10 -o /dev/null http://127.0.0.1:8080/healthz
+checkx "lever left the decoy alone" 'G kill -0 "$decoy"'
+G kill "$decoy" 2>/dev/null
+check "the manager runs after the up" running
+say "a stale hub pid file naming a dead process, then lever up"
+(cd "$INST" && timeout 900 "$LEVER" stop --keep-vm 2>&1 | tail -2)
+dead=$(G sh -c 'sleep 0 & p=$!; wait $p; echo $p | tee ~/.scion/server.pid')
+upna "$WORK/up-dead.log"; rc=$?
+checkx "up over a dead pid succeeds ($rc)" '[ "$rc" = 0 ]'
+hpid=$(G sh -c 'tr -cd 0-9 < ~/.scion/server.pid')
+checkx "server.pid names a new hub ($hpid, not $dead)" '[ -n "$hpid" ] && [ "$hpid" != "$dead" ]'
+check "the hub serves after it" G curl -sf -m 10 -o /dev/null http://127.0.0.1:8080/healthz
+check "the manager runs after it" running
 
 say "lever conversation new on the running manager"
 # P <args...>: podman in the guest, each argument passed as is (X joins them).

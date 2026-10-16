@@ -16,6 +16,11 @@ version bump moves the block under the new version heading.
   started, a healthy one of this binary and broker config is kept, and one of another binary or
   config is restarted. A broker started this way has its manager enrolment ticket minted and staged
   at once, as `apply` does, so its single-use latch is never left open.
+- **A manager that `lever up` resumes can re-enrol after its certificate lapsed.** The manager's
+  short-lived certificate cannot renew while it is suspended, and its boot re-enrols only with an
+  unspent enrolment ticket. `lever apply` stages a fresh one before every resume; `lever up`'s own
+  resume did not, so a manager suspended past its certificate's life came back with no tools. `up`
+  now re-arms the broker's ticket before it resumes the manager, as `apply` does.
 
 ## [0.42.0] - 2026-10-15
 

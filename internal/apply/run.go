@@ -737,8 +737,13 @@ func runBrokerUp(ctx context.Context, d Deps) error {
 // this call started has its single-use latch open: the ticket is minted and
 // staged in tree at once, as apply's mint step does, so no latch stays open
 // for whoever reaches the admin listener first.
-func EnsureBrokerForUp(ctx context.Context, d Deps, tree string) error {
-	if d.StartBroker == nil || d.BrokerHealthy == nil || d.MintManagerBootstrap == nil {
+//
+// forResume is set before a resume: a spent latch is then re-armed and a
+// fresh ticket staged, as start-manager's resume does (ensureFreshBootstrap),
+// since a manager whose leaf expired while it was not running re-enrols on
+// boot only with an unspent ticket.
+func EnsureBrokerForUp(ctx context.Context, d Deps, tree string, forResume bool) error {
+	if d.StartBroker == nil || d.BrokerHealthy == nil || d.MintManagerBootstrap == nil || forResume && d.RearmBootstrap == nil {
 		return errors.New("broker-up: internal error: the broker controller is not wired")
 	}
 	if err := runBrokerUp(ctx, d); err != nil {
@@ -747,6 +752,12 @@ func EnsureBrokerForUp(ctx context.Context, d Deps, tree string) error {
 	m, err := d.MintManagerBootstrap(ctx)
 	switch {
 	case errors.Is(err, ErrBootstrapLatched):
+		if !forResume {
+			return nil
+		}
+		if err := d.RearmBootstrap(ctx); err != nil {
+			return fmt.Errorf("re-arming the broker's spent bootstrap latch: %w", err)
+		}
 		return nil
 	case err != nil:
 		return err

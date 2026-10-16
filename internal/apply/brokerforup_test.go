@@ -32,7 +32,7 @@ func TestEnsureBrokerForUpStagesAnOpenLatch(t *testing.T) {
 	d := brokerForUpDeps(&calls, func() (BootstrapMaterial, error) {
 		return BootstrapMaterial{Ticket: "tkt-up", AgentCN: "mgr"}, nil
 	})
-	if err := EnsureBrokerForUp(context.Background(), d, tree); err != nil {
+	if err := EnsureBrokerForUp(context.Background(), d, tree, false); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(calls, ","); got != "start,healthy,mint" {
@@ -50,7 +50,7 @@ func TestEnsureBrokerForUpReusedBroker(t *testing.T) {
 	tree := t.TempDir()
 	var calls []string
 	d := brokerForUpDeps(&calls, func() (BootstrapMaterial, error) { return BootstrapMaterial{}, ErrBootstrapLatched })
-	if err := EnsureBrokerForUp(context.Background(), d, tree); err != nil {
+	if err := EnsureBrokerForUp(context.Background(), d, tree, false); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(calls, ","); got != "start,healthy,mint" {
@@ -68,7 +68,7 @@ func TestEnsureBrokerForUpFailures(t *testing.T) {
 	var calls []string
 	d := brokerForUpDeps(&calls, func() (BootstrapMaterial, error) { return BootstrapMaterial{}, nil })
 	d.BrokerHealthy = func(context.Context) error { calls = append(calls, "healthy"); return boom }
-	if err := EnsureBrokerForUp(context.Background(), d, t.TempDir()); !errors.Is(err, boom) {
+	if err := EnsureBrokerForUp(context.Background(), d, t.TempDir(), false); !errors.Is(err, boom) {
 		t.Fatalf("err = %v", err)
 	}
 	if got := strings.Join(calls, ","); got != "start,healthy" {
@@ -76,10 +76,45 @@ func TestEnsureBrokerForUpFailures(t *testing.T) {
 	}
 	calls = nil
 	d = brokerForUpDeps(&calls, func() (BootstrapMaterial, error) { return BootstrapMaterial{}, boom })
-	if err := EnsureBrokerForUp(context.Background(), d, t.TempDir()); !errors.Is(err, boom) {
+	if err := EnsureBrokerForUp(context.Background(), d, t.TempDir(), false); !errors.Is(err, boom) {
 		t.Fatalf("mint err = %v", err)
 	}
-	if err := EnsureBrokerForUp(context.Background(), Deps{}, t.TempDir()); err == nil {
+	if err := EnsureBrokerForUp(context.Background(), Deps{}, t.TempDir(), false); err == nil {
 		t.Fatal("an unwired broker controller was accepted")
+	}
+}
+
+// TestEnsureBrokerForUpResumeRearms: before a resume a spent latch is
+// re-armed, as start-manager's resume does, so a manager whose leaf expired
+// while it was suspended can re-enrol; a latch this call found open already
+// gave a fresh ticket and is not re-armed.
+func TestEnsureBrokerForUpResumeRearms(t *testing.T) {
+	var calls []string
+	d := brokerForUpDeps(&calls, func() (BootstrapMaterial, error) { return BootstrapMaterial{}, ErrBootstrapLatched })
+	if err := EnsureBrokerForUp(context.Background(), d, t.TempDir(), true); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(calls, ","); got != "start,healthy,mint,rearm" {
+		t.Fatalf("spent latch: calls = %s", got)
+	}
+
+	calls = nil
+	d = brokerForUpDeps(&calls, func() (BootstrapMaterial, error) { return BootstrapMaterial{Ticket: "tkt"}, nil })
+	if err := EnsureBrokerForUp(context.Background(), d, t.TempDir(), true); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(calls, ","); got != "start,healthy,mint" {
+		t.Fatalf("open latch: calls = %s", got)
+	}
+
+	boom := errors.New("broker did not become healthy")
+	d = brokerForUpDeps(&calls, func() (BootstrapMaterial, error) { return BootstrapMaterial{}, ErrBootstrapLatched })
+	d.RearmBootstrap = func(context.Context) error { return boom }
+	if err := EnsureBrokerForUp(context.Background(), d, t.TempDir(), true); !errors.Is(err, boom) || !strings.Contains(err.Error(), "re-arming") {
+		t.Fatalf("failed re-arm: %v", err)
+	}
+	d.RearmBootstrap = nil
+	if err := EnsureBrokerForUp(context.Background(), d, t.TempDir(), true); err == nil {
+		t.Fatal("a resume without a re-arm was accepted")
 	}
 }

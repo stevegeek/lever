@@ -408,7 +408,8 @@ func TestEnsureRemoteForUp(t *testing.T) {
 }
 
 // TestEnsureBrokerForUp: up's resume and running paths start (or reuse) the
-// host broker as apply does, and a broker that does not come up fails the up.
+// host broker as apply does, the resume re-arms a spent bootstrap latch, and a
+// broker that does not come up fails the up.
 func TestEnsureBrokerForUp(t *testing.T) {
 	rep := progress.New(progress.Options{Mode: progress.ModeQuiet, Command: "up"})
 	var calls []string
@@ -420,14 +421,22 @@ func TestEnsureBrokerForUp(t *testing.T) {
 			return apply.BootstrapMaterial{}, apply.ErrBootstrapLatched
 		},
 	}
-	if err := ensureBrokerForUp(context.Background(), rep, deps, nil, t.TempDir()); err != nil {
+	if err := ensureBrokerForUp(context.Background(), rep, deps, nil, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(calls, ","); got != "start,healthy,mint" {
 		t.Fatalf("calls = %s", got)
 	}
+	calls = nil
+	deps.RearmBootstrap = func(context.Context) error { calls = append(calls, "rearm"); return nil }
+	if err := ensureBrokerForUp(context.Background(), rep, deps, nil, t.TempDir(), true); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(calls, ","); got != "start,healthy,mint,rearm" {
+		t.Fatalf("resume: calls = %s", got)
+	}
 	deps.BrokerHealthy = func(context.Context) error { return errors.New("broker did not become healthy") }
-	err := ensureBrokerForUp(context.Background(), rep, deps, nil, t.TempDir())
+	err := ensureBrokerForUp(context.Background(), rep, deps, nil, t.TempDir(), false)
 	if err == nil || !strings.Contains(err.Error(), "broker-up: broker did not become healthy") {
 		t.Fatalf("err = %v", err)
 	}

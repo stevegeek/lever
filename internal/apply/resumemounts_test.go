@@ -169,7 +169,7 @@ func TestStartManagerKeptForeignNamespaceWarns(t *testing.T) {
 	}
 }
 
-// ManagerResume: Settle checks again until the container runs and fails on
+// managerResume: Settle checks again until the container runs and fails on
 // what it then finds; a check that never runs is a warning.
 func TestManagerResumeSettle(t *testing.T) {
 	old := settleBudget
@@ -206,7 +206,7 @@ func TestManagerResumeSettle(t *testing.T) {
 					return []jail.LiveMountProblem{{Target: "/workspace/kb", Reason: jail.LiveMountElsewhere}}, nil
 				},
 			}
-			g, err := BeginManagerResume(context.Background(), d, app, "/lever", "conversation")
+			g, err := beginManagerResume(context.Background(), d, app, "/lever", "conversation")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -275,7 +275,7 @@ func TestManagerResumeCheckSurvivesCancel(t *testing.T) {
 			return []jail.LiveMountProblem{{Target: "/workspace/kb", Reason: jail.LiveMountElsewhere}}, nil
 		},
 	}
-	g, err := BeginManagerResume(context.Background(), d, app, "/lever", "up")
+	g, err := beginManagerResume(context.Background(), d, app, "/lever", "up")
 	if err != nil {
 		t.Fatal(err)
 	}

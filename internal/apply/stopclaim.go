@@ -41,7 +41,7 @@ var stopClaimSettle = struct{ Stopped, Created time.Duration }{5 * time.Second, 
 // broker heartbeat shows the container gone: 5+10+20+30*5 s, about 3 min.
 var defaultStopClaimRetry = budgetOf(wait.StopClaimReleased)
 
-// ResumeClearingStopClaim runs resume and, when the hub refuses it with a
+// resumeClearingStopClaim runs resume and, when the hub refuses it with a
 // held stop claim (IsStopClaimHeld), recovers and retries within a
 // bound. The hub reads a container podman lists as created as still running
 // (a start the VM's power-off interrupted leaves one), so the claim it took
@@ -61,7 +61,7 @@ var defaultStopClaimRetry = budgetOf(wait.StopClaimReleased)
 //
 // It returns resume's own error for any other failure, nil once a resume
 // succeeds, and an error wrapping ErrStopClaimHeld otherwise.
-func ResumeClearingStopClaim(ctx context.Context, d Deps, name, project, subject string, resume func() error) error {
+func resumeClearingStopClaim(ctx context.Context, d Deps, name, project, subject string, resume func() error) error {
 	err := resume()
 	if !IsStopClaimHeld(err) {
 		return err
@@ -172,9 +172,9 @@ func StopClaimManualFix(ref string) string {
 		ref, ref)
 }
 
-// ResumeError maps a failed manager resume to the error its caller reports:
+// resumeError maps a failed manager resume to the error its caller reports:
 // the stop-claim refusal as it is, a hub refusal, or ResumeFailed.
-func ResumeError(verb string, err error) error {
+func resumeError(verb string, err error) error {
 	switch {
 	case errors.Is(err, ErrStopClaimHeld):
 		return err

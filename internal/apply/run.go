@@ -438,7 +438,7 @@ type Deps struct {
 	// phase to settle. Zero takes the default.
 	PhaseSettleRetry RetryBudget
 	// StaleContainer is podman in the jail, for clearing a hub stop claim that
-	// only a container removal releases (ResumeClearingStopClaim), and for
+	// only a container removal releases (resumeClearingStopClaim), and for
 	// telling a running record whose container is gone or exited
 	// (containerGoneUnder). nil: lever removes nothing and names the manual
 	// fix, and keeps such a record for the gate to refuse.
@@ -1932,7 +1932,7 @@ func (r *run) resumeOrRecover(ctx context.Context, jp string, v resumeVerb) erro
 		return nil
 	}
 	// A hub refusal says nothing about the manager.
-	return ResumeError(v.label, rerr)
+	return resumeError(v.label, rerr)
 }
 
 // ResumeFailed is the error for a manager resume that failed and was not a hub

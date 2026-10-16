@@ -7,7 +7,35 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Changed
+
+- **One lifecycle for the manager.** `lever apply`, `lever up`, `lever conversation new` and
+  `restore`, `lever stop`, and the broker's certificate heal and hub token reset of the manager now
+  all create, resume, suspend and recreate it through one function, which takes the lifecycle lock,
+  reads the manager once and decides from that reading. The decisions are the ones each command
+  made before, except for the fixes below.
+
 ### Fixed
+
+- **`lever up` and `lever apply` bring back a manager whose container died under a record the hub
+  still reads running.** They kept such a record and then refused it ("its container is ... —
+  `lever stop` then `lever up` resumes it"); only a VM restart under the manager was recovered.
+  Now, when podman shows the manager's container exited, stopped or gone, they suspend and resume
+  it, keeping the conversation. A container podman lists as `created` (a start under way) does not
+  count, and a suspend that does not take is still refused by the liveness gate.
+- **`lever up` on a manager the hub still runs gets the whole start-manager step.** When the hub
+  survived (`lever stop --keep-vm`, a guest that restarted under a running hub), `up` resumed or
+  kept the manager on a path of its own. It now runs what `apply` runs for the manager: the wait
+  for the runtime broker, the fresh start of a manager whose home is proven to hold no
+  conversation, the workers' session heal and the mount and settings warnings. A running manager is
+  gated as `apply` gates it: a container column the hub leaves blank is waited on, and refused if it
+  stays blank.
+- **The broker's certificate heal of the manager waits for the manager to come up.** The bounce
+  read the tree mounts back but did not check that claude started, and recorded the guest boot
+  regardless. It now passes the same liveness gate as `lever up` before it is audited as healed and
+  the boot recorded; the heal's bound grows from 9 to 13 minutes. A `lever revoke` that lands while
+  the heal waits for the lifecycle lock now stops it, as it already did for workers, and the
+  manager's hub token reset is skipped when the manager no longer runs once the lock is held.
 
 - **The first `lever up` after a VM reboot no longer fails because a stale hub pid file names a
   reused pid.** After a reboot, `~/.scion/server.pid` still names the hub's old pid, and scion

@@ -85,10 +85,10 @@ func (d Deps) logf(format string, args ...any) {
 	}
 }
 
-// RecordGuestBoot notes the current guest boot as the one the manager runs
+// recordGuestBoot notes the current guest boot as the one the manager runs
 // in; call it once lever has seen the manager live. Best-effort: a failure
 // only means the next restart is not recognised.
-func RecordGuestBoot(ctx context.Context, d Deps) {
+func recordGuestBoot(ctx context.Context, d Deps) {
 	if d.GuestBoot == nil {
 		return
 	}

@@ -59,7 +59,7 @@ func (b *Broker) runHealer(ctx context.Context) {
 }
 
 // reenrolHealTimeout bounds a whole heal. The manager's bounce may wait out
-// a hub stop claim (apply.ResumeClearingStopClaim): about 3 minutes, started
+// a hub stop claim (the manager's stop-claim recovery): about 3 minutes, started
 // again after a removal that can come up to 3 minutes in, then its
 // liveness gate (up to 2 minutes for claude's pane and 2 for its session
 // start); the bound leaves room for those and the steps around them. A heal

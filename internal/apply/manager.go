@@ -610,7 +610,7 @@ func (r *run) ensureUp(ctx context.Context, jp string, q ManagerRequest) (Manage
 		probes.abandon()
 		return res, err
 	}
-	RecordGuestBoot(ctx, r.d)
+	recordGuestBoot(ctx, r.d)
 	probes.finish()
 	return res, nil
 }
@@ -709,13 +709,13 @@ func (r *run) swapConversation(ctx context.Context, jp string, q ManagerRequest)
 	if err := r.d.VerifyAgentRole(ctx, path.Base(jp), r.app.Name); err != nil {
 		return res, err
 	}
-	guard, err := BeginManagerResume(ctx, r.d, r.app, jp, r.subjectName())
+	guard, err := beginManagerResume(ctx, r.d, r.app, jp, r.subjectName())
 	if err != nil {
 		return res, fmt.Errorf("%w; the conversation is restored, but the manager stays suspended: fix that, then run `lever up`", err)
 	}
 	res.Verb = p.verb.String()
 	if err := r.resumeClearing(ctx, jp, func() error { return sc.Resume(ctx, r.app.Name, jp) }); err != nil {
-		return res, guard.AfterFailure(ctx, ResumeError("resume", err))
+		return res, guard.AfterFailure(ctx, resumeError("resume", err))
 	}
 	if err := guard.Resumed(ctx); err != nil {
 		return res, err
@@ -726,14 +726,14 @@ func (r *run) swapConversation(ctx context.Context, jp string, q ManagerRequest)
 	if err := guard.Live(ctx); err != nil {
 		return res, err
 	}
-	RecordGuestBoot(ctx, r.d)
+	recordGuestBoot(ctx, r.d)
 	return res, nil
 }
 
 // resumeClearing runs one resume through the hub's stop-claim recovery and
 // the runtime-broker-race retry.
 func (r *run) resumeClearing(ctx context.Context, jp string, resume func() error) error {
-	return ResumeClearingStopClaim(ctx, r.d, r.app.Name, jp, r.subjectName(), func() error {
+	return resumeClearingStopClaim(ctx, r.d, r.app.Name, jp, r.subjectName(), func() error {
 		return r.retryOnBrokerUnavailable(ctx, resume)
 	})
 }
@@ -785,7 +785,7 @@ func (r *run) resumeAfterFailure(ctx context.Context, jp string, cause error, ho
 	if gerr := r.d.VerifyAgentRole(rctx, path.Base(jp), r.app.Name); gerr != nil {
 		return fmt.Errorf("%w; the manager stays suspended: %w", cause, gerr)
 	}
-	guard, gerr := BeginManagerResume(rctx, r.d, r.app, jp, r.subjectName())
+	guard, gerr := beginManagerResume(rctx, r.d, r.app, jp, r.subjectName())
 	if gerr != nil {
 		return fmt.Errorf("%w; the manager stays suspended: %w", cause, gerr)
 	}
@@ -887,7 +887,7 @@ func (r *run) newSession(ctx context.Context, jp string, q ManagerRequest) (res 
 	if err := r.d.VerifyAgentRole(ctx, path.Base(jp), r.app.Name); err != nil {
 		return res, ended(err)
 	}
-	guard, err := BeginManagerResume(ctx, r.d, r.app, jp, r.subjectName())
+	guard, err := beginManagerResume(ctx, r.d, r.app, jp, r.subjectName())
 	if err != nil {
 		return res, ended(err)
 	}
@@ -918,7 +918,7 @@ func (r *run) newSession(ctx context.Context, jp string, q ManagerRequest) (res 
 	if err := guard.Live(ctx); err != nil {
 		return res, ended(err)
 	}
-	RecordGuestBoot(ctx, r.d)
+	recordGuestBoot(ctx, r.d)
 	return res, nil
 }
 
@@ -968,7 +968,7 @@ func (r *run) park(ctx context.Context, jp string, q ManagerRequest) (ManagerRes
 
 // reenrol is ManagerReenrol. Its suspend is not waited on: the resume that
 // follows is scion's answer to it. A stop claim is cleared only on the
-// manager's own container (ResumeClearingStopClaim), which only the
+// manager's own container (resumeClearingStopClaim), which only the
 // manager's own lapsed certificate brings about.
 func (r *run) reenrol(ctx context.Context, jp string, q ManagerRequest) (res ManagerResult, err error) {
 	sc := r.d.managerScion()
@@ -986,7 +986,7 @@ func (r *run) reenrol(ctx context.Context, jp string, q ManagerRequest) (res Man
 	if err != nil {
 		return res, err
 	}
-	guard, err := BeginManagerResume(ctx, r.d, r.app, jp, r.subjectName())
+	guard, err := beginManagerResume(ctx, r.d, r.app, jp, r.subjectName())
 	if err != nil {
 		return res, refused(err)
 	}
@@ -1017,7 +1017,7 @@ func (r *run) reenrol(ctx context.Context, jp string, q ManagerRequest) (res Man
 		return res, refused(err)
 	}
 	res.MountsUnverified = !guard.Verified()
-	RecordGuestBoot(ctx, r.d)
+	recordGuestBoot(ctx, r.d)
 	return res, nil
 }
 

@@ -9,11 +9,12 @@ import (
 	"github.com/stevegeek/lever/internal/wait"
 )
 
-// ManagerResume guards one resume of the manager outside the start-manager
-// step with the same checks start-manager runs, so no path reports the
-// manager up over mounts lever has not read back:
+// managerResume guards one resume EnsureManager makes outside ensureUp
+// (restore, new session, re-enrol, the resume after a failure) with the same
+// checks ensureUp runs, so no path reports the manager up over mounts lever
+// has not read back:
 //
-//   - BeginManagerResume, before the resume: the host tree has no symbolic
+//   - beginManagerResume, before the resume: the host tree has no symbolic
 //     links (config.App.PrepareManagerReadOnlyHost) and no recorded mount
 //     directory is gone (checkStaleTreeMounts);
 //   - Resumed, right after the resume call: every tree mount's source is read
@@ -27,16 +28,16 @@ import (
 // The caller must not report the manager up while Resumed, Live or Settle
 // returned an error. The checks run detached from the caller's cancellation
 // (bounded), so an interrupt does not skip them.
-type ManagerResume struct {
+type managerResume struct {
 	r        *run
 	project  string
 	verified bool
 }
 
-// BeginManagerResume runs the checks before a resume. project is the in-jail
+// beginManagerResume runs the checks before a resume. project is the in-jail
 // tree root; subject prefixes the messages. An error means: do not resume.
-func BeginManagerResume(ctx context.Context, d Deps, app *config.App, project, subject string) (*ManagerResume, error) {
-	m := &ManagerResume{r: &run{app: app, d: d, subject: subject}, project: project}
+func beginManagerResume(ctx context.Context, d Deps, app *config.App, project, subject string) (*managerResume, error) {
+	m := &managerResume{r: &run{app: app, d: d, subject: subject}, project: project}
 	// Fail closed: without the two readers the read-back would pass without
 	// looking (verifyResumedTreeMounts treats them as optional for tests).
 	if d.InspectContainerMounts == nil || d.CheckLiveMounts == nil {
@@ -55,13 +56,13 @@ func BeginManagerResume(ctx context.Context, d Deps, app *config.App, project, s
 // Resumed checks the resumed manager's tree mounts. An error means the mounts
 // are not what lever planned: the manager was suspended (or the error says it
 // could not be).
-func (m *ManagerResume) Resumed(ctx context.Context) error {
+func (m *managerResume) Resumed(ctx context.Context) error {
 	v, err := m.r.verifyResumedTreeMounts(ctx, m.project)
 	m.verified = v
 	return err
 }
 
-func (m *ManagerResume) Live(ctx context.Context) error {
+func (m *managerResume) Live(ctx context.Context) error {
 	if m.verified {
 		return nil
 	}
@@ -76,7 +77,7 @@ func (m *ManagerResume) Live(ctx context.Context) error {
 // AfterFailure is for a resume call or gate that failed with cause: the
 // resume may still have started the container, so its mounts are read back
 // (a mismatch suspends it) and joined to cause.
-func (m *ManagerResume) AfterFailure(ctx context.Context, cause error) error {
+func (m *managerResume) AfterFailure(ctx context.Context, cause error) error {
 	if m.verified {
 		return cause
 	}
@@ -86,13 +87,13 @@ func (m *ManagerResume) AfterFailure(ctx context.Context, cause error) error {
 	return cause
 }
 
-func (m *ManagerResume) Verified() bool { return m.verified }
+func (m *managerResume) Verified() bool { return m.verified }
 
 var settleBudget = budgetOf(wait.ManagerMountsVerified)
 
 // Settle is Live for a path with no liveness gate: it retries until the check
 // runs, for up to settleBudget, then warns if it never did.
-func (m *ManagerResume) Settle(ctx context.Context) error {
+func (m *managerResume) Settle(ctx context.Context) error {
 	if m.verified {
 		return nil
 	}

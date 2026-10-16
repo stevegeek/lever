@@ -200,14 +200,14 @@ func TestStartManagerRecoversWithoutRecord(t *testing.T) {
 
 func TestRecordGuestBootSkipsUnchanged(t *testing.T) {
 	gb := &fakeGuestBoot{current: bootA, recorded: bootA}
-	RecordGuestBoot(context.Background(), Deps{GuestBoot: gb})
+	recordGuestBoot(context.Background(), Deps{GuestBoot: gb})
 	if len(gb.records) != 0 {
 		t.Errorf("an unchanged boot must not be rewritten: %v", gb.records)
 	}
 	gb.current = bootB
-	RecordGuestBoot(context.Background(), Deps{GuestBoot: gb})
+	recordGuestBoot(context.Background(), Deps{GuestBoot: gb})
 	if len(gb.records) != 1 || gb.recorded != bootB {
 		t.Errorf("records = %v", gb.records)
 	}
-	RecordGuestBoot(context.Background(), Deps{}) // nil tracker: no panic
+	recordGuestBoot(context.Background(), Deps{}) // nil tracker: no panic
 }

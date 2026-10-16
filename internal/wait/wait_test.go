@@ -240,3 +240,16 @@ func TestBudgetsNeverShorterThanBefore(t *testing.T) {
 		t.Error("settle or restart pause shortened")
 	}
 }
+
+// A Spec with a time budget and no interval pauses minPause, never spins.
+func TestNoIntervalDoesNotSpin(t *testing.T) {
+	c := &fakeClock{}
+	n := 0
+	_ = For(context.Background(), withClock(Spec{Name: "x", Budget: 100 * time.Millisecond}, c), func(context.Context) Result {
+		n++
+		return NotYet("")
+	})
+	if n != 11 {
+		t.Fatalf("probes = %d, want 11 (one per %s over 100ms)", n, minPause)
+	}
+}

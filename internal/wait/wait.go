@@ -75,7 +75,7 @@ type Spec struct {
 	Interval    time.Duration
 	MaxInterval time.Duration
 	// Notice, when set, is called once Elapsed reaches NoticeAfter, then
-	// every NoticeEvery (0: once).
+	// every NoticeEvery (0: once). A zero NoticeAfter turns notices off.
 	NoticeAfter time.Duration
 	NoticeEvery time.Duration
 	Notice      func(Progress)
@@ -85,7 +85,8 @@ type Spec struct {
 
 // Attempts is the Spec of a fixed-interval wait that gives up after n
 // probes, as a loop of n probes with interval between them did: its time
-// budget is the n-1 pauses, so fast probes run exactly n times.
+// budget is the n-1 pauses, so fast probes run exactly n times. n < 1 is one
+// probe, never an unbounded wait.
 func Attempts(name string, n int, interval time.Duration) Spec {
 	n = max(n, 1)
 	return Spec{Name: name, MinAttempts: n, Budget: time.Duration(n-1) * interval, Interval: interval}
@@ -177,7 +178,8 @@ func For(ctx context.Context, s Spec, probe func(context.Context) Result) error 
 		}
 		pause := interval
 		if p.Attempts >= s.MinAttempts {
-			pause = min(pause, s.Budget-p.Elapsed)
+			// Only time is left to spend: never spin through it.
+			pause = min(max(pause, minPause), s.Budget-p.Elapsed)
 		}
 		if s.MaxInterval > interval {
 			interval = min(interval*2, s.MaxInterval)
@@ -189,6 +191,10 @@ func For(ctx context.Context, s Spec, probe func(context.Context) Result) error 
 		}
 	}
 }
+
+// minPause is the least pause once only the time budget keeps a wait going,
+// for a Spec with no Interval.
+const minPause = 10 * time.Millisecond
 
 type clock interface {
 	Now() time.Time

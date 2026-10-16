@@ -44,6 +44,20 @@ version bump moves the block under the new version heading.
   look shows it unchanged, and retries for about three minutes; when the claim stays held its audit
   line names the claim and the fix. Only the manager's own lapsed certificate starts this bounce.
   Worker resumes are still not covered: the manager asks for those.
+- **`lever apply` revokes the controller's hub tokens that lever did not record (lever#229).** On an
+  instance migrated to 0.39 or later, PATs an older lever minted before it kept token records stayed
+  valid with the controller's authority, and doctor's *hub identities* row stayed red: the 0.39
+  re-mint revoked only tokens it had a record of, and the documented fix (`scion hub token revoke`)
+  cannot work, since a token cannot manage tokens. Every apply now lists the controller's tokens,
+  as the controller through lever's assertion, and revokes each one lever neither recorded
+  (`controller.pat.json`, `remote.pat.json`, the `lever ssh` records) nor holds, printing its id and
+  name, never its value. It tells the tokens it holds by the prefix the hub lists of each against
+  `controller.pat` and `remote.pat`, so the tokens lever uses are never revoked, recorded or not;
+  a `lever ssh` token still in its life is left alone, and a token listed without a prefix is
+  reported, not revoked. It revokes nothing, with a warning, when it cannot read its own records or
+  token files, when the controller assertion does not resolve to the recorded controller, or when
+  the hub's list does not show the controller token lever holds. Doctor's row now names
+  `lever apply` as the fix.
 
 ## [0.42.0] - 2026-10-15
 

@@ -525,7 +525,8 @@ func (h *hiHub) handle(c hiCaller, method, raw string, body []byte) (int, []byte
 		items := []hubapi.Token{}
 		for _, t := range h.tokens {
 			if t.Owner == me.ID {
-				items = append(items, hubapi.Token{ID: t.ID, Name: t.Name, ProjectID: t.ProjectID, Scopes: t.Scopes, Revoked: t.Revoked, ExpiresAt: t.Expires})
+				items = append(items, hubapi.Token{ID: t.ID, Name: t.Name, ProjectID: t.ProjectID, Scopes: t.Scopes, Revoked: t.Revoked, ExpiresAt: t.Expires,
+					Prefix: t.Secret[:min(len(t.Secret), len(uatPrefix)+12)]})
 			}
 		}
 		return hiJSON(200, map[string]any{"items": items})

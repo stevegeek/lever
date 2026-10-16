@@ -289,6 +289,7 @@ func (h *hubIdentity) run(ctx context.Context) error {
 	if !conduitOn {
 		h.revokeSSHTokens(ctx, mode)
 	}
+	h.revokeUnrecordedTokens(ctx, mode, rec.ControllerID)
 
 	// The PAT cannot register a project, so the link comes after the REST
 	// registration and the mint, and takes scion's already-linked path.

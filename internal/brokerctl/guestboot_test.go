@@ -30,7 +30,7 @@ func TestJailGuestBoot(t *testing.T) {
 	if was, err := g.Recorded(); err != nil || was != id {
 		t.Fatalf("Recorded = %q, %v", was, err)
 	}
-	fi, err := os.Stat(st.GuestBoot())
+	fi, err := os.Stat(st.LifecycleFile())
 	if err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf("record file: %v %v", fi, err)
 	}
@@ -44,7 +44,7 @@ func TestJailGuestBootRefusesOddValues(t *testing.T) {
 	if _, err := g.Current(context.Background()); err == nil {
 		t.Fatal("a value that is not a boot id must be refused")
 	}
-	if err := os.WriteFile(st.GuestBoot(), []byte(`{"boot_id":"junk"}`), 0o600); err != nil {
+	if err := os.WriteFile(st.LifecycleFile(), []byte(`{"version":1,"guest_boot":{"boot_id":"junk"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if was, err := g.Recorded(); err != nil || was != "" {

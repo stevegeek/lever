@@ -50,6 +50,11 @@ func newDestroyCmd(factory BackendFactory) *cobra.Command {
 					if rerr := removePATs(st); rerr != nil {
 						cmd.PrintErrf("lever: warning: removing stale PATs: %v\n", rerr)
 					}
+					// It describes the machine being deleted: its guest boot and what was
+					// converged in it.
+					if rerr := removeIfPresent(st.LifecycleFile()); rerr != nil {
+						cmd.PrintErrf("lever: warning: removing the lifecycle record: %v\n", rerr)
+					}
 				}
 			} else {
 				cmd.PrintErrln("note: --machine given; the broker is not stopped and staged state is not cleared (run `lever destroy` from the instance root to do that).")

@@ -403,7 +403,7 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 			return out, nil
 		},
 	}
-	managerDeps.GuestBoot = managerGuestBoot(app, st, jr)
+	managerDeps.GuestBoot = GuestBootFor(app, st, jr)
 	d.EnsureManager = managerLifecycle(app, managerDeps)
 	if len(app.SharedFolders) > 0 {
 		d.RecordVolumes = readVolumes
@@ -519,10 +519,11 @@ func (h hubTokenHealer) ResetAuth(ctx context.Context, agent string) error {
 	return h.sc.ResetAuth(ctx, agent, h.project)
 }
 
-// managerGuestBoot records the guest boot the manager runs in after a
-// bounce. Inside the tree the state directory is the agents' to replace, so
-// the broker writes nothing there.
-func managerGuestBoot(app *config.App, st state.State, jr proc.Runner) apply.GuestBoot {
+// GuestBootFor is the manager's guest boot record for apply and the broker.
+// Inside the tree the state directory is the agents' to replace, so lever
+// neither trusts nor writes a record there: nil, and the guest-restart check
+// falls back to podman's container start time.
+func GuestBootFor(app *config.App, st state.State, jr proc.Runner) apply.GuestBoot {
 	if StateInsideTree(app, st) {
 		return nil
 	}

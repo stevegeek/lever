@@ -365,7 +365,7 @@ func TestDispatchConfigWiresTheRecordReaderByFolders(t *testing.T) {
 
 	// With the state directory inside the tree the broker writes no boot record there.
 	inTree := wiringApp(st.Dir, "")
-	if managerGuestBoot(inTree, state.ForConfig(inTree.Tree), proc.RealRunner{}) != nil || managerGuestBoot(app, st, proc.RealRunner{}) == nil {
+	if GuestBootFor(inTree, state.ForConfig(inTree.Tree), proc.RealRunner{}) != nil || GuestBootFor(app, st, proc.RealRunner{}) == nil {
 		t.Fatal("the boot record is wired only with the state directory outside the tree")
 	}
 

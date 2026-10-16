@@ -18,14 +18,10 @@ const guestBootIDPath = "/proc/sys/kernel/random/boot_id"
 // comes from the guest, so anything else is refused rather than stored.
 var bootIDRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
-type guestBootRecord struct {
-	BootID     string    `json:"boot_id"`
-	RecordedAt time.Time `json:"recorded_at"`
-}
-
-// JailGuestBoot is apply.GuestBoot over the jail runner and the state
-// directory's guest boot record, for apply's wiring and the broker's bounce
-// of the manager alike.
+// JailGuestBoot is apply.GuestBoot over the jail runner and the guest boot
+// in the state directory's lifecycle record, for apply's wiring and the
+// broker's bounce of the manager alike. Use GuestBootFor, which keeps it off
+// a state directory inside the tree.
 type JailGuestBoot struct {
 	R     proc.Runner
 	State state.State
@@ -45,14 +41,14 @@ func (g JailGuestBoot) Current(ctx context.Context) (string, error) {
 }
 
 func (g JailGuestBoot) Recorded() (string, error) {
-	r, err := state.LoadJSON[guestBootRecord](g.State.GuestBoot(), "guest boot record")
+	l, err := g.State.LoadLifecycle()
 	if err != nil {
 		return "", err
 	}
-	if !bootIDRE.MatchString(r.BootID) {
+	if l.GuestBoot == nil || !bootIDRE.MatchString(l.GuestBoot.BootID) {
 		return "", nil
 	}
-	return r.BootID, nil
+	return l.GuestBoot.BootID, nil
 }
 
 func (g JailGuestBoot) Record(id string) error {
@@ -60,5 +56,7 @@ func (g JailGuestBoot) Record(id string) error {
 	if now == nil {
 		now = time.Now
 	}
-	return state.SaveJSON(g.State.GuestBoot(), "guest boot record", guestBootRecord{BootID: id, RecordedAt: now().UTC()})
+	return g.State.UpdateLifecycle(func(l *state.Lifecycle) {
+		l.GuestBoot = &state.GuestBootRecord{BootID: id, RecordedAt: now().UTC()}
+	})
 }

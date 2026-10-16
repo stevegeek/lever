@@ -95,10 +95,6 @@ func (s State) SkillsAdopted() string { return filepath.Join(s.Dir, "skills-adop
 // writes keeps the answer private.
 func (s State) RemoteStamp() string { return filepath.Join(s.Dir, "remote.stamp") }
 
-// GuestBoot records the jail guest boot id in which lever last saw the
-// manager live, so a VM restart under a "running" record is recognised.
-func (s State) GuestBoot() string { return filepath.Join(s.Dir, "guest-boot.json") }
-
 // HWEFailStamp records that the guest_kernel hwe install failed in the jail
 // VM, keyed by its /etc/machine-id: while it names the VM and egress is
 // closed, apply and up warn instead of running apt again. Deleting it

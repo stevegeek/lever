@@ -15,7 +15,8 @@ version bump moves the block under the new version heading.
   as before; with `--wait 5m`, say, they wait up to that long for it to finish, saying once what
   they wait for, and only then exit `6`. Use it in scripts and scheduled runs. A new conversation
   from the chat page now waits up to 3 minutes and the daily reset up to 10, instead of failing
-  and trying again 10 minutes later.
+  and trying again 10 minutes later. Either one starts nothing when the jail is not up once it has
+  the lock (after a `lever stop` it waited behind, say): it exits as "not running".
 
 ### Changed
 

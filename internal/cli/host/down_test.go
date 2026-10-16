@@ -258,6 +258,19 @@ func TestLockForDestroy(t *testing.T) {
 		t.Fatalf("--force warning = %q", warned)
 	}
 
+	// A lock that cannot be taken at all refuses too, and --force goes on.
+	blocked := state.State{Dir: filepath.Join(root, "file")}
+	if err := os.WriteFile(blocked.Dir, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lockForDestroy(app, blocked, false, func(string) {}); err == nil || !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("unlockable: %v", err)
+	}
+	warned = ""
+	if _, err := lockForDestroy(app, blocked, true, func(s string) { warned = s }); err != nil || !strings.Contains(warned, "without the lifecycle lock") {
+		t.Fatalf("unlockable --force: %v, warned %q", err, warned)
+	}
+
 	in := &config.App{Name: "mgr", Tree: root}
 	free, err := lockForDestroy(in, st, false, func(string) { t.Error("warned with the state in the tree") })
 	if err != nil {

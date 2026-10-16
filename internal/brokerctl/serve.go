@@ -399,8 +399,12 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 	d.ClearManagerStopClaim = func(ctx context.Context, resume func() error) error {
 		return apply.ResumeClearingStopClaim(ctx, stopClaim, app.Name, jailMount, "broker", resume)
 	}
-	guestBoot := apply.Deps{GuestBoot: JailGuestBoot{R: jr, State: st}, Log: daemon.Warnf}
-	d.RecordManagerBoot = func(ctx context.Context) { apply.RecordGuestBoot(ctx, guestBoot) }
+	// Inside the tree the state directory is the agents' to replace, so the
+	// broker writes nothing there.
+	if !StateInsideTree(app, st) {
+		guestBoot := apply.Deps{GuestBoot: JailGuestBoot{R: jr, State: st}, Log: daemon.Warnf}
+		d.RecordManagerBoot = func(ctx context.Context) { apply.RecordGuestBoot(ctx, guestBoot) }
+	}
 	if len(app.SharedFolders) > 0 {
 		d.RecordVolumes = readVolumes
 	} else {

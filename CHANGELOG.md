@@ -32,7 +32,8 @@ version bump moves the block under the new version heading.
   conversation or a stop. `destroy` from the instance root now holds the lock for the teardown and,
   while another command holds it, exits `6`, names that command and its pid, and destroys nothing.
   It stays the last resort: `lever destroy --force` destroys the jail anyway, after a warning that
-  names the holder, for a command that is stuck (a `lever stop` hung in the guest). The broker's
+  names the holder, for a command that is stuck (a `lever stop` hung in the guest), and also when the
+  lock cannot be taken at all. The broker's
   reset of the manager's token is skipped while the lock is held, as its certificate heal already
   was, and retried at the next check.
 - **The broker's certificate heal of the manager gets past a hub stop claim.** When the manager's
@@ -51,7 +52,9 @@ version bump moves the block under the new version heading.
   cannot work, since a token cannot manage tokens. Every apply now lists the controller's tokens,
   as the controller through lever's assertion, and revokes each one lever neither recorded
   (`controller.pat.json`, `remote.pat.json`, the `lever ssh` records) nor holds, printing its id and
-  name, never its value. It tells the tokens it holds by the prefix the hub lists of each against
+  name, never its value. On a migrated hub the controller is scion's dev user, so this also revokes
+  any PAT minted as that user by hand (with the scion CLI, say): each carries the controller's
+  authority. It tells the tokens it holds by the prefix the hub lists of each against
   `controller.pat` and `remote.pat`, so the tokens lever uses are never revoked, recorded or not;
   a `lever ssh` token still in its life is left alone, and a token listed without a prefix is
   reported, not revoked. It revokes nothing, with a warning, when it cannot read its own records or

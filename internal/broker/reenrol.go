@@ -58,7 +58,12 @@ func (b *Broker) runHealer(ctx context.Context) {
 	}
 }
 
-const reenrolHealTimeout = 5 * time.Minute
+// reenrolHealTimeout bounds a whole heal. The manager's resume may wait out a
+// hub stop claim (apply.ResumeClearingStopClaim): about 3 minutes, started
+// again after a removal that can come up to 3 minutes in, so the bound leaves
+// room for both and the steps around them; a heal cut short after a removal
+// would leave the manager down until `lever up`.
+const reenrolHealTimeout = 9 * time.Minute
 
 func (b *Broker) healLapse(ctx context.Context, cn string) {
 	stage, slug, ok := b.healTarget(cn)

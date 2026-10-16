@@ -363,6 +363,12 @@ func TestDispatchConfigWiresTheRecordReaderByFolders(t *testing.T) {
 			d.RecordVolumes != nil, d.LeftoverShareVolumes != nil)
 	}
 
+	// With the state directory inside the tree the broker writes no boot record there.
+	inTree := wiringApp(st.Dir, "")
+	if d, err := dispatchConfig(inTree, state.ForConfig(inTree.Tree), be, env); err != nil || d.RecordManagerBoot != nil {
+		t.Fatalf("state in the tree: boot recorder wired=%v, err %v", err == nil && d.RecordManagerBoot != nil, err)
+	}
+
 	app.SharedFolders = []config.SharedFolder{{Path: "shared/x", Readers: []string{"a"}}}
 	d, err = dispatchConfig(app, st, be, env)
 	if err != nil {

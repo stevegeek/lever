@@ -231,7 +231,7 @@ func TestDoctorHubAuthRowsOverTheJail(t *testing.T) {
 		h := d.hub
 		x := h.addUser("", "x@example.com", "admin", "active", d.now)
 		ctl := h.byEmail(hubauth.ControllerEmail)
-		h.tokens = append(h.tokens, &hiToken{ID: "tok-extra", Owner: ctl.ID, Name: "sneaky", Secret: "scion_pat_extra"})
+		h.tokens = append(h.tokens, &hiToken{ID: "tok-extra", Owner: ctl.ID, Name: "sneaky", Secret: "scion_pat_extra-0123456789abcdef"})
 		h.addUser(devUserID, "scion@localhost", "member", "active", d.now)
 		defer func() {
 			h.removeUser(x.ID)

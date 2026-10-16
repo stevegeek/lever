@@ -21,11 +21,11 @@ func seedPreRecordTokens(e *hiEnv) {
 	h := e.hub
 	other := h.addUser("", "eve@example.com", "member", "active", e.now)
 	h.tokens = append(h.tokens,
-		&hiToken{ID: "tok-pre-ctl", Owner: devUserID, Name: "lever-controller", ProjectID: "proj-1", Secret: "scion_pat_prectl000000x", Expires: e.now.Add(200 * 24 * time.Hour)},
-		&hiToken{ID: "tok-pre-remote", Owner: devUserID, Name: "lever-remote", ProjectID: "proj-1", Secret: "scion_pat_prerem000000x", Expires: e.now.Add(200 * 24 * time.Hour)},
-		&hiToken{ID: "tok-ssh-old", Owner: devUserID, Name: sshTokenName, ProjectID: "proj-1", Secret: "scion_pat_sshold000000x", Expires: e.now.Add(-24 * time.Hour)},
-		&hiToken{ID: "tok-ssh-new", Owner: devUserID, Name: sshTokenName, ProjectID: "proj-1", Secret: "scion_pat_sshnew000000x", Expires: time.Now().Add(100 * 365 * 24 * time.Hour)},
-		&hiToken{ID: "tok-eve", Owner: other.ID, Name: "mine", Secret: "scion_pat_eve000000000x", Expires: e.now.Add(24 * time.Hour)},
+		&hiToken{ID: "tok-pre-ctl", Owner: devUserID, Name: "lever-controller", ProjectID: "proj-1", Secret: "scion_pat_prectl000000x-0123456789", Expires: e.now.Add(200 * 24 * time.Hour)},
+		&hiToken{ID: "tok-pre-remote", Owner: devUserID, Name: "lever-remote", ProjectID: "proj-1", Secret: "scion_pat_prerem000000x-0123456789", Expires: e.now.Add(200 * 24 * time.Hour)},
+		&hiToken{ID: "tok-ssh-old", Owner: devUserID, Name: sshTokenName, ProjectID: "proj-1", Secret: "scion_pat_sshold000000x-0123456789", Expires: e.now.Add(-24 * time.Hour)},
+		&hiToken{ID: "tok-ssh-new", Owner: devUserID, Name: sshTokenName, ProjectID: "proj-1", Secret: "scion_pat_sshnew000000x-0123456789", Expires: time.Now().Add(100 * 365 * 24 * time.Hour)},
+		&hiToken{ID: "tok-eve", Owner: other.ID, Name: "mine", Secret: "scion_pat_eve000000000x-0123456789", Expires: e.now.Add(24 * time.Hour)},
 	)
 }
 
@@ -144,7 +144,7 @@ func TestRevokeUnrecordedTokensFailsClosed(t *testing.T) {
 			return devUserID
 		}},
 		{"PAT not listed", "does not show the controller token", func(e *hiEnv) string {
-			if err := e.st.SaveControllerPAT("scion_pat_notlisted0000x"); err != nil {
+			if err := e.st.SaveControllerPAT("scion_pat_notlisted0000x-0123456789"); err != nil {
 				t.Fatal(err)
 			}
 			return devUserID
@@ -173,17 +173,18 @@ func TestRevokeUnrecordedTokensFailsClosed(t *testing.T) {
 // harmless; a token without a usable prefix is unknown, never revoked.
 func TestLeverTokensUnrecorded(t *testing.T) {
 	now := time.Date(2026, 10, 16, 0, 0, 0, 0, time.UTC)
-	k := leverTokens{ids: map[string]bool{"rec": true}, controller: "scion_pat_held111122223333", secrets: []string{"scion_pat_held111122223333"}}
+	k := leverTokens{ids: map[string]bool{"rec": true}, controller: "scion_pat_held11112222333344445555", secrets: []string{"scion_pat_held11112222333344445555"}}
 	toks := []hubapi.Token{
-		{ID: "rec", Name: "lever-controller", Prefix: "scion_pat_aaaa"},
-		{ID: "held", Name: "lever-controller", Prefix: "scion_pat_held1111"},
-		{ID: "gone", Name: "lever-controller", Prefix: "scion_pat_bbbb", Revoked: true},
-		{ID: "ssh-live", Name: sshTokenName, Prefix: "scion_pat_cccc", ExpiresAt: now.Add(time.Hour)},
-		{ID: "ssh-dead", Name: sshTokenName, Prefix: "scion_pat_dddd", ExpiresAt: now.Add(-time.Hour)},
+		{ID: "rec", Name: "lever-controller", Prefix: "scion_pat_aaaaaaaaaaaa"},
+		{ID: "held", Name: "lever-controller", Prefix: "scion_pat_held11112222"},
+		{ID: "gone", Name: "lever-controller", Prefix: "scion_pat_bbbbbbbbbbbb", Revoked: true},
+		{ID: "ssh-live", Name: sshTokenName, Prefix: "scion_pat_cccccccccccc", ExpiresAt: now.Add(time.Hour)},
+		{ID: "ssh-dead", Name: sshTokenName, Prefix: "scion_pat_dddddddddddd", ExpiresAt: now.Add(-time.Hour)},
 		{ID: "bare", Name: "lever-remote", Prefix: "scion_pat_"},
 		{ID: "none", Name: "x"},
-		{ID: "odd", Name: "x", Prefix: "other_eeee"},
-		{ID: "old", Name: "lever-remote", Prefix: "scion_pat_ffff"},
+		{ID: "odd", Name: "x", Prefix: "other_eeeeeeeeeeee"},
+		{ID: "short", Name: "x", Prefix: "scion_pat_A"},
+		{ID: "old", Name: "lever-remote", Prefix: "scion_pat_ffffffffffff"},
 	}
 	revoke, unknown := k.unrecorded(toks, now)
 	ids := func(ts []hubapi.Token) string {
@@ -196,7 +197,7 @@ func TestLeverTokensUnrecorded(t *testing.T) {
 	if got := ids(revoke); got != "ssh-dead,old" {
 		t.Fatalf("revoke = %s", got)
 	}
-	if got := ids(unknown); got != "bare,none,odd" {
+	if got := ids(unknown); got != "bare,none,odd,short" {
 		t.Fatalf("unknown = %s", got)
 	}
 	if !k.controllerListed(toks) || k.controllerListed(toks[2:3]) || (leverTokens{}).controllerListed(toks) {

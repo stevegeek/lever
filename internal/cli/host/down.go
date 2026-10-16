@@ -88,7 +88,11 @@ func lockForDestroy(app *config.App, st state.State, force bool, warn func(strin
 	}
 	var ee *cli.ExitError
 	if !errors.As(err, &ee) || ee.Code != exitConversationLocked {
-		return nil, err
+		if !force {
+			return nil, fmt.Errorf("%w. `lever destroy --force` destroys the jail without the lock", err)
+		}
+		warn(fmt.Sprintf("lever: warning: %v; destroying without the lifecycle lock (--force)", err))
+		return func() {}, nil
 	}
 	holder := cmp.Or(termsafe.Sanitize(hostledger.LockHolder(st.ConversationLock())), "another lever command")
 	if !force {

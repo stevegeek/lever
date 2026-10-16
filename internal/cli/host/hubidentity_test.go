@@ -508,7 +508,7 @@ func (h *hiHub) handle(c hiCaller, method, raw string, body []byte) (int, []byte
 		exp, _ := time.Parse(time.RFC3339, req.ExpiresAt)
 		scopes := slices.DeleteFunc(slices.Clone(req.Scopes), func(s string) bool { return slices.Contains(h.dropScopes, s) })
 		t := &hiToken{ID: h.id("tok"), Owner: me.ID, Name: req.Name, ProjectID: req.ProjectID, Scopes: scopes, Expires: exp}
-		t.Secret = "scion_pat_" + t.ID
+		t.Secret = "scion_pat_" + t.ID + "-0123456789abcdef"
 		h.tokens = append(h.tokens, t)
 		h.event("mint %s by %s", req.Name, me.ID)
 		return hiJSON(201, map[string]any{"token": t.Secret, "accessToken": hubapi.Token{ID: t.ID, Name: t.Name,
@@ -958,13 +958,13 @@ func (e *hiEnv) seedMigrated(devEmail string, lifecycle bool) {
 		ScopeType: hubapi.RoleScopeProject, Permissions: controllerRolePermissions(lifecycle)})
 	h.addBinding("role-ctl-old", devUserID, hubapi.RoleScopeProject, "proj-1", devUserID)
 	h.tokens = append(h.tokens, &hiToken{ID: "tok-old", Owner: devUserID, Name: "lever-controller", ProjectID: "proj-1",
-		Secret: "scion_pat_old", Scopes: controllerPATScopes(lifecycle, false), Expires: e.now.Add(300 * 24 * time.Hour)})
+		Secret: "scion_pat_old-0123456789abcdef", Scopes: controllerPATScopes(lifecycle, false), Expires: e.now.Add(300 * 24 * time.Hour)})
 	acts := controllerActions(lifecycle)
 	h.agents = []hiAgent{{Slug: "manager", Actions: acts}, {Slug: "worker", Actions: acts}}
 	e.sc.lifecycle = lifecycle
 	// scion hub link registered the project under the tree's marker ID.
 	e.jr.marker = "project-id: proj-1\nproject-slug: lever\n"
-	if err := e.st.SaveControllerPAT("scion_pat_old"); err != nil {
+	if err := e.st.SaveControllerPAT("scion_pat_old-0123456789abcdef"); err != nil {
 		e.t.Fatal(err)
 	}
 	if err := e.st.SaveControllerPATRecord(state.PATRecord{ID: "tok-old", Requested: controllerPATScopes(lifecycle, false),
@@ -1164,7 +1164,7 @@ func TestHubIdentityMigrates(t *testing.T) {
 	if got := hiEventsWith(h.events, "mint", "register", "scion init", "scion link", "invite", "revoke"); len(got) > 0 {
 		t.Fatalf("a migration with a current PAT must not mint, register, link or invite: %q", got)
 	}
-	if tok, _ := e.st.LoadControllerPAT(); tok != "scion_pat_old" {
+	if tok, _ := e.st.LoadControllerPAT(); tok != "scion_pat_old-0123456789abcdef" {
 		t.Fatal("the controller PAT on disk changed")
 	}
 	rec := e.record()

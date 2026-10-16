@@ -62,10 +62,14 @@ func loadLeverTokens(st state.State) (leverTokens, error) {
 	return k, nil
 }
 
-// prefixUsable: a prefix that is missing or names no more than the token
-// type cannot tell one token from another.
+// uatPrefixBody is how many characters of the secret the hub's prefix
+// carries after uatPrefix (scion's UATPrefixLength).
+const uatPrefixBody = 12
+
+// prefixUsable: a prefix of any other shape cannot be trusted to tell one
+// token from another, so such a token is never revoked.
 func prefixUsable(p string) bool {
-	return len(p) > len(uatPrefix) && strings.HasPrefix(p, uatPrefix)
+	return len(p) == len(uatPrefix)+uatPrefixBody && strings.HasPrefix(p, uatPrefix)
 }
 
 func (k leverTokens) holds(t hubapi.Token) bool {
@@ -119,7 +123,8 @@ func tokenLabel(t hubapi.Token) string {
 }
 
 // revokeUnrecordedTokens revokes the controller's tokens lever neither
-// recorded nor holds: PATs older levers minted before they kept records,
+// recorded nor holds: PATs older levers minted before they kept records, and
+// on a migrated hub any other PAT of scion's dev user,
 // which keep the controller's authority until revoked, and which only lever
 // can revoke (a token cannot manage tokens). It runs after the mint, so the
 // records and secrets on disk are the current ones. Anything that leaves the
@@ -163,7 +168,7 @@ func (h *hubIdentity) revokeUnrecordedTokens(ctx context.Context, mode, controll
 	for _, t := range revoke {
 		switch err := h.ctl.RevokeToken(ctx, t.ID); {
 		case err == nil, errors.Is(err, hubapi.ErrNotFound):
-			h.log("lever: revoked hub token %s of the controller, valid until %s: lever had no record of it", tokenLabel(t), expiryText(t.ExpiresAt))
+			h.log("lever: revoked hub token %s of the controller (or the hub had already dropped it), valid until %s: lever had no record of it", tokenLabel(t), expiryText(t.ExpiresAt))
 		default:
 			h.warn("hub-identity: could not revoke the controller's unrecorded hub token %s (it stays valid until %s; the next apply tries again): %v",
 				tokenLabel(t), expiryText(t.ExpiresAt), err)

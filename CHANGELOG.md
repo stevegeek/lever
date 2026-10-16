@@ -70,6 +70,11 @@ version bump moves the block under the new version heading.
 
 ### Fixed
 
+- **`nested_virt` keeps `/dev/kvm` usable after udev restarts (lever#230).** lever's udev rule set
+  the mode only when the device was added, so each time `systemd-udevd` started (every boot, and
+  when an unattended upgrade restarted it) the stock rule's 0660 applied to the static node and the
+  manager lost KVM: nested Lima VMs failed with "Could not access KVM kernel module: Permission
+  denied". The rule now carries `OPTIONS+="static_node=kvm"`; the next `lever apply` rewrites it.
 - **`lever up` starts the remote-access proxy when it only resumes the manager.** After a VM
   or host restart, `up` resumed the manager without `apply`, and so never started the proxy: the
   chat page stayed down until the next `lever apply`. An `up` that resumes the manager or finds it

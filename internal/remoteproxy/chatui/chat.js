@@ -9,6 +9,10 @@
 
 import {
   CONTACTS_MS,
+  activityErrorText,
+  activityOffered,
+  activityPath,
+  activityText,
   UPLOAD_MS,
   VOICE_MIN_SAMPLES,
   VOICE_RATE,
@@ -135,6 +139,12 @@ const el = {
   autoreadrow: $('autoreadrow'),
   readhint: $('readhint'),
   newconv: $('newconv'),
+  activity: $('activity'),
+  activitypanel: $('activitypanel'),
+  activitywhen: $('activitywhen'),
+  activityreload: $('activityreload'),
+  activitynote: $('activitynote'),
+  activitytext: $('activitytext'),
 };
 
 let roster = null; // the list as last applied (agentList shape)
@@ -165,6 +175,8 @@ let sending = false;
 let uploading = false; // a file upload is under way
 let filesOpen = false; // the Files panel is open
 let filesSeq = 0; // counts Files panel reads and closes
+let activityOpen = false; // the Recent activity panel is open
+let activitySeq = 0; // counts its reads and closes
 let waking = ''; // the agent a send is waking ('' = none)
 let renewing = ''; // the agent a new conversation is starting ('' = none)
 let held = false; // Send rests after a note (see hold)
@@ -697,6 +709,7 @@ function applyRoster(l) {
   renderRows();
   syncAttach();
   setLink(el.console, l.tier === 'operator' ? l.console : '');
+  syncActivity();
   if (!current) return;
   const a = l.agents.find((x) => x.name === current);
   if (!a) {
@@ -1389,6 +1402,54 @@ function closeSettings(refocus) {
   if (refocus) el.settings.focus();
 }
 
+// Recent activity: the open agent's terminal, read on demand. The text is
+// the agent's own and goes into a <pre> as text.
+function showActivityNote(text) {
+  setText(el.activitynote, text);
+  el.activitynote.hidden = !text;
+}
+
+function syncActivity() {
+  const a = current && roster ? roster.agents.find((x) => x.name === current) : null;
+  const on = !view && activityOffered(roster, a);
+  el.activity.hidden = !on;
+  if (!on) closeActivity();
+}
+
+function closeActivity() {
+  activityOpen = false;
+  activitySeq++;
+  el.activitypanel.hidden = true;
+  expanded(el.activity, false);
+  setText(el.activitytext, '');
+  el.activitytext.hidden = true;
+  setText(el.activitywhen, '');
+  el.activityreload.disabled = false;
+  showActivityNote('');
+}
+
+async function loadActivity() {
+  const name = current;
+  if (!activityOpen || !name) return;
+  const seq = ++activitySeq;
+  el.activityreload.disabled = true;
+  if (el.activitytext.hidden) showActivityNote('Reading the terminal…');
+  const res = await api(activityPath(name), { method: 'POST' });
+  if (seq !== activitySeq || current !== name || !activityOpen) return;
+  el.activityreload.disabled = false;
+  const got = res.ok ? activityText(res.body) : null;
+  if (!got) {
+    showActivityNote(`The terminal cannot be read: ${activityErrorText(res.status, res.body, name)}.`);
+    return;
+  }
+  setText(el.activitytext, got.text);
+  el.activitytext.hidden = !got.text;
+  setText(el.activitywhen, new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+  showActivityNote(!got.text ? 'The terminal is empty.' : got.truncated ? 'Only the last part is shown.' : '');
+  // The newest lines are at the end.
+  el.activitytext.scrollTop = el.activitytext.scrollHeight;
+}
+
 function closeFiles() {
   filesOpen = false;
   filesSeq++;
@@ -1539,6 +1600,8 @@ function openChat(name) {
   syncNewConversation(a);
   resetHistory();
   closeFiles();
+  closeActivity();
+  syncActivity();
   showError('');
   renderRows();
   if (a.access !== 'message') {
@@ -1582,6 +1645,7 @@ function closeChat() {
   showState('', true);
   resetHistory();
   closeFiles();
+  syncActivity();
   showUpload('');
   showError('');
   showNote('');
@@ -2158,6 +2222,17 @@ if (speechOn() && typeof window.speechSynthesis.addEventListener === 'function')
   // Voices load late in some browsers.
   window.speechSynthesis.addEventListener('voiceschanged', syncReadVoice);
 }
+el.activity.addEventListener('click', () => {
+  if (activityOpen) {
+    closeActivity();
+    return;
+  }
+  activityOpen = true;
+  el.activitypanel.hidden = false;
+  expanded(el.activity, true);
+  void loadActivity();
+});
+el.activityreload.addEventListener('click', () => void loadActivity());
 el.files.addEventListener('click', () => {
   if (filesOpen) {
     closeFiles();

@@ -48,6 +48,7 @@
     <nav class="tools">
       <button id="refresh" class="iconbtn" type="button" aria-label="Refresh" title="Refresh" hidden><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 12a8 8 0 1 1-2.34-5.66L20 8.5"/><path d="M20 3.5v5h-5"/></svg></button>
       <button id="newconv" class="iconbtn" type="button" aria-label="New conversation" title="New conversation" hidden><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 14.5a2 2 0 0 1-2 2H8l-4 4v-14a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2z"/><path d="M12 7.5v6M9 10.5h6"/></svg></button>
+      <button id="activity" class="iconbtn" type="button" aria-label="Recent activity" title="Recent activity" aria-controls="activitypanel" aria-expanded="false" hidden><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg></button>
       <button id="files" class="iconbtn" type="button" aria-label="Files" title="Files" aria-controls="filespanel" aria-expanded="false" hidden><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3.5 7a2 2 0 0 1 2-2h4l2 2.5h7a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg></button>
       <button id="settings" class="iconbtn" type="button" aria-label="Settings" title="Settings" aria-controls="settingspanel" aria-expanded="false" hidden><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><path d="M15 4v4M9 10v4M17 16v4"/></svg></button>
       <a id="terminal" class="iconbtn" aria-label="Terminal" title="Terminal" hidden><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 17l5-5-5-5"/><path d="M12.5 18h7"/></svg></a>
@@ -58,6 +59,11 @@
       <div id="autoreadrow" class="setrow check" hidden><input id="autoread" type="checkbox" aria-describedby="autoreadhelp"><label for="autoread">Read new replies aloud</label><p id="autoreadhelp" class="help">Only replies that arrive while this chat is open, after your first tap on the page. A locked phone or a background tab may not play them.</p></div>
     </div>
   </header>
+  <section id="activitypanel" class="activity" aria-label="Recent activity" hidden>
+    <div class="activityhead"><h2>Recent activity</h2><span id="activitywhen" class="activitywhen"></span><button id="activityreload" type="button">Read again</button></div>
+    <p id="activitynote" class="activitynote" role="status" hidden></p>
+    <pre id="activitytext" class="activitytext" tabindex="0" aria-label="The last lines of the agent's terminal" hidden></pre>
+  </section>
   <main id="scroll">
     <button id="older" type="button" hidden>Load earlier messages</button>
     <p id="notice" class="notice">Choose an agent from the list.</p>

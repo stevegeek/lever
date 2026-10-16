@@ -452,3 +452,15 @@ func TestTokenResetUnderTheLock(t *testing.T) {
 		}
 	}
 }
+
+// TestKeepNoCreateRefusesAGoneRecord: up's keep path ran none of the steps
+// a create needs, so a record that vanished is refused, never created.
+func TestKeepNoCreateRefusesAGoneRecord(t *testing.T) {
+	p, err := planManager(ManagerRequest{Intent: ManagerKeep, NoCreate: true}, "m", managerObservation{})
+	if err == nil || p.verb != verbNone || !strings.Contains(err.Error(), "nothing was created") {
+		t.Fatalf("%+v %v", p, err)
+	}
+	if p, err := planManager(ManagerRequest{Intent: ManagerKeep, NoCreate: true}, "m", managerObservation{present: true, phase: scion.PhaseSuspended}); err != nil || p.verb != verbResume {
+		t.Fatalf("suspended: %+v %v", p, err)
+	}
+}

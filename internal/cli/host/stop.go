@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/hostledger"
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
@@ -54,6 +56,14 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 				st = stateFor(ia.path)
 				appName = ia.app.Name
 				unlock, err := lockLifecycle(ia.app, st, "lever stop")
+				if err != nil && *machine == "" && brokerHoldsLock(st) {
+					// The broker heals the manager under the lock, and the manager can make
+					// a heal last minutes, again after every cooldown: the power-off must
+					// not wait on it. Stopping the broker ends its hold.
+					cmd.PrintErrln("lever: the broker is changing the manager (a certificate heal or a token reset); stopping the broker first.")
+					stopHostDaemons(cmd, st)
+					unlock, err = lockLifecycle(ia.app, st, "lever stop")
+				}
 				if err != nil {
 					return err
 				}
@@ -308,4 +318,11 @@ func stopHostDaemons(cmd *cobra.Command, st state.State) {
 	if err := brokerctl.StopRemoteProxy(st); err != nil {
 		cmd.PrintErrf("lever: warning: stopping remote proxy: %v\n", err)
 	}
+}
+
+// brokerHoldsLock reports whether the lifecycle lock's holder is the broker
+// (brokerctl's managerLock names it so). Only lever processes write the
+// holder: the lock file is in the state directory, outside the tree.
+func brokerHoldsLock(st state.State) bool {
+	return strings.HasPrefix(hostledger.LockHolder(st.ConversationLock()), "the broker's ")
 }

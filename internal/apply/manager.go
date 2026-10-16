@@ -137,6 +137,10 @@ type ManagerRequest struct {
 	Attach bool
 	// FreshWithoutConversation: PlanOpts.FreshWithoutConversation.
 	FreshWithoutConversation bool
+	// NoCreate (Keep): the caller ran none of the bring-up steps a create
+	// needs (the image load and its tag policy, the agent template, the
+	// credential), so a record that is gone is refused, not created.
+	NoCreate bool
 	// TicketStaged: a fresh enrolment ticket was staged for this run, so no
 	// re-arm is needed before a create or resume.
 	TicketStaged bool
@@ -235,6 +239,9 @@ func EnsureManager(ctx context.Context, app *config.App, d Deps, q ManagerReques
 		return ManagerResult{}, fmt.Errorf("%s: internal error: no lifecycle lock is wired, so lever does not change the manager", subject)
 	}
 	if d.managerScion() == nil || d.Log == nil {
+		return ManagerResult{}, fmt.Errorf("%s: internal error: the manager's lifecycle is not wired", subject)
+	}
+	if (q.Intent == ManagerKeep || q.Intent == ManagerFresh) && (d.WaitBrokerReady == nil || d.RearmBootstrap == nil || d.VerifyAgentRole == nil) {
 		return ManagerResult{}, fmt.Errorf("%s: internal error: the manager's lifecycle is not wired", subject)
 	}
 	release, err := d.ManagerLock(cmp.Or(q.What, subject))
@@ -372,6 +379,8 @@ func planManager(q ManagerRequest, name string, o managerObservation) (managerPl
 		return managerPlan{verb: verbDeleteCreate}, nil
 	case ManagerKeep:
 		switch {
+		case !o.present && q.NoCreate:
+			return managerPlan{}, fmt.Errorf("%s: manager %q has no record any more; nothing was created. Run `lever stop`, then `lever up`, which brings the whole application up and creates it", q.subject(), name)
 		case !o.present:
 			return managerPlan{verb: verbCreate}, nil
 		case o.phase == scion.PhaseRunning:

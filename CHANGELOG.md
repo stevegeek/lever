@@ -26,14 +26,16 @@ version bump moves the block under the new version heading.
 - **`lever up` on a manager the hub still runs gets the whole start-manager step.** When the hub
   survived (`lever stop --keep-vm`, a guest that restarted under a running hub), `up` resumed or
   kept the manager on a path of its own. It now runs what `apply` runs for the manager: the wait
-  for the runtime broker, the fresh start of a manager whose home is proven to hold no
-  conversation, the workers' session heal and the mount and settings warnings. A running manager is
-  gated as `apply` gates it: a container column the hub leaves blank is waited on, and refused if it
-  stays blank.
+  for the runtime broker and its retry, the workers' session heal and the mount and settings
+  warnings. It still creates nothing there: a record that is gone is refused with the fix. A
+  running manager is gated as `apply` gates it: a container column the hub leaves blank is waited
+  on, and refused if it stays blank.
 - **The broker's certificate heal of the manager waits for the manager to come up.** The bounce
   read the tree mounts back but did not check that claude started, and recorded the guest boot
   regardless. It now passes the same liveness gate as `lever up` before it is audited as healed and
-  the boot recorded; the heal's bound grows from 9 to 13 minutes. A `lever revoke` that lands while
+  the boot recorded; the heal's bound grows from 9 to 13 minutes. Since the manager can make such a
+  heal last minutes, `lever stop` no longer refuses while the broker holds the lifecycle lock: it
+  stops the broker first, which ends the hold. A `lever revoke` that lands while
   the heal waits for the lifecycle lock now stops it, as it already did for workers, and the
   manager's hub token reset is skipped when the manager no longer runs once the lock is held.
 

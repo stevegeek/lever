@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/hostledger"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
@@ -779,5 +780,47 @@ func TestReportManagerSuspendErrorQuietWhenSuspended(t *testing.T) {
 		if got := strings.Contains(errOut.String(), "warning"); got != c.warn {
 			t.Errorf("phase %q: warned=%v (stderr %q, stdout %q)", c.phase, got, errOut.String(), out.String())
 		}
+	}
+}
+
+// TestStopEndsTheBrokersHold: while the broker holds the lifecycle lock (a
+// heal of the manager the manager can draw out), stop stops the broker
+// first, which ends its hold; any other holder still turns stop away.
+func TestStopEndsTheBrokersHold(t *testing.T) {
+	for _, c := range []struct {
+		holder      string
+		stopsBroker bool
+	}{
+		{"the broker's certificate heal of the manager (pid 1)", true},
+		{"`lever up` (pid 1, since 10:00:00 UTC)", false},
+	} {
+		dir := writeInstance(t, managerYAML)
+		t.Chdir(dir)
+		st := state.ForConfig(dir)
+		if err := os.MkdirAll(st.Dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		unlock, err := hostledger.TryLockFileAs(st.ConversationLock(), c.holder)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := brokerHoldsLock(st); got != c.stopsBroker {
+			t.Fatalf("%s: brokerHoldsLock = %v", c.holder, got)
+		}
+		sb := &stubBackend{runner: scionOKRunner()}
+		root := stubRoot(sb)
+		var out bytes.Buffer
+		root.SetOut(&out)
+		root.SetErr(&out)
+		root.SetArgs([]string{"stop"})
+		// The lock stays held here (this process holds it, not a broker), so
+		// stop is still refused; what differs is that it tried the broker.
+		if err := root.Execute(); err == nil || sb.stopped {
+			t.Fatalf("%s: stop went on under a held lock: %v", c.holder, err)
+		}
+		if strings.Contains(out.String(), "stopping the broker first") != c.stopsBroker {
+			t.Fatalf("%s: output %q", c.holder, out.String())
+		}
+		unlock()
 	}
 }

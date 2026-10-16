@@ -178,6 +178,11 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				// workers need, and the manager's lifecycle, which keeps a running
 				// manager (healing its session), resumes a suspended one or one whose
 				// container died under it, and gates it.
+				// The role guard runs before a ticket is staged for a manager it would
+				// refuse.
+				if err := deps.VerifyAgentRole(ctx, hubProjectKey(project), app.Name); err != nil {
+					return fmt.Errorf("start-manager: %w", err)
+				}
 				staged, err := ensureBrokerForUp(ctx, rep, deps, w.stepTail(apply.KindBrokerUp), app.Tree)
 				if err != nil {
 					return err
@@ -186,7 +191,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				step.TailFrom(w.stepTail(apply.KindStartManager))
 				_, err = apply.EnsureManager(ctx, app, deps, apply.ManagerRequest{
 					Intent: apply.ManagerKeep, Subject: string(apply.KindStartManager),
-					Attach: attachTTY, FreshWithoutConversation: true, TicketStaged: staged,
+					Attach: attachTTY, TicketStaged: staged, NoCreate: true,
 				})
 				step.Done(err)
 				if err != nil {

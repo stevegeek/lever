@@ -26,6 +26,15 @@ version bump moves the block under the new version heading.
   manager record a VM restart left behind from a live one. `apply` and `up` recorded it; these three
   start the manager too and did not, so a later `lever up` could compare against an older boot.
   Each now records the boot once the manager passed its checks.
+- **`lever destroy` and the broker's hub token reset of the manager take the lifecycle lock.**
+  `destroy` tore the jail down while an `up`, `apply`, `stop` or new conversation could be acting on
+  it, and the broker could reset the manager's expired hub token in the middle of a new
+  conversation or a stop. `destroy` from the instance root now holds the lock for the teardown and,
+  while another command holds it, exits `6`, names that command and its pid, and destroys nothing.
+  It stays the last resort: `lever destroy --force` destroys the jail anyway, after a warning that
+  names the holder, for a command that is stuck (a `lever stop` hung in the guest). The broker's
+  reset of the manager's token is skipped while the lock is held, as its certificate heal already
+  was, and retried at the next check.
 
 ## [0.42.0] - 2026-10-15
 

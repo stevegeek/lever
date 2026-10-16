@@ -490,15 +490,18 @@ The old transcripts also stay in the manager's home (the new session is a new fi
 until Claude Code's own cleanup removes them. Each new conversation is one of the 10 backups lever
 keeps.
 
-`lever conversation new`, `lever conversation restore`, `lever up`, `lever apply`, `lever stop` and
-`lever reload` share one lock per instance (`.lever-state/conversation.lock`): while one of them runs, the
+`lever conversation new`, `lever conversation restore`, `lever up`, `lever apply`, `lever stop`,
+`lever reload` and `lever destroy` share one lock per instance (`.lever-state/conversation.lock`): while one of them runs, the
 others exit `6`, name the command that holds the lock (with its pid and start time), and change
 nothing. None of them waits, since a new conversation can take minutes: run the command again
 once the other has finished. `lever up` lets go of the lock before it attaches you, so a new
 conversation from the chat page can run while you are attached; its stop ends your attach, and
 `lever up` says so instead of reporting the manager dead. The broker's heal of an expired manager
-certificate also skips while the lock is held (the next lapse retries), and a new conversation
-gives up after 20 minutes; to stop one sooner, end the process the refusal names. With the state directory inside the
+certificate and its reset of the manager's expired hub token also skip while the lock is held (the
+next lapse or the next 5-minute check retries), and a new conversation gives up after 20 minutes;
+to stop one sooner, end the process the refusal names. `lever destroy` is the last resort, so
+`lever destroy --force` destroys the jail even while another command holds the lock (one stuck
+in the guest, say), after a warning that names it. With the state directory inside the
 tree there are no conversation backups, so no new conversation or restore, and the others take
 no lock.
 

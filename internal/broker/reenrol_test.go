@@ -628,7 +628,7 @@ func TestHealSkipsTheManagerWhileLeverChangesIt(t *testing.T) {
 	var buf bytes.Buffer
 	b.log = slog.New(slog.NewTextHandler(&buf, nil))
 	held, during := true, false
-	b.lockManager = func() (func(), error) {
+	b.lockManager = func(string) (func(), error) {
 		if held || during {
 			return nil, errors.New("locked")
 		}

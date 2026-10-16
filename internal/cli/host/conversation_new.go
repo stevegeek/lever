@@ -261,9 +261,9 @@ func lockConversation(app *config.App, st state.State, verb, from string) (func(
 	return takeManagerLock(st, verb, from)
 }
 
-// lockLifecycle is lockConversation for up, apply, stop and reload. With the state
-// directory inside the tree there is no new or restore to keep apart from,
-// and a lock file there would be the agents' to hold.
+// lockLifecycle is lockConversation for up, apply, stop, reload and destroy.
+// With the state directory inside the tree there is no new or restore to keep
+// apart from, and a lock file there would be the agents' to hold.
 func lockLifecycle(app *config.App, st state.State, verb string) (func(), error) {
 	if brokerctl.StateInsideTree(app, st) {
 		return func() {}, nil
@@ -302,7 +302,7 @@ func takeManagerLock(st state.State, verb, from string) (func(), error) {
 	if errors.Is(err, hostledger.ErrLocked) {
 		other := termsafe.Sanitize(hostledger.LockHolder(p))
 		if other == "" {
-			other = "another `lever conversation new`, `conversation restore`, `up`, `apply`, `stop` or `reload`"
+			other = "another `lever conversation new`, `conversation restore`, `up`, `apply`, `stop`, `reload` or `destroy`"
 		}
 		return nil, cli.WithExitCode(fmt.Errorf("%s is changing this instance's manager; nothing was changed. Run `%s` again once it has finished", other, verb), exitConversationLocked)
 	}

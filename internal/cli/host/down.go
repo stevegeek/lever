@@ -1,6 +1,7 @@
 package host
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -8,14 +9,17 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
+	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/hostledger"
 	"github.com/stevegeek/lever/internal/state"
+	"github.com/stevegeek/lever/internal/termsafe"
 	"github.com/stevegeek/lever/internal/treebackup"
 )
 
 func newDestroyCmd(factory BackendFactory) *cobra.Command {
 	var machine, backendFlag *string
-	var noTreeBackup bool
+	var noTreeBackup, force bool
 	cmd := &cobra.Command{
 		Use:     "destroy",
 		Aliases: []string{"down"},
@@ -28,6 +32,11 @@ func newDestroyCmd(factory BackendFactory) *cobra.Command {
 			if *machine == "" {
 				if ia.app != nil {
 					st := stateFor(ia.path)
+					unlock, err := lockForDestroy(ia.app, st, force, func(msg string) { cmd.PrintErrln(msg) })
+					if err != nil {
+						return err
+					}
+					defer unlock()
 					// The remote proxy goes too, with its stamp: a later `up` would otherwise
 					// reuse it, with a cached jail prefix naming the destroyed machine.
 					stopHostDaemons(cmd, st)
@@ -62,7 +71,31 @@ func newDestroyCmd(factory BackendFactory) *cobra.Command {
 	}
 	machine, backendFlag = addJailTargetFlags(cmd)
 	cmd.Flags().BoolVar(&noTreeBackup, "no-tree-backup", false, "do not take the tree snapshot this destroy would take (tree_backup.at_stop)")
+	cmd.Flags().BoolVar(&force, "force", false, "destroy even while another lever command holds this instance's lifecycle lock (one that is stuck)")
 	return cmd
+}
+
+// lockForDestroy takes the lifecycle lock for the whole teardown, so no up,
+// apply, stop, new conversation or broker heal acts on a jail being deleted.
+// A held lock refuses with exit 6 and names the holder, as for the other
+// lifecycle commands. destroy is the last resort, also for a holder that
+// never ends (a `lever stop` stuck in the guest), so force goes on without
+// the lock after a warning naming the holder.
+func lockForDestroy(app *config.App, st state.State, force bool, warn func(string)) (func(), error) {
+	unlock, err := lockLifecycle(app, st, "lever destroy")
+	if err == nil {
+		return unlock, nil
+	}
+	var ee *cli.ExitError
+	if !errors.As(err, &ee) || ee.Code != exitConversationLocked {
+		return nil, err
+	}
+	holder := cmp.Or(termsafe.Sanitize(hostledger.LockHolder(st.ConversationLock())), "another lever command")
+	if !force {
+		return nil, cli.WithExitCode(fmt.Errorf("%s is changing this instance; nothing was destroyed. Run `lever destroy` again once it has finished. If it is stuck, end that process, or run `lever destroy --force` to destroy the jail anyway", holder), exitConversationLocked)
+	}
+	warn(fmt.Sprintf("lever: warning: %s holds this instance's lifecycle lock; destroying anyway (--force). That command may still act on the instance, and fail or leave state behind, once the jail is gone", holder))
+	return func() {}, nil
 }
 
 // clearStagedRuntimeState removes the bootstrap ticket and runtime manifest

@@ -112,7 +112,7 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 		// a restore has suspended or stopped on purpose (and a resume of a
 		// stopped one runs the hub's stored task, not the operator's current
 		// prompt). Busy skips the heal without counting it.
-		unlock, err := b.lockManager()
+		unlock, err := b.lockManager("the broker's certificate heal of the manager")
 		if err != nil {
 			b.reenrolMu.Lock()
 			b.reenrolTries[cn] = max(0, b.reenrolTries[cn]-1)

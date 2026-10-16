@@ -171,11 +171,12 @@ type DispatchConfig struct {
 	// its last fresh start saw the skill on disk. nil ⇒ nothing is recorded.
 	BeginSession func(agent string) (commit func() error)
 	// LockManager takes, without waiting, the lock lever's own changes to
-	// the manager record hold (a new conversation, a restore, up, stop), so
-	// the heal never bounces the manager in the middle of one. nil ⇒ no
-	// lock (the state directory is inside the tree, where none of those
-	// that stop the record can run).
-	LockManager func() (unlock func(), err error)
+	// the manager record hold (a new conversation, a restore, up, apply, stop,
+	// reload, destroy), so neither the certificate heal nor the hub token
+	// reset acts on the manager in the middle of one; what names the holder
+	// for the command it turns away. nil ⇒ no lock (the state directory is
+	// inside the tree, where none of those that stop the record can run).
+	LockManager func(what string) (unlock func(), err error)
 	// AutoReenrol gates the natural-lapse healer: "all" | "manager" | "off"
 	// (empty = all).
 	AutoReenrol string
@@ -295,7 +296,7 @@ type Broker struct {
 	verifyRole     func(ctx context.Context, agent string) error
 	resolveAgentID func(ctx context.Context, agentSlug string) (string, error)
 	beginSession   func(agent string) (commit func() error)
-	lockManager    func() (func(), error)
+	lockManager    func(what string) (func(), error)
 	tree           string
 	readOnlyDirs   []string
 	recordVolumes  RecordVolumesFunc

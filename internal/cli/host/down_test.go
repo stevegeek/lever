@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/cli/clitest"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/state"
@@ -214,4 +215,53 @@ func TestRemovePATsAttemptsEveryFileOnFailure(t *testing.T) {
 			t.Errorf("%s should still be removed, stat err = %v", p, serr)
 		}
 	}
+}
+
+// TestLockForDestroy: destroy holds the lifecycle lock through the teardown,
+// refuses with exit 6 naming the holder while another command holds it, and
+// with --force goes on after a warning that names the holder.
+func TestLockForDestroy(t *testing.T) {
+	root := t.TempDir()
+	st := state.State{Dir: filepath.Join(root, "state")}
+	app := &config.App{Name: "mgr", Tree: filepath.Join(root, "tree")}
+
+	unlock, err := lockForDestroy(app, st, false, func(string) { t.Error("warned on a free lock") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lockLifecycle(app, st, "lever up"); err == nil || !strings.Contains(err.Error(), "`lever destroy` (pid ") {
+		t.Fatalf("up during destroy: %v", err)
+	}
+	unlock()
+
+	held, err := lockLifecycle(app, st, "lever stop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held()
+	_, err = lockForDestroy(app, st, false, func(string) { t.Error("warned without --force") })
+	var ee *cli.ExitError
+	if !errors.As(err, &ee) || ee.Code != exitConversationLocked {
+		t.Fatalf("held: %v", err)
+	}
+	pid := "(pid " + strconv.Itoa(os.Getpid())
+	if msg := err.Error(); !strings.Contains(msg, "`lever stop` "+pid) || !strings.Contains(msg, "lever destroy --force") || !strings.Contains(msg, "nothing was destroyed") {
+		t.Fatalf("held: %v", err)
+	}
+	var warned string
+	unlock, err = lockForDestroy(app, st, true, func(s string) { warned = s })
+	if err != nil || unlock == nil {
+		t.Fatalf("--force: %v", err)
+	}
+	unlock()
+	if !strings.Contains(warned, "`lever stop` "+pid) || !strings.Contains(warned, "--force") {
+		t.Fatalf("--force warning = %q", warned)
+	}
+
+	in := &config.App{Name: "mgr", Tree: root}
+	free, err := lockForDestroy(in, st, false, func(string) { t.Error("warned with the state in the tree") })
+	if err != nil {
+		t.Fatalf("state in the tree: %v", err)
+	}
+	free()
 }

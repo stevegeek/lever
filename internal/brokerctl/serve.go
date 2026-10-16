@@ -240,8 +240,8 @@ func decorateConfig(cfg *broker.Config, app *config.App, st state.State, be back
 	cfg.Files = Files(app, st)
 	cfg.Dispatch.BeginSession = func(agent string) func() error { return BeginSession(app, st, version, agent) }
 	if !StateInsideTree(app, st) {
-		cfg.Dispatch.LockManager = func() (func(), error) {
-			return hostledger.TryLockFileAs(st.ConversationLock(), fmt.Sprintf("the broker's certificate heal of the manager (pid %d)", os.Getpid()))
+		cfg.Dispatch.LockManager = func(what string) (func(), error) {
+			return hostledger.TryLockFileAs(st.ConversationLock(), fmt.Sprintf("%s (pid %d)", what, os.Getpid()))
 		}
 	}
 	cfg.Version = version

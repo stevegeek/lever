@@ -105,8 +105,9 @@ func (b *Broker) healHubTokens(ctx context.Context) {
 }
 
 // healOneHubToken is gated like every hub mint for an agent: cooldown, the
-// worker's lifecycle lock (busy is skipped), revocation after the lock wait,
-// and the pre-role record guard. The hub mints from the record's stored role,
+// worker's lifecycle lock or lever's manager lock (busy is skipped),
+// revocation after the lock wait, and the pre-role record guard. The hub
+// mints from the record's stored role,
 // which on an old record can resolve to full, so the guard must refuse it as
 // the resume paths do; with no guard wired the reset is refused.
 func (b *Broker) healOneHubToken(ctx context.Context, cn, slug string) {
@@ -125,6 +126,17 @@ func (b *Broker) healOneHubToken(ctx context.Context, cn, slug string) {
 		cancel()
 		if err != nil {
 			// Not an attempt: the next tick may try again.
+			b.reenrolMu.Lock()
+			delete(b.tokenHealLast, slug)
+			b.reenrolMu.Unlock()
+			return
+		}
+		defer unlock()
+	} else if slug == b.managerSlug && b.lockManager != nil {
+		// A reset under a new conversation, a restore or a stop would act on a
+		// record lever is changing on purpose. Busy is not an attempt.
+		unlock, err := b.lockManager("the broker's hub token reset of the manager")
+		if err != nil {
 			b.reenrolMu.Lock()
 			delete(b.tokenHealLast, slug)
 			b.reenrolMu.Unlock()

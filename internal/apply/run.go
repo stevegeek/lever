@@ -240,6 +240,12 @@ type Deps struct {
 	// converges the hub's auth settings before the hub starts. It reports
 	// whether a running hub must restart to read them.
 	EnsureHubAuth func(ctx context.Context) (bool, error)
+	// BeforeHubRestart, when set, writes the database settings the hub reads
+	// only at start (scion's experiments) into a hub the scion-server step is
+	// about to restart, so that one restart takes them. An error is logged:
+	// hub-identity converges them after the restart and restarts again if it
+	// must.
+	BeforeHubRestart func(ctx context.Context) error
 	// EnsureScionTelemetry converges the telemetry block of the guest's
 	// ~/.scion/settings.yaml on config scion.telemetry and reports whether it
 	// changed. A change is only logged: the runtime broker reads the block at every
@@ -610,7 +616,7 @@ func (r *run) step(ctx context.Context, s Step) error {
 
 // scionServer runs the scion-server step. It restarts a running hub only when
 // it was started with other auth settings, another key, or another argv than
-// this apply wants (HubRestartReason), or when the guest's key file or
+// this run wants (HubRestartReason), or when the guest's key file or
 // settings changed in a way the hub reads only at startup: a restart drops
 // every agent's hub connection.
 func (r *run) scionServer(ctx context.Context) error {
@@ -647,27 +653,89 @@ func (r *run) scionServer(ctx context.Context) error {
 		reason = "the hub's key file or settings changed"
 	}
 	if reason != "" {
-		r.d.Log("lever: restarting the hub: %s", reason)
-		// Stop-then-start, not scion server restart: scion's restart replays the
-		// old argv without this apply's env, and refuses when no daemon runs.
-		if err := r.d.Scion.ServerStop(ctx); err != nil {
-			return fmt.Errorf("restart the hub: %w", err)
+		// The database settings the hub reads at start go in first, so this one
+		// restart takes them too and hub-identity has none left to make.
+		if r.d.BeforeHubRestart != nil {
+			if err := r.d.BeforeHubRestart(ctx); err != nil {
+				r.d.Log("lever: %v; hub-identity pins them after the restart", err)
+			}
 		}
+		if err := RestartHub(ctx, r.app, r.d, reason); err != nil {
+			return err
+		}
+		r.brokerOnline = true
+		return nil
 	}
+	// On a running hub the start only waits until it answers.
 	if err := r.d.Scion.ServerStart(ctx, opts); err != nil {
 		return err
 	}
-	// A just-started hub registers its runtime broker only after it serves, and
-	// register-project's hub link would race that and fail with a 422
-	// no_runtime_broker, so wait on every apply (one hub brokers call when the
-	// broker is online). Fail-soft. It asks scion's global settings because the
-	// tree may not be a scion project yet.
+	if !live.Running {
+		if err := hubBrokerOnline(ctx, r.d); err != nil {
+			return fmt.Errorf("scion-server: %w", err)
+		}
+		r.brokerOnline = true
+		return nil
+	}
+	// A hub that kept running: its runtime broker is only looked at, so a
+	// broker that went away is the manager's start retry's to wait out.
 	online, err := r.d.WaitBrokerReady(ctx, scionGlobalProject)
 	if err != nil {
 		return fmt.Errorf("scion-server: waiting for runtime broker: %w", err)
 	}
 	r.brokerOnline = online
 	return nil
+}
+
+// RestartHub is the one way lever restarts the hub: stop it (stop-then-start,
+// not scion server restart, which replays the old argv without this run's
+// env and refuses when no daemon runs), converge the guest settings it reads
+// at start again (agents can rewrite them while it runs), start it, and hold
+// it to the start's postcondition (hubBrokerOnline). reason, when set, is
+// logged.
+func RestartHub(ctx context.Context, app *config.App, d Deps, reason string) error {
+	if reason != "" {
+		d.Log("lever: restarting the hub: %s", reason)
+	}
+	if err := d.Scion.ServerStop(ctx); err != nil {
+		return fmt.Errorf("restart the hub: %w", err)
+	}
+	if _, err := d.EnsureHubAuth(ctx); err != nil {
+		return fmt.Errorf("the hub is stopped: it was stopped for a restart, and converging its settings before the start failed (%w); fix the cause and run `lever up`, which starts it again", err)
+	}
+	opts := HubServerOpts(app, d.HubSessionSecret, d.HubAuthEnv)
+	opts.Progress = d.Log
+	if err := d.Scion.ServerStart(ctx, opts); err != nil {
+		return fmt.Errorf("the hub is stopped: it was stopped for a restart, and starting it again failed (%w); fix the cause and run `lever up`, which starts it again", err)
+	}
+	return hubBrokerOnline(ctx, d)
+}
+
+// hubStartedBroker bounds the wait, after lever started the hub, for its
+// runtime broker: each try is one WaitBrokerReady (its own 30 s), so a cold
+// Lima start has about two minutes.
+var hubStartedBroker = wait.Attempts("the hub's runtime broker to come online after the start", 4, time.Second)
+
+// hubBrokerOnline is the postcondition of a hub lever started: the hub
+// answers (ServerStart waited for that) and its runtime broker is online. A
+// hub that serves before its broker registers fails every agent create and
+// resume, so this is a hard requirement. It asks scion's global settings
+// because the tree may not be a scion project yet.
+func hubBrokerOnline(ctx context.Context, d Deps) error {
+	err := wait.For(ctx, hubStartedBroker, func(ctx context.Context) wait.Result {
+		online, err := d.WaitBrokerReady(ctx, scionGlobalProject)
+		switch {
+		case err != nil:
+			return wait.NotYetErr(err)
+		case online:
+			return wait.Ready()
+		}
+		return wait.NotYet("no online runtime broker")
+	})
+	if errors.Is(err, wait.ErrTimeout) {
+		return fmt.Errorf("the hub's runtime broker did not come online after the start: %w", err)
+	}
+	return err
 }
 
 // HubRestartReason says why a running hub does not match the start opts, or ""

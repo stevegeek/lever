@@ -991,6 +991,7 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 
 		EnsureHubIdentity: w.ensureHubIdentity,
 		EnsureHubAuth:     w.ensureHubAuth,
+		BeforeHubRestart:  w.pinExperimentsBeforeRestart,
 		HubAuthEnv:        apply.HubEnv(w.instanceID, w.hubKey.Fingerprint(), w.app, w.ssh.controls),
 		HubConduitEnv: func(ctx context.Context) (map[string]string, error) {
 			live, err := conduit.ReadLiveHub(ctx, w.jr)
@@ -1191,31 +1192,23 @@ func (w *applyWiring) ensureHubIdentity(ctx context.Context) error {
 		reset:     w.resetHubIdentity,
 		ssh:       w.ssh,
 		restartHub: func(ctx context.Context) error {
-			if err := w.sc.ServerStop(ctx); err != nil {
-				return err
-			}
-			// Again here: agents can rewrite settings.yaml since the
-			// scion-server step converged it, and the hub reads it at start.
-			if _, err := w.ensureHubAuth(ctx); err != nil {
-				return fmt.Errorf("the hub is stopped: it was stopped for a restart, and converging its settings before the start failed (%w); fix the cause and run `lever apply`, which starts it again", err)
-			}
-			opts := apply.HubServerOpts(w.app, w.deps.HubSessionSecret, w.deps.HubAuthEnv)
-			opts.Progress = w.deps.Log
-			if err := w.sc.ServerStart(ctx, opts); err != nil {
-				return fmt.Errorf("the hub is stopped: it was stopped for a restart, and starting it again failed (%w); fix the cause and run `lever apply`, which starts it again", err)
-			}
-			online, err := w.sc.RuntimeBrokerReady(ctx, "global")
-			if err == nil && !online {
-				// start-manager trusts the scion-server step's broker wait.
-				err = errors.New("the hub's runtime broker did not come back online after the restart")
-			}
-			return err
+			return apply.RestartHub(ctx, w.app, w.deps, "")
 		},
 		linkBroker: w.ensureProjectProvider,
 		log:        w.log,
 		warn:       func(format string, args ...any) { w.log("lever: warning: "+format, args...) },
 	}
 	return h.run(ctx)
+}
+
+// pinExperimentsBeforeRestart pins scion's experiments on the hub the
+// scion-server step is about to restart (prePinExperiments).
+func (w *applyWiring) pinExperimentsBeforeRestart(ctx context.Context) error {
+	return prePinExperiments(ctx, experimentsPin{
+		admin: w.assertHub(w.signer.Admin), st: w.state, known: w.sc.KnowsUATScope, now: w.clock.Now,
+		conduitOn: w.ssh.on, conduitPolicyLive: w.ssh.policyLive,
+		log: w.log, warn: func(format string, args ...any) { w.log("lever: warning: "+format, args...) },
+	})
 }
 
 // projectLinked is the register-project soundness predicate's link half

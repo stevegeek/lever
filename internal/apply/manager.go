@@ -1,6 +1,7 @@
 package apply
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -47,7 +48,19 @@ const (
 	// (HealAgentSession), or the suspend would not keep its conversation.
 	// The suspend's own error is returned as scion gave it.
 	ManagerPark
+	// ManagerReenrol bounces the manager so its boot re-enrols with a fresh
+	// ticket (ManagerRequest.StageTicket): a running record is suspended and
+	// resumed, a suspended or stopped one resumed, an error one resumed with
+	// --force. The broker's certificate heal; it never creates or deletes.
+	ManagerReenrol
 )
+
+// ErrManagerRefused marks a change a check refused before or after it acted:
+// the record's stored role, or the manager's tree mounts. A refusal after
+// the resume suspended the manager (or says it could not).
+var ErrManagerRefused = errors.New("the manager's checks refused the change")
+
+func refused(err error) error { return markedError{err, ErrManagerRefused} }
 
 // The refusals of ManagerNewSession a caller tells apart. Nothing was
 // changed.
@@ -99,6 +112,8 @@ func (i ManagerIntent) String() string {
 		return "new-session"
 	case ManagerPark:
 		return "park"
+	case ManagerReenrol:
+		return "reenrol"
 	}
 	return fmt.Sprintf("intent(%d)", int(i))
 }
@@ -134,6 +149,13 @@ type ManagerRequest struct {
 	// returns the commit that records the new one once it started.
 	BeginSession func() (commit func() error, err error)
 
+	// UnderLock runs once the lifecycle lock is held, before anything is
+	// read; its error is returned as it is and nothing is changed.
+	UnderLock func() error
+	// StageTicket (Reenrol) stages a fresh enrolment ticket, after the
+	// checks before the resume.
+	StageTicket func(ctx context.Context) error
+
 	// HealBudget (Park) bounds the session heal before the suspend, so a slow
 	// one cannot cost the manager its suspend. Zero means parkHealBudget.
 	HealBudget time.Duration
@@ -161,6 +183,9 @@ type ManagerResult struct {
 	Verb string
 	// Created: this call created the record.
 	Created bool
+	// MountsUnverified: the manager was resumed and gated, but its tree
+	// mounts could not be read back (a warning was logged).
+	MountsUnverified bool
 }
 
 // ManagerLock takes the lifecycle lock for what, without waiting, and
@@ -206,11 +231,16 @@ func EnsureManager(ctx context.Context, app *config.App, d Deps, q ManagerReques
 	if d.managerScion() == nil || d.Log == nil {
 		return ManagerResult{}, fmt.Errorf("%s: internal error: the manager's lifecycle is not wired", subject)
 	}
-	release, err := d.ManagerLock(cmpOr(q.What, subject))
+	release, err := d.ManagerLock(cmp.Or(q.What, subject))
 	if err != nil {
 		return ManagerResult{}, err
 	}
 	defer release()
+	if q.UnderLock != nil {
+		if err := q.UnderLock(); err != nil {
+			return ManagerResult{}, err
+		}
+	}
 	r := &run{app: app, d: d,
 		brokerStart:  d.BrokerStartRetry.or(defaultBrokerStartRetry),
 		managerLive:  d.ManagerLiveRetry.or(defaultManagerLiveRetry),
@@ -238,15 +268,13 @@ func EnsureManager(ctx context.Context, app *config.App, d Deps, q ManagerReques
 		return r.newSession(ctx, jp, q)
 	case ManagerPark:
 		return r.park(ctx, jp, q)
+	case ManagerReenrol:
+		if q.StageTicket == nil || d.VerifyAgentRole == nil {
+			return ManagerResult{}, fmt.Errorf("%s: internal error: the manager's lifecycle is not wired", subject)
+		}
+		return r.reenrol(ctx, jp, q)
 	}
 	return ManagerResult{}, fmt.Errorf("%s: internal error: unknown manager intent %s", subject, q.Intent)
-}
-
-func cmpOr(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
 }
 
 // managerObservation is the one reading of the manager a plan is made from.
@@ -381,6 +409,16 @@ func planManager(q ManagerRequest, name string, o managerObservation) (managerPl
 		// The suspend is sent whatever the reading: a power-off follows, and
 		// scion's answer is what the caller reports.
 		return managerPlan{heal: o.present && o.phase == scion.PhaseStopped, verb: verbSuspend}, nil
+	case ManagerReenrol:
+		switch o.phase {
+		case scion.PhaseRunning:
+			return managerPlan{suspend: true, verb: verbResume}, nil
+		case scion.PhaseSuspended, scion.PhaseStopped:
+			return managerPlan{verb: verbResume}, nil
+		case scion.PhaseError:
+			return managerPlan{verb: verbResumeForce}, nil
+		}
+		return managerPlan{}, fmt.Errorf("manager %q is in phase %s, which the broker does not bounce; run `lever up`", name, scion.BoundedQuote(o.phase))
 	}
 	return managerPlan{}, fmt.Errorf("%s: internal error: unknown manager intent %s", q.subject(), q.Intent)
 }
@@ -905,4 +943,59 @@ func (r *run) park(ctx context.Context, jp string, q ManagerRequest) (ManagerRes
 	sctx, scancel := context.WithTimeout(ctx, parkSuspendTimeout)
 	defer scancel()
 	return ManagerResult{Verb: p.verb.String()}, sc.Suspend(sctx, r.app.Name, jp)
+}
+
+// reenrol is ManagerReenrol. Its suspend is not waited on: the resume that
+// follows is scion's answer to it. A stop claim is cleared only on the
+// manager's own container (ResumeClearingStopClaim), which only the
+// manager's own lapsed certificate brings about.
+func (r *run) reenrol(ctx context.Context, jp string, q ManagerRequest) (res ManagerResult, err error) {
+	sc := r.d.managerScion()
+	agents, err := sc.List(ctx, jp)
+	if err != nil {
+		return res, fmt.Errorf("listing the agents: %s", termsafe.Sanitize(scion.ErrSummary(err)))
+	}
+	rec := scion.FindAgent(agents, r.app.Name)
+	// A resume takes no --role: a record whose stored role the installed
+	// scion reads as full is never bounced, before any ticket is staged.
+	if err := r.d.VerifyAgentRole(ctx, path.Base(jp), r.app.Name); err != nil {
+		return res, refused(err)
+	}
+	p, err := planManager(q, r.app.Name, observationOf(rec))
+	if err != nil {
+		return res, err
+	}
+	guard, err := BeginManagerResume(ctx, r.d, r.app, jp, r.subjectName())
+	if err != nil {
+		return res, refused(err)
+	}
+	if err := q.StageTicket(ctx); err != nil {
+		return res, err
+	}
+	res.Verb = p.verb.String()
+	if p.suspend {
+		res.Verb = "suspend+" + res.Verb
+		if err := sc.Suspend(ctx, r.app.Name, jp); err != nil {
+			return res, guard.AfterFailure(ctx, fmt.Errorf("suspend: %s", termsafe.Sanitize(scion.ErrSummary(err))))
+		}
+	}
+	resume := func() error { return sc.Resume(ctx, r.app.Name, jp) }
+	if p.verb == verbResumeForce {
+		resume = func() error { return sc.ResumeForce(ctx, r.app.Name, jp) }
+	}
+	if err := r.resumeClearing(ctx, jp, resume); err != nil {
+		return res, guard.AfterFailure(ctx, fmt.Errorf("%s failed: %w", res.Verb, err))
+	}
+	if err := guard.Resumed(ctx); err != nil {
+		return res, refused(err)
+	}
+	if err := r.gateResumed(ctx, jp); err != nil {
+		return res, guard.AfterFailure(ctx, err)
+	}
+	if err := guard.Live(ctx); err != nil {
+		return res, refused(err)
+	}
+	res.MountsUnverified = !guard.Verified()
+	RecordGuestBoot(ctx, r.d)
+	return res, nil
 }

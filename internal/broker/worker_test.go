@@ -1506,7 +1506,7 @@ func TestReenrolBounceRefusesSwappedWorkspace(t *testing.T) {
 	var buf bytes.Buffer
 	tree, _, b := strictTree(t, rt, &buf)
 	swapToLink(t, filepath.Join(tree, "workers"), "assistant")
-	if _, ok := b.bounceForReenrol(context.Background(), "worker", "worker", nil); ok {
+	if _, ok := b.bounceForReenrol(context.Background(), "worker", "worker"); ok {
 		t.Fatal("the healer must not bounce a worker whose workspace goes through a link")
 	}
 	if len(rt.resumed) != 0 {

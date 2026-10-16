@@ -3,6 +3,7 @@ package brokerctl
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -370,11 +371,23 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 		}
 		return nil, fmt.Errorf("no hub record for worker %q", agent)
 	}
-	// The manager's re-enrol bounce is a resume: the checks apply runs
-	// around its own, with the same client and runner.
-	d.ManagerResumeGuard = managerResumeGuard(app, apply.Deps{
-		Scion: sc,
-		Log:   daemon.Warnf,
+	// The broker's changes to the manager go through the manager's one
+	// lifecycle, with the same client and runner: the role guard, the tree
+	// mount checks around the resume, the stop-claim recovery on the
+	// manager's own container, the liveness gate and the guest boot record.
+	managerDeps := apply.Deps{
+		Scion:       sc,
+		Log:         daemon.Warnf,
+		JailMount:   jailMount,
+		ManagerLock: managerLock(app, st),
+		VerifyAgentRole: func(ctx context.Context, project, agent string) error {
+			return hubapi.VerifyAgentRole(ctx, sc.RolesSupported, hc, project, agent)
+		},
+		AgentSession: jail.AgentProbe{R: jr},
+		ContainerRunning: func(ctx context.Context, ref string) (bool, error) {
+			return jail.ContainerRunning(ctx, jr, ref)
+		},
+		StaleContainer: jail.ContainerJanitor{R: jr},
 		InspectContainerMounts: func(ctx context.Context, ref string) ([]jail.Mount, error) {
 			return jail.ContainerMounts(ctx, jr, ref)
 		},
@@ -394,17 +407,9 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 			}
 			return out, nil
 		},
-	}, jailMount)
-	stopClaim := apply.Deps{StaleContainer: jail.ContainerJanitor{R: jr}, Log: daemon.Warnf}
-	d.ClearManagerStopClaim = func(ctx context.Context, resume func() error) error {
-		return apply.ResumeClearingStopClaim(ctx, stopClaim, app.Name, jailMount, "broker", resume)
 	}
-	// Inside the tree the state directory is the agents' to replace, so the
-	// broker writes nothing there.
-	if !StateInsideTree(app, st) {
-		guestBoot := apply.Deps{GuestBoot: JailGuestBoot{R: jr, State: st}, Log: daemon.Warnf}
-		d.RecordManagerBoot = func(ctx context.Context) { apply.RecordGuestBoot(ctx, guestBoot) }
-	}
+	managerDeps.GuestBoot = managerGuestBoot(app, st, jr)
+	d.EnsureManager = managerLifecycle(app, managerDeps)
 	if len(app.SharedFolders) > 0 {
 		d.RecordVolumes = readVolumes
 	} else {
@@ -519,31 +524,55 @@ func (h hubTokenHealer) ResetAuth(ctx context.Context, agent string) error {
 	return h.sc.ResetAuth(ctx, agent, h.project)
 }
 
-// managerResumeGuard runs the checks before the resume
-// (apply.BeginManagerResume) and afterwards reads back the tree mounts until
-// the container runs (the bounce has no liveness gate), suspending the
-// manager on a mismatch.
-func managerResumeGuard(app *config.App, d apply.Deps, jailMount string) func(context.Context) (broker.ManagerResumeCheck, error) {
-	return func(ctx context.Context) (broker.ManagerResumeCheck, error) {
-		g, err := apply.BeginManagerResume(ctx, d, app, jailMount, "broker")
-		if err != nil {
-			return nil, err
+// managerGuestBoot records the guest boot the manager runs in after a
+// bounce. Inside the tree the state directory is the agents' to replace, so
+// the broker writes nothing there.
+func managerGuestBoot(app *config.App, st state.State, jr proc.Runner) apply.GuestBoot {
+	if StateInsideTree(app, st) {
+		return nil
+	}
+	return JailGuestBoot{R: jr, State: st}
+}
+
+// managerLifecycle makes the broker's changes to the manager through
+// apply.EnsureManager.
+func managerLifecycle(app *config.App, d apply.Deps) func(context.Context, broker.ManagerChange) (broker.ManagerOutcome, error) {
+	return func(ctx context.Context, c broker.ManagerChange) (broker.ManagerOutcome, error) {
+		q := apply.ManagerRequest{Subject: "broker", What: c.What, UnderLock: c.UnderLock, StageTicket: c.StageTicket}
+		switch c.Kind {
+		case broker.ManagerReenrol:
+			q.Intent = apply.ManagerReenrol
+		default:
+			return broker.ManagerOutcome{}, fmt.Errorf("internal error: unknown change %d to the manager", c.Kind)
 		}
-		return resumeCheck{g}, nil
+		res, err := apply.EnsureManager(ctx, app, d, q)
+		if errors.Is(err, apply.ErrManagerRefused) {
+			err = refusedChange{err}
+		}
+		return broker.ManagerOutcome{Verb: res.Verb, MountsUnverified: res.MountsUnverified}, err
 	}
 }
 
-type resumeCheck struct{ g *apply.ManagerResume }
+// refusedChange is an apply.ErrManagerRefused as the broker reads it.
+type refusedChange struct{ error }
 
-func (c resumeCheck) After(ctx context.Context) error {
-	if err := c.g.Resumed(ctx); err != nil {
-		return err
+func (e refusedChange) Unwrap() error        { return e.error }
+func (e refusedChange) Is(target error) bool { return target == broker.ErrManagerRefused }
+
+// managerLock is the lifecycle lock as the broker takes it: without
+// waiting, naming the broker to the command it turns away. With the state
+// directory inside the tree there is no lock file (the agents could hold
+// it), and the conversation commands, which suspend or stop the manager on
+// purpose, refuse to run.
+func managerLock(app *config.App, st state.State) apply.ManagerLock {
+	if StateInsideTree(app, st) {
+		return func(string) (func(), error) { return func() {}, nil }
 	}
-	return c.g.Settle(ctx)
+	return func(what string) (func(), error) {
+		unlock, err := hostledger.TryLockFileAs(st.ConversationLock(), fmt.Sprintf("%s (pid %d)", what, os.Getpid()))
+		if errors.Is(err, hostledger.ErrLocked) {
+			return nil, fmt.Errorf("%w: %v", broker.ErrManagerBusy, err)
+		}
+		return unlock, err
+	}
 }
-
-func (c resumeCheck) AfterFailure(ctx context.Context, cause error) error {
-	return c.g.AfterFailure(ctx, cause)
-}
-
-func (c resumeCheck) Verified() bool { return c.g.Verified() }

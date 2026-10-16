@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/scion"
@@ -297,5 +298,113 @@ func TestPlanManagerPark(t *testing.T) {
 		if err != nil || p.verb != verbSuspend || p.heal != (o.Phase == scion.PhaseStopped) {
 			t.Errorf("%s: %+v %v", o.Name, p, err)
 		}
+	}
+}
+
+// reenrolDeps is the broker's wiring of the lifecycle over r: the mount
+// checks pass, the gate takes one look.
+func reenrolDeps(r *agentLifecycleRunner, staged *int) (Deps, ManagerRequest) {
+	d := fillDeps(Deps{Scion: scion.New(r, scion.Options{}), Log: func(string, ...any) {},
+		InspectContainerMounts: func(context.Context, string) ([]jail.Mount, error) { return nil, nil },
+		CheckLiveMounts:        func(context.Context, string, []jail.LiveMount) ([]jail.LiveMountProblem, error) { return nil, nil },
+	})
+	d.VerifyAgentRole = func(context.Context, string, string) error { return nil }
+	return d, ManagerRequest{Intent: ManagerReenrol, Subject: "broker",
+		StageTicket: func(context.Context) error { *staged++; return nil }}
+}
+
+// TestReenrolBouncesByPhase: the broker's bounce stages a ticket and
+// suspends and resumes a running manager, resumes a suspended or stopped
+// one, forces an error one; it never creates or deletes, and refuses any
+// other phase before the stage. The guest boot is recorded only after a
+// bounce that passed the gate.
+func TestReenrolBouncesByPhase(t *testing.T) {
+	for _, c := range []struct {
+		phase, container string
+		verb             string
+		suspends, forces int
+	}{
+		{"running", "Up 5 minutes", "suspend+resume", 1, 0},
+		{"suspended", "stopped", "resume", 0, 0},
+		{"stopped", "stopped", "resume", 0, 0},
+		{"error", "Exited (1)", "resume --force", 0, 1},
+		{"starting", "", "", 0, 0},
+		{"", "", "", 0, 0},
+	} {
+		t.Run(c.phase, func(t *testing.T) {
+			app, f := newObserveFirstApp(t)
+			r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: c.phase, initContainerStatus: c.container}
+			staged := 0
+			d, q := reenrolDeps(r, &staged)
+			gb := &fakeGuestBoot{current: bootB}
+			d.GuestBoot = gb
+			res, err := EnsureManager(context.Background(), app, d, q)
+			if c.verb == "" {
+				if err == nil || staged != 0 || r.resumeCalls+r.suspendCalls != 0 || len(gb.records) != 0 {
+					t.Fatalf("err %v staged %d resume %d suspend %d boots %v: want a refusal before the stage", err, staged, r.resumeCalls, r.suspendCalls, gb.records)
+				}
+				return
+			}
+			if err != nil || res.Verb != c.verb || staged != 1 || r.suspendCalls != c.suspends || r.resumeForceCalls != c.forces || r.resumeCalls != 1 {
+				t.Fatalf("err %v verb %q staged %d suspend %d resume %d force %d", err, res.Verb, staged, r.suspendCalls, r.resumeCalls, r.resumeForceCalls)
+			}
+			if r.startCalls+r.deleteCalls != 0 || len(gb.records) != 1 {
+				t.Fatalf("start %d delete %d boots %v", r.startCalls, r.deleteCalls, gb.records)
+			}
+		})
+	}
+}
+
+// TestReenrolRefusals: what the lifecycle refuses for the broker is marked
+// ErrManagerRefused and changes nothing; a revoke caught under the lock
+// reads nothing at all; a resume that dies fails the gate and records no
+// boot.
+func TestReenrolRefusals(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "stopped"}
+	staged := 0
+	d, q := reenrolDeps(r, &staged)
+	d.VerifyAgentRole = func(context.Context, string, string) error { return errors.New("stored role reads as full") }
+	if _, err := EnsureManager(context.Background(), app, d, q); !errors.Is(err, ErrManagerRefused) || staged != 0 || r.resumeCalls != 0 {
+		t.Fatalf("role: err %v staged %d resume %d", err, staged, r.resumeCalls)
+	}
+
+	d, q = reenrolDeps(r, &staged)
+	app.Manager.ReadOnly = []string{"kb"} // a read_only entry the tree does not hold
+	if _, err := EnsureManager(context.Background(), app, d, q); !errors.Is(err, ErrManagerRefused) || staged != 0 || r.resumeCalls != 0 {
+		t.Fatalf("tree: err %v staged %d resume %d", err, staged, r.resumeCalls)
+	}
+	app.Manager.ReadOnly = nil
+
+	revoked := errors.New("revoked")
+	q.UnderLock = func() error { return revoked }
+	lists := r.listCalls
+	if _, err := EnsureManager(context.Background(), app, d, q); !errors.Is(err, revoked) || r.listCalls != lists || staged != 0 {
+		t.Fatalf("under lock: err %v lists %d staged %d", err, r.listCalls-lists, staged)
+	}
+
+	app2, f2 := newObserveFirstApp(t)
+	r2 := &agentLifecycleRunner{FakeRunner: f2, slug: "hello", initPhase: "suspended", initContainerStatus: "stopped", liveWhenContainer: "Exited (1)"}
+	d2, q2 := reenrolDeps(r2, &staged)
+	gb := &fakeGuestBoot{current: bootB}
+	d2.GuestBoot = gb
+	if _, err := EnsureManager(context.Background(), app2, d2, q2); err == nil || errors.Is(err, ErrManagerRefused) || len(gb.records) != 0 {
+		t.Fatalf("dead resume: err %v boots %v", err, gb.records)
+	}
+}
+
+// TestReenrolClearsTheManagersStopClaim: the bounce's resume goes through
+// the stop-claim recovery, which removes the manager's own stopped container.
+func TestReenrolClearsTheManagersStopClaim(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "stopped",
+		resumeErr: errors.New(stopClaimMsg), resumeFailsThenSucceed: 1}
+	staged := 0
+	d, q := reenrolDeps(r, &staged)
+	j := &fakeJanitor{states: []jail.ContainerState{{ID: staleID, Name: "proj--m", Status: "exited"}}}
+	d.StaleContainer = j
+	d.StopClaimRetry = RetryBudget{Attempts: 3, Interval: time.Millisecond}
+	if _, err := EnsureManager(context.Background(), app, d, q); err != nil || !j.did("rm ") || r.resumeCalls != 2 {
+		t.Fatalf("err %v janitor %v resumes %d", err, j.calls, r.resumeCalls)
 	}
 }

@@ -11,8 +11,9 @@ import (
 
 // TestUpDecisions pins up's path over the shared observation set
 // (characterization; start-manager's table is apply's
-// TestStartManagerDecisions). A running record over a dead container takes
-// the attach-only path here; its gate (ObserveManagerLive) refuses it later.
+// TestStartManagerDecisions). up decides on the phase alone: a running record
+// over a dead container takes the attach-only path here, and its gate
+// (ObserveManagerLive) refuses it later.
 func TestUpDecisions(t *testing.T) {
 	want := map[string]upAction{
 		"absent": upApply, "running": upNone, "running-exited": upNone, "running-created": upNone,
@@ -55,43 +56,37 @@ type convEntry struct {
 // suspended first whatever its container shows.
 func TestConversationDecisions(t *testing.T) {
 	const noRecord, notReady = "no manager record", "running or suspended"
-	wantNew := map[string]convEntry{
-		"absent":    {"", noRecord},
-		"running":   {"suspend,stop,resume-fresh", ""},
-		"suspended": {"stop,resume-fresh", ""},
-	}
-	wantRestore := map[string]convEntry{
-		"absent":    {"", noRecord},
-		"running":   {"suspend,resume", ""},
-		"suspended": {"resume", ""},
+	refuse := func(why string) [2]convEntry { return [2]convEntry{{"", why}, {"", why}} }
+	running := [2]convEntry{{"suspend,stop,resume-fresh", ""}, {"suspend,resume", ""}}
+	// [0] is conversation new, [1] restore.
+	want := map[string][2]convEntry{
+		"absent": refuse(noRecord), "running": running, "running-exited": running,
+		"running-created": running, "running-no-status": running,
+		"suspended": {{"stop,resume-fresh", ""}, {"resume", ""}},
+		"stopped":   refuse(notReady), "error": refuse(notReady), "created": refuse(notReady),
+		"provisioning": refuse(notReady), "cloning": refuse(notReady), "starting": refuse(notReady),
+		"stopping": refuse(notReady), "resumed": refuse(notReady), "unknown": refuse(notReady),
 	}
 	for _, o := range testutil.ManagerObservations {
-		phase := o.Phase
-		if strings.HasPrefix(o.Name, "running-") {
-			continue // the conversation fake reports the container from the phase
+		w, ok := want[o.Name]
+		if !ok {
+			t.Errorf("%s: the observation set grew; pin conversation new and restore for it", o.Name)
+			continue
 		}
 		t.Run(o.Name, func(t *testing.T) {
-			wn, ok := wantNew[o.Name]
-			if !ok {
-				wn = convEntry{"", notReady}
-			}
 			f, _ := newConvFixtureWith(t)
 			writeConvFile(t, f.transcript("old.jsonl"), "{\"old\":1}\n")
 			m, _, err := f.ops.backup(context.Background(), "manual")
 			if err != nil {
 				t.Fatal(err)
 			}
-			f.sc.phase, f.sc.calls = phase, nil
+			f.sc.phase, f.sc.container, f.sc.calls = o.Phase, o.Container, nil
 			_, _, err = f.ops.newConversation(context.Background(), newConvRequest{Reason: "x"})
-			checkConvEntry(t, "new", f.calls(), err, wn)
+			checkConvEntry(t, "new", f.calls(), err, w[0])
 
-			wr, ok := wantRestore[o.Name]
-			if !ok {
-				wr = convEntry{"", notReady}
-			}
-			f.sc.phase, f.sc.calls = phase, nil
+			f.sc.phase, f.sc.container, f.sc.calls = o.Phase, o.Container, nil
 			err = f.ops.restore(context.Background(), m.ID, false)
-			checkConvEntry(t, "restore", f.calls(), err, wr)
+			checkConvEntry(t, "restore", f.calls(), err, w[1])
 		})
 	}
 }

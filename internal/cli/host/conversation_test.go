@@ -36,6 +36,9 @@ type fakeConvScion struct {
 	stopLands bool
 	// task is the last task ResumeTask passed ("" for none).
 	task string
+	// container, when set, is the container status List reports until a
+	// verb changes the phase; otherwise it follows the phase.
+	container string
 }
 
 func (f *fakeConvScion) List(context.Context, string) ([]scion.Agent, error) {
@@ -48,6 +51,9 @@ func (f *fakeConvScion) List(context.Context, string) ([]scion.Agent, error) {
 	if f.phase == scion.PhaseRunning {
 		cs = "Up 1 minute"
 	}
+	if f.container != "" {
+		cs = f.container
+	}
 	return []scion.Agent{{Slug: "mgr", Phase: f.phase, Activity: f.activity, ContainerStatus: cs}}, nil
 }
 
@@ -55,6 +61,7 @@ func (f *fakeConvScion) Stop(context.Context, string, string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "stop")
+	f.container = ""
 	if f.stopErr == nil || f.stopLands {
 		f.phase = scion.PhaseStopped
 	}
@@ -65,6 +72,7 @@ func (f *fakeConvScion) Suspend(context.Context, string, string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "suspend")
+	f.container = ""
 	if f.suspendErr != nil {
 		return f.suspendErr
 	}
@@ -77,6 +85,7 @@ func (f *fakeConvScion) Suspend(context.Context, string, string) error {
 func (f *fakeConvScion) Resume(context.Context, string, string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.container = ""
 	if f.phase == scion.PhaseStopped {
 		f.calls = append(f.calls, "resume-fresh")
 	} else {

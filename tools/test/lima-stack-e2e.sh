@@ -497,7 +497,11 @@ if not a: print("none"); sys.exit()
 print(a[0].get("phase", "") if sys.argv[2] == "phase" else (a[0].get("appliedConfig") or {}).get("task", ""))' "$NAME" "$1"
 }
 # claude_up: a claude process runs in the manager's container.
-claude_up() { P exec "lever--$NAME" sh -c 'for f in /proc/[0-9]*/cmdline; do tr "\000" " " < "$f"; echo; done' 2>/dev/null | grep -qE '(^|/)claude( |$)'; }
+# cmdlines: every process's command line in the manager's container, one per line.
+cmdlines() { P exec "lever--$NAME" sh -c 'for f in /proc/[0-9]*/cmdline; do tr "\000" " " < "$f"; echo; done' 2>/dev/null; }
+# claude_up: a claude process runs in the manager's container. Claude Code runs as
+# claude, as node with claude-code's cli, or behind scion's shell wrapper.
+claude_up() { cmdlines | grep -qE '(^|[/ ])claude( |$)|@anthropic-ai/claude-code/'; }
 # newest: the newest transcript in the manager's home (its claude session id).
 newest() { P exec --user scion "lever--$NAME" sh -c 'ls -t /home/scion/.claude/projects/*/*.jsonl 2>/dev/null | grep -v stack-e2e-old | head -1' 2>/dev/null; }
 P exec --user scion "lever--$NAME" sh -c 'mkdir -p /home/scion/.claude/projects/-workspace && echo stack-e2e-old > /home/scion/.claude/projects/-workspace/stack-e2e-old.jsonl'
@@ -540,6 +544,7 @@ checkx "the hub reads the manager running ($(mgrrec phase))" '[ "$(mgrrec phase)
 # The hub reads running as soon as the container starts; claude follows.
 for _ in $(seq 1 30); do claude_up && break; sleep 2; done
 check "claude runs in the manager's container" claude_up
+claude_up || { echo "      | processes in the manager's container:"; cmdlines | cut -c1-160 | sed 's/^/      |   /'; }
 after=$(newest)
 echo "      | session after: ${after:-(no transcript)}"
 checkx "a new claude session" '[ -n "$after" ] && [ "$after" != "$before" ]'

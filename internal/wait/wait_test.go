@@ -236,7 +236,7 @@ func TestBudgetsNeverShorterThanBefore(t *testing.T) {
 			t.Errorf("%s: %d attempts / %s, want at least %d / %s", tc.s.Name, tc.s.MinAttempts, tc.s.Total(), tc.attempts, tc.total)
 		}
 	}
-	if ManagerSettle < 10*time.Second {
+	if ManagerSettle < 10*time.Second || HubStartRetryPause <= 0 {
 		t.Error("settle or restart pause shortened")
 	}
 }

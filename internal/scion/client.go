@@ -60,6 +60,7 @@ type Client struct {
 	hubReady      wait.Spec
 	hubAliveEvery time.Duration
 	brokerReady   wait.Spec
+	hubRetryPause time.Duration
 }
 
 func New(r proc.Runner, o Options) *Client {
@@ -78,6 +79,7 @@ func New(r proc.Runner, o Options) *Client {
 		hubReady:      wait.HubReady,
 		hubAliveEvery: hubAliveEvery,
 		brokerReady:   wait.RuntimeBrokerOnline,
+		hubRetryPause: wait.HubStartRetryPause,
 	}
 }
 

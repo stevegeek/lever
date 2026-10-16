@@ -9,6 +9,17 @@ version bump moves the block under the new version heading.
 
 ### Fixed
 
+- **The first `lever up` after a VM reboot no longer fails because a stale hub pid file names a
+  reused pid.** After a reboot, `~/.scion/server.pid` still names the hub's old pid, and scion
+  counts any live process with that pid as a running hub. lever removed such a file only when the
+  pid was alive at its own check; a pid that a new process took a moment later (a reboot repeats
+  the pid sequence, so this can be lever's own `scion server start`) made scion answer "already
+  running" and start nothing, and `up` failed with "no scion server is running in the jail any
+  more" and nothing new in `server.log`. lever now also removes a pid file that names a dead pid,
+  checks an "already running" answer against a live scion server, and starts a hub that exited
+  during start-up (or was falsely reported running) once more after 3 s. A second failure ends the
+  step, and the error quotes what each attempt added to `server.log` (redacted, made safe to
+  print), or says it added nothing. (lever#231)
 - **`lever up` brings up the host broker when it only resumes the manager or finds it running.**
   These two paths skip `apply`, and so never started or checked the capability broker: a broker
   that had died under a live hub stayed down, and the manager and its workers had no tools, until

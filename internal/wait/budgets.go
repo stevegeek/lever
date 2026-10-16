@@ -12,6 +12,9 @@ var (
 		Name: "the hub to answer", Budget: 2 * time.Minute, Interval: time.Second,
 		NoticeAfter: 15 * time.Second, NoticeEvery: 30 * time.Second,
 	}
+	// HubStartRetryPause is the pause before the one restart of a hub that
+	// exited during start-up.
+	HubStartRetryPause = 3 * time.Second
 
 	// RuntimeBrokerOnline: the runtime broker registers with the hub only
 	// after the hub serves.

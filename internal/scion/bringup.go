@@ -12,6 +12,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/progress"
 	"github.com/stevegeek/lever/internal/scion/layout"
+	"github.com/stevegeek/lever/internal/termsafe"
 	"github.com/stevegeek/lever/internal/wait"
 )
 
@@ -483,6 +484,10 @@ type ServerOpts struct {
 //
 // scion's own readiness give-up (startGaveUpWaiting) is not a failure: the
 // daemon keeps starting, and waitHubReady decides.
+//
+// A hub that exits during start-up, or that scion falsely reports already
+// running, is started once more after c.hubRetryPause, and never again: a
+// second failure is returned with both attempts' evidence (HubExitedError).
 func (c *Client) ServerStart(ctx context.Context, o ServerOpts) error {
 	args := []string{"server", "start"}
 	if o.WebPort > 0 {
@@ -500,16 +505,167 @@ func (c *Client) ServerStart(ctx context.Context, o ServerOpts) error {
 			args = append(args, "--web-assets-dir="+o.WebAssetsDir)
 		}
 	}
-	// A pid file naming a live non-scion process (a reboot reused the pid)
-	// makes scion answer "already running" without starting anything. The
-	// probe removes such a file first; best-effort.
-	_, _ = c.serverPIDProbe(ctx)
-	// runSecret: the argv carries the session secret, which redactArgs does
-	// not know. The scrub is textual, so AlreadyRunning still matches.
-	if _, err := c.runSecretEnv(ctx, o.Env, o.SessionSecret, args...); err != nil && !startGaveUpWaiting(err) && !AlreadyRunning(err) {
+	err := c.startHubOnce(ctx, o, args)
+	var first *HubExitedError
+	if !errors.As(err, &first) {
 		return err
 	}
-	return c.waitHubReady(ctx, o.Progress)
+	if o.Progress != nil {
+		o.Progress("scion-server: %s; starting it once more in %s", first.What, c.hubRetryPause)
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(c.hubRetryPause):
+	}
+	err = c.startHubOnce(ctx, o, args)
+	var second *HubExitedError
+	switch {
+	case errors.As(err, &second):
+		second.First = first
+	case err != nil:
+		err = fmt.Errorf("%w (this was the hub's second start; the first: %s)", err, first.what())
+	}
+	return err
+}
+
+// HubExitedError is a hub start that left no scion server running: the
+// daemon exited during start-up, or scion refused to start one over a pid
+// file that names no scion server. Log is what the start added to the
+// hub's log, redacted and made safe to print; "" when it added nothing.
+type HubExitedError struct {
+	What  string
+	Log   string
+	Cause error
+	// First is the earlier attempt's failure, when this is the restart.
+	First *HubExitedError
+}
+
+func (e *HubExitedError) Error() string {
+	msg := e.what()
+	if e.First != nil {
+		msg = "the hub failed to start twice. Second attempt: " + msg + ". First attempt: " + e.First.what()
+	}
+	return fmt.Sprintf("%v: %s", ErrHubNotReady, msg)
+}
+
+func (e *HubExitedError) what() string {
+	msg := e.What
+	if e.Log != "" {
+		msg += fmt.Sprintf("; ~/%s from this start: %s", layout.ServerLogRel, e.Log)
+	} else {
+		msg += fmt.Sprintf("; it wrote nothing to ~/%s", layout.ServerLogRel)
+	}
+	if e.Cause != nil {
+		msg += "; " + termsafe.Sanitize(ErrSummary(e.Cause))
+	}
+	return msg
+}
+
+func (e *HubExitedError) Is(target error) bool { return target == ErrHubNotReady }
+
+// startHubOnce is one scion server start and the wait on it.
+func (c *Client) startHubOnce(ctx context.Context, o ServerOpts, args []string) error {
+	// A pid file naming a dead pid, or a live process that is not a scion
+	// server, makes scion answer "already running" without starting
+	// anything; a dead pid is reused at random after a reboot. The probe
+	// removes such a file first; best-effort.
+	_, _ = c.serverPIDProbe(ctx)
+	logFrom, logErr := c.serverLogSize(ctx)
+	exited := func(what string, cause error) error {
+		e := &HubExitedError{What: what, Cause: cause}
+		if logErr == nil {
+			e.Log = c.serverLogSince(ctx, logFrom, o.SessionSecret)
+		}
+		return e
+	}
+	// runSecret: the argv carries the session secret, which redactArgs does
+	// not know. The scrub is textual, so AlreadyRunning still matches.
+	_, err := c.runSecretEnv(ctx, o.Env, o.SessionSecret, args...)
+	switch {
+	case err == nil, startGaveUpWaiting(err):
+	case startExited(err):
+		return exited("the hub exited during start-up", err)
+	case AlreadyRunning(err):
+		// scion trusts any live process the pid file names. Only a live
+		// scion server makes the refusal true.
+		if pid, perr := c.serverPIDProbe(ctx); perr == nil && pid == 0 {
+			return exited("scion refused to start the hub as already running, but no scion server runs (a stale pid file)", err)
+		}
+	default:
+		return err
+	}
+	err = c.waitHubReady(ctx, o.Progress)
+	if errors.Is(err, errServerGone) {
+		return exited("the hub exited during start-up, before it answered", nil)
+	}
+	return err
+}
+
+// startExited reports whether err is scion server start seeing the daemon it
+// launched exit before it became ready (cmd/server_start_ready.go,
+// cmd/server_daemon.go).
+func startExited(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "the server exited during startup") ||
+		strings.Contains(s, "The server process has exited") ||
+		strings.Contains(s, "daemon failed to start")
+}
+
+// serverLogSizeScript prints the size of the hub's log; 0 when there is none.
+// A symlink is refused, here and in serverLogTailScript, so the log read can
+// only ever be the hub's own file.
+const serverLogSizeScript = `f="$HOME/$1"
+if [ -f "$f" ] && [ ! -L "$f" ]; then wc -c < "$f"; else echo 0; fi`
+
+// serverLogTailScript prints at most the last 4 KiB the log gained past
+// offset $2, all of it when the log is now shorter (a new file).
+const serverLogTailScript = `f="$HOME/$1"
+[ -f "$f" ] && [ ! -L "$f" ] || exit 0
+off=$2
+[ "$(wc -c < "$f")" -ge "$off" ] || off=0
+tail -c +$((off+1)) "$f" | tail -c 4096`
+
+func (c *Client) serverLogSize(ctx context.Context) (int64, error) {
+	res, err := c.r.Run(ctx, nil, "sh", "-c", serverLogSizeScript, "_", layout.ServerLogRel)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.ParseInt(strings.TrimSpace(res.Stdout), 10, 64)
+}
+
+// serverLogLines is how many of the log's last lines an error quotes.
+const serverLogLines = 12
+
+// serverLogSince returns what the hub's log gained past from, as one line:
+// its last serverLogLines lines, redacted, with secret scrubbed, made safe to
+// print and bounded. "" when it gained nothing or cannot be read.
+func (c *Client) serverLogSince(ctx context.Context, from int64, secret string) string {
+	res, err := c.r.Run(ctx, nil, "sh", "-c", serverLogTailScript, "_", layout.ServerLogRel, strconv.FormatInt(from, 10))
+	if err != nil {
+		return ""
+	}
+	var lines []string
+	for _, l := range strings.Split(res.Stdout, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			lines = append(lines, l)
+		}
+	}
+	lines = lines[max(0, len(lines)-serverLogLines):]
+	out := cleanErr(strings.Join(lines, "\n"))
+	if len(secret) >= 8 {
+		out = strings.ReplaceAll(out, secret, "***")
+	}
+	safe := make([]string, 0, len(lines))
+	for _, l := range strings.Split(out, "\n") {
+		if l != "" {
+			safe = append(safe, termsafe.Sanitize(l))
+		}
+	}
+	return boundSummary(strings.Join(safe, " | "), 1500)
 }
 
 // ServerStop stops the workstation daemon, tolerating one that is not running
@@ -538,13 +694,20 @@ func (c *Client) ServerStop(ctx context.Context) error {
 }
 
 // serverPIDProbeScript prints the pid the server pid file names when it is a
-// live scion server, nothing when there is no file or the pid is dead, and
-// removes the file when the pid is alive but not a scion server. The cmdline
-// test matches scion's own daemon argv (cmd/server_daemon.go).
+// live scion server and nothing otherwise. It removes the file when that pid
+// is dead or not a scion server: scion's own check is signal 0, so a dead pid
+// the next process reuses (lever's own scion start, after a reboot) would
+// read as a running server. The dead-pid removal re-reads the file first, so
+// a daemon that replaced it meanwhile keeps its own. The cmdline test
+// matches scion's own daemon argv (cmd/server_daemon.go).
 const serverPIDProbeScript = `f="$HOME/$1"
 [ -f "$f" ] || exit 0
 pid=$(tr -cd '0-9' < "$f")
-[ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ] || exit 0
+[ -n "$pid" ] || exit 0
+if [ ! -r "/proc/$pid/cmdline" ]; then
+  [ "$(tr -cd '0-9' < "$f")" = "$pid" ] && rm -f -- "$f"
+  exit 0
+fi
 case "$(tr '\000' ' ' < "/proc/$pid/cmdline")" in
 *scion*" server "*) printf '%s' "$pid" ;;
 *) rm -f -- "$f"; printf 'stale:%s' "$pid" ;;

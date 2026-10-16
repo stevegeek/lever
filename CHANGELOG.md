@@ -39,9 +39,12 @@ version bump moves the block under the new version heading.
   online.** A bring-up could restart the hub twice: once for its auth settings and once more to
   pin scion's experiments. lever now pins the experiments before the first restart, so that
   restart takes them, and restarts again only to turn conduit on for `lever ssh`, which needs the
-  restarted hub's proof. After lever starts or restarts the hub, the step waits up to about two
-  minutes for its runtime broker and fails if it does not come online, instead of going on and
-  failing the manager's start later.
+  restarted hub's proof. After lever starts the hub, the step waits up to 5 minutes for its
+  runtime broker (2 after a restart) and fails if it does not come online, naming what the hub
+  last listed or the error it last answered, instead of going on and failing the manager's start
+  later. lever asks the hub as lever-admin: the scion CLI it asked before holds no token on the
+  first `lever up`, and the controller token sees no broker, so that wait never saw one and always
+  ran out its time.
 - **lever's lifecycle record is `.lever-state/lifecycle.json`.** It holds the guest boot the
   manager last ran in (formerly `guest-boot.json`, taken over and removed on the first write), the
   image warm-up records and the last full bring-up. Only the command holding the lifecycle lock

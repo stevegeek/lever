@@ -742,9 +742,11 @@ type applyWiring struct {
 	state state.State
 	// hubKey signs every assertion; instanceID names the hub in iss and aud;
 	// clock is the guest's, read once per run.
-	hubKey           *hubauth.Key
-	instanceID       string
-	clock            hubauth.Clock
+	hubKey     *hubauth.Key
+	instanceID string
+	clock      hubauth.Clock
+	// runStart is clock.Now() when the run began.
+	runStart         time.Time
 	signer           *hubauth.Signer
 	resetHubIdentity bool
 	// ssh is this apply's `lever ssh` decision.
@@ -851,6 +853,7 @@ func (w *applyWiring) initHubAuth(ctx context.Context) error {
 	w.hubKey, w.instanceID = k, id
 	w.clock = readGuestClock(ctx, w.jr, w.log)
 	w.signer = hubauth.NewSigner(k, id, w.clock)
+	w.runStart = w.clock.Now()
 	return nil
 }
 
@@ -988,7 +991,8 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 
 		// The runtime broker registers asynchronously after the Hub API, so a first
 		// create/resume would race it. Fail-soft: it never fails bring-up.
-		WaitBrokerReady: sc.RuntimeBrokerReady,
+		WaitBrokerReady: w.waitBrokerReady,
+		BrokerOnline:    w.brokerOnline,
 
 		RearmBootstrap: bc.Rearm,
 
@@ -1219,6 +1223,7 @@ func (w *applyWiring) ensureHubIdentity(ctx context.Context) error {
 		jailMount: w.b.MountDest(),
 		keyFP:     w.hubKey.Fingerprint(),
 		guestNow:  w.clock.Now,
+		runStart:  w.runStart,
 		reset:     w.resetHubIdentity,
 		ssh:       w.ssh,
 		restartHub: func(ctx context.Context) error {

@@ -148,8 +148,8 @@ func TestRuntimeBrokerSeenOnlineSkipsStartManagersWait(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(projects) != 1 || projects[0] != scionGlobalProject {
-		t.Fatalf("WaitBrokerReady calls = %q; want only the scion-server step's", projects)
+	if len(projects) != 0 {
+		t.Fatalf("WaitBrokerReady calls = %q; want none after the scion-server step's hard wait", projects)
 	}
 }
 

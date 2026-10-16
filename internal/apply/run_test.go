@@ -77,6 +77,9 @@ func fillDeps(d Deps) Deps {
 	if d.WaitBrokerReady == nil {
 		d.WaitBrokerReady = func(context.Context, string) (bool, error) { return true, nil }
 	}
+	if d.BrokerOnline == nil {
+		d.BrokerOnline = func(context.Context) (bool, string, error) { return true, "", nil }
+	}
 	if d.MintManagerBootstrap == nil {
 		d.MintManagerBootstrap = func(context.Context) (BootstrapMaterial, error) {
 			return BootstrapMaterial{Ticket: "minted-this-run"}, nil
@@ -767,8 +770,8 @@ func TestStartManagerWaitsForBrokerReadyBeforeActing(t *testing.T) {
 	}
 }
 
-// When the scion-server step saw the broker online, start-manager does not
-// wait for it a second time in the same run.
+// When the scion-server step saw the broker online after its start,
+// start-manager does not wait for it a second time in the same run.
 func TestStartManagerSkipsTheBrokerWaitWhenScionServerSawItOnline(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello"}
@@ -783,8 +786,8 @@ func TestStartManagerSkipsTheBrokerWaitWhenScionServerSawItOnline(t *testing.T) 
 	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(waits) != 1 || waits[0] != "global" {
-		t.Fatalf("waits = %q, want only scion-server's", waits)
+	if len(waits) != 0 {
+		t.Fatalf("soft waits = %q, want none: scion-server's hard wait saw it", waits)
 	}
 	if r.startCalls != 1 {
 		t.Errorf("startCalls = %d, want 1", r.startCalls)
@@ -2884,8 +2887,8 @@ func TestRegisterFailsWhenHubEndpointRepairFails(t *testing.T) {
 
 // TestScionServerWaitsForTheBroker: a just-started hub registers its runtime
 // broker only after it serves, so the step waits for it before
-// register-project's hub link, via scion's global settings since the tree may
-// not be a project yet. It waits after a plain start and on a kept hub.
+// register-project's hub link: a hard wait after a start, a soft look on a
+// kept hub. Each happens once, in the scion-server step.
 func TestScionServerWaitsForTheBroker(t *testing.T) {
 	for _, kept := range []bool{false, true} {
 		f := scionOKRunner()
@@ -2895,21 +2898,33 @@ func TestScionServerWaitsForTheBroker(t *testing.T) {
 		if kept {
 			keptHub(f, app)
 		}
-		var waits []string
+		var events []string
 		deps := Deps{
 			Scion:      hubScion(f, app),
 			HubAuthEnv: testHubAuthEnv(),
+			BrokerOnline: func(context.Context) (bool, string, error) {
+				events = append(events, "hard")
+				return true, "", nil
+			},
 			WaitBrokerReady: func(_ context.Context, project string) (bool, error) {
-				waits = append(waits, project)
+				events = append(events, "soft "+project)
 				// A kept hub's broker is only looked at: not online is no failure.
-				return !kept, nil
+				return false, nil
+			},
+			EnsureProjectProvider: func(context.Context, string) error {
+				events = append(events, "link")
+				return nil
 			},
 		}
 		if err := runApply(app, deps); err != nil {
 			t.Fatalf("kept=%v: Run: %v", kept, err)
 		}
-		if len(waits) < 1 || waits[0] != "global" || slices.Index(waits[1:], "global") >= 0 {
-			t.Errorf("kept=%v: waits = %q, want one wait on scion's global settings, first (before register-project)", kept, waits)
+		first := "hard"
+		if kept {
+			first = "soft global"
+		}
+		if len(events) < 2 || events[0] != first || slices.Index(events[1:], first) >= 0 || events[1] != "link" {
+			t.Errorf("kept=%v: events = %q, want one %q first, before register-project's link", kept, events, first)
 		}
 	}
 }

@@ -9,6 +9,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/wait"
 )
 
 // errNoProvider is a project no agent can start in ("no_runtime_broker").
@@ -91,4 +92,59 @@ func (w *applyWiring) ensureProjectProvider(ctx context.Context, jp string) erro
 		jp:    jp,
 		log:   w.log,
 	})
+}
+
+// runtimeBrokerOnline asks the hub once whether it lists an online runtime
+// broker. It must ask as lever-admin: the hub lists no runtime broker to the
+// project-scoped controller PAT, and before hub-identity first mints that
+// PAT the scion CLI holds no credential the hub accepts at all.
+func runtimeBrokerOnline(ctx context.Context, admin *hubapi.Client) (bool, string, error) {
+	brokers, err := admin.RuntimeBrokers(ctx)
+	if err != nil {
+		return false, "", fmt.Errorf("listing the hub's runtime brokers as lever-admin: %w", err)
+	}
+	if len(brokers) == 0 {
+		return false, "the hub lists no runtime broker", nil
+	}
+	var seen []string
+	for _, b := range brokers {
+		// A broker registers before it connects: a row alone is not ready.
+		if b.Status == "online" || b.ConnectionState == "connected" {
+			return true, "", nil
+		}
+		seen = append(seen, fmt.Sprintf("%s (%s) status %q connection %q", b.ID, b.Name, b.Status, b.ConnectionState))
+	}
+	return false, "no runtime broker online: " + strings.Join(seen, ", "), nil
+}
+
+// softBrokerWait backs Deps.WaitBrokerReady: probe polled under s, and a
+// timeout is (false, nil) with a warning, since an agent start retries while
+// the broker is unavailable.
+func softBrokerWait(ctx context.Context, s wait.Spec, probe func(context.Context) (bool, string, error), log func(string, ...any)) (bool, error) {
+	err := wait.For(ctx, s, func(ctx context.Context) wait.Result {
+		online, seen, err := probe(ctx)
+		switch {
+		case err != nil:
+			return wait.NotYetErr(err)
+		case online:
+			return wait.Ready()
+		}
+		return wait.NotYet(seen)
+	})
+	if errors.Is(err, wait.ErrTimeout) {
+		log("lever: warning: %v; going on, an agent start retries while the broker is unavailable", err)
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// brokerOnline backs Deps.BrokerOnline.
+func (w *applyWiring) brokerOnline(ctx context.Context) (bool, string, error) {
+	return runtimeBrokerOnline(ctx, w.assertHub(w.signer.Admin))
+}
+
+// waitBrokerReady backs Deps.WaitBrokerReady; the hub's broker list is
+// hub-wide, so the project is not asked about.
+func (w *applyWiring) waitBrokerReady(ctx context.Context, _ string) (bool, error) {
+	return softBrokerWait(ctx, wait.RuntimeBrokerOnline, w.brokerOnline, w.log)
 }

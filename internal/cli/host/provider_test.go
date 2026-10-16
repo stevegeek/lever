@@ -3,10 +3,14 @@ package host
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/hubapi"
+	"github.com/stevegeek/lever/internal/wait"
 )
 
 // providerHub answers the project list, its providers, the broker list and the
@@ -110,5 +114,82 @@ func TestEnsureProjectProvider(t *testing.T) {
 				t.Fatalf("err = %v, want %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// brokerListHub answers the runtime-broker list only to lever-admin, with
+// the rows a controller PAT would not see. tokenless answers everyone
+// else 401, as the hub does before hub-identity has minted the PAT.
+type brokerListHub struct {
+	rows      string
+	tokenless bool
+	admin     bool
+}
+
+func (c brokerListHub) Do(ctx context.Context, method, path string) (int, []byte, error) {
+	return c.DoBody(ctx, method, path, nil)
+}
+
+func (c brokerListHub) DoBody(_ context.Context, method, path string, _ []byte) (int, []byte, error) {
+	switch {
+	case method != "GET" || path != "/api/v1/runtime-brokers":
+		return 404, nil, nil
+	case c.admin:
+		return 200, []byte(`{"brokers":` + c.rows + `}`), nil
+	case c.tokenless:
+		return 401, []byte(`{"error":{"message":"authentication required"}}`), nil
+	}
+	return 200, []byte(`{"brokers":[]}`), nil
+}
+
+// The broker check holds on the first lever up, before any controller PAT
+// exists, and after it, when the PAT's scopes list no broker.
+func TestRuntimeBrokerOnline(t *testing.T) {
+	online := `[{"id":"b1","name":"local","status":"online","connectionState":"connected"}]`
+	for _, c := range []struct {
+		name     string
+		hub      brokerListHub
+		want     bool
+		wantSeen string
+		wantErr  string
+	}{
+		{name: "lever-admin sees it online", hub: brokerListHub{rows: online, admin: true}, want: true},
+		{name: "registered, not connected", hub: brokerListHub{rows: `[{"id":"b1","name":"local","status":"offline","connectionState":"disconnected"}]`, admin: true},
+			wantSeen: `b1 (local) status "offline" connection "disconnected"`},
+		{name: "none registered", hub: brokerListHub{rows: `[]`, admin: true}, wantSeen: "lists no runtime broker"},
+		{name: "a refusal is an error, not a no", hub: brokerListHub{rows: online, tokenless: true}, wantErr: "HTTP 401"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, seen, err := runtimeBrokerOnline(context.Background(), &hubapi.Client{T: c.hub})
+			if c.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), c.wantErr) || got {
+					t.Fatalf("online=%v err=%v, want %q", got, err, c.wantErr)
+				}
+				return
+			}
+			if err != nil || got != c.want || !strings.Contains(seen, c.wantSeen) {
+				t.Fatalf("online=%v seen=%q err=%v", got, seen, err)
+			}
+		})
+	}
+}
+
+func TestSoftBrokerWait(t *testing.T) {
+	s := wait.Attempts("the broker", 2, time.Millisecond)
+	var logs []string
+	logf := func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }
+	refused := errors.New("HTTP 401")
+	online, err := softBrokerWait(context.Background(), s, func(context.Context) (bool, string, error) { return false, "", refused }, logf)
+	if online || err != nil || len(logs) != 1 || !strings.Contains(logs[0], "last error: HTTP 401") {
+		t.Fatalf("online=%v err=%v logs=%q; want a fail-soft timeout that names the refusal", online, err, logs)
+	}
+	online, err = softBrokerWait(context.Background(), s, func(context.Context) (bool, string, error) { return true, "", nil }, logf)
+	if !online || err != nil {
+		t.Fatalf("online=%v err=%v", online, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := softBrokerWait(ctx, s, func(context.Context) (bool, string, error) { return false, "", nil }, logf); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want the cancellation", err)
 	}
 }

@@ -236,7 +236,12 @@ type Deps struct {
 	// async registration. It is fail-soft (nil on timeout); the start path's
 	// broker-unavailable retry backstops it. It reports whether it saw the broker
 	// online so start-manager can skip its own wait.
-	WaitBrokerReady      func(ctx context.Context, project string) (online bool, err error)
+	WaitBrokerReady func(ctx context.Context, project string) (online bool, err error)
+	// BrokerOnline asks the hub once whether it lists an online runtime
+	// broker; seen describes what it listed, for a timeout's evidence. It is
+	// the probe of the hard wait after lever starts or restarts the hub, so
+	// it must work before hub-identity has minted any token.
+	BrokerOnline         func(ctx context.Context) (online bool, seen string, err error)
 	MintManagerBootstrap func(ctx context.Context) (BootstrapMaterial, error)
 	// RearmBootstrap restarts the broker to re-arm its single-use /bootstrap latch
 	// (the CA and signing keys persist, so agent certs and capability tokens
@@ -487,6 +492,7 @@ func (d Deps) check() error {
 		{"EnsureHubIdentity", d.EnsureHubIdentity == nil},
 		{"EnsureProjectProvider", d.EnsureProjectProvider == nil},
 		{"WaitBrokerReady", d.WaitBrokerReady == nil},
+		{"BrokerOnline", d.BrokerOnline == nil},
 		{"MintManagerBootstrap", d.MintManagerBootstrap == nil},
 		{"RearmBootstrap", d.RearmBootstrap == nil},
 		{"EnsureHubAuth", d.EnsureHubAuth == nil},
@@ -687,7 +693,7 @@ func (r *run) scionServer(ctx context.Context) error {
 		return err
 	}
 	if !live.Running {
-		if err := hubBrokerOnline(ctx, r.d); err != nil {
+		if err := hubBrokerOnline(ctx, r.d, hubColdBroker); err != nil {
 			return fmt.Errorf("scion-server: %w", err)
 		}
 		r.brokerOnline = true
@@ -724,32 +730,38 @@ func RestartHub(ctx context.Context, app *config.App, d Deps, reason string) err
 	if err := d.Scion.ServerStart(ctx, opts); err != nil {
 		return fmt.Errorf("the hub is stopped: it was stopped for a restart, and starting it again failed (%w); fix the cause and run `lever up`, which starts it again", err)
 	}
-	return hubBrokerOnline(ctx, d)
+	return hubBrokerOnline(ctx, d, hubRestartedBroker)
 }
 
-// hubStartedBroker bounds the wait, after lever started the hub, for its
-// runtime broker: each try is one WaitBrokerReady (its own 30 s), so a cold
-// Lima start has about two minutes.
-var hubStartedBroker = wait.Attempts("the hub's runtime broker to come online after the start", 4, time.Second)
+// hubRestartedBroker and hubColdBroker bound the wait, after lever restarted
+// or started the hub, for its runtime broker. A cold start also covers a
+// freshly booted VM, where the broker's first connect is slowest.
+var (
+	hubRestartedBroker = wait.Spec{Name: "the hub's runtime broker to come online after the restart",
+		Budget: 2 * time.Minute, MinAttempts: 3, Interval: time.Second, MaxInterval: 5 * time.Second}
+	hubColdBroker = wait.Spec{Name: "the hub's runtime broker to come online after the start",
+		Budget: 5 * time.Minute, MinAttempts: 3, Interval: time.Second, MaxInterval: 5 * time.Second}
+)
 
 // hubBrokerOnline is the postcondition of a hub lever started: the hub
 // answers (ServerStart waited for that) and its runtime broker is online. A
 // hub that serves before its broker registers fails every agent create and
-// resume, so this is a hard requirement. It asks scion's global settings
-// because the tree may not be a scion project yet.
-func hubBrokerOnline(ctx context.Context, d Deps) error {
-	err := wait.For(ctx, hubStartedBroker, func(ctx context.Context) wait.Result {
-		online, err := d.WaitBrokerReady(ctx, scionGlobalProject)
+// resume, so this is a hard requirement. A probe error is evidence, not the
+// end of the wait: the hub may still be settling.
+func hubBrokerOnline(ctx context.Context, d Deps, s wait.Spec) error {
+	err := wait.For(ctx, s, func(ctx context.Context) wait.Result {
+		online, seen, err := d.BrokerOnline(ctx)
 		switch {
 		case err != nil:
 			return wait.NotYetErr(err)
 		case online:
 			return wait.Ready()
 		}
-		return wait.NotYet("no online runtime broker")
+		return wait.NotYet(seen)
 	})
 	if errors.Is(err, wait.ErrTimeout) {
-		return fmt.Errorf("the hub's runtime broker did not come online after the start: %w", err)
+		return fmt.Errorf("the hub is running, but its runtime broker did not come online: %w; "+
+			"check the hub's log in the jail (~/.scion/server.log), then run `lever up` again", err)
 	}
 	return err
 }

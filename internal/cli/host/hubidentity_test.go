@@ -858,6 +858,8 @@ type hiEnv struct {
 	keyFP  string
 	// cacheWait and cachePoll go to the step; zero keeps its defaults.
 	cacheWait, cachePoll time.Duration
+	// runStart goes to the step.
+	runStart time.Time
 }
 
 func newHIEnv(t *testing.T, app *config.App) *hiEnv {
@@ -892,6 +894,7 @@ func (e *hiEnv) step() *hubIdentity {
 		jailMount: hiJailMount + "/",
 		keyFP:     e.keyFP,
 		guestNow:  func() time.Time { return e.now },
+		runStart:  e.runStart,
 		reset:     e.reset,
 		log:       func(f string, a ...any) { e.logs = append(e.logs, fmt.Sprintf(f, a...)) },
 		warn:      func(f string, a ...any) { e.warns = append(e.warns, fmt.Sprintf(f, a...)) },
@@ -1290,6 +1293,45 @@ func TestHubIdentityRebootstrapsANewHubDatabase(t *testing.T) {
 	}
 	if u := h.byEmail("op@example.com"); u == nil || rec.Users["op@example.com"] != u.ID {
 		t.Fatalf("the remote login was not re-invited: %+v", rec.Users)
+	}
+}
+
+// The scion-server step's broker check asserts as lever-admin before this
+// step, so on a new hub database lever-admin's row can be minutes older
+// than the step and still be this run's.
+func TestHubIdentityRebootstrapsWhenLeverAdminWasCreatedEarlierThisRun(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		runStart bool
+		wantErr  string
+	}{
+		{name: "the run's start is known", runStart: true},
+		{name: "only the step's start is known", wantErr: "predates this run"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e := newHIEnv(t, hiRemoteApp(false))
+			e.mustRun()
+			h := e.newHub()
+			e.now = e.now.Add(48 * time.Hour)
+			if c.runStart {
+				e.runStart = e.now
+			}
+			h.addUser("", hubauth.AdminEmail, "admin", "active", e.now)
+			e.now = e.now.Add(5 * time.Minute)
+			err := e.run()
+			if c.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+					t.Fatalf("run = %v, want %q", err, c.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !hiAnyContains(e.logs, "WARNING", "bootstrapping it as new") {
+				t.Fatalf("no re-bootstrap: %q", e.logs)
+			}
+		})
 	}
 }
 

@@ -330,37 +330,48 @@ func TestScionServerFailsWhenTheHubCannotBeRead(t *testing.T) {
 // TestScionServerHoldsAStartedHubToItsBroker: a hub lever started from down
 // must have its runtime broker online before the step passes, and one that
 // never registers fails the step instead of failing every agent start later.
+// A probe that cannot ask the hub (the CLI holding no token the hub accepts)
+// is named in the failure rather than read as "not online".
 func TestScionServerHoldsAStartedHubToItsBroker(t *testing.T) {
-	old := hubStartedBroker
-	hubStartedBroker = wait.Attempts(old.Name, 3, time.Millisecond)
-	t.Cleanup(func() { hubStartedBroker = old })
+	old := hubColdBroker
+	hubColdBroker = wait.Attempts(old.Name, 3, time.Millisecond)
+	t.Cleanup(func() { hubColdBroker = old })
+	refused := errors.New("authentication failed, login to hub")
+	type answer struct {
+		online bool
+		err    error
+	}
 	for _, c := range []struct {
 		name    string
-		answers []bool
-		wantErr bool
+		answers []answer
+		wantErr []string
 	}{
-		{name: "online at once", answers: []bool{true}},
-		{name: "online at the second look", answers: []bool{false, true}},
-		{name: "never online", answers: []bool{false, false, false}, wantErr: true},
+		{name: "online at once", answers: []answer{{online: true}}},
+		{name: "online at the second look", answers: []answer{{}, {online: true}}},
+		{name: "online after a refused look", answers: []answer{{err: refused}, {online: true}}},
+		{name: "never online", answers: []answer{{}, {}, {}},
+			wantErr: []string{"runtime broker did not come online", "last seen: offline", "run `lever up` again"}},
+		{name: "never asked", answers: []answer{{err: refused}, {err: refused}, {err: refused}},
+			wantErr: []string{"runtime broker did not come online", "last error: authentication failed"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := scionOKRunner()
 			app := helloApp(t.TempDir())
-			var global int
+			var looks int
 			err := runApply(app, Deps{
 				Scion:      hubScion(f, app),
 				HubAuthEnv: testHubAuthEnv(),
-				WaitBrokerReady: func(_ context.Context, project string) (bool, error) {
-					if project != scionGlobalProject {
-						return true, nil
-					}
-					global++
-					return c.answers[min(global, len(c.answers))-1], nil
+				BrokerOnline: func(context.Context) (bool, string, error) {
+					looks++
+					a := c.answers[min(looks, len(c.answers))-1]
+					return a.online, "offline", a.err
 				},
 			})
-			if c.wantErr {
-				if err == nil || !strings.Contains(err.Error(), "runtime broker did not come online") {
-					t.Fatalf("err = %v, want the broker postcondition", err)
+			if c.wantErr != nil {
+				for _, w := range c.wantErr {
+					if err == nil || !strings.Contains(err.Error(), w) {
+						t.Fatalf("err = %v, want %q", err, w)
+					}
 				}
 				if f.Called(proc.ArgvPrefix("scion", "start")) {
 					t.Fatal("an agent was started on a hub with no runtime broker")
@@ -370,8 +381,8 @@ func TestScionServerHoldsAStartedHubToItsBroker(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Run: %v", err)
 			}
-			if global != len(c.answers) {
-				t.Fatalf("global broker looks = %d, want %d", global, len(c.answers))
+			if looks != len(c.answers) {
+				t.Fatalf("broker looks = %d, want %d", looks, len(c.answers))
 			}
 		})
 	}

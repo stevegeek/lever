@@ -122,6 +122,9 @@ type run struct {
 	// fresh is PlanOpts.Fresh: discard any present manager record at
 	// start-manager.
 	fresh bool
+	// brokerOnly is PlanOpts.BrokerOnly: no hub, no project, no manager
+	// record to check.
+	brokerOnly bool
 	// attach is PlanOpts.Attach: the gate for a manager this run created ends once
 	// claude's pane is alive; a resume's gate still waits for claude's session
 	// start.
@@ -551,6 +554,7 @@ func Run(ctx context.Context, app *config.App, d Deps, opts PlanOpts) error {
 		managerLive: d.ManagerLiveRetry.or(defaultManagerLiveRetry),
 		phaseSettle: d.PhaseSettleRetry.or(defaultPhaseSettleRetry),
 		fresh:       opts.Fresh,
+		brokerOnly:  opts.BrokerOnly,
 		attach:      opts.Attach,
 		freshNoConv: opts.FreshWithoutConversation,
 	}
@@ -1141,9 +1145,10 @@ func (r *run) settleProject(ctx context.Context, jp string) error {
 // The ticket lands in the tree, which a running manager reads, so a record
 // start-manager would refuse to keep (Deps.VerifyAgentRole) is refused here,
 // before a ticket exists for it to enrol with. Under --fresh the record is
-// discarded, so its role does not matter.
+// discarded, so its role does not matter; a broker-only plan has no hub to
+// ask and starts no manager.
 func (r *run) mintManagerBootstrap(ctx context.Context, s Step) error {
-	if !r.fresh {
+	if !r.fresh && !r.brokerOnly {
 		jp := JailPath(r.app.Tree, r.app.Tree, r.d.JailMount)
 		if err := r.d.VerifyAgentRole(ctx, path.Base(jp), r.app.Name); err != nil {
 			return fmt.Errorf("mint-manager-bootstrap: no enrolment ticket was staged: %w", err)

@@ -340,6 +340,8 @@ func TestBrokerOnlyPlanMintsAfterTheBroker(t *testing.T) {
 			ok.Store(started.Load())
 			return BootstrapMaterial{Ticket: "t"}, nil
 		},
+		// The broker-only VM has no scion to answer the role check.
+		VerifyAgentRole: func(context.Context, string, string) error { return errors.New("no scion in the jail") },
 	})
 	if err := Run(context.Background(), app, d, PlanOpts{BrokerOnly: true}); err != nil {
 		t.Fatalf("Run: %v", err)

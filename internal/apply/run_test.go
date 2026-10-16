@@ -2762,8 +2762,8 @@ func TestMintRefusesPreRoleRecordBeforeStagingATicket(t *testing.T) {
 		_, statErr := os.Stat(filepath.Join(app.Tree, ".lever", "bootstrap.json"))
 		if fresh {
 			// --fresh discards the record, so its role does not stop the mint.
-			if mints != 1 {
-				t.Errorf("fresh: mints = %d, want 1", mints)
+			if mints != 1 || err != nil && strings.Contains(err.Error(), "mint-manager-bootstrap") {
+				t.Errorf("fresh: mints = %d, err = %v; want the mint", mints, err)
 			}
 			continue
 		}
@@ -2790,7 +2790,7 @@ func TestStartManagerRefusesPreRoleRecordWhenRunning(t *testing.T) {
 	}
 }
 
-// TestStartManagerVerifyAgentRoleSkippedWhenRecordAbsent: a fresh create
+// TestStartManagerVerifyAgentRoleSkippedWhenRecordAbsent: a first create
 // stamps `--role baseline` itself, so start-manager has nothing to refuse.
 // The mint step asks before it stages a ticket; the guard answers nil for an
 // absent record.

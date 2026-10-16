@@ -147,9 +147,13 @@ func (s State) RecordStep(step, inputs string, now time.Time) error {
 }
 
 // ForgetStep drops step's fingerprint, before the work it vouched for is
-// undone or redone.
+// undone or redone. A record a newer lever wrote is left alone: StepMatches
+// never trusts it, so nothing in it vouches for anything here.
 func (s State) ForgetStep(step string) error {
 	l, err := s.LoadLifecycle()
+	if errors.Is(err, errLifecycleNewer) {
+		return nil
+	}
 	if err == nil {
 		if _, ok := l.Steps[step]; !ok {
 			return nil

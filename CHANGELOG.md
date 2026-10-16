@@ -49,7 +49,9 @@ version bump moves the block under the new version heading.
   manager last ran in (formerly `guest-boot.json`, taken over and removed on the first write), the
   image warm-up records and the last full bring-up. Only the command holding the lifecycle lock
   writes it; `lever destroy` removes it; with the state directory inside the tree lever neither
-  reads nor writes it. The remote proxy's `remote.stamp` now has a single writer, the proxy.
+  reads nor writes it. A record lever cannot read counts as none: a manager left running in an
+  ended VM boot is still recognised by its container's start time. A warm-up record lever cannot
+  remove before it reloads an image fails the load, so it never vouches for the new image. The remote proxy's `remote.stamp` now has a single writer, the proxy.
 - **`lever attach`, `lever conversation backup` and `lever acceptance` take the lifecycle lock.**
   `attach` holds it only while it detaches other terminals and stages its token, waiting up to 2
   minutes for another command by default; the attach itself holds no lock. `lever destroy

@@ -335,8 +335,8 @@ func TestScionServerFailsWhenTheHubCannotBeRead(t *testing.T) {
 // TestScionServerHoldsAStartedHubToItsBroker: a hub lever started from down
 // must have its runtime broker online before the step passes, and one that
 // never registers fails the step instead of failing every agent start later.
-// A probe that cannot ask the hub (the CLI holding no token the hub accepts)
-// is named in the failure rather than read as "not online".
+// A probe the hub refuses is named in the failure rather than read as "not
+// online".
 func TestScionServerHoldsAStartedHubToItsBroker(t *testing.T) {
 	old := hubColdBroker
 	hubColdBroker = wait.Attempts(old.Name, 3, time.Millisecond)

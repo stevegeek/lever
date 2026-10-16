@@ -47,8 +47,8 @@ const hubCacheWait = 75 * time.Second
 // hubCachePoll is how often that wait asks again.
 const hubCachePoll = 5 * time.Second
 
-// markerSlack is how far before this step the hub may have stamped an admin
-// row and still count as created by it: guest and host clocks differ, and the
+// markerSlack is how far before this run's start the hub may have stamped an
+// admin row and still count as created by it: guest and host clocks differ, and the
 // signer only corrects for the offset read at the start of the run.
 const markerSlack = 2 * time.Minute
 

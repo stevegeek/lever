@@ -143,8 +143,14 @@ func (w *applyWiring) brokerOnline(ctx context.Context) (bool, string, error) {
 	return runtimeBrokerOnline(ctx, w.assertHub(w.signer.Admin))
 }
 
+// softBrokerSpec is wait.RuntimeBrokerOnline's budget with no attempt
+// floor: each probe is a jail exec and a curl that can take its own 20 s, so
+// thirty of them on a slow hub would stretch the wait to minutes.
+var softBrokerSpec = wait.Spec{Name: wait.RuntimeBrokerOnline.Name, Budget: wait.RuntimeBrokerOnline.Budget,
+	MinAttempts: 1, Interval: wait.RuntimeBrokerOnline.Interval}
+
 // waitBrokerReady backs Deps.WaitBrokerReady; the hub's broker list is
 // hub-wide, so the project is not asked about.
 func (w *applyWiring) waitBrokerReady(ctx context.Context, _ string) (bool, error) {
-	return softBrokerWait(ctx, wait.RuntimeBrokerOnline, w.brokerOnline, w.log)
+	return softBrokerWait(ctx, softBrokerSpec, w.brokerOnline, w.log)
 }

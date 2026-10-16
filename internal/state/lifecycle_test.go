@@ -85,6 +85,9 @@ func TestLifecycleCorruptAndNewer(t *testing.T) {
 	if err := st.RecordStep("x", "z", time.Now()); err == nil {
 		t.Fatal("a newer record must not be overwritten")
 	}
+	if err := st.ForgetStep("x"); err != nil {
+		t.Fatalf("forgetting in a newer record is a no-op, not a failure: %v", err)
+	}
 	if b, _ := os.ReadFile(st.LifecycleFile()); string(b) != string(newer) {
 		t.Fatalf("newer record changed: %s", b)
 	}

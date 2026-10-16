@@ -65,6 +65,11 @@ version bump moves the block under the new version heading.
 
 ### Fixed
 
+- **No enrolment ticket for a manager record lever refuses to keep.** The mint step staged the
+  manager's ticket in the tree before start-manager checked the record's stored role, so a record
+  lever then refused (one a roles-aware scion reads as full authority) could still read a fresh
+  ticket. The role check now runs first, and a refused record gets no ticket. `lever up --fresh`,
+  which discards the record, is not affected.
 - **`lever up` and `lever apply` bring back a manager whose container died under a record the hub
   still reads running.** They kept such a record and then refused it ("its container is ... —
   `lever stop` then `lever up` resumes it"); only a VM restart under the manager was recovered.

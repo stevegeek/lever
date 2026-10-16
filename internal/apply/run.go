@@ -1135,7 +1135,18 @@ func (r *run) settleProject(ctx context.Context, jp string) error {
 
 // mintManagerBootstrap is idempotent against the live broker latch, not a
 // stale file: a spent latch is tolerated only when a ticket is already staged.
+//
+// The ticket lands in the tree, which a running manager reads, so a record
+// start-manager would refuse to keep (Deps.VerifyAgentRole) is refused here,
+// before a ticket exists for it to enrol with. Under --fresh the record is
+// discarded, so its role does not matter.
 func (r *run) mintManagerBootstrap(ctx context.Context, s Step) error {
+	if !r.fresh {
+		jp := JailPath(r.app.Tree, r.app.Tree, r.d.JailMount)
+		if err := r.d.VerifyAgentRole(ctx, path.Base(jp), r.app.Name); err != nil {
+			return fmt.Errorf("mint-manager-bootstrap: no enrolment ticket was staged: %w", err)
+		}
+	}
 	// After a broker restart the latch reopens and a fresh ticket is deposited, so
 	// a first apply that failed before the manager enrolled recovers on re-apply.
 	m, err := r.d.MintManagerBootstrap(ctx)

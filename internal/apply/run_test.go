@@ -2739,6 +2739,41 @@ func TestStartManagerRefusesPreRoleRecordOnResume(t *testing.T) {
 	}
 }
 
+// A record lever would refuse to keep gets no enrolment ticket staged in
+// the tree it reads: the mint step refuses before it mints.
+func TestMintRefusesPreRoleRecordBeforeStagingATicket(t *testing.T) {
+	for _, fresh := range []bool{false, true} {
+		app, f := newObserveFirstApp(t)
+		r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "Up 6 seconds"}
+		mints := 0
+		deps := Deps{
+			Scion:           scion.New(r, scion.Options{}),
+			VerifyAgentRole: func(context.Context, string, string) error { return errPreRoleRefusal },
+			MintManagerBootstrap: func(context.Context) (BootstrapMaterial, error) {
+				mints++
+				return BootstrapMaterial{Ticket: "minted-this-run"}, nil
+			},
+		}
+		run := runApply
+		if fresh {
+			run = runApplyFresh
+		}
+		err := run(app, deps)
+		_, statErr := os.Stat(filepath.Join(app.Tree, ".lever", "bootstrap.json"))
+		if fresh {
+			// --fresh discards the record, so its role does not stop the mint.
+			if mints != 1 {
+				t.Errorf("fresh: mints = %d, want 1", mints)
+			}
+			continue
+		}
+		testutil.WantErrIs(t, err, errPreRoleRefusal)
+		if !strings.Contains(err.Error(), "mint-manager-bootstrap") || mints != 0 || statErr == nil {
+			t.Fatalf("err = %v, mints = %d, staged = %v; want the refusal before any mint", err, mints, statErr == nil)
+		}
+	}
+}
+
 // TestStartManagerRefusesPreRoleRecordWhenRunning: the no-op branch is not
 // exempt. A running agent refreshes its own token and scion re-derives scopes
 // from the stored role on every refresh, so an unrolled running record is
@@ -2756,23 +2791,25 @@ func TestStartManagerRefusesPreRoleRecordWhenRunning(t *testing.T) {
 }
 
 // TestStartManagerVerifyAgentRoleSkippedWhenRecordAbsent: a fresh create
-// stamps `--role baseline` itself, so there is nothing to refuse.
+// stamps `--role baseline` itself, so start-manager has nothing to refuse.
+// The mint step asks before it stages a ticket; the guard answers nil for an
+// absent record.
 func TestStartManagerVerifyAgentRoleSkippedWhenRecordAbsent(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello"}
-	called := 0
+	var steps []string
 	deps := Deps{
 		Scion: scion.New(r, scion.Options{}),
 		VerifyAgentRole: func(context.Context, string, string) error {
-			called++
-			return errPreRoleRefusal
+			steps = append(steps, fmt.Sprintf("starts=%d", r.startCalls))
+			return nil
 		},
 	}
 	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if called != 0 {
-		t.Errorf("VerifyAgentRole called %d times, want 0 (no record to keep)", called)
+	if len(steps) != 1 || steps[0] != "starts=0" {
+		t.Errorf("VerifyAgentRole calls = %q, want only the mint step's, before any start", steps)
 	}
 	if r.startCalls != 1 {
 		t.Errorf("startCalls = %d, want 1", r.startCalls)

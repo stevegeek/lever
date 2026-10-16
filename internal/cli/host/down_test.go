@@ -2,6 +2,7 @@ package host
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"

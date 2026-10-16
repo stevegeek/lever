@@ -2,7 +2,6 @@ package host
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 

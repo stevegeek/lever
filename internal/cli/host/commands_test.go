@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend"
@@ -169,6 +171,34 @@ func TestBringUpBackendPassesWarn(t *testing.T) {
 	sb.upCfg.Warn("w %d", 1)
 	if len(got) != 1 || got[0] != "w 1" {
 		t.Fatalf("warn sink = %q", got)
+	}
+}
+
+// TestBringUpBackendGuestLogDir: console logs are saved only where the
+// agents cannot reach them.
+func TestBringUpBackendGuestLogDir(t *testing.T) {
+	root := t.TempDir()
+	tree := filepath.Join(root, "tree")
+	if err := os.Mkdir(tree, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		st   state.State
+		want string
+	}{
+		{state.State{Dir: filepath.Join(root, ".lever-state")}, filepath.Join(root, ".lever-state", "guest-logs")},
+		{state.State{Dir: filepath.Join(tree, ".lever-state")}, ""},
+	} {
+		sb := &stubBackend{}
+		app := &config.App{Name: "x", Backend: config.BackendLima, Tree: tree}
+		var warned []string
+		warn := func(format string, a ...any) { warned = append(warned, fmt.Sprintf(format, a...)) }
+		if _, err := bringUpBackend(context.Background(), app, func(string, string) (backend.Backend, error) { return sb, nil }, tc.st, warn); err != nil {
+			t.Fatal(err)
+		}
+		if sb.upCfg.GuestLogDir != tc.want || (tc.want == "") != (len(warned) == 1) {
+			t.Errorf("state %s: GuestLogDir = %q, warned %q", tc.st.Dir, sb.upCfg.GuestLogDir, warned)
+		}
 	}
 }
 

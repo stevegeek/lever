@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -100,14 +101,27 @@ func liveExperiments(ctx context.Context, hc *hubapi.Client) ([]string, error) {
 // experiments row.
 const pinConflictRetries = 3
 
-// pinExperimentsOff writes an explicit false for each pinned-off experiment the
-// hub registers and does not already hold at false, leaving every other
-// override as it is, then requires the hub's answer to show each one
-// overridden off and disabled.
+// conduitExperiment is the one pinned experiment lever turns on, and only
+// for `lever ssh` (sshGate).
+const conduitExperiment = "hub.conduit"
+
+// pinExperimentsOff is pinExperiments with every experiment off.
 func pinExperimentsOff(ctx context.Context, hc *hubapi.Client, now time.Time) (state.HubExperimentsRecord, error) {
+	return pinExperiments(ctx, hc, now, false)
+}
+
+// pinExperiments writes an explicit override for each pinned experiment the
+// hub registers and does not already hold at the wanted value (false, or true
+// for conduit when conduitOn), leaving every other override as it is, then
+// requires the hub's answer to show each one overridden that way.
+func pinExperiments(ctx context.Context, hc *hubapi.Client, now time.Time, conduitOn bool) (state.HubExperimentsRecord, error) {
+	wantOn := func(name string) bool { return conduitOn && name == conduitExperiment }
 	for attempt := 1; ; attempt++ {
 		cur, err := hc.AdminExperiments(ctx)
 		if errors.Is(err, hubapi.ErrNoExperiments) {
+			if conduitOn {
+				return state.HubExperimentsRecord{}, fmt.Errorf("the hub has no experiments, so lever cannot turn %s on", conduitExperiment)
+			}
 			return state.HubExperimentsRecord{NotApplicable: true, PinnedAt: now}, nil
 		}
 		if err != nil {
@@ -124,9 +138,12 @@ func pinExperimentsOff(ctx context.Context, hc *hubapi.Client, now time.Time) (s
 				continue
 			}
 			registered = append(registered, name)
-			if e.Override == nil || *e.Override {
-				want[name] = false
+			if e.Override == nil || *e.Override != wantOn(name) {
+				want[name] = wantOn(name)
 			}
+		}
+		if conduitOn && !slices.Contains(registered, conduitExperiment) {
+			return state.HubExperimentsRecord{}, fmt.Errorf("the hub does not register %s, so lever cannot turn it on", conduitExperiment)
 		}
 		got := cur
 		if len(want) > 0 {
@@ -138,17 +155,31 @@ func pinExperimentsOff(ctx context.Context, hc *hubapi.Client, now time.Time) (s
 				return state.HubExperimentsRecord{}, err
 			}
 		}
+		rec := state.HubExperimentsRecord{Asked: pinnedOffNames(), Revision: got.Revision, PinnedAt: now}
 		for _, name := range registered {
 			e, ok := got.Lookup(name)
-			if !ok || e.Override == nil || *e.Override || e.Enabled {
-				return state.HubExperimentsRecord{}, fmt.Errorf("the hub does not report %s overridden off after the write", name)
+			on := wantOn(name)
+			if !ok || e.Override == nil || *e.Override != on || e.Enabled != on {
+				return state.HubExperimentsRecord{}, fmt.Errorf("the hub does not report %s overridden %s after the write", name, onOff(on))
+			}
+			if on {
+				rec.On = append(rec.On, name)
+			} else {
+				rec.Off = append(rec.Off, name)
 			}
 		}
-		return state.HubExperimentsRecord{Off: registered, Asked: pinnedOffNames(), Revision: got.Revision, PinnedAt: now}, nil
+		return rec, nil
 	}
 }
 
-// experimentsPin is ensureHubExperimentsOff's seams.
+func onOff(on bool) string {
+	if on {
+		return "on"
+	}
+	return "off"
+}
+
+// experimentsPin is ensureHubExperiments' seams.
 type experimentsPin struct {
 	// admin is the hub as lever-admin: the experiments admin route is
 	// hub-admin only, and lever-admin signs every probe route, so this also
@@ -159,62 +190,142 @@ type experimentsPin struct {
 	now   func() time.Time
 	// restartHub stops and starts the live hub and waits for its broker.
 	restartHub func(ctx context.Context) error
-	log, warn  func(format string, args ...any)
+	// conduitOn asks for conduit on, for `lever ssh` (sshGate.on).
+	conduitOn bool
+	// conduitPolicyLive returns nil only when the live hub runs with lever's
+	// conduit policy (sshGate). It must be set when conduitOn is.
+	conduitPolicyLive func(ctx context.Context) error
+	log, warn         func(format string, args ...any)
 }
 
-// ensureHubExperimentsOff pins scion's experiments in pinnedOffExperiments off
+// ensureHubExperiments pins scion's experiments in pinnedOffExperiments off
 // as lever-admin on every apply of a scion that has them, then proves every
-// probe route answers 404. An experiment that was on before the pin restarts
-// the hub, since conduit's relay starts only with the hub and a pin alone
-// would leave a running relay. A probe that gets no answer fails the apply
-// rather than pass as off. A scion that cannot say whether it has hub
-// experiments is probed too: a hub without them answers 404 to every probe.
-func ensureHubExperimentsOff(ctx context.Context, p experimentsPin) error {
+// probe route answers 404. With conduitOn it turns conduit on instead, but
+// only on a hub that runs with lever's conduit policy, and proves that again
+// after the hub restarts with conduit; anything it cannot prove leaves conduit
+// off. An experiment whose state changes restarts the hub, since conduit's
+// relay starts only with the hub and a pin alone would leave a running relay
+// (or none). A probe that gets no answer fails the apply rather than pass as
+// off. A scion that cannot say whether it has hub experiments is probed too: a
+// hub without them answers 404 to every probe.
+func ensureHubExperiments(ctx context.Context, p experimentsPin) (conduitOn bool, err error) {
 	rec, found, err := p.st.LoadHubExperimentsRecord()
 	if err != nil {
-		return fmt.Errorf("hub experiments: %w", err)
+		return false, fmt.Errorf("hub experiments: %w", err)
 	}
 	has, sure := hubExperimentsSupport(ctx, p.known, rec, found)
 	if !has && sure {
-		return nil
+		if p.conduitOn {
+			p.warn("%s: the jail's scion has no hub experiments; conduit stays off", sshOffPrefix)
+		}
+		return false, nil
 	}
 	names := strings.Join(pinnedOffNames(), ", ")
 	on, err := liveExperiments(ctx, p.admin)
 	if err != nil {
-		return fmt.Errorf("hub experiments: could not tell whether %s are off: %w", names, err)
+		return false, fmt.Errorf("hub experiments: could not tell whether %s are off: %w", names, err)
 	}
 	if !has {
-		if len(on) == 0 {
-			return nil
+		if p.conduitOn {
+			p.warn("%s: the jail's scion did not say whether it has hub experiments; conduit stays off", sshOffPrefix)
 		}
-		return fmt.Errorf("hub experiments: %s is on at the hub, and lever cannot pin it off because the jail's scion did not say whether it has hub experiments (`scion hub token create --help`); "+
+		if len(on) == 0 {
+			return false, nil
+		}
+		return false, fmt.Errorf("hub experiments: %s is on at the hub, and lever cannot pin it off because the jail's scion did not say whether it has hub experiments (`scion hub token create --help`); "+
 			"run `lever stop` and check the hub's admin experiments page before `lever up`", strings.Join(on, " and "))
 	}
-	pinned, err := pinExperimentsOff(ctx, p.admin, p.now())
+	conduitOn = p.conduitOn
+	if conduitOn {
+		if err := policyLive(ctx, p); err != nil {
+			p.warn("%s: %v; conduit stays off", sshOffPrefix, err)
+			conduitOn = false
+		}
+	}
+	pinned, err := pinExperiments(ctx, p.admin, p.now(), conduitOn)
 	switch {
 	case errors.Is(err, errExperimentsMalformed) && len(on) == 0:
+		if conduitOn {
+			p.warn("%s: %v; conduit stays off", sshOffPrefix, err)
+			conduitOn = false
+		}
 		p.warn("hub experiments: %v, so scion keeps %s off but lever cannot pin them; "+
 			"reset them to the defaults in the hub's admin experiments page, then run `lever apply`", err, names)
 	case err != nil:
-		return fmt.Errorf("hub experiments: pinning %s off as lever-admin: %w", names, err)
+		return false, fmt.Errorf("hub experiments: pinning %s as lever-admin: %w", names, err)
 	default:
 		if err := p.st.SaveHubExperimentsRecord(pinned); err != nil {
-			return fmt.Errorf("hub experiments: persisting hub-experiments.json: %w", err)
+			return false, fmt.Errorf("hub experiments: persisting hub-experiments.json: %w", err)
 		}
 	}
-	if len(on) > 0 {
-		p.log("lever: scion experiment %s was on at the hub; lever pinned it off and restarts the hub", strings.Join(on, " and "))
+	stray := strayExperiments(on, conduitOn)
+	switch {
+	case len(stray) > 0:
+		p.log("lever: scion experiment %s was on at the hub; lever pinned it off and restarts the hub", strings.Join(stray, " and "))
+	case conduitOn && !slices.Contains(on, conduitExperiment):
+		p.log("lever: turned scion's %s on for `lever ssh`; restarting the hub so its relay starts", conduitExperiment)
+	}
+	if len(stray) > 0 || conduitOn && !slices.Contains(on, conduitExperiment) {
 		if err := p.restartHub(ctx); err != nil {
-			return fmt.Errorf("hub experiments: restarting the hub after pinning experiments off: %w", err)
+			return false, fmt.Errorf("hub experiments: restarting the hub after pinning experiments: %w", err)
+		}
+	}
+	if conduitOn {
+		if err := policyLive(ctx, p); err != nil {
+			return false, conduitBackOff(ctx, p, fmt.Errorf("the hub restarted without lever's conduit policy: %w", err))
 		}
 	}
 	on, err = liveExperiments(ctx, p.admin)
 	if err != nil {
-		return fmt.Errorf("hub experiments: could not confirm %s are off: %w", names, err)
+		if conduitOn {
+			return false, conduitBackOff(ctx, p, fmt.Errorf("could not confirm %s are as pinned: %w", names, err))
+		}
+		return false, fmt.Errorf("hub experiments: could not confirm %s are off: %w", names, err)
 	}
-	if len(on) > 0 {
-		return fmt.Errorf("hub experiments: %s is still on at the hub after lever pinned it off; "+
-			"run `lever stop` and check the hub's admin experiments page before `lever up`", strings.Join(on, " and "))
+	if stray := strayExperiments(on, conduitOn); len(stray) > 0 {
+		if conduitOn {
+			return false, conduitBackOff(ctx, p, fmt.Errorf("%s is still on at the hub after lever pinned it off", strings.Join(stray, " and ")))
+		}
+		return false, fmt.Errorf("hub experiments: %s is still on at the hub after lever pinned it off; "+
+			"run `lever stop` and check the hub's admin experiments page before `lever up`", strings.Join(stray, " and "))
 	}
-	return nil
+	if conduitOn && !slices.Contains(on, conduitExperiment) {
+		return false, conduitBackOff(ctx, p, fmt.Errorf("the hub does not serve %s after lever turned it on", conduitExperiment))
+	}
+	return conduitOn, nil
+}
+
+// strayExperiments are the served experiments lever does not want on.
+func strayExperiments(served []string, conduitOn bool) []string {
+	var out []string
+	for _, n := range served {
+		if !(conduitOn && n == conduitExperiment) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+func policyLive(ctx context.Context, p experimentsPin) error {
+	if p.conduitPolicyLive == nil {
+		return errors.New("lever has no way to check the hub's conduit policy")
+	}
+	return p.conduitPolicyLive(ctx)
+}
+
+// conduitBackOff pins conduit off again after a failed proof that it is on
+// safely, restarts the hub so no relay runs, and returns cause.
+func conduitBackOff(ctx context.Context, p experimentsPin, cause error) error {
+	err := fmt.Errorf("hub experiments: %s: %w; lever pinned conduit off again", sshOffPrefix, cause)
+	pinned, perr := pinExperimentsOff(ctx, p.admin, p.now())
+	if perr != nil {
+		return fmt.Errorf("%w, but pinning it off failed (%v): run `lever stop` before anything else", err, perr)
+	}
+	if serr := p.st.SaveHubExperimentsRecord(pinned); serr != nil {
+		return fmt.Errorf("%w; persisting hub-experiments.json: %v", err, serr)
+	}
+	if rerr := p.restartHub(ctx); rerr != nil {
+		return fmt.Errorf("%w, but the hub restart failed (%v): run `lever stop` before anything else", err, rerr)
+	}
+	return err
 }

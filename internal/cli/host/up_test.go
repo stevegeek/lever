@@ -13,6 +13,7 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/progress"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/wire"
 )
@@ -383,5 +384,25 @@ func TestResumeForUpRefusesLinkedReadOnly(t *testing.T) {
 	_, err := resumeForUp(context.Background(), deps, app, "/lever", func(context.Context) error { resumed = true; return nil })
 	if err == nil || resumed || !strings.Contains(err.Error(), "read_only") {
 		t.Fatalf("err = %v resumed %v, want a refusal before the resume", err, resumed)
+	}
+}
+
+// TestEnsureRemoteForUp: up checks the proxy only with remote access on, and
+// a proxy it cannot start is a warning naming the fix, not a failed up.
+func TestEnsureRemoteForUp(t *testing.T) {
+	rep := progress.New(progress.Options{Mode: progress.ModeQuiet, Command: "up"})
+	on := &config.App{Name: "assistant", Remote: config.Remote{Enabled: true}}
+	called := false
+	if w := ensureRemoteForUp(context.Background(), rep, &config.App{Name: "assistant"}, func(context.Context) error { called = true; return nil }); w != "" || called {
+		t.Fatalf("remote off: warning %q, ensure called %v; want neither", w, called)
+	}
+	if w := ensureRemoteForUp(context.Background(), rep, on, func(context.Context) error { return nil }); w != "" {
+		t.Fatalf("a serving proxy warned: %q", w)
+	}
+	for _, err := range []error{errRemoteProxyNoStamp, errRemoteProxyStale, errRemoteProxyStateInTree, errors.New("bind: address already in use")} {
+		w := ensureRemoteForUp(context.Background(), rep, on, func(context.Context) error { return err })
+		if !strings.Contains(w, "proxy") || !strings.Contains(w, "lever apply") || !strings.Contains(w, err.Error()) {
+			t.Errorf("warning for %v = %q, want the cause and `lever apply`", err, w)
+		}
 	}
 }

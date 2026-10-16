@@ -508,6 +508,48 @@ tasks), and have the boot prompt read it, so a fresh session picks up where the 
 off. Messages that arrive while the manager is down wait in the hub as they do across
 `lever stop`; a boot prompt that reads the manager's events picks them up.
 
+### A new conversation every day
+
+`manager.daily_reset` makes the new conversation once a day on its own:
+
+```yaml
+manager:
+  daily_reset: "06:30"     # 24-hour HH:MM, host local time; omit to turn it off
+```
+
+The broker runs `lever conversation new` at that time, the same command with the same backup and
+checks, in its own session (a broker restart does not cut it short), its output appended to
+`.lever-state/logs/conversation-new.log`. It reads the time when it starts, so a change takes
+effect when `lever apply` restarts the broker (or `lever reload`). It runs only while lever is up
+and the manager is running, never with `--force`, and records the new session for the contact gate
+as the command from your terminal does, so contacts can post to the manager after it.
+
+- **Busy, locked or not running:** a manager in the middle of a turn, another change to the
+  manager holding the lock (`lever up`, `apply`, `stop`, `reload`, a new conversation from the
+  chat page, the broker's certificate heal), or a manager that is not running changes nothing;
+  the broker tries again every 10 minutes for 2 hours from the set time, then gives up for the day.
+- **A failure is not retried** that day. The next day's runs as usual.
+- **Once a day at most.** The day is claimed in `.lever-state/daily-reset.json` (the host's
+  record: last attempt, result, next due) before the run starts, so a broker restart or a second
+  broker never starts it twice, and a clock set back does not repeat a day that has run.
+- **Sleep and clock changes:** a host asleep at the time (or a broker that was down) runs it once
+  when it wakes, if that is still within the 2 hours; later, that day is skipped. On a day the
+  clocks go forward over the time it runs at the first minute after the jump; on a day the time
+  happens twice it runs at the first.
+- `lever doctor`'s *daily reset* row shows the time, when it is next due and the last result; it
+  warns after a failure, a day given up, or a run whose end the broker did not record.
+
+Each run is one of the 10 conversation backups lever keeps: with no other new conversation, the
+backups go back 10 days. A manager waiting for an answer is not busy, so the reset goes ahead
+over a question it asked (or a terminal attached to it, which the stop ends). The daily runs
+leave no bring-up record (doctor's *last bring-up* row); their output is in the log above.
+
+What the manager can do about it: its busy report, a stop of its own, or a run it makes fail (the
+backup of its home, for one) holds off or ends that day's reset, and doctor then warns. It cannot
+start a reset, move the time, or turn it off: the schedule is in `lever.yaml` and the record in
+the state directory, neither of which the agent can reach. With the state directory inside the
+tree there is no daily reset.
+
 ## The manager's conversation across `--fresh`
 
 A manager keeps the image, model, mounts and devices it was created with, so changing one of them
@@ -1274,6 +1316,7 @@ Both open the hub database directly; `recover-authz` refuses while a hub runs. T
 | `lever apply`/`up` fails at `start-manager`: "manager … stayed in phase \"created\" … and did not settle"; the guest's `~/.scion/server.log` shows `context canceled` on a start about every 30 s | the first rootless start of a large image (several GB) builds podman's user-namespace layer copy, which can take longer than scion's ~30 s start timeout; scion then deletes the partial work and starts again from zero, every time. lever 0.34.2 and later warms the copy of every image in the `load-image` step on every apply (fast once warm; a warning there means the warm-up failed) | in the guest, as the jail user: `podman run --rm --userns=keep-id:uid=1000,gid=1000 --entrypoint true <image>` (it can take a few minutes), then `lever up --fresh` — a manager that never left phase created has no conversation to lose |
 | `lever up` fails: "manager … cannot be resumed: <dir> mounted by the manager record but no longer on the host" (before 0.30.0: podman `statfs /lever/<dir>: no such file or directory`) | the manager was created with `manager.read_only` naming `<dir>` (or a worker dir while the list was set); the record keeps that mount for life, and the directory was deleted after the entry was removed from `lever.yaml`. lever reads the mounts off the stopped manager container, or, with no container, off the hub record, and refuses every resume (the forced resume of an `error` phase too); it only warns when it keeps a running manager as it is | recreate the directory (`mkdir`, empty is enough) and run `lever up` again; to drop the mount, run `lever up --fresh --keep-conversation`. Keep a removed entry's directory until that fresh create |
 | `lever up` exits **3**: "resume (or resume --force) of the manager failed. lever did NOT delete the manager …" | scion could not resume the manager record (a late runtime broker, a container whose state the VM lost, a wedged harness). lever keeps the record and the conversation; it never starts a fresh manager on its own after a failed resume | run `lever up` again — a transient failure clears; `lever doctor` (manager row) for the cause. To give the session up, run `lever up --fresh` (it backs the conversation up first; `--keep-conversation` resumes the new manager on it). In a script, test the exit code (3), not the text: the message ends with the hub's own words after "Cause:" |
+| `lever up` exits **3**: "… the hub holds a stop claim on the manager …" | the hub refuses every resume while a stopped container from an interrupted start exists, and lever could not clear it (a container still running or changing between lever's two looks, a failed removal, or a claim the hub kept past the wait) | running `lever up` again does not help until the cause the message names is gone: see [a stop claim the hub never releases](#a-stop-claim-the-hub-never-releases) |
 | `lever up`/`apply` fails at `start-manager`: "did not come up … the harness is not live — cause: no conversation to continue" | the manager was never sent a message, so its home holds no transcript, and the resume's `claude --continue` found nothing to continue. `lever up` starts such a manager fresh on its own once it has checked the home from the guest, when the resume ran in its bring-up (on a terminal too: a resumed manager is attached only after claude reports its session start); this message means it could not prove the home empty (the line before it says why), the resume was `up`'s own (a suspended manager under a running hub, or after a guest restart), or the command was `lever apply` | `lever stop && lever up` (the resume then runs in the bring-up, which makes the fresh start when the line before did not give a reason), or `lever up --fresh`: it backs up any transcript first, so nothing is lost ([the manager's conversation across `--fresh`](#the-managers-conversation-across---fresh)) |
 | `lever up` exits **4**: "the hub refused resume of the manager. lever kept the manager …" | the hub refused the call: a controller token without `agent:lifecycle`, or a phase that cannot be resumed now | `lever apply` (it re-mints a token whose scopes changed, while agents run), or wait and retry. Do **not** answer exit 4 with `--fresh` |
 | Changed `manager.image` (or rebuilt under a new tag) but the manager still runs the old image; doctor's `manager image` row fails | a manager record keeps the image it was created with — `lever up` resumes it unchanged, and a `stop && up` is a resume too | `lever up --fresh` — the bring-up deletes the record once the hub is up and creates the manager on the configured image (add `--keep-conversation` to keep the conversation; plain `--fresh` starts a new one after backing the old one up; before 0.21 the flag was silently dropped after `stop`) |
@@ -1521,7 +1564,7 @@ the [live test plan](https://github.com/stevegeek/lever/blob/main/CONTRIBUTING.m
 checks it.
 
 **A guest booted without grub.** The command-line parameter reaches the kernel through grub, and
-the pending-reboot check reads `/boot/vmlinuz`. A guest that boots a kernel directly (a Lima
+the kernel check reads grub's `/boot/grub/grub.cfg`. A guest that boots a kernel directly (a Lima
 template whose `images` entry sets `kernel:`, rather than the cloud image's grub) never gets the
 parameter, so apply and doctor report "reboot pending" for it forever. lever's own template boots
 the cloud image through grub; with a custom one, add `efi_pstore.pstore_disable=1` to that
@@ -1567,6 +1610,14 @@ warns that a reboot is pending until the guest runs the new kernel (`lever stop`
 The GA kernel stays installed; grub's *Advanced options* menu still offers it. lever counts the
 package installed only when dpkg says `install ok installed`.
 
+The GA kernel also keeps getting updates (`unattended-upgrades` installs them), and lever does
+not hold its metapackage: it is the kernel grub falls back to, so it should stay patched. Such an
+update points `/boot/vmlinuz` at the GA kernel, because that link names the kernel installed
+last, but grub still boots the newest kernel. The pending-reboot check therefore asks what grub
+boots next: the first entry of `/boot/grub/grub.cfg` while grub's default is entry 0 (Ubuntu's
+`GRUB_DEFAULT=0`), and otherwise (another `GRUB_DEFAULT`, or no readable `grub.cfg`) the newest
+`/boot/vmlinuz-*` by version, the kernel Ubuntu's grub lists first.
+
 The install normally happens on the VM's first apply, before lever's egress chain exists, so it
 reaches the Ubuntu mirrors under either posture. `apt-get update` and the install each wait up to
 2 minutes for the apt and dpkg locks, which cloud-init or `apt-daily` may hold on a fresh VM.
@@ -1583,7 +1634,7 @@ Later, when the package is still missing:
   stamp does not apply to it.
 
 Doctor's *guest kernel* row shows the guest's Ubuntu release and `uname -r`, and warns when
-`/boot/vmlinuz` names another kernel (a reboot is pending), when `guest_kernel` is `hwe` and the
+grub boots another kernel next (a reboot is pending), when `guest_kernel` is `hwe` and the
 release's package is missing or the release has none lever knows, and when `nested_virt` runs on a
 6.8 kernel.
 
@@ -1624,6 +1675,49 @@ container podman never started is not evidence. When the boot id or the start ti
 or the suspend does not take, `lever up` behaves as before and names `lever stop`, then
 `lever up`.
 
+### A stop claim the hub never releases
+
+A VM that goes down while the manager is starting can leave the hub holding a *stop claim* on
+the manager: the hub turns a start it cannot confirm into a stop, and releases the claim only once
+the broker's inventory shows the container gone or exited. After the reboot podman may list the
+manager's container as `Created`, which the hub counts as running, so the claim is never
+released and every resume is refused with
+`start_in_progress: A stop is in progress for this agent (since HH:MM) ... (status: 409)`.
+`lever doctor`'s *manager agent* row names a stopped, suspended or error record over a `Created`
+container.
+
+`lever up` (and `lever apply`, and `lever conversation restore`) recover from it on their own when
+the resume gets that answer:
+
+1. lever asks podman, as the jail user, for the manager's container (`<project>--<manager>`, the
+   name lever derives itself). It acts only when podman reports the container with no process in
+   it: created, configured, initialized, exited or stopped. A running or paused container is never
+   touched; the hub stops it itself, and lever waits.
+2. It looks again after 5 s (30 s for a created, configured or initialized container, since
+   created is also the state between a create and its start) and goes on only when podman reports
+   the same container id in the same state; otherwise it removes nothing and stops.
+3. It removes the container by that id, without `--force` (podman refuses to remove a running
+   container).
+4. It retries the resume for up to about three minutes: the hub releases the claim on its next
+   sweep after a broker heartbeat shows the container gone.
+
+The container is removed, and lever keeps no copy of it. The resume creates a new container, so
+the old one's writable layer is lost: whatever was written outside the agent home and the mounted
+tree (packages installed by hand, files in `/tmp`). That is what any scion resume of a container
+that is not running does too. The conversation is in the agent home, a bind mount, and is kept.
+
+When the claim is still held after the wait (the broker may be offline: the hub keeps claims while
+it is), lever stops with the manager and its conversation kept. By hand, in the guest as the jail
+user:
+
+```sh
+podman ps -a --filter name='^<project>--<manager>$'      # must not show it Up
+podman rm <project>--<manager>
+```
+
+then, within about two minutes, `lever up`. Workers are not covered: the broker resumes them, and
+lever does not remove containers on that path.
+
 ### If a nested VM wedges the guest
 
 1. With the crash recovery in place the guest should panic and reboot by itself within seconds of
@@ -1631,13 +1725,45 @@ or the suspend does not take, `lever up` behaves as before and names `lever stop
    `lever up`, which resumes the manager (above).
 2. If the guest stays wedged (no answer from `limactl shell <vm> true`, QEMU at full CPU), stop
    it on the host: `limactl stop --force <vm>`, or kill its QEMU process. Then `lever up`.
-3. Keep the evidence before it rotates. The guest console goes to the Lima instance directory on
-   the host (`~/.lima/<vm>/serial*.log`), which holds the oops even when the guest could not
-   write its disk. After the reboot, `journalctl -k -b -1` in the guest may have the previous
-   boot's kernel log, but journald rarely flushes the oops itself before a panic: trust the
-   serial log.
-4. Check `lever doctor`: the *guest crash recovery* and *guest kernel* rows should be green. Add
-   the host and guest kernels and the outcome to the table above.
+3. Keep the evidence. The guest console goes to the Lima instance directory on the host
+   (`~/.lima/<vm>/serial*.log`), which holds the oops even when the guest could not write its
+   disk, and Lima recreates those files on every VM start. lever saves them first (see
+   [saved guest console logs](#saved-guest-console-logs)). After the reboot,
+   `journalctl -k -b -1` in the guest may have the previous boot's kernel log, but journald
+   rarely flushes the oops itself before a panic: trust the serial log.
+4. Check `lever doctor`: the *guest crash recovery* and *guest kernel* rows should be green, and
+   *last guest boot* names the saved logs and their first panic line. Add the host and guest
+   kernels and the outcome to the table above.
+
+### Saved guest console logs
+
+Lima recreates the VM's console and host-agent logs (`serial.log`, `serialp.log`, `serialv.log`
+and `ha.stderr.log` in the instance directory, `limactl list <vm> --format '{{.Dir}}'`) each
+time the VM starts, and the guest keeps no crash record of its own (EFI pstore is off, above). So
+before `lever apply` or `lever up` starts a stopped Lima VM, lever copies those files to
+`.lever-state/guest-logs/<UTC time>/` (for example `20261015T030405Z`; the directory is 0700,
+each file 0600). Empty files are skipped, each copy keeps only the last 4 MiB of its file, and a
+link or any other non-regular file is not copied (the apply warns). A set whose serial log holds
+a kernel panic, oops or `BUG:` line is named `<UTC time>-panic` and kept apart from the others,
+so routine restarts do not push it out. lever keeps the 5 newest sets of each kind: at most ten
+sets, 160 MiB in the worst case.
+
+A panic the guest recovers from by itself (it reboots 10 s later) leaves the VM process running,
+so its trace stays in the live `serial.log` until the VM next restarts. `lever apply` and
+`lever up` against a running VM look for such a line in that log and, once per VM run, save a
+`-panic` set and warn; a later trace in the same run reaches the set saved before the next
+start. A failed save is a warning; it never stops the bring-up. lever saves nothing when
+`.lever-state` is inside the tree the agents mount (they could read, forge or delete the copies
+there; apply warns), and `lever provision`, which runs without a `lever.yaml`, saves nothing.
+
+Doctor's *last guest boot* row reads the guest's journal (`journalctl -b -1` through
+`sudo -n`): it warns when the previous boot did not end with a clean shutdown, with the time of
+its last journal entry, and when the newest saved set holds a panic line, which it prints. Treat
+that line as a lead, not proof: any process in the guest, an agent's container included, can get
+a line of that shape onto the console, so doctor prints only one line, cut to 200 characters with
+control characters replaced. Only messages from the guest's PID 1 decide whether the previous
+boot shut down cleanly. The row is a warning, never a failure, and not applicable on OrbStack.
+Delete old sets by hand when you no longer need them.
 
 ### Breaking a reboot loop
 

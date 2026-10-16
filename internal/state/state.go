@@ -70,6 +70,11 @@ func (s State) Sessions() string { return filepath.Join(s.Dir, "sessions.jsonl")
 // broker's heal of the manager).
 func (s State) ConversationLock() string { return filepath.Join(s.Dir, "conversation.lock") }
 
+// DailyReset is the broker's record of the manager's daily new conversation
+// (package dailyreset); DailyResetLock keeps two brokers' schedulers apart.
+func (s State) DailyReset() string     { return filepath.Join(s.Dir, "daily-reset.json") }
+func (s State) DailyResetLock() string { return filepath.Join(s.Dir, "daily-reset.lock") }
+
 // OperatorSock is the broker's UNIX socket for `lever msg send` (0600,
 // bound only when the state directory is outside the tree).
 func (s State) OperatorSock() string { return filepath.Join(s.Dir, "operator.sock") }
@@ -99,6 +104,10 @@ func (s State) GuestBoot() string { return filepath.Join(s.Dir, "guest-boot.json
 // closed, apply and up warn instead of running apt again. Deleting it
 // retries.
 func (s State) HWEFailStamp() string { return filepath.Join(s.Dir, "hwe-install-failed.json") }
+
+// GuestLogs holds the jail VM's console logs, saved before each VM start
+// and when a running VM's console shows a kernel panic (0700, each file 0600).
+func (s State) GuestLogs() string { return filepath.Join(s.Dir, "guest-logs") }
 
 // PushDir holds the remote proxy's Web Push key, subscriptions and last
 // send result (remote.push), each 0600.

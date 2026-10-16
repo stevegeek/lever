@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/chatfiles"
+	"github.com/stevegeek/lever/internal/dailyreset"
 	"github.com/stevegeek/lever/internal/egress"
 	"github.com/stevegeek/lever/internal/fsutil"
 	"github.com/stevegeek/lever/internal/hubauth"
@@ -300,6 +301,11 @@ func (a *App) Validate() error {
 	if err := validateClaude("manager", a.Manager.ClaudeSettings, a.Manager.AfterCompactNote); err != nil {
 		return err
 	}
+	if a.Manager.DailyReset != "" {
+		if _, err := dailyreset.Parse(a.Manager.DailyReset); err != nil {
+			return fmt.Errorf("config: manager.daily_reset: %w", err)
+		}
+	}
 	if err := a.validateResources("manager", a.Manager.Resources); err != nil {
 		return err
 	}
@@ -343,6 +349,15 @@ func (a *App) Validate() error {
 	}
 	if err := a.validateRemote(); err != nil {
 		return err
+	}
+	return a.validateSSH()
+}
+
+func (a *App) validateSSH() error {
+	for _, p := range a.SSH.DenyPorts {
+		if p < 1 || p > 65535 {
+			return fmt.Errorf("config: ssh.deny_ports: port %d is outside 1-65535", p)
+		}
 	}
 	return nil
 }

@@ -28,6 +28,7 @@ import (
 	"github.com/stevegeek/lever/internal/backend/types"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/cli"
+	"github.com/stevegeek/lever/internal/conduit"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/httpjson"
 	"github.com/stevegeek/lever/internal/hubapi"
@@ -151,18 +152,22 @@ type remoteController struct {
 	startTimeout  time.Duration
 	startInterval time.Duration
 	log           logFunc // apply's user-facing line sink (applyWiring.log)
+	// stateInTree reports whether the state directory, which holds the stamp
+	// and remote.pid, is inside the tree.
+	stateInTree func() bool
 }
 
 func newRemoteController(app *config.App, st state.State, configPath, selfExe string, log logFunc) *remoteController {
 	return &remoteController{
-		state:      st,
-		configPath: configPath,
-		selfExe:    selfExe,
-		port:       app.EffectiveRemotePort(),
-		probeHost:  remoteProbeHost(app),
-		version:    cli.VersionString(),
-		cfgHash:    func() string { return brokerctl.RemoteConfigHash(app, st) },
-		log:        log,
+		state:       st,
+		configPath:  configPath,
+		selfExe:     selfExe,
+		port:        app.EffectiveRemotePort(),
+		probeHost:   remoteProbeHost(app),
+		version:     cli.VersionString(),
+		cfgHash:     func() string { return brokerctl.RemoteConfigHash(app, st) },
+		log:         log,
+		stateInTree: func() bool { return brokerctl.StateInsideTree(app, st) },
 	}
 }
 
@@ -216,6 +221,43 @@ func (rc *remoteController) Start(ctx context.Context) error {
 		rc.log.printf("lever: could not record the remote proxy stamp (%v) — the next apply will restart it", err)
 	}
 	return nil
+}
+
+// errRemoteProxyNeedsApply: up does not converge a changed remote config or
+// binary itself, nor trusts a stamp an agent could write. Each wraps it.
+var (
+	errRemoteProxyNeedsApply  = errors.New("the proxy needs `lever apply`")
+	errRemoteProxyStale       = fmt.Errorf("%w: a proxy started with another remote config or lever binary is still running", errRemoteProxyNeedsApply)
+	errRemoteProxyNoStamp     = fmt.Errorf("%w: it is not running, and no proxy has run this lever binary with the current remote config", errRemoteProxyNeedsApply)
+	errRemoteProxyStateInTree = fmt.Errorf("%w: the state directory (%s) is inside the tree the agents mount, where an agent could write the proxy's stamp and pid file, so `lever up` does not start it", errRemoteProxyNeedsApply, state.DirName)
+)
+
+// EnsureForUp restarts the proxy on up's paths that skip apply.Run (a resume,
+// or a manager already running), as after a restart of the host or the VM.
+// A healthy current proxy is left alone. It starts one only when the stamp
+// records this binary and this remote config: a changed config is apply's to
+// converge (hub identity, broker, grants), and a stale proxy that is still
+// running stays fenced by the login grants rather than restarted here. With
+// the state directory inside the tree the stamp is the agent's to forge, so
+// up neither trusts nor acts on it.
+func (rc *remoteController) EnsureForUp(ctx context.Context) error {
+	if rc.stateInTree == nil || rc.stateInTree() {
+		return errRemoteProxyStateInTree
+	}
+	hash := rc.cfgHash()
+	_, found, alive := rc.state.RemoteStatus()
+	live := found && alive
+	if live && rc.state.RemoteStampMatches(rc.version, hash) && tcpDial(rc.addr()) == nil {
+		progress.From(ctx).Note("running")
+		return nil
+	}
+	if !rc.state.RemoteStampRecords(rc.version, hash) {
+		if live {
+			return errRemoteProxyStale
+		}
+		return errRemoteProxyNoStamp
+	}
+	return rc.Start(ctx)
 }
 
 // recordStamp waits until remote.pid names pid: the proxy binds its port
@@ -732,6 +774,8 @@ type applyWiring struct {
 	clock            hubauth.Clock
 	signer           *hubauth.Signer
 	resetHubIdentity bool
+	// ssh is this apply's `lever ssh` decision.
+	ssh sshGate
 	// brokerHost is what agents dial the host by:
 	// the host-alias IP when the backend has one. Under closed-internet egress DNS
 	// is dropped; the IP is allowlisted and is a SAN on the broker cert.
@@ -739,6 +783,8 @@ type applyWiring struct {
 	cmd        *cobra.Command // for Log; nil ⇒ stderr
 	// rep, when set, takes the Log lines so they print above its live line.
 	rep *progress.Reporter
+	// remote is Deps.StartRemoteProxy's controller, for up's EnsureForUp.
+	remote *remoteController
 }
 
 type applyOpts struct {
@@ -781,6 +827,10 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 	if err := w.initHubAuth(ctx); err != nil {
 		return nil, err
 	}
+	w.ssh = newSSHGate(ctx, app, jailConduit{jr}, jr)
+	if w.ssh.why != "" {
+		w.log("lever: warning: %s", w.ssh.why)
+	}
 	aliasV4 := b.HostAliasV4()
 	w.brokerHost = cmp.Or(aliasV4, b.HostToolAlias())
 	selfExe := cmp.Or(opts.SelfExe, os.Args[0])
@@ -800,6 +850,7 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 	}
 
 	rc := newRemoteController(app, st, configPath, selfExe, w.log)
+	w.remote = rc
 
 	w.deps = w.newDeps(bc, rc, sessionSecret)
 	return w, nil
@@ -853,6 +904,12 @@ func bringUpBackend(ctx context.Context, app *config.App, bf BackendFactory, st 
 	cfg.Warn = warn
 	if st.Dir != "" {
 		cfg.HWEFailStamp = st.HWEFailStamp()
+		// An agent could read, forge or delete them there.
+		if !brokerctl.StateInsideTree(app, st) {
+			cfg.GuestLogDir = st.GuestLogs()
+		} else {
+			warn("jail: warning: the state directory (%s) is inside the tree the agents mount, so lever saves no copy of the VM's console logs", state.DirName)
+		}
 	}
 	// The host's scion build runs while the VM boots; the scion step takes it once
 	// the guest confirms the architecture.
@@ -923,9 +980,13 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		// unlink/init race; see the register-project case in internal/apply/run.go).
 		RemoveJailFile: w.removeJailFile,
 
-		EnsureHubIdentity:     w.ensureHubIdentity,
-		EnsureHubAuth:         w.ensureHubAuth,
-		HubAuthEnv:            apply.HubAuthEnv(w.instanceID, w.hubKey.Fingerprint()),
+		EnsureHubIdentity: w.ensureHubIdentity,
+		EnsureHubAuth:     w.ensureHubAuth,
+		HubAuthEnv:        apply.HubEnv(w.instanceID, w.hubKey.Fingerprint(), w.app, w.ssh.controls),
+		HubConduitEnv: func(ctx context.Context) (map[string]string, error) {
+			live, err := conduit.ReadLiveHub(ctx, w.jr)
+			return live.Env, err
+		},
 		ProjectLinked:         w.projectLinked,
 		EnsureProjectProvider: w.ensureProjectProvider,
 
@@ -994,7 +1055,10 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		ContainerStartedBeforeBoot: func(ctx context.Context, ref string) (bool, error) {
 			return jail.ContainerStartedBeforeBoot(ctx, b.JailRunner(), ref)
 		},
-		AgentRevoked: agentRevoked(w.app, st),
+		// StaleContainer lets a manager resume clear a hub stop claim that only
+		// removing the manager's stopped container releases.
+		StaleContainer: jail.ContainerJanitor{R: b.JailRunner()},
+		AgentRevoked:   agentRevoked(w.app, st),
 		// GuestBoot lets start-manager and up recover a manager record a hard VM kill
 		// left "running".
 		GuestBoot: jailGuestBoot{jr: b.JailRunner(), st: st},
@@ -1116,14 +1180,20 @@ func (w *applyWiring) ensureHubIdentity(ctx context.Context) error {
 		keyFP:     w.hubKey.Fingerprint(),
 		guestNow:  w.clock.Now,
 		reset:     w.resetHubIdentity,
+		ssh:       w.ssh,
 		restartHub: func(ctx context.Context) error {
 			if err := w.sc.ServerStop(ctx); err != nil {
 				return err
 			}
+			// Again here: agents can rewrite settings.yaml since the
+			// scion-server step converged it, and the hub reads it at start.
+			if _, err := w.ensureHubAuth(ctx); err != nil {
+				return fmt.Errorf("the hub is stopped: it was stopped for a restart, and converging its settings before the start failed (%w); fix the cause and run `lever apply`, which starts it again", err)
+			}
 			opts := apply.HubServerOpts(w.app, w.deps.HubSessionSecret, w.deps.HubAuthEnv)
 			opts.Progress = w.deps.Log
 			if err := w.sc.ServerStart(ctx, opts); err != nil {
-				return err
+				return fmt.Errorf("the hub is stopped: it was stopped for a restart, and starting it again failed (%w); fix the cause and run `lever apply`, which starts it again", err)
 			}
 			online, err := w.sc.RuntimeBrokerReady(ctx, "global")
 			if err == nil && !online {

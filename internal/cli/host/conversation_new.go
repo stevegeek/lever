@@ -25,6 +25,8 @@ type newConvRequest struct {
 	Reason string
 	// Force interrupts a turn the manager is in the middle of.
 	Force bool
+	// RunningOnly leaves a manager that is not running alone (exit 7).
+	RunningOnly bool
 }
 
 // sessionBegin runs once the old container is gone and returns the commit
@@ -32,8 +34,8 @@ type newConvRequest struct {
 type sessionBegin func() (commit func() error, err error)
 
 // beginFreshSession records a new conversation's session as `lever up
-// --fresh` does: at the operator's word, on the skill on disk once the old
-// container is gone. A session it cannot record on a skill gets a record that
+// --fresh` does: at the operator's word (the daily reset's time in lever.yaml
+// is that word too), on the skill on disk once the old container is gone. A session it cannot record on a skill gets a record that
 // matches none, so the old session's record never vouches for it.
 func beginFreshSession(app *config.App, st state.State) sessionBegin {
 	fence := func() error {
@@ -69,10 +71,15 @@ const (
 	// `restore`, `up`, `apply`, `stop`, `reload`) is running; nothing was
 	// changed.
 	exitConversationLocked = 6
+	// exitConversationNotRunning: --by daily found the manager not running;
+	// nothing was changed.
+	exitConversationNotRunning = 7
 )
 
 // errConvBusy: the manager reports a turn in progress.
 var errConvBusy = errors.New("the manager is in the middle of a turn; nothing was changed. Try again when it is idle, or pass --force to interrupt the turn")
+
+var errConvNotRunning = errors.New("the manager is not running; nothing was changed")
 
 // managerBusy reads the hub's activity for a turn in progress. The activity
 // is the agent's own report: an agent can hold off a reset this way, never
@@ -134,7 +141,13 @@ func (o convOps) newConversation(ctx context.Context, req newConvRequest) (m con
 		}
 		suspended = true
 	case scion.PhaseSuspended:
+		if req.RunningOnly {
+			return m, false, cli.WithExitCode(errConvNotRunning, exitConversationNotRunning)
+		}
 	default:
+		if req.RunningOnly {
+			return m, false, cli.WithExitCode(errConvNotRunning, exitConversationNotRunning)
+		}
 		return m, false, fmt.Errorf("manager %q is in phase %s; a new conversation needs it running or suspended (`lever up` first)", o.app.Name, scion.BoundedQuote(rec.Phase))
 	}
 	defer func() {
@@ -308,6 +321,8 @@ const conversationNewDeadline = 20 * time.Minute
 var newConvBy = map[string]newConvRequest{
 	"":     {Reason: "new conversation"},
 	"chat": {Reason: "new conversation (chat)"},
+	// The broker's daily reset (manager.daily_reset).
+	"daily": {Reason: "new conversation (daily)", RunningOnly: true},
 }
 
 func newConversationNewCmd(bf BackendFactory) *cobra.Command {
@@ -326,6 +341,9 @@ func newConversationNewCmd(bf BackendFactory) *cobra.Command {
 			if !ok {
 				return fmt.Errorf("--by: unknown caller %q", by)
 			}
+			if by == "daily" && force {
+				return errors.New("--by daily never interrupts a turn; --force is refused")
+			}
 			req.Force = force
 			path, app, err := loadAppPath(args)
 			if err != nil {
@@ -333,15 +351,25 @@ func newConversationNewCmd(bf BackendFactory) *cobra.Command {
 			}
 			st := stateFor(path)
 			from := ""
-			if by == "chat" {
+			switch by {
+			case "chat":
 				from = " from the chat page"
+			case "daily":
+				from = " for the daily reset"
 			}
 			unlock, err := lockConversation(app, st, "lever conversation new", from)
 			if err != nil {
 				return err
 			}
 			defer unlock()
-			run, pctx, err := startBringup(cmd, app, st, "conversation-new", progressMode)
+			// The daily reset keeps no bring-up record: a manager that reports
+			// busy at every retry would otherwise rotate the operator's own
+			// records out each day. Its output is in conversation-new.log.
+			recordIn := st
+			if by == "daily" {
+				recordIn = state.State{}
+			}
+			run, pctx, err := startBringup(cmd, app, recordIn, "conversation-new", progressMode)
 			if err != nil {
 				return err
 			}
@@ -374,7 +402,7 @@ func newConversationNewCmd(bf BackendFactory) *cobra.Command {
 		},
 	}
 	c.Flags().BoolVar(&force, "force", false, "interrupt a turn the manager is in the middle of")
-	c.Flags().StringVar(&by, "by", "", "the caller that asks (chat); for lever's own use")
+	c.Flags().StringVar(&by, "by", "", "the caller that asks (chat, daily); for lever's own use")
 	_ = c.Flags().MarkHidden("by")
 	c.Flags().StringVar(&progressMode, "progress", "", progressFlagUsage)
 	return c

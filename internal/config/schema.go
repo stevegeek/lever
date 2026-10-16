@@ -186,6 +186,9 @@ type Manager struct {
 	// resume included.
 	ClaudeSettings   ClaudeSettings `yaml:"claude_settings"`
 	AfterCompactNote string         `yaml:"after_compact_note"`
+	// DailyReset is "HH:MM", host local time: the broker starts the manager
+	// on a new conversation once a day then. Empty is off.
+	DailyReset string `yaml:"daily_reset"`
 	// Resources is create-time only.
 	Resources      Resources       `yaml:"resources"`
 	AllowPorts     []int           `yaml:"allow_ports"`
@@ -298,6 +301,17 @@ type Operator struct {
 	SigningKey         string        `yaml:"signing_key"`
 	DirectiveExpiry    time.Duration `yaml:"directive_expiry"`
 	DirectiveExpiryMax time.Duration `yaml:"directive_expiry_max"`
+}
+
+// SSH is the opt-in `lever ssh`: an SSH session into an agent over scion's
+// hub relay (conduit), for the host operator only. Off, lever keeps the
+// relay pinned off. On, it needs a scion with the hub's conduit controls,
+// and lever keeps the relay off until it can prove they are in force.
+type SSH struct {
+	Enabled bool `yaml:"enabled"`
+	// DenyPorts are agent-local ports no tunnel or SSH forward may reach,
+	// added to the ones lever always denies (its own listeners in the agent).
+	DenyPorts []int `yaml:"deny_ports"`
 }
 
 // Remote configures the opt-in remote-access proxy: a host-side reverse
@@ -455,6 +469,8 @@ type App struct {
 	GuestProfile string `yaml:"guest_profile"`
 	// TreeBackup snapshots the tree on the host (off by default).
 	TreeBackup TreeBackup `yaml:"tree_backup"`
+	// SSH opts the operator into `lever ssh` (off by default).
+	SSH SSH `yaml:"ssh"`
 
 	dir string // instance root (the config file's directory)
 }

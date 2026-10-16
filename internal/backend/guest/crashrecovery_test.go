@@ -292,6 +292,8 @@ type kernelEnv struct {
 	egressClosed   bool
 	machineID      string
 	opts           KernelOpts
+	// boot, when set, lays out /boot instead of def (bootLayout).
+	boot *bootLayout
 }
 
 const testMachineID = "0123456789abcdef0123456789abcdef"
@@ -350,7 +352,7 @@ exit `+aptExit)
 	stub("timeout", `shift; exec "$@"`)
 	stub("sleep", `:`)
 	stub("uname", "echo "+e.running)
-	p := kernelPaths{OSRelease: filepath.Join(root, "os-release"), Vmlinuz: filepath.Join(root, "boot/vmlinuz"), MachineID: filepath.Join(root, "machine-id")}
+	p := kernelPaths{OSRelease: filepath.Join(root, "os-release"), Boot: filepath.Join(root, "boot"), MachineID: filepath.Join(root, "machine-id")}
 	if err := os.WriteFile(p.OSRelease, []byte(`NAME="Ubuntu"`+"\nVERSION_ID=\""+e.osVersion+"\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -361,17 +363,11 @@ exit `+aptExit)
 	if err := os.WriteFile(p.MachineID, []byte(mid+"\n"), 0o444); err != nil {
 		t.Fatal(err)
 	}
-	if e.def != "" {
-		if err := os.MkdirAll(filepath.Dir(p.Vmlinuz), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		target := filepath.Join(root, "boot/vmlinuz-"+e.def)
-		if err := os.WriteFile(target, nil, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Symlink("vmlinuz-"+e.def, p.Vmlinuz); err != nil {
-			t.Fatal(err)
-		}
+	switch {
+	case e.boot != nil:
+		e.boot.write(t, p.Boot)
+	case e.def != "":
+		(&bootLayout{kernels: []string{e.def}, link: e.def}).write(t, p.Boot)
 	}
 	cmd := exec.Command("bash", "-c", guestKernelScript(e.kernel, e.opts, p))
 	cmd.Env = []string{"PATH=" + bin + ":" + os.Getenv("PATH")}
@@ -390,7 +386,7 @@ func TestGuestKernelHWEInstallsAndReportsReboot(t *testing.T) {
 	if !strings.Contains(calls, "apt-get install -y -qq -o DPkg::Lock::Timeout=120 linux-generic-hwe-24.04") || !strings.Contains(calls, "apt-get -o DPkg::Lock::Timeout=120 update -qq") {
 		t.Errorf("want the HWE install; calls:\n%s", calls)
 	}
-	if len(rep.Reboot) != 1 || !strings.Contains(rep.Reboot[0], "runs kernel 6.8.0-146-generic; the default kernel is now 6.17.0-5-generic") {
+	if len(rep.Reboot) != 1 || !strings.Contains(rep.Reboot[0], "runs kernel 6.8.0-146-generic; the next boot starts 6.17.0-5-generic") {
 		t.Errorf("reboot = %q", rep.Reboot)
 	}
 }
@@ -469,8 +465,7 @@ func TestGuestKernelGAInstallsNothing(t *testing.T) {
 }
 
 func TestGuestKernelNoVmlinuzNoReboot(t *testing.T) {
-	// readlink -f prints a missing /boot/vmlinuz as it is; that is no
-	// default kernel, not a different one.
+	// No kernel in /boot is no default kernel, not a different one.
 	rep, _ := runKernelScript(t, GuestKernelGA, "24.04", "6.8.0-146-generic", "", false, false)
 	if len(rep.Reboot) != 0 {
 		t.Errorf("reboot = %q", rep.Reboot)

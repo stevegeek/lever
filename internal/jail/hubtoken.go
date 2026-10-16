@@ -73,3 +73,22 @@ func StageHubToken(ctx context.Context, r proc.Runner, tok string) error {
 func WithHubTokenFromFile(inner []string) []string {
 	return append([]string{"sh", "-c", hubTokenReadScript, "_"}, inner...)
 }
+
+// WithHubTokenFromStdin wraps an in-jail streaming command so the guest shell
+// reads the token from the first line of its stdin, exports it, then execs
+// inner with the rest of the stream: the caller writes the token line ahead
+// of the payload.
+func WithHubTokenFromStdin(inner []string) []string {
+	return append([]string{"sh", "-c", hubTokenStdinScript, "_"}, inner...)
+}
+
+// HubTokenLine is the stdin prefix WithHubTokenFromStdin reads.
+func HubTokenLine(tok string) (string, error) {
+	if tok == "" {
+		return "", fmt.Errorf("hub token line: empty token")
+	}
+	if err := checkHubToken(tok); err != nil {
+		return "", err
+	}
+	return tok + "\n", nil
+}

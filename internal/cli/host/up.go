@@ -12,6 +12,7 @@ import (
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/convbackup"
+	"github.com/stevegeek/lever/internal/progress"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/termsafe"
 )
@@ -108,13 +109,8 @@ func resumeForUp(ctx context.Context, deps apply.Deps, app *config.App, project 
 		return nil, err
 	}
 	if err := resume(ctx); err != nil {
-		if scion.IsRefusedByHub(err) {
-			err = apply.HubRefusedResume("resume", err)
-		} else {
-			err = apply.ResumeFailed("resume", err)
-		}
 		// The container may have started all the same.
-		return nil, guard.AfterFailure(ctx, err)
+		return nil, guard.AfterFailure(ctx, apply.ResumeError("resume", err))
 	}
 	if err := guard.Resumed(ctx); err != nil {
 		return nil, err
@@ -260,7 +256,9 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 					// The resume and its gate can run over a minute: print progress about every
 					// 15 s, or hand the stages to the progress list.
 					prog = apply.StartProgress(ctx, deps, "up", app.Name, "asking scion to resume the container")
-					return sc.Resume(ctx, app.Name, project)
+					return apply.ResumeClearingStopClaim(ctx, deps, app.Name, project, "up", func() error {
+						return sc.Resume(ctx, app.Name, project)
+					})
 				})
 				defer prog.Stop()
 				if err != nil {
@@ -288,9 +286,16 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				return err
 			}
 			apply.RecordGuestBoot(ctx, deps)
+			var remoteWarn string
+			if decision != upApply {
+				remoteWarn = ensureRemoteForUp(ctx, rep, app, w.remote.EnsureForUp)
+			}
 			stop()
 			// The list ends before the attach: from here the terminal is the manager's.
 			run.finish(nil)
+			if remoteWarn != "" {
+				logLine(cmd.ErrOrStderr(), "%s", remoteWarn)
+			}
 			// An attach can last all day; a new conversation must not wait on it.
 			release()
 			if noAttach {
@@ -402,4 +407,27 @@ func managerPhase(ctx context.Context, sc *scion.Client, project, name string) (
 		return a.Phase, nil
 	}
 	return "", nil
+}
+
+// ensureRemoteForUp: a proxy that is not serving does not fail the up, since
+// the manager is up; the returned warning, printed once the list has ended,
+// says how to bring the proxy back.
+func ensureRemoteForUp(ctx context.Context, rep *progress.Reporter, app *config.App, ensure func(context.Context) error) string {
+	if !app.RemoteEnabled() {
+		return ""
+	}
+	rep.Group("remote", 0)
+	step := rep.Start("remote proxy")
+	err := ensure(ctx)
+	switch {
+	case err == nil:
+		step.Done(nil)
+		return ""
+	case errors.Is(err, errRemoteProxyNeedsApply):
+		step.Skip("needs `lever apply`")
+		return "lever: remote access: " + err.Error() + ". Run `lever apply` to start the proxy with the current config."
+	default:
+		step.Done(err)
+		return "lever: the remote-access proxy did not start: " + err.Error() + ". Run `lever apply` once the cause is fixed; `lever doctor` checks the proxy."
+	}
 }

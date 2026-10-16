@@ -16,7 +16,10 @@ const KVMUdevRulePath = "/etc/udev/rules.d/65-lever-kvm.rules"
 // container in the guest, hub and workers too. Every apply removes it.
 const legacyKVMDropInPath = "$HOME/.config/containers/containers.conf.d/20-lever-kvm.conf"
 
-const kvmUdevRule = `KERNEL=="kvm", MODE="0666"`
+// static_node makes udevd apply the mode to the static /dev/kvm node each
+// time it starts (at boot, and when a package upgrade restarts it); without
+// it the stock rule's 0660 wins then.
+const kvmUdevRule = `KERNEL=="kvm", MODE="0666", OPTIONS+="static_node=kvm"`
 
 const kvmOnRootScript = `set -e
 if ! test -c /dev/kvm; then

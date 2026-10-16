@@ -210,7 +210,7 @@ func TestEnsureUpWarmPathNestedVirt(t *testing.T) {
 	on := func(m map[string]backendtest.ProbeItem) {
 		m["kvmchar"] = backendtest.ProbeItem{}
 		m["kvmmode"] = backendtest.ProbeItem{Out: "666\n"}
-		m["udev"] = backendtest.ProbeItem{Out: `KERNEL=="kvm", MODE="0666"` + "\n"}
+		m["udev"] = backendtest.ProbeItem{Out: `KERNEL=="kvm", MODE="0666", OPTIONS+="static_node=kvm"` + "\n"}
 		m["udevexists"] = backendtest.ProbeItem{}
 	}
 	cases := []struct {

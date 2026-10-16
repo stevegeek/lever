@@ -19,11 +19,14 @@ import (
 // the pin looked for; a pinned name missing from it was never checked on this
 // hub.
 type HubExperimentsRecord struct {
-	NotApplicable bool      `json:"not_applicable,omitempty"`
-	Off           []string  `json:"off,omitempty"`
-	Asked         []string  `json:"asked,omitempty"`
-	Revision      int64     `json:"revision"`
-	PinnedAt      time.Time `json:"pinned_at"`
+	NotApplicable bool     `json:"not_applicable,omitempty"`
+	Off           []string `json:"off,omitempty"`
+	// On lists the pinned experiments lever turned on (only hub.conduit, for
+	// `lever ssh`).
+	On       []string  `json:"on,omitempty"`
+	Asked    []string  `json:"asked,omitempty"`
+	Revision int64     `json:"revision"`
+	PinnedAt time.Time `json:"pinned_at"`
 }
 
 // HubExperiments sits beside remote-role.json; like it, it describes the jail

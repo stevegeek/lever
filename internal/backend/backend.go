@@ -87,6 +87,10 @@ type Config struct {
 	// apt; an apply under the open posture retries and removes it on success.
 	// "" keeps no stamp. Lima only.
 	HWEFailStamp string
+	// GuestLogDir is the host directory the Lima console and host-agent logs
+	// are saved to before a VM start recreates them, and when a running VM's
+	// console holds a kernel panic. "" saves none. Lima only.
+	GuestLogDir string
 	// Warn prints a user-facing line for advice that must not fail the
 	// bring-up. Nil discards.
 	Warn func(format string, args ...any)

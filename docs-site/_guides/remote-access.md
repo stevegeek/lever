@@ -209,6 +209,9 @@ This invites each login's hub user and binds the [remote web role](#the-remote-w
 project-create ceiling before anyone signs in, mints the **remote PAT** (see
 [below](#the-remote-pat)), and starts the proxy as a daemonized child, the same lifecycle pattern
 as the broker: `apply`/`up` start it, `lever stop` stops it alongside the rest of the instance.
+An `up` that only resumes the manager (after `lever stop`, or a host or VM restart) starts the
+proxy again when the lever binary and the `remote:` config are the ones it last ran with; after a
+change it warns and leaves the start to `lever apply`, which converges the hub side first.
 
 All of it runs against the live hub, as lever's own hub identities, while agents run: no container
 has to stop. The first apply with remote access on (including flipping it on later) restarts the
@@ -323,8 +326,9 @@ decide:
   into agents through the hub), artifacts (`/api/v1/artifacts*`, with its unauthenticated
   `shared/` and `view/` links) and chat thread groups (`/api/v1/thread-groups*`), and every write
   to `/api/v1/admin/experiments`, which switches them on. These experiments are off, and lever
-  keeps them off (see [worker isolation](/security-model-worker-isolation/)); the proxy refuses
-  them in any case. Reading `/api/v1/admin/experiments` stays admin-only at the hub. The
+  keeps them off (see [worker isolation](/security-model-worker-isolation/)), conduit apart when
+  the host operator opts into [`lever ssh`](/ssh/); the proxy refuses them in any case, so no web
+  login opens a tunnel or an SSH session. Reading `/api/v1/admin/experiments` stays admin-only at the hub. The
   federation token route (`POST /api/v1/auth/federation-token`) is refused with every other
   credential route under `/api/v1/auth/`.
 - An agent's `ports/tunnel` (the agent side's own socket) and `delegations` (they hand the

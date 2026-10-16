@@ -202,6 +202,14 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 			return checkGuestKernel(app, p, err)
 		},
 		func() checkResult {
+			var p guestBootProbe
+			var err error
+			if app.Backend == config.BackendLima {
+				p, err = readGuestBootProbe(ctx, jr)
+			}
+			return checkLastGuestBoot(app.Backend, state.GuestLogs(), p, err)
+		},
+		func() checkResult {
 			return checkScionTelemetry(ctx, app.EffectiveScionTelemetry(), readJailScionSettings(jr), b.MountDest(), app.Name, listAgents, readContainerEnv)
 		},
 		func() checkResult { return checkAgentCert(state, time.Now()) },
@@ -217,6 +225,7 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult { return checkCredentialFile(app.Manager.CredentialFile) },
 		func() checkResult { return checkMcpJsonInTree(app.Tree) },
 		func() checkResult { return checkTreeBackup(app, state, time.Now()) },
+		func() checkResult { return checkDailyReset(app, state, time.Now()) },
 		func() checkResult { return checkGoToolchain(app.Scion, scionPrebuilt(app), probes) },
 		func() checkResult { return checkNodeToolchain(app, webUIPrebuilt(app), probes) },
 		func() checkResult { return checkOperatorSkills(app, state) },
@@ -241,7 +250,13 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult { return checkHubAuthentication(ctx, hubAuth, jailScion.RunningHub) },
 		func() checkResult { return checkHubIdentities(ctx, hubAuth) },
 		func() checkResult { return checkRemoteWebRole(ctx, app, hubAuth) },
-		func() checkResult { return checkHubExperiments(ctx, state, jailScion.KnowsUATScope, hc) },
+		func() checkResult {
+			return checkHubExperiments(ctx, state, app.SSHEnabled(), jailScion.KnowsUATScope, hc)
+		},
+		func() checkResult {
+			return checkSSH(ctx, app, state, sshDoctor{sc: jailConduit{jr}, hc: hc, list: listAgents, env: readContainerEnv,
+				project: b.MountDest(), agents: append([]string{app.Name}, workerNames...)})
+		},
 		func() checkResult { return checkHubRuntime(ctx, hc) },
 		func() checkResult { return checkProjectSharedDirs(ctx, project, listSharedDirs) },
 		func() checkResult { return checkAgentRoles(ctx, project, rolesSupported, listAgentRoles) },

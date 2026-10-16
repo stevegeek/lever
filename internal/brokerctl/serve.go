@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/stevegeek/lever/internal/apply"
@@ -91,8 +92,9 @@ func controllerPAT(st state.State) func() string {
 
 // Serve runs the host-side broker for app until ctx is cancelled. version is
 // reported by /epoch alongside ConfigHash(app) so apply can detect a stale
-// broker. env is what apply passed through the environment.
-func Serve(ctx context.Context, app *config.App, st state.State, version string, env ServeEnv) error {
+// broker. env is what apply passed through the environment. jobs are host
+// work the broker runs while it serves; each ends when its context does.
+func Serve(ctx context.Context, app *config.App, st state.State, version string, env ServeEnv, jobs ...func(context.Context)) error {
 	kp, caInst, err := EnsureKeys(st)
 	if err != nil {
 		return err
@@ -186,6 +188,18 @@ func Serve(ctx context.Context, app *config.App, st state.State, version string,
 		return err
 	}
 	defer sup.Stop()
+
+	// Started only once this broker holds the instance's ports: a second
+	// broker for the same instance fails to bind and runs none.
+	jobCtx, cancelJobs := context.WithCancel(ctx)
+	var jobsDone sync.WaitGroup
+	defer func() {
+		cancelJobs()
+		jobsDone.Wait()
+	}()
+	for _, job := range jobs {
+		jobsDone.Go(func() { job(jobCtx) })
+	}
 
 	served = true
 	return b.ServeListeners(ctx, jailLn, adminLn, dirLn, opLn, certSrc)

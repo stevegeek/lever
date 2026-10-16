@@ -225,10 +225,10 @@ func HWEPackageShell() string {
 
 // kernelPaths is a test seam.
 type kernelPaths struct {
-	OSRelease, Vmlinuz, MachineID string
+	OSRelease, Boot, MachineID string
 }
 
-var realKernelPaths = kernelPaths{OSRelease: "/etc/os-release", Vmlinuz: "/boot/vmlinuz", MachineID: "/etc/machine-id"}
+var realKernelPaths = kernelPaths{OSRelease: "/etc/os-release", Boot: "/boot", MachineID: "/etc/machine-id"}
 
 // HWE install outcomes, read into KernelReport.HWE.
 const (
@@ -337,20 +337,20 @@ fi
 			q("warn: guest_kernel hwe: installing %s failed (the guest may not reach the Ubuntu mirrors); run lever apply again with the open posture, or install it by hand in the guest\n"),
 			strings.Join(HWEReleases, " or "))
 	}
-	fmt.Fprintf(&b, `running=$(uname -r)
-default=$(readlink -f %s 2>/dev/null || true)
-case "$default" in */vmlinuz-*) default=${default##*/vmlinuz-} ;; *) default= ;; esac
+	b.WriteString(BootKernelShell(p.Boot))
+	b.WriteString(`running=$(uname -r)
+default=$(` + BootKernelFunc + `)
 if [ -n "$default" ] && [ "$default" != "$running" ]; then
-  echo "reboot: the guest runs kernel $running; the default kernel is now $default"
+  echo "reboot: the guest runs kernel $running; the next boot starts $default"
 fi
-`, q(p.Vmlinuz))
+`)
 	return b.String()
 }
 
 // EnsureGuestKernel converges the guest kernel flavour: hwe installs the
 // release's HWE package, ga changes nothing (it does not remove an installed
-// HWE kernel). It reports a reboot when the default kernel is not the running
-// one. "" only reports.
+// HWE kernel). It reports a reboot when the kernel GRUB boots next
+// (BootKernelShell) is not the running one. "" only reports.
 func (g Guest) EnsureGuestKernel(ctx context.Context, kernel string, opts KernelOpts) (KernelReport, error) {
 	switch kernel {
 	case "", GuestKernelGA, GuestKernelHWE:

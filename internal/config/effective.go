@@ -85,6 +85,9 @@ func (a *App) EffectiveAdminPort() int {
 	return cmp.Or(a.Broker.AdminPort, DefaultBrokerAdminPort)
 }
 
+// SSHEnabled reports whether the operator opted into `lever ssh`.
+func (a *App) SSHEnabled() bool { return a.SSH.Enabled }
+
 // RemoteEnabled reports whether the remote-access proxy is configured on.
 func (a *App) RemoteEnabled() bool { return a.Remote.Enabled }
 

@@ -7,6 +7,127 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.42.0] - 2026-10-16
+
+### Added
+
+- **lever keeps the Lima VM's console logs across VM restarts.** Lima recreates `serial*.log` and
+  `ha.stderr.log` on every VM start, so a `lever stop`, `lever up` after a guest kernel panic lost
+  the trace. Before `lever apply` or `lever up` starts a stopped Lima VM, lever now copies them to
+  `.lever-state/guest-logs/<UTC time>/` (0700, files 0600, the last 4 MiB of each, links never
+  followed). Sets holding a panic line are kept apart as `-panic` sets, the 5 newest of each kind.
+  An apply against a running VM whose console shows a panic saves it once per VM run and warns.
+  Nothing is saved when the state directory is inside the agents' tree. Doctor's new
+  *last guest boot* row warns when the previous guest boot ended without a clean shutdown, and
+  prints the first panic line of the newest saved set, sanitized and bounded. (lever#224)
+- **A new conversation for the manager once a day (lever#222).** `manager.daily_reset: "HH:MM"`
+  (24-hour, host local time) has the broker run `lever conversation new` at that time each day,
+  with its backup and boot prompt, while the manager is running. It never interrupts a turn: a
+  manager that is busy, not running, or under another change (the conversation lock) is tried
+  again every 10 minutes for 2 hours, then the day is skipped; a failure is not retried. The day
+  is claimed in `.lever-state/daily-reset.json` before the run, so it runs at most once a day
+  across broker restarts and clock changes; a time the clocks skip runs at the first minute after
+  the jump, a time that happens twice runs at the first, and a host asleep at the time runs it on
+  waking if still within the 2 hours. The new session counts for the contact gate as one started
+  from the terminal. `lever doctor` gains a *daily reset* row (next due, last result; a warning
+  after a failure or a skipped day); the daily runs leave no bring-up record. The manager can hold
+  a day's reset off (busy, stopped) or make it fail, never start one or change the schedule. Off
+  with the state directory inside the tree. A new hidden exit code `7` from
+  `lever conversation new --by daily` means the manager was not running.
+- **Opt-in `lever ssh` and VS Code Remote-SSH into an agent, over scion's hub relay
+  (lever#208).** `ssh.enabled: true` in `lever.yaml` asks for it; it needs a scion whose hub has
+  the conduit controls (`server.hub.conduit.disable_ssh`, `deny_ports` and
+  `disable_ssh_socket_forwarding`) and agent images built from one. lever tells by behaviour: the
+  jail's scion must accept those settings (`scion config validate` on a scratch file) and each
+  agent image's `sciontool` must read `SCION_CONDUIT_POLICY`. The scion lever pins today has
+  neither, so on it nothing changes: apply keeps conduit pinned off and warns, `lever ssh`
+  refuses, and doctor's new *lever ssh* row says why; a scion pin bump turns it on. On a scion
+  with the controls the hub always starts with lever's conduit policy in its environment (not in
+  `settings.yaml`, which agents can rewrite): port 8462, each agent's lever gateway, and
+  `ssh.deny_ports` denied to every tunnel, port proxy and SSH forward, SSH socket forwarding off,
+  and SSH itself off unless `ssh.enabled`. With ssh on, apply turns `hub.conduit` on as
+  lever-admin only after reading the policy back from the running hub, restarts the hub, reads it
+  back again and checks conduit is served, and turns it off again (with a restart) when any of that
+  fails; the other experiments stay off. `lever ssh NAME` runs your `ssh` with none of your ssh
+  config and agent, X11 and port forwarding off; its ProxyCommand, `lever ssh --proxy`, runs `scion
+  tunnel --stdio --ssh` through the jail runner (no port forward), with a 12-hour token it mints as
+  lever's controller per connection (`agent:attach`, `agent:port_access` and two reads, the
+  instance project only) and revokes at the end, and pins the agent's host key in
+  `.lever-state/ssh/known_hosts`. `lever ssh-config` prints Host blocks for VS Code and the
+  settings it needs (`remote.SSH.localServerDownload: always`, `remote.autoForwardPorts: false`).
+  The remote proxy still refuses conduit to every web login. Every apply, ssh on or off, also drops
+  a `server.hub.conduit` block from the jail's `settings.yaml` (lever never writes one, and agents
+  can write that file), in any case, as some of scion's readers match keys in any case, and
+  restarts the hub when it did. A `server` or `hub` key on that path spelled in another case or
+  repeated, or a key there that is an alias, a complex key, `!!binary` or a merge key, fails the apply. See the
+  new SSH and VS Code guide.
+
+### Changed
+
+- **The lever-dev example runs on the slim image with resource limits.** Its `manager.image` is
+  `lever.local/lever-dev-claude-slim:amd64` and it sets `manager.resources` to 18 GiB and 6 CPUs,
+  so nested VMs and Go builds in the manager hit the container's limit before the guest's.
+
+### Fixed
+
+- **`nested_virt` keeps `/dev/kvm` usable after udev restarts (lever#230).** lever's udev rule set
+  the mode only when the device was added, so each time `systemd-udevd` started (every boot, and
+  when an unattended upgrade restarted it) the stock rule's 0660 applied to the static node and the
+  manager lost KVM: nested Lima VMs failed with "Could not access KVM kernel module: Permission
+  denied". The rule now carries `OPTIONS+="static_node=kvm"`; the next `lever apply` rewrites it.
+- **`lever up` starts the remote-access proxy when it only resumes the manager.** After a VM
+  or host restart, `up` resumed the manager without `apply`, and so never started the proxy: the
+  chat page stayed down until the next `lever apply`. An `up` that resumes the manager or finds it
+  running now starts the proxy when it is not serving and leaves a serving one alone. It starts
+  it only when the stamp the proxy left records this lever binary and the current `remote:` config,
+  so a changed config or an upgrade still waits for `lever apply`, and so does turning remote
+  access back on (an apply with it off removes the stamp); a running proxy with an older config is
+  not restarted. With the state directory inside the tree, where an agent could write the stamp,
+  `up` starts no proxy and warns to run `lever apply`. When the proxy cannot start, `up` succeeds
+  and warns at the end with the fix. (lever#225)
+- **No false "reboot pending" when a GA kernel update lands under `guest_kernel: hwe`.** The
+  check compared the running kernel with `/boot/vmlinuz`, which names the kernel installed last,
+  so an `unattended-upgrades` update of the GA 6.8 kernel on a guest running the HWE 7.0 kernel
+  reported a reboot that `lever stop` and `lever up` could never clear: grub boots the newest
+  kernel. Apply, up and doctor now compare with what grub boots next: the first entry of
+  `/boot/grub/grub.cfg` while grub's default is entry 0, otherwise the newest `/boot/vmlinuz-*` by
+  version. The GA metapackage is deliberately not held, so the fallback kernel stays patched.
+  (lever#226)
+- **`lever up` gets past a hub stop claim that a VM power-off left behind (lever#223).** When the
+  VM went down while the manager was starting, the hub turned the start it could not confirm into
+  a stop claim, which it releases only once the broker reports the container gone or exited. After
+  the reboot podman listed the manager's container as `Created`, which the hub counts as running, so
+  every `lever up` failed with `start_in_progress: A stop is in progress for this agent` and said
+  that running it again would clear a transient failure, which it never did. Now, when the manager's
+  resume (in `lever up`, `lever apply` and `lever conversation restore`) gets that refusal, lever
+  asks podman for the manager's container, by the name lever derives from the project and the
+  manager, and, only when podman reports it with no process in it (created, exited or stopped)
+  and a second look 5 s later (30 s for created, which is also the state between a create and its
+  start) shows the same container id in the same state, removes it by that id without `--force`,
+  and retries the resume for up to about three minutes while the hub releases the claim. A running
+  or paused container, or one that changed between the looks, is never removed. The container is
+  removed without a copy: its writable layer (files written outside the agent home and the tree,
+  such as packages installed by hand) is lost, as with any scion resume of a container that is not
+  running. The conversation lives in the agent home, a bind mount, and is not touched. When the
+  claim stays held, the error says why and gives the fix by hand, not "a transient failure
+  clears". `lever doctor`'s *manager agent* row names a stopped, suspended or error record over a
+  `Created` container as this state, with the fix. Workers are not covered: the broker resumes them, and lever does not remove containers on that path.
+
+### Docs
+
+- **The sizing guide recommends `manager.resources` for a manager that runs heavy work.** A
+  manager that runs `nested_virt` or large builds should have a memory (and CPU) limit, so an
+  out-of-memory kill stays inside its container rather than pressing on the whole guest, its hub
+  and the workers. The new section gives an example for a guest sized like `examples/lever-dev`
+  (18 GiB and 6 CPUs on its 24 GiB, 8-CPU guest) and how to size the limit; the config reference links to it. (lever#227)
+
+### Upgrade
+
+- **Jail ABI 5, unchanged.** Only host code changed: no agent image rebuild. Run `lever apply`
+  after upgrading; it restarts the broker, which `manager.daily_reset` needs. `ssh.enabled` has no
+  effect until lever pins a scion with the conduit controls.
+
+
 ## [0.41.1] - 2026-10-15
 
 ### Fixed

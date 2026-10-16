@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -201,6 +202,11 @@ type Deps struct {
 	// scion.ServerOpts.Env). It also carries the assertion key's fingerprint,
 	// so a hub started before a key change is detected and restarted.
 	HubAuthEnv map[string]string
+	// HubConduitEnv reads the running hub's conduit environment, which
+	// scion's RunningHub does not report, so HubRestartReason compares the
+	// conduit policy HubAuthEnv carries (HubEnv) too. Optional: nil reads
+	// none.
+	HubConduitEnv func(ctx context.Context) (map[string]string, error)
 	// EnsureProjectProvider runs before each hub link (whose agent sync needs a
 	// broker) and again when the project settles: when the instance's hub
 	// project lists no runtime broker, it links the jail's broker to it as
@@ -420,6 +426,13 @@ type Deps struct {
 	// PhaseSettleRetry bounds the wait for a manager record in a transitional
 	// phase to settle. Zero takes the default.
 	PhaseSettleRetry RetryBudget
+	// StaleContainer is podman in the jail, for clearing a hub stop claim that
+	// only a container removal releases (ResumeClearingStopClaim). nil: lever
+	// removes nothing and names the manual fix.
+	StaleContainer StaleContainerOps
+	// StopClaimRetry bounds the wait for the hub to release that claim; the
+	// interval doubles up to stopClaimMaxInterval. Zero takes the default.
+	StopClaimRetry RetryBudget
 }
 
 func (d Deps) check() error {
@@ -595,6 +608,17 @@ func (r *run) scionServer(ctx context.Context) error {
 	live, err := r.d.Scion.RunningHub(ctx)
 	if err != nil {
 		return fmt.Errorf("hub auth: %w", err)
+	}
+	if live.Running && r.d.HubConduitEnv != nil {
+		env, err := r.d.HubConduitEnv(ctx)
+		if err != nil {
+			return fmt.Errorf("hub conduit policy: %w", err)
+		}
+		live.Env = maps.Clone(live.Env)
+		if live.Env == nil {
+			live.Env = map[string]string{}
+		}
+		maps.Copy(live.Env, env)
 	}
 	reason := HubRestartReason(live, opts)
 	if reason == "" && guestChanged && live.Running {
@@ -2028,7 +2052,9 @@ func (r *run) resumeOrRecover(ctx context.Context, jp string, v resumeVerb) erro
 	if err := r.ensureFreshBootstrap(ctx); err != nil {
 		return err
 	}
-	rerr := r.retryOnBrokerUnavailable(ctx, v.resume)
+	rerr := ResumeClearingStopClaim(ctx, r.d, r.app.Name, jp, "start-manager", func() error {
+		return r.retryOnBrokerUnavailable(ctx, v.resume)
+	})
 	if rerr == nil {
 		return nil
 	}
@@ -2036,11 +2062,8 @@ func (r *run) resumeOrRecover(ctx context.Context, jp string, v resumeVerb) erro
 		r.d.Log("start-manager: %s failed (%v) but the manager is now running — recovered concurrently (auto-re-enrol healer); keeping the session", v.label, rerr)
 		return nil
 	}
-	if scion.IsRefusedByHub(rerr) {
-		// The hub refused the call, which says nothing about the manager.
-		return HubRefusedResume(v.label, rerr)
-	}
-	return ResumeFailed(v.label, rerr)
+	// A hub refusal says nothing about the manager.
+	return ResumeError(v.label, rerr)
 }
 
 // ResumeFailed is the error for a manager resume that failed and was not a hub

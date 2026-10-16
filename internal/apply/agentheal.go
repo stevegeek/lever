@@ -110,7 +110,10 @@ func HealAgentSession(ctx context.Context, h SessionHealer, project string, rec 
 
 // SessionHealer is what HealAgentSession acts with.
 type SessionHealer struct {
-	Scion *scion.Client
+	Scion interface {
+		List(ctx context.Context, project string) ([]scion.Agent, error)
+		ResetAuth(ctx context.Context, agent, project string) error
+	}
 	Probe AgentSessionProbe
 	// VerifyRole is the pre-role record guard (Deps.VerifyAgentRole). The hub
 	// mints a reset token from the record's stored role, and an old record's
@@ -171,7 +174,7 @@ func healNamedSessions(ctx context.Context, d Deps, project string, names []stri
 	if d.AgentSession == nil || d.Log == nil || len(names) == 0 {
 		return
 	}
-	agents, err := d.Scion.List(ctx, project)
+	agents, err := d.managerScion().List(ctx, project)
 	if err != nil {
 		d.Log("lever: warning: could not list agents to check their hub sessions: %s", termsafe.Sanitize(scion.ErrSummary(err)))
 		return
@@ -190,5 +193,5 @@ func workerNames(app *config.App) []string {
 }
 
 func (d Deps) sessionHealer() SessionHealer {
-	return SessionHealer{Scion: d.Scion, Probe: d.AgentSession, VerifyRole: d.VerifyAgentRole, Revoked: d.AgentRevoked, Log: d.Log}
+	return SessionHealer{Scion: d.managerScion(), Probe: d.AgentSession, VerifyRole: d.VerifyAgentRole, Revoked: d.AgentRevoked, Log: d.Log}
 }

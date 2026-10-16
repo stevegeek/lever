@@ -547,7 +547,7 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 			ctx, stop := applySignalContext(pctx)
 			defer stop()
 			run.rep.Group("jail", 0)
-			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd, Rep: run.rep, ResetHubIdentity: resetHubIdentity})
+			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd, Rep: run.rep, ResetHubIdentity: resetHubIdentity, Locked: true})
 			if err != nil {
 				return err
 			}
@@ -795,6 +795,10 @@ type applyOpts struct {
 	// ResetHubIdentity forgets the recorded hub identities and bootstraps the
 	// hub as new (`--reset-hub-identity`).
 	ResetHubIdentity bool
+	// Locked: the command holds the lifecycle lock for its whole run, so
+	// Deps.ManagerLock is apply.HeldManagerLock. Otherwise it is nil and
+	// apply.EnsureManager refuses.
+	Locked bool
 	// SelfExe is the executable re-exec'd as `broker serve` / `remote serve`;
 	// empty means os.Args[0]. Tests must set it: under `go test` os.Args[0] is the
 	// test binary, and the Setsid child outlives the run with nothing to reap it.
@@ -853,6 +857,9 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 	w.remote = rc
 
 	w.deps = w.newDeps(bc, rc, sessionSecret)
+	if opts.Locked {
+		w.deps.ManagerLock = apply.HeldManagerLock
+	}
 	return w, nil
 }
 

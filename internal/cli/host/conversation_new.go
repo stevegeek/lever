@@ -380,7 +380,7 @@ func newConversationNewCmd(bf BackendFactory) *cobra.Command {
 			ctx, cancel := context.WithTimeout(ctx, conversationNewDeadline)
 			defer cancel()
 			rep.Group("jail", 0)
-			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd, Rep: rep})
+			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd, Rep: rep, Locked: true})
 			if err != nil {
 				return err
 			}

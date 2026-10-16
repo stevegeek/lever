@@ -35,7 +35,7 @@ func newReloadCmd(bf BackendFactory) *cobra.Command {
 			}
 			ctx, stop := applySignalContext(cmd.Context())
 			defer stop()
-			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd})
+			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd, Locked: true})
 			if err != nil {
 				return err
 			}

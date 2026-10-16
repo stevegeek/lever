@@ -162,7 +162,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			// buildApplyDeps brings the jail up through EnsureUp on every path, so on Lima
 			// the guest hardening converges whether up applies, resumes or attaches.
 			rep.Group("jail", 0)
-			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd, Rep: rep, ResetHubIdentity: resetHubIdentity})
+			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd, Rep: rep, ResetHubIdentity: resetHubIdentity, Locked: true})
 			if err != nil {
 				return err
 			}

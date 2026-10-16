@@ -74,7 +74,7 @@ func startedInEndedBoot(ctx context.Context, d Deps, ref string) bool {
 func suspendAfterGuestRestart(ctx context.Context, d Deps, subject, project, name string, rec *scion.Agent) {
 	d.logf("%s: manager %q: the jail VM restarted since the manager last ran (a new guest boot) and its container is %s; suspending and resuming it (the conversation is kept)",
 		subject, name, scion.BoundedQuote(rec.ContainerStatus))
-	if err := d.Scion.Suspend(ctx, name, project); err != nil {
+	if err := d.managerScion().Suspend(ctx, name, project); err != nil {
 		d.logf("%s: warning: suspend of manager %q failed: %s", subject, name, scion.ErrSummary(err))
 	}
 }

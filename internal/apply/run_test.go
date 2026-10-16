@@ -33,6 +33,9 @@ func runApply(app *config.App, deps Deps) error {
 // material (boot.minted = true); a test that models a spent latch wires
 // spentLatchMint instead.
 func fillDeps(d Deps) Deps {
+	if d.ManagerLock == nil {
+		d.ManagerLock = HeldManagerLock
+	}
 	// The production default holds the manager live for 10 s; a test that
 	// does not model the settle window must not pay for it.
 	if d.ManagerLiveRetry == (RetryBudget{}) {
@@ -4215,7 +4218,7 @@ func TestStartManagerFreshAfterAnUnconfirmedDelete(t *testing.T) {
 
 // A manager an older lever created keeps its unqualified image name, which
 // the hub's image registry still applies to: keeping or resuming it warns.
-func TestConvergeManagerWarnsOnAnUnqualifiedImage(t *testing.T) {
+func TestActUpWarnsOnAnUnqualifiedImage(t *testing.T) {
 	for _, c := range []struct {
 		image string
 		warn  bool
@@ -4228,7 +4231,7 @@ func TestConvergeManagerWarnsOnAnUnqualifiedImage(t *testing.T) {
 		var logs []string
 		r := &run{app: &config.App{Name: "m"}, d: Deps{Log: func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }}}
 		rec := &scion.Agent{Slug: "m", Phase: scion.PhaseRunning, Image: c.image}
-		if _, err := r.convergeManager(context.Background(), "/lever", rec, scion.StartOpts{Image: "lever.local/lever-claude:arm64"}); err != nil {
+		if err := r.actUp(context.Background(), "/lever", rec, managerPlan{verb: verbNone}, scion.StartOpts{Image: "lever.local/lever-claude:arm64"}); err != nil {
 			t.Fatal(err)
 		}
 		got := strings.Contains(strings.Join(logs, "\n"), "unqualified image name")

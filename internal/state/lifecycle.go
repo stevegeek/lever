@@ -26,6 +26,17 @@ type Lifecycle struct {
 	// Steps maps a step key to the fingerprint of the inputs it last
 	// converged on.
 	Steps map[string]Fingerprint `json:"steps,omitempty"`
+	// LastConverge is the last bring-up that ran the whole plan.
+	LastConverge *ConvergeRecord `json:"last_converge,omitempty"`
+}
+
+// ConvergeRecord says which config and lever a bring-up converged the
+// instance on. It is shown to the operator, never acted on.
+type ConvergeRecord struct {
+	By      string    `json:"by"`
+	Config  string    `json:"config"`
+	Version string    `json:"version"`
+	At      time.Time `json:"at"`
 }
 
 // GuestBootRecord is the jail guest boot id in which lever last saw the
@@ -145,4 +156,12 @@ func (s State) ForgetStep(step string) error {
 		}
 	}
 	return s.UpdateLifecycle(func(l *Lifecycle) { delete(l.Steps, step) })
+}
+
+// RecordConverge notes that `lever by` converged the instance on the config
+// digest and lever version at now.
+func (s State) RecordConverge(by, config, version string, now time.Time) error {
+	return s.UpdateLifecycle(func(l *Lifecycle) {
+		l.LastConverge = &ConvergeRecord{By: by, Config: config, Version: version, At: now.UTC()}
+	})
 }

@@ -52,6 +52,9 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				return err
 			}
 			printContactSessionWarnings(cmd, app, stateFor(path))
+			if msg := convergeNotice(app, stateFor(path)); msg != "" {
+				rep.Log(msg)
+			}
 			// The bring-up runs under a signal-aware context; the attach does not, so the
 			// operator's keys go to the manager.
 			ctx, stop := applySignalContext(pctx)
@@ -95,6 +98,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				}
 				return err
 			}
+			recordConverge(app, stateFor(path), "up", w.log)
 			if keepConv {
 				rep.Group("conversation", 0)
 				step := rep.Start("restore conversation")

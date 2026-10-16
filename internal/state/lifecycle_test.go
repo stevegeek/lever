@@ -110,3 +110,26 @@ func TestLifecycleConcurrentUpdates(t *testing.T) {
 		t.Fatalf("steps = %d, %v", len(l.Steps), err)
 	}
 }
+
+// TestLifecycleRecordConverge: the last converge is kept beside the steps,
+// and a later one replaces it.
+func TestLifecycleRecordConverge(t *testing.T) {
+	st := State{Dir: t.TempDir()}
+	at := time.Date(2026, 10, 16, 9, 0, 0, 0, time.UTC)
+	if err := st.RecordStep("x", "y", at); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordConverge("apply", "c1", "v1", at); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordConverge("up", "c2", "v1", at.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	l, err := st.LoadLifecycle()
+	if err != nil || l.LastConverge == nil || *l.LastConverge != (ConvergeRecord{By: "up", Config: "c2", Version: "v1", At: at.Add(time.Hour)}) {
+		t.Fatalf("last converge: %+v %v", l.LastConverge, err)
+	}
+	if !st.StepMatches("x", "y") {
+		t.Fatal("the steps survive a converge record")
+	}
+}

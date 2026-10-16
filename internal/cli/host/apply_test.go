@@ -939,3 +939,47 @@ func TestRemoteControllerStartReplacesAProxyInsideTheTree(t *testing.T) {
 		})
 	}
 }
+
+// TestConvergeNotice: up says what changed since the last bring-up that ran
+// the whole plan, and nothing when nothing did or nothing was recorded. With
+// the state directory inside the tree it neither reads nor writes a record.
+func TestConvergeNotice(t *testing.T) {
+	root := t.TempDir()
+	st := state.State{Dir: filepath.Join(root, "state")}
+	app := &config.App{Name: "mgr", Tree: filepath.Join(root, "tree"), CPUs: 2}
+	if got := convergeNotice(app, st); got != "" {
+		t.Fatalf("nothing recorded: %q", got)
+	}
+	recordConverge(app, st, "apply", func(string, ...any) { t.Error("warned") })
+	if got := convergeNotice(app, st); got != "" {
+		t.Fatalf("nothing changed: %q", got)
+	}
+	edited := *app
+	edited.CPUs = 4
+	got := convergeNotice(&edited, st)
+	if !strings.Contains(got, "the config changed") || !strings.Contains(got, "`lever apply`") || !strings.Contains(got, "this up applies it") {
+		t.Fatalf("config edit: %q", got)
+	}
+	if err := st.RecordConverge("up", convergeDigest(app), "v-older", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if got := convergeNotice(app, st); !strings.Contains(got, "the lever binary changed") || strings.Contains(got, "config") {
+		t.Fatalf("new binary: %q", got)
+	}
+
+	inTree := state.State{Dir: filepath.Join(root, "in", "state")}
+	in := &config.App{Name: "mgr", Tree: filepath.Join(root, "in"), CPUs: 2}
+	recordConverge(in, inTree, "up", func(string, ...any) { t.Error("warned") })
+	if _, err := os.Stat(inTree.LifecycleFile()); !os.IsNotExist(err) {
+		t.Fatalf("a record was written inside the tree: %v", err)
+	}
+	if err := os.MkdirAll(inTree.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := inTree.RecordConverge("up", "forged", "forged", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if got := convergeNotice(in, inTree); got != "" {
+		t.Fatalf("a record inside the tree was read: %q", got)
+	}
+}

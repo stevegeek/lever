@@ -525,6 +525,7 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 			if err := apply.Run(ctx, app, w.deps, apply.PlanOpts{}); err != nil {
 				return err
 			}
+			recordConverge(app, stateFor(path), "apply", w.log)
 			run.finish(nil)
 			cmd.Printf("application %q is up.\n", app.Name)
 			return nil
@@ -1063,6 +1064,49 @@ type lifecycleSteps struct{ st state.State }
 func (l lifecycleSteps) Matches(step, inputs string) bool { return l.st.StepMatches(step, inputs) }
 func (l lifecycleSteps) Record(step, inputs string) error { return l.st.RecordStep(step, inputs, time.Now()) }
 func (l lifecycleSteps) Forget(step string) error         { return l.st.ForgetStep(step) }
+
+// convergeDigest is the config a bring-up converges on, as lever loaded it.
+func convergeDigest(app *config.App) string { return state.HashJSON(app) }
+
+// convergeNotice says, before up, what changed since the last bring-up that
+// ran the whole plan: up converges on the config as it is now, so an edit
+// takes effect without an apply, and this keeps that visible. "" when
+// nothing changed, nothing is recorded, or the state directory is inside
+// the tree (where an agent could write the record).
+func convergeNotice(app *config.App, st state.State) string {
+	if brokerctl.StateInsideTree(app, st) {
+		return ""
+	}
+	l, err := st.LoadLifecycle()
+	if err != nil || l.LastConverge == nil {
+		return ""
+	}
+	last := l.LastConverge
+	var changed []string
+	if last.Config != convergeDigest(app) {
+		changed = append(changed, "the config")
+	}
+	if last.Version != cli.VersionString() {
+		changed = append(changed, "the lever binary")
+	}
+	if len(changed) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("lever: %s changed since the last bring-up (`lever %s`, %s); this up applies it",
+		strings.Join(changed, " and "), termsafe.Sanitize(last.By), last.At.Local().Format("2006-01-02 15:04 MST"))
+}
+
+// recordConverge notes a bring-up that ran the whole plan, for the next
+// one's convergeNotice. A failure only warns: the record informs, it
+// guards nothing.
+func recordConverge(app *config.App, st state.State, by string, log func(string, ...any)) {
+	if brokerctl.StateInsideTree(app, st) {
+		return
+	}
+	if err := st.RecordConverge(by, convergeDigest(app), cli.VersionString(), time.Now()); err != nil {
+		log("lever: warning: could not record this bring-up in %s: %v", st.LifecycleFile(), err)
+	}
+}
 
 func (w *applyWiring) removeJailFile(ctx context.Context, jailPath string) error {
 	return removeJailFile(ctx, w.jr, jailPath)

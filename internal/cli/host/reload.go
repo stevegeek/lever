@@ -45,6 +45,7 @@ func newReloadCmd(bf BackendFactory) *cobra.Command {
 			if err := apply.Run(ctx, app, w.deps, apply.PlanOpts{}); err != nil {
 				return err
 			}
+			recordConverge(app, stateFor(path), "reload", w.log)
 			cmd.Printf("application %q reloaded (broker restarted on the current config).\n", app.Name)
 			return nil
 		},

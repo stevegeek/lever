@@ -452,6 +452,9 @@ type Deps struct {
 	// ManagerVerbs, when set, takes the place of Scion for the verbs on the
 	// manager's record. nil means Scion.
 	ManagerVerbs ManagerScion
+	// ManagerPhaseWait bounds the wait for a suspend or stop of the manager to
+	// read in the hub. Zero takes the default.
+	ManagerPhaseWait RetryBudget
 }
 
 func (d Deps) check() error {
@@ -1093,10 +1096,8 @@ func (r *run) startFreshWithoutConversation(ctx context.Context, jp string, opts
 		r.d.Log("start-manager: manager %q has no conversation to continue, and its record is gone; lever did not start it fresh on its own", r.app.Name)
 		return cause
 	}
-	if r.d.BackupManagerConversation != nil {
-		if err := r.d.BackupManagerConversation(ctx, rec); err != nil {
-			return fmt.Errorf("%w; lever went to start it fresh, but backing up its conversation failed, so the manager was NOT deleted: %w", cause, err)
-		}
+	if err := r.backupBeforeDelete(ctx, jp, rec); err != nil {
+		return fmt.Errorf("%w; lever went to start it fresh, but backing up its conversation failed, so the manager was NOT deleted: %w", cause, err)
 	}
 	// Record before anything is deleted, and after the backup (which carries the
 	// last session's skill): a start the agent can bring about must not record a
@@ -1922,9 +1923,7 @@ func (r *run) resumeOrRecover(ctx context.Context, jp string, v resumeVerb) erro
 	if err := r.ensureFreshBootstrap(ctx); err != nil {
 		return err
 	}
-	rerr := ResumeClearingStopClaim(ctx, r.d, r.app.Name, jp, "start-manager", func() error {
-		return r.retryOnBrokerUnavailable(ctx, v.resume)
-	})
+	rerr := r.resumeClearing(ctx, jp, v.resume)
 	if rerr == nil {
 		return nil
 	}

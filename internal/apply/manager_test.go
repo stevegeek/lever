@@ -3,6 +3,7 @@ package apply
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -181,5 +182,65 @@ func TestKeepStagesATicketOnlyToStartOrResume(t *testing.T) {
 		if rearms != c.rearms {
 			t.Errorf("%+v: %d re-arm(s), want %d", c, rearms, c.rearms)
 		}
+	}
+}
+
+// TestPlanManagerRestore: a restore reads the phase alone (the shared
+// observation set, as TestConversationDecisions pins it through the command).
+func TestPlanManagerRestore(t *testing.T) {
+	want := map[string]string{"absent": "refuse", "running": "suspend,resume", "running-exited": "suspend,resume",
+		"running-created": "suspend,resume", "running-no-status": "suspend,resume", "suspended": "resume"}
+	for _, o := range testutil.ManagerObservations {
+		w, ok := want[o.Name]
+		if !ok {
+			w = "refuse"
+		}
+		p, err := planManager(ManagerRequest{Intent: ManagerRestore}, "m", managerObservation{present: o.Phase != "", phase: o.Phase, container: o.Container})
+		got := describePlan(p, err)
+		if err == nil && p.suspend {
+			got = "suspend," + got
+		}
+		if got != w {
+			t.Errorf("%s: %s, want %s (%v)", o.Name, got, w, err)
+		}
+	}
+}
+
+// TestFreshBackupSuspendsAndResumesOnFailure: --fresh suspends a running
+// manager before its backup, so the copy is the conversation as it ends; a
+// failed backup resumes it through the role guard and its mount checks and
+// deletes nothing, and a guard refusal leaves it suspended.
+func TestFreshBackupSuspendsAndResumesOnFailure(t *testing.T) {
+	boom := errors.New("no home")
+	for _, c := range []struct {
+		name    string
+		roleErr error
+		resumes int
+		want    string
+	}{
+		{"resumed", nil, 1, "the manager was resumed"},
+		{"guard refuses", errors.New("pre-role record"), 0, "the manager stays suspended: pre-role record"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			app, f := newObserveFirstApp(t)
+			r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "Up 1 minute"}
+			var order []string
+			d := fillDeps(Deps{Scion: scion.New(r, scion.Options{}), Log: func(string, ...any) {},
+				InspectContainerMounts: func(context.Context, string) ([]jail.Mount, error) { return nil, nil },
+				CheckLiveMounts:        func(context.Context, string, []jail.LiveMount) ([]jail.LiveMountProblem, error) { return nil, nil },
+				BackupManagerConversation: func(context.Context, *scion.Agent) error {
+					order = append(order, fmt.Sprintf("backup after %d suspend(s)", r.suspendCalls))
+					return boom
+				},
+			})
+			d.VerifyAgentRole = func(context.Context, string, string) error { return c.roleErr }
+			_, err := EnsureManager(context.Background(), app, d, ManagerRequest{Intent: ManagerFresh})
+			if !errors.Is(err, boom) || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("err = %v, want %q", err, c.want)
+			}
+			if strings.Join(order, ",") != "backup after 1 suspend(s)" || r.resumeCalls != c.resumes || r.deleteCalls != 0 || r.startCalls != 0 {
+				t.Fatalf("order %v resume %d delete %d start %d", order, r.resumeCalls, r.deleteCalls, r.startCalls)
+			}
+		})
 	}
 }

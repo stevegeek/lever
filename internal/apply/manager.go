@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/imageref"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/termsafe"
+	"github.com/stevegeek/lever/internal/wait"
 )
 
 // ManagerIntent is what a caller wants of the manager. EnsureManager reads
@@ -28,6 +30,10 @@ const (
 	// ManagerFresh discards the record, after the conversation backup, and
 	// creates the manager anew.
 	ManagerFresh
+	// ManagerRestore suspends a running manager, runs the caller's swap of
+	// its conversation (ManagerRequest.WhileSuspended) and resumes it on
+	// what its home now holds.
+	ManagerRestore
 )
 
 func (i ManagerIntent) String() string {
@@ -36,6 +42,8 @@ func (i ManagerIntent) String() string {
 		return "keep"
 	case ManagerFresh:
 		return "fresh"
+	case ManagerRestore:
+		return "restore"
 	}
 	return fmt.Sprintf("intent(%d)", int(i))
 }
@@ -59,6 +67,15 @@ type ManagerRequest struct {
 	// BrokerOnline: the runtime broker was seen online since the hub last
 	// started, so no wait for it is needed.
 	BrokerOnline bool
+
+	// WhileSuspended (Restore) runs once the hub reads the manager suspended
+	// with no live container, so no agent process runs while its files
+	// change. An error resumes a manager this call suspended, on its own
+	// conversation; after it returns nil nothing resumes it but the plan.
+	WhileSuspended func(ctx context.Context) error
+	// ResumeHow names the conversation a resume after a failure continues
+	// ("on its own conversation"); nil leaves it out.
+	ResumeHow func() string
 }
 
 func (q ManagerRequest) subject() string {
@@ -94,6 +111,8 @@ type ManagerScion interface {
 	Suspend(ctx context.Context, worker, project string) error
 	Delete(ctx context.Context, worker, project string) error
 	ResetAuth(ctx context.Context, agent, project string) error
+	ResumeTask(ctx context.Context, worker, project, task string) error
+	Stop(ctx context.Context, worker, project string) error
 }
 
 func (d Deps) managerScion() ManagerScion {
@@ -137,6 +156,11 @@ func EnsureManager(ctx context.Context, app *config.App, d Deps, q ManagerReques
 	switch q.Intent {
 	case ManagerKeep, ManagerFresh:
 		return r.ensureUp(ctx, jp, q)
+	case ManagerRestore:
+		if q.WhileSuspended == nil || d.VerifyAgentRole == nil {
+			return ManagerResult{}, fmt.Errorf("%s: internal error: the manager's lifecycle is not wired", subject)
+		}
+		return r.swapConversation(ctx, jp, q)
 	}
 	return ManagerResult{}, fmt.Errorf("%s: internal error: unknown manager intent %s", subject, q.Intent)
 }
@@ -198,6 +222,8 @@ func (v managerVerb) String() string {
 type managerPlan struct {
 	// recover: suspend the record first, read it again and plan again.
 	recover bool
+	// suspend: suspend the record and wait until it reads suspended.
+	suspend bool
 	verb    managerVerb
 	// mustCreate: a create that finds a record fails rather than keeps it.
 	mustCreate bool
@@ -234,6 +260,18 @@ func planManager(q ManagerRequest, name string, o managerObservation) (managerPl
 		// phase.
 		return managerPlan{}, fmt.Errorf("%s: manager %q is in phase %s, which lever does not recognise; nothing was changed. Retry once it settles, or run `lever up --fresh` to discard the session and start over",
 			q.subject(), name, scion.BoundedQuote(o.phase))
+	case ManagerRestore:
+		// The phase alone decides: a running record is suspended whatever its
+		// container shows.
+		switch {
+		case !o.present:
+			return managerPlan{}, errors.New("there is no manager record to restore into; run `lever up --no-attach` first")
+		case o.phase == scion.PhaseRunning:
+			return managerPlan{suspend: true, verb: verbResume}, nil
+		case o.phase == scion.PhaseSuspended:
+			return managerPlan{verb: verbResume}, nil
+		}
+		return managerPlan{}, fmt.Errorf("manager %q is in phase %s; a restore needs it running or suspended (`lever up --no-attach` first)", name, scion.BoundedQuote(o.phase))
 	}
 	return managerPlan{}, fmt.Errorf("%s: internal error: unknown manager intent %s", q.subject(), q.Intent)
 }
@@ -428,10 +466,8 @@ func (r *run) actUp(ctx context.Context, jp string, rec *scion.Agent, p managerP
 		// after the hub is up, because after lever stop the record is invisible
 		// until this step. The create that follows is what puts a changed
 		// manager.image into effect (a resume keeps the record's image).
-		if r.d.BackupManagerConversation != nil {
-			if err := r.d.BackupManagerConversation(ctx, rec); err != nil {
-				return fmt.Errorf("%s: --fresh: backing up manager %q's conversation failed, so the manager was NOT deleted (its record and conversation are kept): %w. Fix the cause and run `lever up --fresh` again, or run `lever up --fresh --no-backup` to discard the conversation without a backup", r.subjectName(), r.app.Name, err)
-			}
+		if err := r.backupBeforeDelete(ctx, jp, rec); err != nil {
+			return fmt.Errorf("%s: --fresh: backing up manager %q's conversation failed, so the manager was NOT deleted (its record and conversation are kept): %w. Fix the cause and run `lever up --fresh` again, or run `lever up --fresh --no-backup` to discard the conversation without a backup", r.subjectName(), r.app.Name, err)
 		}
 		return r.recoverDeleteAndCreate(ctx, jp, opts,
 			fmt.Sprintf("%s: --fresh — deleting manager %q (phase %s) and starting FRESH (previous session discarded)", r.subjectName(), r.app.Name, scion.BoundedQuote(rec.Phase)),
@@ -456,4 +492,176 @@ func (r *run) actUp(ctx context.Context, jp string, rec *scion.Agent, p managerP
 		}))
 	}
 	return nil
+}
+
+// swapConversation is ManagerRestore: the record is suspended if it runs,
+// the caller's swap runs with no agent process, and the manager is resumed
+// through the resume checks and gated. Up to the end of the swap a failure
+// resumes a manager this call suspended; after it the manager is resumed
+// only by the plan, and a failure leaves it suspended.
+func (r *run) swapConversation(ctx context.Context, jp string, q ManagerRequest) (res ManagerResult, err error) {
+	sc := r.d.managerScion()
+	agents, err := sc.List(ctx, jp)
+	if err != nil {
+		return res, fmt.Errorf("the hub does not answer (%s); bring the instance up first (`lever up --no-attach`)", termsafe.Sanitize(scion.ErrSummary(err)))
+	}
+	p, err := planManager(q, r.app.Name, observationOf(scion.FindAgent(agents, r.app.Name)))
+	if err != nil {
+		return res, err
+	}
+	// suspended: this call suspended the manager; swapped: the caller's swap
+	// is done, so a failure no longer resumes it as it was.
+	suspended, swapped := false, false
+	if p.suspend {
+		r.d.Log("conversation: suspending manager %q to swap its transcripts", r.app.Name)
+		if err := sc.Suspend(ctx, r.app.Name, jp); err != nil {
+			return res, fmt.Errorf("suspending the manager failed, nothing was restored: %s", termsafe.Sanitize(scion.ErrSummary(err)))
+		}
+		suspended = true
+	}
+	defer func() {
+		if err != nil && suspended && !swapped {
+			how := ""
+			if q.ResumeHow != nil {
+				how = q.ResumeHow()
+			}
+			err = r.resumeAfterFailure(ctx, jp, err, how)
+		}
+	}()
+	if last, werr := r.waitPhase(ctx, jp, scion.PhaseSuspended); werr != nil {
+		if errors.Is(werr, wait.ErrTimeout) {
+			return res, fmt.Errorf("the manager did not suspend (last seen %s); nothing was restored", scion.BoundedQuote(last))
+		}
+		return res, werr
+	}
+	if err := q.WhileSuspended(ctx); err != nil {
+		return res, err
+	}
+	swapped = true
+	if err := r.d.VerifyAgentRole(ctx, path.Base(jp), r.app.Name); err != nil {
+		return res, err
+	}
+	guard, err := BeginManagerResume(ctx, r.d, r.app, jp, r.subjectName())
+	if err != nil {
+		return res, fmt.Errorf("%w; the conversation is restored, but the manager stays suspended: fix that, then run `lever up`", err)
+	}
+	res.Verb = p.verb.String()
+	if err := r.resumeClearing(ctx, jp, func() error { return sc.Resume(ctx, r.app.Name, jp) }); err != nil {
+		return res, guard.AfterFailure(ctx, ResumeError("resume", err))
+	}
+	if err := guard.Resumed(ctx); err != nil {
+		return res, err
+	}
+	if err := r.gateResumed(ctx, jp); err != nil {
+		return res, guard.AfterFailure(ctx, err)
+	}
+	if err := guard.Live(ctx); err != nil {
+		return res, err
+	}
+	RecordGuestBoot(ctx, r.d)
+	return res, nil
+}
+
+// resumeClearing runs one resume through the hub's stop-claim recovery and
+// the runtime-broker-race retry.
+func (r *run) resumeClearing(ctx context.Context, jp string, resume func() error) error {
+	return ResumeClearingStopClaim(ctx, r.d, r.app.Name, jp, r.subjectName(), func() error {
+		return r.retryOnBrokerUnavailable(ctx, resume)
+	})
+}
+
+// gateResumed is the full liveness gate for a manager this call resumed: a
+// resume's claude --continue is waited on to its session start.
+func (r *run) gateResumed(ctx context.Context, jp string) error {
+	err := gateManagerLive(ctx, r.d, r.managerLive, r.app.Name, jp, r.subjectName(), nil, gateOpts{})
+	return withHarnessDeathHint(ctx, r.d, err, jp, r.app.Name)
+}
+
+// waitPhase waits until the hub reads the manager in phase with no live
+// container (Deps.ManagerPhaseWait). last is the phase/container status last
+// seen; an exhausted wait Is wait.ErrTimeout.
+func (r *run) waitPhase(ctx context.Context, jp, phase string) (last string, err error) {
+	s := wait.ManagerStopped
+	if b := r.d.ManagerPhaseWait; b.Attempts > 0 {
+		s = wait.Attempts(s.Name, b.Attempts, b.Interval)
+	}
+	err = wait.For(ctx, s, func(ctx context.Context) wait.Result {
+		agents, err := r.d.managerScion().List(ctx, jp)
+		if err != nil {
+			return wait.NotYetErr(err)
+		}
+		rec := scion.FindAgent(agents, r.app.Name)
+		if rec == nil {
+			return wait.Fatal(errors.New("the manager record disappeared"))
+		}
+		last = rec.Phase + "/" + rec.ContainerStatus
+		if rec.Phase == phase && !scion.ContainerLive(rec.ContainerStatus) {
+			return wait.Ready()
+		}
+		return wait.NotYet(last)
+	})
+	return last, err
+}
+
+// resumeAfterFailureTimeout bounds resumeAfterFailure, which runs on its own
+// context: the caller's may be what was cancelled.
+const resumeAfterFailureTimeout = 60 * time.Second
+
+// resumeAfterFailure resumes a manager this call suspended, after cause,
+// through the pre-role record guard and the resume checks. how names the
+// conversation it continues ("" leaves it out). No liveness gate follows:
+// the checks wait until the container runs.
+func (r *run) resumeAfterFailure(ctx context.Context, jp string, cause error, how string) error {
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), resumeAfterFailureTimeout)
+	defer cancel()
+	if gerr := r.d.VerifyAgentRole(rctx, path.Base(jp), r.app.Name); gerr != nil {
+		return fmt.Errorf("%w; the manager stays suspended: %w", cause, gerr)
+	}
+	guard, gerr := BeginManagerResume(rctx, r.d, r.app, jp, r.subjectName())
+	if gerr != nil {
+		return fmt.Errorf("%w; the manager stays suspended: %w", cause, gerr)
+	}
+	if rerr := r.d.managerScion().Resume(rctx, r.app.Name, jp); rerr != nil {
+		err := fmt.Errorf("%w; the manager is suspended and resuming it failed (%s): run `lever up`", cause, termsafe.Sanitize(scion.ErrSummary(rerr)))
+		return guard.AfterFailure(rctx, err)
+	}
+	verr := guard.Resumed(rctx)
+	if verr == nil {
+		verr = guard.Settle(rctx)
+	}
+	if verr != nil {
+		return fmt.Errorf("%w; resuming the manager after that failed its mount check: %w", cause, verr)
+	}
+	if how != "" {
+		how = " " + how
+	}
+	return fmt.Errorf("%w; the manager was resumed%s", cause, how)
+}
+
+// backupSuspendTimeout bounds the suspend before a backup: a hung one costs
+// only a copy taken while the manager runs.
+const backupSuspendTimeout = 30 * time.Second
+
+// backupBeforeDelete runs Deps.BackupManagerConversation before a delete. A
+// running record is suspended first, so the copy is the conversation as it
+// ends; a failed backup resumes a record it suspended, which is then kept.
+func (r *run) backupBeforeDelete(ctx context.Context, jp string, rec *scion.Agent) error {
+	if r.d.BackupManagerConversation == nil {
+		return nil
+	}
+	suspended := false
+	if rec != nil && rec.Phase == scion.PhaseRunning {
+		sctx, cancel := context.WithTimeout(ctx, backupSuspendTimeout)
+		if err := r.d.managerScion().Suspend(sctx, r.app.Name, jp); err != nil {
+			r.d.Log("conversation: could not suspend manager %q before the backup (%s); copying it while it runs", r.app.Name, termsafe.Sanitize(scion.ErrSummary(err)))
+		} else {
+			suspended = true
+		}
+		cancel()
+	}
+	err := r.d.BackupManagerConversation(ctx, rec)
+	if err != nil && suspended {
+		err = r.resumeAfterFailure(ctx, jp, err, "")
+	}
+	return err
 }

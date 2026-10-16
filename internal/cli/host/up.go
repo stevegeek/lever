@@ -185,7 +185,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				step := rep.Start(string(apply.KindStartManager))
 				step.TailFrom(w.stepTail(apply.KindStartManager))
 				_, err = apply.EnsureManager(ctx, app, deps, apply.ManagerRequest{
-					Intent: apply.ManagerKeep, Subject: "up", What: "lever up",
+					Intent: apply.ManagerKeep, Subject: string(apply.KindStartManager),
 					Attach: attachTTY, FreshWithoutConversation: true, TicketStaged: staged,
 				})
 				step.Done(err)

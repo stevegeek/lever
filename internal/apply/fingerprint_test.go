@@ -11,8 +11,9 @@ import (
 
 // memFingerprints is StepFingerprints in memory.
 type memFingerprints struct {
-	steps   map[string]string
-	failRec error
+	steps      map[string]string
+	failRec    error
+	failForget error
 }
 
 func (m *memFingerprints) Matches(step, inputs string) bool {
@@ -31,6 +32,9 @@ func (m *memFingerprints) Record(step, inputs string) error {
 }
 
 func (m *memFingerprints) Forget(step string) error {
+	if m.failForget != nil {
+		return m.failForget
+	}
 	delete(m.steps, step)
 	return nil
 }
@@ -76,6 +80,25 @@ func TestWarmUpFingerprint(t *testing.T) {
 				t.Fatalf("loads/warms/recorded = %d/%d/%v, want %d/%d/%v", loads, warms, got, c.wantLoad, c.wantWarm, c.wantRecorded)
 			}
 		})
+	}
+}
+
+// A warm-up record lever cannot forget must not outlive the image it
+// covered: the load is not made, so the record cannot vouch for a new image.
+func TestWarmUpFingerprintForgetFails(t *testing.T) {
+	step := Step{Kind: KindLoadImage, Target: "lever.local/w:1"}
+	key, inputs := warmFingerprint(step)
+	boom := errors.New("lifecycle.json: read-only file system")
+	fp := &memFingerprints{steps: map[string]string{key: inputs}, failForget: boom}
+	loads := 0
+	d := fillDeps(Deps{
+		Fingerprints: fp,
+		ImageLoaded:  func(context.Context, string) bool { return false },
+		LoadImage:    func(context.Context, string) error { loads++; return nil },
+	})
+	err := runLoadImage(context.Background(), step, d, nil)
+	if !errors.Is(err, boom) || loads != 0 {
+		t.Fatalf("err = %v, loads = %d; want the forget failure before any load", err, loads)
 	}
 }
 

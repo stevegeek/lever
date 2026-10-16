@@ -896,9 +896,11 @@ func runLoadImage(ctx context.Context, s Step, d Deps, app *config.App) error {
 		}
 		rep.Note("already loaded")
 	} else {
+		// A warm-up record that outlived the image it covered would skip the
+		// warm-up of the image loaded next.
 		if d.Fingerprints != nil {
 			if err := d.Fingerprints.Forget(key); err != nil {
-				d.Log("load-image: warning: %v", err)
+				return fmt.Errorf("load-image: forgetting the warm-up of the image the jail no longer holds: %w", err)
 			}
 		}
 		rep.Detail("loading the image into the jail")

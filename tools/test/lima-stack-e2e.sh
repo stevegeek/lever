@@ -526,13 +526,20 @@ say "lever up --wait waits out a held lifecycle lock"
 python3 -c 'import fcntl,sys,time; f=open(sys.argv[1],"a"); fcntl.flock(f,fcntl.LOCK_EX); open(sys.argv[2],"w").close(); time.sleep(15)' \
 	"$INST/.lever-state/conversation.lock" "$WORK/held-wait" &
 holder=$!
-for _ in $(seq 50); do [ -e "$WORK/held-wait" ] && break; sleep 0.1; done
-upna "$WORK/up-locked.log"; rc=$?
-checkx "up under a held lock exits 6 at once ($rc)" '[ "$rc" = 6 ]'
-upna "$WORK/up-wait.log" --wait 3m; rc=$?
-wait "$holder" 2>/dev/null
-checkx "up --wait runs once the holder lets go ($rc)" '[ "$rc" = 0 ]'
-check "up --wait said what it waited for" grep -q "waiting up to 3m0s" "$WORK/up-wait.log"
+for _ in $(seq 300); do [ -e "$WORK/held-wait" ] && break; sleep 0.1; done
+if [ ! -e "$WORK/held-wait" ]; then
+	# Without the lock held, the checks below would test nothing.
+	bad "the test's lock holder took the lifecycle lock within 30s (the --wait checks did not run)"
+	kill "$holder" 2>/dev/null
+	wait "$holder" 2>/dev/null
+else
+	upna "$WORK/up-locked.log"; rc=$?
+	checkx "up under a held lock exits 6 at once ($rc)" '[ "$rc" = 6 ]'
+	upna "$WORK/up-wait.log" --wait 3m; rc=$?
+	wait "$holder" 2>/dev/null
+	checkx "up --wait runs once the holder lets go ($rc)" '[ "$rc" = 0 ]'
+	check "up --wait said what it waited for" grep -q "waiting up to 3m0s" "$WORK/up-wait.log"
+fi
 
 say "a stale hub pid file naming a live process, then lever up"
 # After a guest reboot server.pid names the old hub's pid, and the pid

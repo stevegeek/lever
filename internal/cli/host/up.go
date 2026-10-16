@@ -250,6 +250,9 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				if err := verifyManagerRole(ctx, deps, project, app.Name); err != nil {
 					return err
 				}
+				if err := ensureBrokerForUp(ctx, rep, deps, w.stepTail(apply.KindBrokerUp), app.Tree); err != nil {
+					return err
+				}
 				guard, err = resumeForUp(ctx, deps, app, project, func(ctx context.Context) error {
 					resume := rep.Start("resume manager")
 					resume.TailFrom(w.stepTail(apply.KindStartManager))
@@ -269,6 +272,9 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				// role on every token refresh, so an unrolled record gains full authority
 				// without restarting.
 				if err := verifyManagerRole(ctx, deps, project, app.Name); err != nil {
+					return err
+				}
+				if err := ensureBrokerForUp(ctx, rep, deps, w.stepTail(apply.KindBrokerUp), app.Tree); err != nil {
 					return err
 				}
 				// A running manager or its workers can hold an expired hub token (the refresh
@@ -407,6 +413,21 @@ func managerPhase(ctx context.Context, sc *scion.Client, project, name string) (
 		return a.Phase, nil
 	}
 	return "", nil
+}
+
+// ensureBrokerForUp is apply's broker-up for the up paths that keep the
+// manager: a broker that died under a live hub, or one of an older binary or
+// config, would otherwise stay so until the next apply, and the manager and
+// its workers would have no tools.
+func ensureBrokerForUp(ctx context.Context, rep *progress.Reporter, deps apply.Deps, tail func() (string, []string), tree string) error {
+	step := rep.Start(string(apply.KindBrokerUp))
+	step.TailFrom(tail)
+	err := apply.EnsureBrokerForUp(ctx, deps, tree)
+	step.Done(err)
+	if err != nil {
+		return fmt.Errorf("broker-up: %w", err)
+	}
+	return nil
 }
 
 // ensureRemoteForUp: a proxy that is not serving does not fail the up, since

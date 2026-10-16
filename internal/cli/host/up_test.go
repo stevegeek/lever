@@ -406,3 +406,29 @@ func TestEnsureRemoteForUp(t *testing.T) {
 		}
 	}
 }
+
+// TestEnsureBrokerForUp: up's resume and running paths start (or reuse) the
+// host broker as apply does, and a broker that does not come up fails the up.
+func TestEnsureBrokerForUp(t *testing.T) {
+	rep := progress.New(progress.Options{Mode: progress.ModeQuiet, Command: "up"})
+	var calls []string
+	deps := apply.Deps{
+		StartBroker:   func(context.Context) error { calls = append(calls, "start"); return nil },
+		BrokerHealthy: func(context.Context) error { calls = append(calls, "healthy"); return nil },
+		MintManagerBootstrap: func(context.Context) (apply.BootstrapMaterial, error) {
+			calls = append(calls, "mint")
+			return apply.BootstrapMaterial{}, apply.ErrBootstrapLatched
+		},
+	}
+	if err := ensureBrokerForUp(context.Background(), rep, deps, nil, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(calls, ","); got != "start,healthy,mint" {
+		t.Fatalf("calls = %s", got)
+	}
+	deps.BrokerHealthy = func(context.Context) error { return errors.New("broker did not become healthy") }
+	err := ensureBrokerForUp(context.Background(), rep, deps, nil, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "broker-up: broker did not become healthy") {
+		t.Fatalf("err = %v", err)
+	}
+}

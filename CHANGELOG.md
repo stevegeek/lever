@@ -7,6 +7,16 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`lever up` brings up the host broker when it only resumes the manager or finds it running.**
+  These two paths skip `apply`, and so never started or checked the capability broker: a broker
+  that had died under a live hub stayed down, and the manager and its workers had no tools, until
+  the next `lever apply`. They now run apply's broker step: a broker that is not serving is
+  started, a healthy one of this binary and broker config is kept, and one of another binary or
+  config is restarted. A broker started this way has its manager enrolment ticket minted and staged
+  at once, as `apply` does, so its single-use latch is never left open.
+
 ## [0.42.0] - 2026-10-15
 
 ### Added

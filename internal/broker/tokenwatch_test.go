@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -40,9 +41,24 @@ func tokenWatchBroker(t *testing.T, mode string, agents []scion.Agent, h *fakeHu
 	b, _, _ := reenrolBroker(t, rt, mode)
 	b.hubTokens = h
 	b.verifyRole = func(context.Context, string) error { return nil }
+	b.ensureManager = (&fakeLifecycle{rt: rt, reset: managerReset(b, h)}).ensure
 	var buf bytes.Buffer
 	b.log = slog.New(slog.NewTextHandler(&buf, nil))
 	return b, &buf
+}
+
+// managerReset is the manager's token reset as its lifecycle makes it: the
+// pre-role guard (refusing without one), then reset-auth, on h.
+func managerReset(b *Broker, h HubTokenHealer) func(ctx context.Context) error {
+	return func(ctx context.Context) error {
+		if b.verifyRole == nil {
+			return fmt.Errorf("%w: no pre-role record guard is wired", ErrManagerRefused)
+		}
+		if err := b.verifyRole(ctx, "appname"); err != nil {
+			return fmt.Errorf("%w: %v", ErrManagerRefused, err)
+		}
+		return h.ResetAuth(ctx, "appname")
+	}
 }
 
 var liveFleet = []scion.Agent{
@@ -196,14 +212,14 @@ func TestHealHubTokensSkipsTheManagerWhileLeverChangesIt(t *testing.T) {
 	b, _ := tokenWatchBroker(t, "all", liveFleet, h)
 	held, during := true, false
 	var whats []string
-	b.lockManager = func(what string) (func(), error) {
+	b.ensureManager = (&fakeLifecycle{reset: managerReset(b, h), lock: func(what string) (func(), error) {
 		whats = append(whats, what)
 		if held || during {
 			return nil, errors.New("locked")
 		}
 		during = true
 		return func() { during = false }, nil
-	}
+	}}).ensure
 	b.verifyRole = func(context.Context, string) error {
 		if !during {
 			t.Error("the manager's reset ran without the lock")

@@ -53,6 +53,10 @@ const (
 	// resumed, a suspended or stopped one resumed, an error one resumed with
 	// --force. The broker's certificate heal; it never creates or deletes.
 	ManagerReenrol
+	// ManagerTokenReset resets a running manager's hub token (scion
+	// reset-auth): a token of the record's own stored role, behind the
+	// pre-role record guard. The broker's token watch.
+	ManagerTokenReset
 )
 
 // ErrManagerRefused marks a change a check refused before or after it acted:
@@ -114,6 +118,8 @@ func (i ManagerIntent) String() string {
 		return "park"
 	case ManagerReenrol:
 		return "reenrol"
+	case ManagerTokenReset:
+		return "token-reset"
 	}
 	return fmt.Sprintf("intent(%d)", int(i))
 }
@@ -273,6 +279,11 @@ func EnsureManager(ctx context.Context, app *config.App, d Deps, q ManagerReques
 			return ManagerResult{}, fmt.Errorf("%s: internal error: the manager's lifecycle is not wired", subject)
 		}
 		return r.reenrol(ctx, jp, q)
+	case ManagerTokenReset:
+		if d.VerifyAgentRole == nil {
+			return ManagerResult{}, refused(errors.New("no pre-role record guard is wired"))
+		}
+		return r.resetToken(ctx, jp, q)
 	}
 	return ManagerResult{}, fmt.Errorf("%s: internal error: unknown manager intent %s", subject, q.Intent)
 }
@@ -310,6 +321,7 @@ const (
 	// verbResumeTask resumes a stopped record in a new session with a task.
 	verbResumeTask
 	verbSuspend
+	verbResetAuth
 )
 
 func (v managerVerb) String() string {
@@ -326,6 +338,8 @@ func (v managerVerb) String() string {
 		return "stop+resume"
 	case verbSuspend:
 		return "suspend"
+	case verbResetAuth:
+		return "reset-auth"
 	}
 	return ""
 }
@@ -419,6 +433,13 @@ func planManager(q ManagerRequest, name string, o managerObservation) (managerPl
 			return managerPlan{verb: verbResumeForce}, nil
 		}
 		return managerPlan{}, fmt.Errorf("manager %q is in phase %s, which the broker does not bounce; run `lever up`", name, scion.BoundedQuote(o.phase))
+	case ManagerTokenReset:
+		// Read again under the lock: a manager lever suspended or stopped
+		// meanwhile has no token to reset.
+		if o.phase == scion.PhaseRunning && scion.ContainerLive(o.container) {
+			return managerPlan{verb: verbResetAuth}, nil
+		}
+		return managerPlan{verb: verbNone}, nil
 	}
 	return managerPlan{}, fmt.Errorf("%s: internal error: unknown manager intent %s", q.subject(), q.Intent)
 }
@@ -998,4 +1019,27 @@ func (r *run) reenrol(ctx context.Context, jp string, q ManagerRequest) (res Man
 	res.MountsUnverified = !guard.Verified()
 	RecordGuestBoot(ctx, r.d)
 	return res, nil
+}
+
+// resetToken is ManagerTokenReset. The hub mints the new token from the
+// record's stored role, which on an old record can read as full, so the
+// pre-role record guard runs first. Verb is "" when the manager no longer
+// runs.
+func (r *run) resetToken(ctx context.Context, jp string, q ManagerRequest) (ManagerResult, error) {
+	sc := r.d.managerScion()
+	agents, err := sc.List(ctx, jp)
+	if err != nil {
+		return ManagerResult{}, fmt.Errorf("listing the agents: %s", termsafe.Sanitize(scion.ErrSummary(err)))
+	}
+	p, err := planManager(q, r.app.Name, observationOf(scion.FindAgent(agents, r.app.Name)))
+	if err != nil || p.verb == verbNone {
+		return ManagerResult{}, err
+	}
+	if err := r.d.VerifyAgentRole(ctx, path.Base(jp), r.app.Name); err != nil {
+		return ManagerResult{}, refused(err)
+	}
+	if err := sc.ResetAuth(ctx, r.app.Name, jp); err != nil {
+		return ManagerResult{}, err
+	}
+	return ManagerResult{Verb: p.verb.String()}, nil
 }

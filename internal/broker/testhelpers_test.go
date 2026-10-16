@@ -390,7 +390,9 @@ type fakeLifecycle struct {
 	refuse     error
 	fail       error
 	unverified bool
-	calls      []ManagerChange
+	// reset is ManagerTokenReset's reset-auth, its guard included.
+	reset func(ctx context.Context) error
+	calls []ManagerChange
 }
 
 func (f *fakeLifecycle) ensure(ctx context.Context, c ManagerChange) (ManagerOutcome, error) {
@@ -409,6 +411,15 @@ func (f *fakeLifecycle) ensure(ctx context.Context, c ManagerChange) (ManagerOut
 	}
 	if f.refuse != nil {
 		return ManagerOutcome{}, fmt.Errorf("%w: %v", ErrManagerRefused, f.refuse)
+	}
+	if c.Kind == ManagerTokenReset {
+		if f.reset == nil {
+			return ManagerOutcome{}, errors.New("fake: no reset wired")
+		}
+		if err := f.reset(ctx); err != nil {
+			return ManagerOutcome{}, err
+		}
+		return ManagerOutcome{Verb: "reset-auth"}, nil
 	}
 	if c.Kind != ManagerReenrol {
 		return ManagerOutcome{}, f.fail

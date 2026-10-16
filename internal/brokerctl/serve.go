@@ -240,11 +240,6 @@ func decorateConfig(cfg *broker.Config, app *config.App, st state.State, be back
 	cfg.AgentMessages = AgentMessages(app, st)
 	cfg.Files = Files(app, st)
 	cfg.Dispatch.BeginSession = func(agent string) func() error { return BeginSession(app, st, version, agent) }
-	if !StateInsideTree(app, st) {
-		cfg.Dispatch.LockManager = func(what string) (func(), error) {
-			return hostledger.TryLockFileAs(st.ConversationLock(), fmt.Sprintf("%s (pid %d)", what, os.Getpid()))
-		}
-	}
 	cfg.Version = version
 	cfg.ConfigHash = ConfigHash(app)
 	// Made here when apply did not make it first (a manual `lever broker
@@ -542,6 +537,8 @@ func managerLifecycle(app *config.App, d apply.Deps) func(context.Context, broke
 		switch c.Kind {
 		case broker.ManagerReenrol:
 			q.Intent = apply.ManagerReenrol
+		case broker.ManagerTokenReset:
+			q.Intent = apply.ManagerTokenReset
 		default:
 			return broker.ManagerOutcome{}, fmt.Errorf("internal error: unknown change %d to the manager", c.Kind)
 		}

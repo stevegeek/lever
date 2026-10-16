@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/jail"
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/testutil"
 )
@@ -406,5 +407,48 @@ func TestReenrolClearsTheManagersStopClaim(t *testing.T) {
 	d.StopClaimRetry = RetryBudget{Attempts: 3, Interval: time.Millisecond}
 	if _, err := EnsureManager(context.Background(), app, d, q); err != nil || !j.did("rm ") || r.resumeCalls != 2 {
 		t.Fatalf("err %v janitor %v resumes %d", err, j.calls, r.resumeCalls)
+	}
+}
+
+// TestTokenResetUnderTheLock: the broker's reset of the manager's hub token
+// reads the record again under the lock and resets only a running manager,
+// behind the pre-role guard (no guard refuses).
+func TestTokenResetUnderTheLock(t *testing.T) {
+	for _, c := range []struct {
+		phase, container string
+		roleErr          error
+		noGuard          bool
+		want             string // "reset", "none" or "refused"
+	}{
+		{"running", "Up 1 hour", nil, false, "reset"},
+		{"suspended", "stopped", nil, false, "none"},
+		{"running", "Exited (1)", nil, false, "none"},
+		{"running", "Up 1 hour", errors.New("stored role reads as full"), false, "refused"},
+		{"running", "Up 1 hour", nil, true, "refused"},
+	} {
+		app, f := newObserveFirstApp(t)
+		f.Script("scion reset-auth", proc.Result{Stdout: "ok"})
+		r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: c.phase, initContainerStatus: c.container}
+		d := fillDeps(Deps{Scion: scion.New(r, scion.Options{}), Log: func(string, ...any) {}})
+		d.VerifyAgentRole = func(context.Context, string, string) error { return c.roleErr }
+		if c.noGuard {
+			d.VerifyAgentRole = nil
+		}
+		res, err := EnsureManager(context.Background(), app, d, ManagerRequest{Intent: ManagerTokenReset, Subject: "broker"})
+		reset := sawScionCall(f, "reset-auth hello")
+		switch c.want {
+		case "reset":
+			if err != nil || !reset || res.Verb != "reset-auth" {
+				t.Errorf("%+v: err %v reset %v verb %q", c, err, reset, res.Verb)
+			}
+		case "none":
+			if err != nil || reset || res.Verb != "" {
+				t.Errorf("%+v: err %v reset %v verb %q", c, err, reset, res.Verb)
+			}
+		case "refused":
+			if !errors.Is(err, ErrManagerRefused) || reset {
+				t.Errorf("%+v: err %v reset %v", c, err, reset)
+			}
+		}
 	}
 }

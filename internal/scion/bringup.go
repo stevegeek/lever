@@ -532,11 +532,13 @@ func (c *Client) ServerStart(ctx context.Context, o ServerOpts) error {
 // HubExitedError is a hub start that left no scion server running: the
 // daemon exited during start-up, or scion refused to start one over a pid
 // file that names no scion server. Log is what the start added to the
-// hub's log, redacted and made safe to print; "" when it added nothing.
+// hub's log, redacted and made safe to print; "" when it added nothing or
+// LogUnread says why lever could not tell.
 type HubExitedError struct {
-	What  string
-	Log   string
-	Cause error
+	What      string
+	Log       string
+	LogUnread string
+	Cause     error
 	// First is the earlier attempt's failure, when this is the restart.
 	First *HubExitedError
 }
@@ -551,9 +553,12 @@ func (e *HubExitedError) Error() string {
 
 func (e *HubExitedError) what() string {
 	msg := e.What
-	if e.Log != "" {
+	switch {
+	case e.LogUnread != "":
+		msg += fmt.Sprintf("; lever could not read what it wrote to ~/%s (%s)", layout.ServerLogRel, e.LogUnread)
+	case e.Log != "":
 		msg += fmt.Sprintf("; ~/%s from this start: %s", layout.ServerLogRel, e.Log)
-	} else {
+	default:
 		msg += fmt.Sprintf("; it wrote nothing to ~/%s", layout.ServerLogRel)
 	}
 	if e.Cause != nil {
@@ -575,7 +580,10 @@ func (c *Client) startHubOnce(ctx context.Context, o ServerOpts, args []string) 
 	exited := func(what string, cause error) error {
 		e := &HubExitedError{What: what, Cause: cause}
 		if logErr == nil {
-			e.Log = c.serverLogSince(ctx, logFrom, o.SessionSecret)
+			e.Log, logErr = c.serverLogSince(ctx, logFrom, o.SessionSecret)
+		}
+		if logErr != nil {
+			e.LogUnread = logUnread(logErr)
 		}
 		return e
 	}
@@ -616,22 +624,40 @@ func startExited(err error) bool {
 }
 
 // serverLogSizeScript prints the size of the hub's log; 0 when there is none.
-// A symlink is refused, here and in serverLogTailScript, so the log read can
-// only ever be the hub's own file.
+// A symlink is refused (exit logSymlinkExit), here and in
+// serverLogTailScript, so the log read can only ever be the hub's own file.
 const serverLogSizeScript = `f="$HOME/$1"
-if [ -f "$f" ] && [ ! -L "$f" ]; then wc -c < "$f"; else echo 0; fi`
+[ -L "$f" ] && exit 5
+if [ -f "$f" ]; then wc -c < "$f"; else echo 0; fi`
 
-// serverLogTailScript prints at most the last 4 KiB the log gained past
-// offset $2, all of it when the log is now shorter (a new file).
+const logSymlinkExit = 5
+
+// serverLogTailScript prints at most the last serverLogTailBytes the log
+// gained past offset $2, all of it when the log is now shorter (a new file).
 const serverLogTailScript = `f="$HOME/$1"
-[ -f "$f" ] && [ ! -L "$f" ] || exit 0
+[ -L "$f" ] && exit 5
+[ -f "$f" ] || exit 0
 off=$2
 [ "$(wc -c < "$f")" -ge "$off" ] || off=0
 tail -c +$((off+1)) "$f" | tail -c 4096`
 
+const serverLogTailBytes = 4096
+
+var errLogSymlink = errors.New("it is a symlink, which lever does not follow")
+
+func logUnread(err error) string {
+	if errors.Is(err, errLogSymlink) {
+		return err.Error()
+	}
+	return "the read in the guest failed"
+}
+
 func (c *Client) serverLogSize(ctx context.Context) (int64, error) {
 	res, err := c.r.Run(ctx, nil, "sh", "-c", serverLogSizeScript, "_", layout.ServerLogRel)
 	if err != nil {
+		if res.Code == logSymlinkExit {
+			return 0, errLogSymlink
+		}
 		return 0, err
 	}
 	return strconv.ParseInt(strings.TrimSpace(res.Stdout), 10, 64)
@@ -642,30 +668,41 @@ const serverLogLines = 12
 
 // serverLogSince returns what the hub's log gained past from, as one line:
 // its last serverLogLines lines, redacted, with secret scrubbed, made safe to
-// print and bounded. "" when it gained nothing or cannot be read.
-func (c *Client) serverLogSince(ctx context.Context, from int64, secret string) string {
+// print and bounded; "" when it gained nothing.
+func (c *Client) serverLogSince(ctx context.Context, from int64, secret string) (string, error) {
 	res, err := c.r.Run(ctx, nil, "sh", "-c", serverLogTailScript, "_", layout.ServerLogRel, strconv.FormatInt(from, 10))
 	if err != nil {
-		return ""
+		if res.Code == logSymlinkExit {
+			return "", errLogSymlink
+		}
+		return "", err
+	}
+	raw := res.Stdout
+	// A tail that filled its window may start inside a line, and so inside a
+	// secret the literal scrub would then miss: drop that first line.
+	if len(raw) >= serverLogTailBytes {
+		_, raw, _ = strings.Cut(raw, "\n")
+	}
+	// The literal secret goes before the pattern redaction, which could
+	// otherwise mask part of it and leave the rest unmatched.
+	if len(secret) >= 8 {
+		raw = strings.ReplaceAll(raw, secret, "***")
 	}
 	var lines []string
-	for _, l := range strings.Split(res.Stdout, "\n") {
+	for _, l := range strings.Split(raw, "\n") {
 		if l = strings.TrimSpace(l); l != "" {
 			lines = append(lines, l)
 		}
 	}
 	lines = lines[max(0, len(lines)-serverLogLines):]
 	out := cleanErr(strings.Join(lines, "\n"))
-	if len(secret) >= 8 {
-		out = strings.ReplaceAll(out, secret, "***")
-	}
 	safe := make([]string, 0, len(lines))
 	for _, l := range strings.Split(out, "\n") {
 		if l != "" {
 			safe = append(safe, termsafe.Sanitize(l))
 		}
 	}
-	return boundSummary(strings.Join(safe, " | "), 1500)
+	return boundSummary(strings.Join(safe, " | "), 1500), nil
 }
 
 // ServerStop stops the workstation daemon, tolerating one that is not running
@@ -698,8 +735,16 @@ func (c *Client) ServerStop(ctx context.Context) error {
 // is dead or not a scion server: scion's own check is signal 0, so a dead pid
 // the next process reuses (lever's own scion start, after a reboot) would
 // read as a running server. The dead-pid removal re-reads the file first, so
-// a daemon that replaced it meanwhile keeps its own. The cmdline test
-// matches scion's own daemon argv (cmd/server_daemon.go).
+// a daemon that replaced it meanwhile keeps its own; one starter at a time is
+// assumed (the lifecycle lock), as nothing makes the re-read and the rm one
+// step.
+//
+// Agents can write the pid file (scion's workstation routes write under
+// $HOME) and run processes the guest sees as the jail user, so a scion server
+// must also run the root-installed scion ($2; "(deleted)" once an upgrade
+// replaced the file under it) in the reader's own pid and user namespaces,
+// not a decoy in a container. The cmdline test matches scion's own daemon
+// argv (cmd/server_daemon.go).
 const serverPIDProbeScript = `f="$HOME/$1"
 [ -f "$f" ] || exit 0
 pid=$(tr -cd '0-9' < "$f")
@@ -708,14 +753,24 @@ if [ ! -r "/proc/$pid/cmdline" ]; then
   [ "$(tr -cd '0-9' < "$f")" = "$pid" ] && rm -f -- "$f"
   exit 0
 fi
-case "$(tr '\000' ' ' < "/proc/$pid/cmdline")" in
-*scion*" server "*) printf '%s' "$pid" ;;
-*) rm -f -- "$f"; printf 'stale:%s' "$pid" ;;
-esac`
+` + scionServerTest + `
+then
+  printf '%s' "$pid"
+else
+  rm -f -- "$f"; printf 'stale:%s' "$pid"
+fi`
+
+// scionServerTest is the condition of an if, true when $pid is a scion server
+// lever installed (see serverPIDProbeScript); $2 is layout.ScionBin.
+const scionServerTest = `exe=$(readlink "/proc/$pid/exe")
+if [ -n "$2" ] && { [ "$exe" = "$2" ] || [ "$exe" = "$2 (deleted)" ]; } &&
+  [ "$(readlink "/proc/$pid/ns/pid")" = "$(readlink /proc/self/ns/pid)" ] &&
+  [ "$(readlink "/proc/$pid/ns/user")" = "$(readlink /proc/self/ns/user)" ] &&
+  case "$(tr '\000' ' ' < "/proc/$pid/cmdline")" in *scion*" server "*) true ;; *) false ;; esac`
 
 // serverPIDProbe returns the live scion server's pid, or 0 when there is none.
 func (c *Client) serverPIDProbe(ctx context.Context) (int, error) {
-	res, err := c.r.Run(ctx, nil, "sh", "-c", serverPIDProbeScript, "_", layout.ServerPIDRel)
+	res, err := c.r.Run(ctx, nil, "sh", "-c", serverPIDProbeScript, "_", layout.ServerPIDRel, layout.ScionBin)
 	if err != nil {
 		return 0, err
 	}
@@ -747,15 +802,15 @@ var HubEnvPrefixes = []string{"SCION_SERVER_AUTH_", "SCION_SERVER_HUB_ADMINEMAIL
 
 // runningHubScript prints the server's pid, then its NUL-separated argv, a
 // separator line, then the allowed env entries. The env filter runs in the
-// guest, so nothing else of the daemon's environment is ever read out.
+// guest, so nothing else of the daemon's environment is ever read out. A
+// process that is not a scion server lever installed (scionServerTest) reads
+// as no hub.
 var runningHubScript = `f="$HOME/$1"
 [ -f "$f" ] || exit 0
 pid=$(tr -cd '0-9' < "$f")
 [ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ] || exit 0
-case "$(tr '\000' ' ' < "/proc/$pid/cmdline")" in
-*scion*" server "*) ;;
-*) exit 0 ;;
-esac
+` + scionServerTest + `
+then :; else exit 0; fi
 printf '%s\n' "$pid"
 tr '\000' '\n' < "/proc/$pid/cmdline"
 printf '%s\n' '--lever-env--'
@@ -772,7 +827,7 @@ func hubEnvPatterns() []string {
 
 // RunningHub reads the live hub's argv and pinned env from /proc in the jail.
 func (c *Client) RunningHub(ctx context.Context) (RunningHub, error) {
-	res, err := c.r.Run(ctx, nil, "sh", "-c", runningHubScript, "_", layout.ServerPIDRel)
+	res, err := c.r.Run(ctx, nil, "sh", "-c", runningHubScript, "_", layout.ServerPIDRel, layout.ScionBin)
 	if err != nil {
 		return RunningHub{}, fmt.Errorf("reading the running hub: %w", err)
 	}

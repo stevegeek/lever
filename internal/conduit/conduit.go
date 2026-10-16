@@ -239,7 +239,7 @@ tr '\000' '\n' < "/proc/$pid/environ" | grep '^` + EnvPrefix + `' || true
 `
 
 // ScionPath is where lever installs the jail's scion, root-owned.
-const ScionPath = "/usr/local/bin/scion"
+const ScionPath = layout.ScionBin
 
 // ReadLiveHub reads the running hub's conduit environment from /proc in the
 // jail.

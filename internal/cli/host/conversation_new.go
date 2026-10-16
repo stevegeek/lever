@@ -72,8 +72,8 @@ const (
 	// `restore`, `up`, `apply`, `stop`, `reload`) is running; nothing was
 	// changed.
 	exitConversationLocked = 6
-	// exitConversationNotRunning: --by daily found the manager not running;
-	// nothing was changed.
+	// exitConversationNotRunning: --by found the manager, or the jail, not
+	// running; nothing was changed.
 	exitConversationNotRunning = 7
 )
 
@@ -311,6 +311,17 @@ func newConversationNewCmd(bf BackendFactory) *cobra.Command {
 				return err
 			}
 			defer unlock()
+			if by != "" {
+				// lever's own callers may have waited for the lock behind a stop or
+				// a destroy: they must not boot, or create, the jail that undid.
+				b, err := bf(app.Backend, machineName(app.Name))
+				if err != nil {
+					return err
+				}
+				if err := b.ResolveRunUser(cmd.Context()); err != nil {
+					return cli.WithExitCode(fmt.Errorf("the jail is not up (%v): nothing was started or changed", err), exitConversationNotRunning)
+				}
+			}
 			// The daily reset keeps no bring-up record: a manager that reports
 			// busy at every retry would otherwise rotate the operator's own
 			// records out each day. Its output is in conversation-new.log.

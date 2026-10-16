@@ -365,8 +365,18 @@ func TestDispatchConfigWiresTheRecordReaderByFolders(t *testing.T) {
 
 	// With the state directory inside the tree the broker writes no boot record there.
 	inTree := wiringApp(st.Dir, "")
-	if GuestBootFor(inTree, state.ForConfig(inTree.Tree), proc.RealRunner{}) != nil || GuestBootFor(app, st, proc.RealRunner{}) == nil {
-		t.Fatal("the boot record is wired only with the state directory outside the tree")
+	inTreeState := state.ForConfig(inTree.Tree)
+	if _, ok := GuestBootFor(inTree, inTreeState, proc.RealRunner{}).(unrecordedGuestBoot); !ok {
+		t.Fatal("inside the tree the boot is read but never recorded")
+	}
+	if _, ok := GuestBootFor(app, st, proc.RealRunner{}).(JailGuestBoot); !ok {
+		t.Fatal("outside the tree the boot record is wired")
+	}
+	if err := GuestBootFor(inTree, inTreeState, proc.RealRunner{}).Record("0f4c3a9e-7b1d-4c2e-9a8f-5d6e7f8a9b0c"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(inTreeState.LifecycleFile()); !os.IsNotExist(err) {
+		t.Fatalf("a boot record was written inside the tree: %v", err)
 	}
 
 	app.SharedFolders = []config.SharedFolder{{Path: "shared/x", Readers: []string{"a"}}}

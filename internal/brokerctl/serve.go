@@ -521,14 +521,20 @@ func (h hubTokenHealer) ResetAuth(ctx context.Context, agent string) error {
 
 // GuestBootFor is the manager's guest boot record for apply and the broker.
 // Inside the tree the state directory is the agents' to replace, so lever
-// neither trusts nor writes a record there: nil, and the guest-restart check
-// falls back to podman's container start time.
+// neither trusts nor writes a record there: it reads the current boot only,
+// and the guest-restart check falls back to podman's container start time.
 func GuestBootFor(app *config.App, st state.State, jr proc.Runner) apply.GuestBoot {
 	if StateInsideTree(app, st) {
-		return nil
+		return unrecordedGuestBoot{JailGuestBoot{R: jr}}
 	}
 	return JailGuestBoot{R: jr, State: st}
 }
+
+// unrecordedGuestBoot is a JailGuestBoot that keeps no record.
+type unrecordedGuestBoot struct{ JailGuestBoot }
+
+func (unrecordedGuestBoot) Recorded() (string, error) { return "", nil }
+func (unrecordedGuestBoot) Record(string) error       { return nil }
 
 // managerLifecycle makes the broker's changes to the manager through
 // apply.EnsureManager.

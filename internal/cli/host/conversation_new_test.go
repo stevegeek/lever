@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/apply"
+	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
@@ -413,5 +415,26 @@ func TestNewConversationBootTask(t *testing.T) {
 	}
 	if got := f.calls(); got != "suspend,stop,resume-fresh" || f.sc.task != "" {
 		t.Fatalf("calls = %q task %q", got, f.sc.task)
+	}
+}
+
+// TestUnattendedNewConversationBootsNoJail: a new conversation lever starts
+// on its own may have waited for the lock behind a stop or a destroy, so a
+// jail that is not up refuses it (exit 7) before anything is brought up.
+func TestUnattendedNewConversationBootsNoJail(t *testing.T) {
+	p := writeTmpConfig(t)
+	sb := &stubBackend{resolveRunUserErr: errors.New("machine is stopped")}
+	bf := func(string, string) (backend.Backend, error) { return sb, nil }
+	c := newConversationNewCmd(bf)
+	c.SetArgs([]string{"--by", "daily", "--", p})
+	c.SetOut(io.Discard)
+	c.SetErr(io.Discard)
+	err := c.Execute()
+	var ee *cli.ExitError
+	if !errors.As(err, &ee) || ee.Code != exitConversationNotRunning || !strings.Contains(err.Error(), "the jail is not up") {
+		t.Fatalf("err = %v", err)
+	}
+	if sb.up {
+		t.Fatal("the jail was brought up")
 	}
 }

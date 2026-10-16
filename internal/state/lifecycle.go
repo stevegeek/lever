@@ -11,7 +11,7 @@ import (
 )
 
 // Lifecycle is the instance's one record of what lever last observed and
-// converged: the guest boot the manager last ran live in, and the
+// converged: the guest boot the manager last ran in, and the
 // fingerprints of the bring-up steps a converge may skip.
 //
 // Only a holder of the lifecycle lock writes it, and only while the state
@@ -40,7 +40,7 @@ type ConvergeRecord struct {
 }
 
 // GuestBootRecord is the jail guest boot id in which lever last saw the
-// manager live.
+// manager's container run.
 type GuestBootRecord struct {
 	BootID     string    `json:"boot_id"`
 	RecordedAt time.Time `json:"recorded_at"`

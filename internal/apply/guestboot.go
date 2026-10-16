@@ -86,7 +86,7 @@ func (d Deps) logf(format string, args ...any) {
 }
 
 // recordGuestBoot notes the current guest boot as the one the manager runs
-// in; call it once lever has seen the manager live. Best-effort: a failure
+// in; call it once the manager's container is known to run in this boot. Best-effort: a failure
 // only means the next restart is not recognised.
 func recordGuestBoot(ctx context.Context, d Deps) {
 	if d.GuestBoot == nil {

@@ -20,6 +20,7 @@ import (
 	"github.com/stevegeek/lever/internal/progress"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/scion/layout"
+	"github.com/stevegeek/lever/internal/state"
 	"github.com/stevegeek/lever/internal/termsafe"
 	"github.com/stevegeek/lever/internal/wait"
 	"github.com/stevegeek/lever/internal/wire"
@@ -188,9 +189,15 @@ type Deps struct {
 	// not grow the grow-only jail disk by a full image. Best-effort.
 	PruneImages func(ctx context.Context) error
 	// WarmImage starts imageRef once under scion's user-namespace mapping so the
-	// first agent start finds podman's id-mapped layer copy built. It runs on every
-	// image, bounded by imageWarmTimeout. Best-effort.
+	// first agent start finds podman's id-mapped layer copy built. It runs on an
+	// image the jail held already only when no finished warm-up of the same
+	// inputs is recorded (Fingerprints), bounded by imageWarmTimeout.
+	// Best-effort.
 	WarmImage func(ctx context.Context, imageRef string) error
+	// Fingerprints records what a step last converged on, so a converge skips
+	// work that step's own check still vouches for. It never gates a fence.
+	// nil skips nothing.
+	Fingerprints StepFingerprints
 	Scion     *scion.Client
 	ReadCred  func(path string) (string, error) // nil ⇒ defaultReadCred
 	JailMount string                            // jail path where app.Tree is bind-mounted (e.g. "/lever"); "" disables translation
@@ -503,6 +510,15 @@ func (d Deps) check() error {
 		}
 	}
 	return nil
+}
+
+// StepFingerprints is the lifecycle record's step fingerprints
+// (state.Lifecycle). inputs is a digest of everything the step's result
+// depends on.
+type StepFingerprints interface {
+	Matches(step, inputs string) bool
+	Record(step, inputs string) error
+	Forget(step string) error
 }
 
 // UnattendedSession is Deps.BeginUnattendedSession's answer.
@@ -884,9 +900,22 @@ func runLoadImage(ctx context.Context, s Step, d Deps, app *config.App) error {
 		}
 	}
 	rep := progress.From(ctx)
+	key, inputs := warmFingerprint(s)
 	if loaded(ctx, s.Target) {
+		// The jail holds the configured image (by image ID), so the layer copy
+		// the last finished warm-up of these inputs built is still the one an
+		// agent start uses.
+		if d.Fingerprints != nil && d.Fingerprints.Matches(key, inputs) {
+			rep.Note("already loaded and warmed")
+			return ctx.Err()
+		}
 		rep.Note("already loaded")
 	} else {
+		if d.Fingerprints != nil {
+			if err := d.Fingerprints.Forget(key); err != nil {
+				d.Log("load-image: warning: %v", err)
+			}
+		}
 		rep.Detail("loading the image into the jail")
 		if err := load(ctx, s.Target); err != nil {
 			return err
@@ -900,10 +929,37 @@ func runLoadImage(ctx context.Context, s Step, d Deps, app *config.App) error {
 	}
 	// Warm an already-loaded image too: an earlier apply may have failed before its
 	// warm-up finished.
-	warmImage(ctx, s.Target, d)
+	warmed := warmImage(ctx, s.Target, d)
 	// A warm-up cut short by the run stopping or an interrupt is not a finished
 	// step.
-	return ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if warmed && d.Fingerprints != nil {
+		if err := d.Fingerprints.Record(key, inputs); err != nil {
+			d.Log("load-image: warning: could not record the warm-up of %s (the next bring-up warms it again): %v", s.Target, err)
+		}
+	}
+	return nil
+}
+
+// warmFingerprint is the lifecycle key and the inputs of an image's warm-up:
+// the reference, the archive it ships in as the host has it now, and this
+// lever (whose warm-up run may differ). "" inputs never match.
+func warmFingerprint(s Step) (key, inputs string) {
+	in := struct {
+		Ref, Tar, Version string
+		Size              int64
+		ModTime           time.Time
+	}{Ref: s.Target, Tar: s.TarPath, Version: cli.VersionString()}
+	if s.TarPath != "" {
+		fi, err := os.Stat(s.TarPath)
+		if err != nil {
+			return "warm-image " + s.Target, ""
+		}
+		in.Size, in.ModTime = fi.Size(), fi.ModTime().UTC()
+	}
+	return "warm-image " + s.Target, state.HashJSON(in)
 }
 
 // imageWarmTimeout bounds one image's warm-up. The measured first run of a
@@ -918,7 +974,7 @@ var imageWarmNoticeAfter = 3 * time.Second
 // warmImage only warns on failure: the agent start may still succeed (a small
 // image, a podman with native id-mapped mounts), and the start-manager error
 // names the cause if it does not.
-func warmImage(ctx context.Context, ref string, d Deps) {
+func warmImage(ctx context.Context, ref string, d Deps) (warmed bool) {
 	wctx, cancel := context.WithTimeout(ctx, imageWarmTimeout)
 	defer cancel()
 	done := make(chan error, 1)
@@ -937,6 +993,7 @@ func warmImage(ctx context.Context, ref string, d Deps) {
 	if err != nil && ctx.Err() == nil {
 		d.Log("load-image: warning: warming %s failed: %v. The first agent start on it may stay in phase created; see the start-manager error if it does", ref, err)
 	}
+	return err == nil
 }
 
 func runCredential(ctx context.Context, s Step, d Deps) error {

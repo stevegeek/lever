@@ -980,6 +980,7 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		// WarmImage builds podman's id-mapped layer copy before scion's agent start
 		// needs it. Best-effort.
 		WarmImage:        b.WarmJailImage,
+		Fingerprints:     stepFingerprints(w.app, st),
 		Scion:            sc,
 		JailMount:        b.MountDest(),
 		HubSessionSecret: sessionSecret,
@@ -1079,6 +1080,22 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		StepTail:             w.stepTail,
 	}
 }
+
+// stepFingerprints is the lifecycle record's step fingerprints, or nil (a
+// converge skips nothing) with the state directory inside the tree, where an
+// agent could forge them.
+func stepFingerprints(app *config.App, st state.State) apply.StepFingerprints {
+	if brokerctl.StateInsideTree(app, st) {
+		return nil
+	}
+	return lifecycleSteps{st}
+}
+
+type lifecycleSteps struct{ st state.State }
+
+func (l lifecycleSteps) Matches(step, inputs string) bool { return l.st.StepMatches(step, inputs) }
+func (l lifecycleSteps) Record(step, inputs string) error { return l.st.RecordStep(step, inputs, time.Now()) }
+func (l lifecycleSteps) Forget(step string) error         { return l.st.ForgetStep(step) }
 
 func (w *applyWiring) removeJailFile(ctx context.Context, jailPath string) error {
 	return removeJailFile(ctx, w.jr, jailPath)

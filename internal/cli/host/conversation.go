@@ -16,11 +16,11 @@ import (
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/convbackup"
-	"github.com/stevegeek/lever/internal/retry"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/sessionrec"
 	"github.com/stevegeek/lever/internal/state"
 	"github.com/stevegeek/lever/internal/termsafe"
+	"github.com/stevegeek/lever/internal/wait"
 )
 
 // `lever up --fresh` deletes the manager's record, and scion deletes the home
@@ -452,7 +452,7 @@ func verifyStored(store convbackup.Store, id string) error {
 // container: no agent process may run while its files move.
 func (o convOps) waitSuspended(ctx context.Context) error {
 	last, err := o.waitPhase(ctx, scion.PhaseSuspended)
-	if errors.Is(err, retry.ErrExhausted) {
+	if errors.Is(err, wait.ErrTimeout) {
 		return fmt.Errorf("the manager did not suspend (last seen %s); nothing was restored", scion.BoundedQuote(last))
 	}
 	return err
@@ -460,23 +460,26 @@ func (o convOps) waitSuspended(ctx context.Context) error {
 
 // waitPhase waits until the hub reads the manager in phase with no live
 // container, within suspendWait. last is the phase/container status last
-// seen; an exhausted wait is retry.ErrExhausted.
+// seen; an exhausted wait Is wait.ErrTimeout.
 func (o convOps) waitPhase(ctx context.Context, phase string) (last string, err error) {
-	b := o.suspendWait
-	if b.Attempts <= 0 {
-		b = apply.RetryBudget{Attempts: 30, Interval: time.Second}
+	s := wait.ManagerStopped
+	if b := o.suspendWait; b.Attempts > 0 {
+		s = wait.Attempts(s.Name, b.Attempts, b.Interval)
 	}
-	err = retry.Until(ctx, b.Attempts, b.Interval, func() (bool, error) {
+	err = wait.For(ctx, s, func(ctx context.Context) wait.Result {
 		agents, err := o.sc.List(ctx, o.guest.Workspace)
 		if err != nil {
-			return false, nil
+			return wait.NotYetErr(err)
 		}
 		rec := scion.FindAgent(agents, o.app.Name)
 		if rec == nil {
-			return false, errors.New("the manager record disappeared")
+			return wait.Fatal(errors.New("the manager record disappeared"))
 		}
 		last = rec.Phase + "/" + rec.ContainerStatus
-		return rec.Phase == phase && !scion.ContainerLive(rec.ContainerStatus), nil
+		if rec.Phase == phase && !scion.ContainerLive(rec.ContainerStatus) {
+			return wait.Ready()
+		}
+		return wait.NotYet(last)
 	})
 	return last, err
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/termsafe"
+	"github.com/stevegeek/lever/internal/wait"
 )
 
 // StaleContainerOps is what clearing a stop claim needs from podman in the
@@ -26,7 +27,7 @@ type StaleContainerOps interface {
 // after lever's recovery, or one lever could not recover.
 var ErrStopClaimHeld = errors.New("the hub holds a stop claim on the manager")
 
-const stopClaimMaxInterval = 30 * time.Second
+var stopClaimMaxInterval = wait.StopClaimReleased.MaxInterval
 
 // stopClaimSettle is how long a container must keep the same id and the same
 // state between two looks before it is removed. created is also the state
@@ -38,7 +39,7 @@ var stopClaimSettle = struct{ Stopped, Created time.Duration }{5 * time.Second, 
 
 // The hub releases the claim on the reaper's next tick (every minute) after a
 // broker heartbeat shows the container gone: 5+10+20+30*5 s, about 3 min.
-var defaultStopClaimRetry = RetryBudget{Attempts: 9, Interval: 5 * time.Second}
+var defaultStopClaimRetry = budgetOf(wait.StopClaimReleased)
 
 // ResumeClearingStopClaim runs resume and, when the hub refuses it with a
 // held stop claim (IsStopClaimHeld), recovers and retries within a

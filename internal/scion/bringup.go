@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/progress"
-	"github.com/stevegeek/lever/internal/retry"
 	"github.com/stevegeek/lever/internal/scion/layout"
+	"github.com/stevegeek/lever/internal/wait"
 )
 
 // AlreadyRunning reports whether err is a scion "already running" error, so
@@ -154,31 +154,23 @@ func IsAgentAbsent(err error) bool {
 		strings.Contains(msg, "no git origin remote found")
 }
 
-// The default waitHubReady budget: probe every hubReadyInterval for up to
-// hubReadyTimeout; say so after hubReadyNotice and then every hubReadyEvery;
-// check every hubAliveEvery that a scion server is still alive to wait on.
-//
-// The timeout is a time, not an attempt count, and long: a cold hub start
-// after a reboot (daemon re-exec, cold page cache, a large hub.db) can take
-// many seconds before it serves at all.
-const (
-	hubReadyTimeout  = 2 * time.Minute
-	hubReadyInterval = 1 * time.Second
-	hubReadyNotice   = 15 * time.Second
-	hubReadyEvery    = 30 * time.Second
-	hubAliveEvery    = 5 * time.Second
-)
+// hubAliveEvery is how often waitHubReady checks that a scion server is
+// still alive to wait on, and how long one in-guest /healthz poll runs.
+const hubAliveEvery = 5 * time.Second
+
+// errServerGone is waitHubReady finding no live scion server to wait on.
+var errServerGone = errors.New("no scion server is running in the jail any more (it exited during start-up)")
 
 // waitHubReady polls a project-independent hub call until it succeeds or the
-// budget runs out. list --all does not resolve a project, unlike list
-// --global, which fails with "no git origin remote found" before any project
-// is registered.
+// c.hubReady budget runs out. list --all does not resolve a project, unlike
+// list --global, which fails with "no git origin remote found" before any
+// project is registered.
 //
 // An authentication failure also counts as ready: the hub answered, it only
 // refused the credential, which happens whenever lever holds no working token
 // yet. Whoever needs the credential fails on it next, with the real error.
 //
-// Every hubAliveEvery it runs serverPIDProbe, and stops with ErrHubNotReady
+// Every hubAliveEvery it runs serverPIDProbe, and stops with errServerGone
 // once no scion server is alive, so the long budget costs nothing when the
 // start failed. A probe that cannot run says nothing. notify, when non-nil,
 // gets progress lines so a slow start does not read as a hang.
@@ -188,65 +180,54 @@ func (c *Client) waitHubReady(ctx context.Context, notify func(format string, ar
 	if rep.Active() {
 		notify = nil
 	}
+	s := c.hubReady
+	if notify != nil {
+		s.Notice = func(p wait.Progress) {
+			notify("scion-server: the hub is not answering yet after %s; a cold start (the first after a reboot or a scion pin change) can take a minute — waiting up to %s",
+				p.Elapsed.Round(time.Second), s.Budget)
+		}
+	}
 	start := time.Now()
-	deadline := start.Add(c.hubReadyTimeout)
-	nextNotice := start.Add(c.hubReadyNotice)
+	deadline := start.Add(s.Budget)
 	lastAlive := start
-	attempts := 0
 	var lastErr error
-	errGone := errors.New("server gone")
 	// One jail call polls /healthz for up to hubAliveEvery; the scion CLI
 	// probe after each in-guest wait still decides readiness. Without an
 	// endpoint, or when the in-guest wait cannot run, it polls with the CLI
-	// every hubReadyInterval.
+	// every s.Interval.
 	inGuest := c.hubEndpoint != ""
-	pace := false
-	err := retry.Until(ctx, 0, 0, func() (bool, error) {
-		attempts++
-		if pace {
-			select {
-			case <-ctx.Done():
-				return false, ctx.Err()
-			case <-time.After(c.hubReadyInterval):
-			}
-		}
-		pace = true
+	err := wait.For(ctx, s, func(ctx context.Context) wait.Result {
+		waited := false
 		if inGuest {
 			switch c.awaitHealthz(ctx, min(c.hubAliveEvery, time.Until(deadline))) {
 			case healthzDown:
-				pace = false // the guest loop has already waited
+				waited = true
 			case healthzUnavailable:
 				inGuest = false
 			}
 		}
 		_, lastErr = c.run(ctx, "", "list", "--all", "--format", "json", nonInteractive)
 		if lastErr == nil || isHubAuthRefusal(lastErr) {
-			return true, nil
+			return wait.Ready()
 		}
-		now := time.Now()
-		if !now.Before(deadline) {
-			return false, retry.ErrExhausted
-		}
-		if now.Sub(lastAlive) >= c.hubAliveEvery {
+		if now := time.Now(); now.Sub(lastAlive) >= c.hubAliveEvery {
 			lastAlive = now
 			if pid, perr := c.serverPIDProbe(ctx); perr == nil && pid == 0 {
-				return false, errGone
+				return wait.Fatal(errServerGone)
 			}
 		}
-		rep.Detail(fmt.Sprintf("hub not answering yet; a cold start can take a minute (waiting up to %s)", c.hubReadyTimeout))
-		if notify != nil && !now.Before(nextNotice) {
-			notify("scion-server: the hub is not answering yet after %s; a cold start (the first after a reboot or a scion pin change) can take a minute — waiting up to %s",
-				now.Sub(start).Round(time.Second), c.hubReadyTimeout)
-			nextNotice = now.Add(hubReadyEvery)
+		rep.Detail(fmt.Sprintf("hub not answering yet; a cold start can take a minute (waiting up to %s)", s.Budget))
+		if waited {
+			return wait.NotYetErr(lastErr).Now()
 		}
-		return false, nil
+		return wait.NotYetErr(lastErr)
 	})
+	var te *wait.TimeoutError
 	switch {
-	case errors.Is(err, retry.ErrExhausted):
-		return fmt.Errorf("%w after %s (%d attempts): %w", ErrHubNotReady, time.Since(start).Round(time.Second), attempts, lastErr)
-	case errors.Is(err, errGone):
-		return fmt.Errorf("%w: no scion server is running in the jail any more (it exited during start-up); see ~/%s in the jail: %w",
-			ErrHubNotReady, layout.ServerLogRel, lastErr)
+	case errors.As(err, &te):
+		return fmt.Errorf("%w after %s (%d attempts): %w", ErrHubNotReady, te.Elapsed.Round(time.Second), te.Attempts, lastErr)
+	case errors.Is(err, errServerGone):
+		return fmt.Errorf("%w: %w; see ~/%s in the jail: %w", ErrHubNotReady, errServerGone, layout.ServerLogRel, lastErr)
 	}
 	return err
 }
@@ -304,13 +285,6 @@ func isHubAuthRefusal(err error) bool {
 // its budget, or its server is gone; the last probe error is wrapped
 // alongside it.
 var ErrHubNotReady = errors.New("hub not ready")
-
-// brokerReadyAttempts/brokerReadyInterval are the default WaitRuntimeBrokerReady
-// budget: their product is how long it waits.
-const (
-	brokerReadyAttempts = 30
-	brokerReadyInterval = 1 * time.Second
-)
 
 // brokerPollEvery is how often the in-guest broker wait asks the hub.
 const brokerPollEvery = 200 * time.Millisecond
@@ -372,8 +346,8 @@ func (c *Client) WaitRuntimeBrokerReady(ctx context.Context, project string) err
 // avoid scion's "no project" resolution failure; hub brokers is hub-wide.
 func (c *Client) RuntimeBrokerReady(ctx context.Context, project string) (bool, error) {
 	args := append([]string{"hub", "brokers", "--format", "json", nonInteractive}, projectFlag(project)...)
-	budget := time.Duration(c.brokerReadyAttempts) * c.brokerReadyInterval
-	deadline := time.Now().Add(budget)
+	s := c.brokerReady
+	deadline := time.Now().Add(s.Budget)
 	for {
 		n := int(time.Until(deadline) / brokerPollEvery)
 		argv := append([]string{"-c", brokerWaitScript, "_", strconv.Itoa(max(n, 0)), c.bin}, args...)
@@ -398,20 +372,24 @@ func (c *Client) RuntimeBrokerReady(ctx context.Context, project string) (bool, 
 		case <-time.After(brokerPollEvery):
 		}
 	}
-	attempts := c.brokerReadyAttempts
-	if c.brokerReadyInterval > 0 {
-		attempts = max(1, int(time.Until(deadline)/c.brokerReadyInterval))
+	// The host poll keeps the attempts the remaining time allows, so a slow
+	// CLI call cannot shorten it.
+	s.Budget = time.Until(deadline)
+	if s.Interval > 0 {
+		s.MinAttempts = max(1, int(s.Budget/s.Interval))
 	}
 	online := false
-	err := retry.Until(ctx, attempts, c.brokerReadyInterval, func() (bool, error) {
+	err := wait.For(ctx, s, func(ctx context.Context) wait.Result {
 		out, err := c.runValue(ctx, "", args...)
 		if err != nil {
-			return false, nil
+			return wait.NotYetErr(err)
 		}
-		online = brokersOnline(out)
-		return online, nil
+		if online = brokersOnline(out); online {
+			return wait.Ready()
+		}
+		return wait.NotYet("no online broker")
 	})
-	if errors.Is(err, retry.ErrExhausted) {
+	if errors.Is(err, wait.ErrTimeout) {
 		return false, nil
 	}
 	return online, err

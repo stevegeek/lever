@@ -4,10 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/stevegeek/lever/internal/config"
-	"github.com/stevegeek/lever/internal/retry"
+	"github.com/stevegeek/lever/internal/wait"
 )
 
 // ManagerResume guards one resume of the manager outside the start-manager
@@ -89,7 +88,7 @@ func (m *ManagerResume) AfterFailure(ctx context.Context, cause error) error {
 
 func (m *ManagerResume) Verified() bool { return m.verified }
 
-var settleBudget = RetryBudget{Attempts: 30, Interval: time.Second}
+var settleBudget = budgetOf(wait.ManagerMountsVerified)
 
 // Settle is Live for a path with no liveness gate: it retries until the check
 // runs, for up to settleBudget, then warns if it never did.
@@ -99,10 +98,13 @@ func (m *ManagerResume) Settle(ctx context.Context) error {
 	}
 	var verr error
 	// Detached, like each check: an interrupt must not end the wait.
-	_ = retry.Until(context.WithoutCancel(ctx), settleBudget.Attempts, settleBudget.Interval, func() (bool, error) {
+	_ = wait.For(context.WithoutCancel(ctx), settleBudget.spec(wait.ManagerMountsVerified.Name), func(context.Context) wait.Result {
 		v, err := m.r.verifyResumedTreeMounts(ctx, m.project)
 		m.verified, verr = v, err
-		return v, nil
+		if v {
+			return wait.Ready()
+		}
+		return wait.NotYetErr(err)
 	})
 	if verr == nil && !m.verified {
 		m.r.warnUnverifiedResume()

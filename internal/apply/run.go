@@ -19,10 +19,10 @@ import (
 	"github.com/stevegeek/lever/internal/imageref"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/progress"
-	"github.com/stevegeek/lever/internal/retry"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/scion/layout"
 	"github.com/stevegeek/lever/internal/termsafe"
+	"github.com/stevegeek/lever/internal/wait"
 	"github.com/stevegeek/lever/internal/wire"
 )
 
@@ -56,10 +56,20 @@ func (b RetryBudget) or(def RetryBudget) RetryBudget {
 	return b
 }
 
+// spec is b as a wait of b.Attempts probes b.Interval apart.
+func (b RetryBudget) spec(name string) wait.Spec {
+	return wait.Attempts(name, b.Attempts, b.Interval)
+}
+
+// budgetOf is the RetryBudget of a fixed-interval wait.Spec.
+func budgetOf(s wait.Spec) RetryBudget {
+	return RetryBudget{Attempts: s.MinAttempts, Interval: s.Interval}
+}
+
 // defaultBrokerStartRetry absorbs the runtime broker's asynchronous
 // registration with the hub: a start-manager that runs too soon gets "no
 // runtime brokers available" although the hub is up.
-var defaultBrokerStartRetry = RetryBudget{Attempts: 30, Interval: time.Second}
+var defaultBrokerStartRetry = budgetOf(wait.BrokerUnavailable)
 
 // defaultManagerLiveRetry bounds waitManagerLive's post-start poll. scion
 // reports the record running before the harness has run a line, and every
@@ -68,12 +78,14 @@ var defaultBrokerStartRetry = RetryBudget{Attempts: 30, Interval: time.Second}
 // those with margin but is still probabilistic. It applies to a gate that never
 // saw claude's pane; after that the window is harnessSettle, counted from the
 // pane.
-var defaultManagerLiveRetry = RetryBudget{Attempts: 15, Interval: time.Second, Settle: 10 * time.Second}
+var defaultManagerLiveRetry = RetryBudget{
+	Attempts: wait.ManagerRunning.MinAttempts, Interval: wait.ManagerRunning.Interval, Settle: wait.ManagerSettle,
+}
 
 // defaultPhaseSettleRetry bounds settleManagerPhase. It errs long: exhausting
 // it is a loud failure the operator must act on, while an early settle costs
 // one more list.
-var defaultPhaseSettleRetry = RetryBudget{Attempts: 60, Interval: time.Second}
+var defaultPhaseSettleRetry = budgetOf(wait.ManagerPhaseSettle)
 
 // transitionalPhases are scion record phases (pkg/agent/state/state.go) that a
 // record only passes through. convergeManager has no verb for them and a
@@ -1948,20 +1960,23 @@ func (r *run) settleManagerPhase(ctx context.Context, jp string, rec *scion.Agen
 		r.app.Name, rec.Phase, time.Duration(b.Attempts)*b.Interval)
 	cur := rec
 	var listErr error
-	err := retry.Until(ctx, b.Attempts, b.Interval, func() (bool, error) {
+	err := wait.For(ctx, b.spec(wait.ManagerPhaseSettle.Name), func(ctx context.Context) wait.Result {
 		agents, err := r.d.Scion.List(ctx, jp)
 		if err != nil {
 			listErr = err
-			return false, nil
+			return wait.NotYetErr(err)
 		}
 		listErr = nil
 		cur = scion.FindAgent(agents, r.app.Name)
-		return cur == nil || !slices.Contains(transitionalPhases, cur.Phase), nil
+		if cur == nil || !slices.Contains(transitionalPhases, cur.Phase) {
+			return wait.Ready()
+		}
+		return wait.NotYet(cur.Phase)
 	})
 	if err == nil {
 		return cur, nil
 	}
-	if !errors.Is(err, retry.ErrExhausted) {
+	if !errors.Is(err, wait.ErrTimeout) {
 		return nil, err
 	}
 	if listErr != nil {
@@ -2128,17 +2143,17 @@ func HubRefusedResume(verb string, err error) error {
 // absorbs the registration race and must not mask real failures.
 func (r *run) retryOnBrokerUnavailable(ctx context.Context, action func() error) error {
 	var last error
-	err := retry.Until(ctx, r.brokerStart.Attempts, r.brokerStart.Interval, func() (bool, error) {
+	err := wait.For(ctx, r.brokerStart.spec(wait.BrokerUnavailable.Name), func(context.Context) wait.Result {
 		last = action()
-		if last == nil {
-			return true, nil
+		switch {
+		case last == nil:
+			return wait.Ready()
+		case !scion.IsBrokerUnavailable(last):
+			return wait.Fatal(last)
 		}
-		if !scion.IsBrokerUnavailable(last) {
-			return false, last
-		}
-		return false, nil
+		return wait.NotYetErr(last)
 	})
-	if errors.Is(err, retry.ErrExhausted) {
+	if errors.Is(err, wait.ErrTimeout) {
 		return last // the transient error itself
 	}
 	return err

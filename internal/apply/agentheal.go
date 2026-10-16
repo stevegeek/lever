@@ -8,9 +8,9 @@ import (
 
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/jail"
-	"github.com/stevegeek/lever/internal/retry"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/termsafe"
+	"github.com/stevegeek/lever/internal/wait"
 )
 
 // AgentSessionProbe reads an agent's session from inside its container and
@@ -23,9 +23,7 @@ type AgentSessionProbe interface {
 	ReportSessionRunning(ctx context.Context, ref string) error
 }
 
-// sessionHealSettle is short because sciontool's hub call is synchronous, so
-// the first list normally shows the new phase.
-var sessionHealSettle = RetryBudget{Attempts: 3, Interval: time.Second}
+var sessionHealSettle = budgetOf(wait.SessionHealed)
 
 // HealAgentSession repairs two faults of an agent whose container is live,
 // both of which leave every other signal green, and returns the record as it
@@ -87,16 +85,19 @@ func HealAgentSession(ctx context.Context, h SessionHealer, project string, rec 
 	}
 	healed := rec
 	b := sessionHealSettle
-	_ = retry.Until(ctx, b.Attempts, b.Interval, func() (bool, error) {
+	_ = wait.For(ctx, b.spec(wait.SessionHealed.Name), func(ctx context.Context) wait.Result {
 		agents, err := sc.List(ctx, project)
 		if err != nil {
-			return false, nil
+			return wait.NotYetErr(err)
 		}
 		if a := scion.FindAgent(agents, rec.Slug); a != nil {
 			healed = a
-			return a.Phase == scion.PhaseRunning, nil
+			if a.Phase == scion.PhaseRunning {
+				return wait.Ready()
+			}
+			return wait.NotYet(a.Phase)
 		}
-		return false, nil
+		return wait.NotYet("no record")
 	})
 	if healed.Phase == scion.PhaseRunning {
 		log("agent %q: session reported running again; its conversation continues", rec.Slug)

@@ -755,33 +755,27 @@ func runBrokerUp(ctx context.Context, d Deps) error {
 // `lever up` paths that keep a manager without running the plan. A broker
 // this call started has its single-use latch open: the ticket is minted and
 // staged in tree at once, as apply's mint step does, so no latch stays open
-// for whoever reaches the admin listener first.
-//
-// forResume is set before a resume: a spent latch is then re-armed and a
-// fresh ticket staged, as start-manager's resume does (ensureFreshBootstrap),
-// since a manager whose leaf expired while it was not running re-enrols on
-// boot only with an unspent ticket.
-func EnsureBrokerForUp(ctx context.Context, d Deps, tree string, forResume bool) error {
-	if d.StartBroker == nil || d.BrokerHealthy == nil || d.MintManagerBootstrap == nil || forResume && d.RearmBootstrap == nil {
-		return errors.New("broker-up: internal error: the broker controller is not wired")
+// for whoever reaches the admin listener first. staged reports that ticket
+// (ManagerRequest.TicketStaged); a spent latch stages none, and
+// EnsureManager re-arms it before a resume or create.
+func EnsureBrokerForUp(ctx context.Context, d Deps, tree string) (staged bool, err error) {
+	if d.StartBroker == nil || d.BrokerHealthy == nil || d.MintManagerBootstrap == nil {
+		return false, errors.New("broker-up: internal error: the broker controller is not wired")
 	}
 	if err := runBrokerUp(ctx, d); err != nil {
-		return err
+		return false, err
 	}
 	m, err := d.MintManagerBootstrap(ctx)
 	switch {
 	case errors.Is(err, ErrBootstrapLatched):
-		if !forResume {
-			return nil
-		}
-		if err := d.RearmBootstrap(ctx); err != nil {
-			return fmt.Errorf("re-arming the broker's spent bootstrap latch: %w", err)
-		}
-		return nil
+		return false, nil
 	case err != nil:
-		return err
+		return false, err
 	}
-	return StageBootstrapMaterial(tree, m)
+	if err := StageBootstrapMaterial(tree, m); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // agentTemplate logs only on change: the change is otherwise invisible, and a
@@ -2175,40 +2169,10 @@ func WaitManagerLive(ctx context.Context, d Deps, name, project string, prog *Pr
 	return withHarnessDeathHint(ctx, d, err, project, name)
 }
 
-// observeAttempts bounds ObserveManagerLive's list retries: enough to ride
-// out a transient hub error, short enough that a refusal arrives in seconds
-// rather than after the fifteen the start gate allows.
+// observeAttempts bounds CheckManagerAfterDetach's list retries: enough to
+// ride out a transient hub error, short enough that an answer arrives in
+// seconds.
 const observeAttempts = 3
-
-// ObserveManagerLive is lever up's check for a manager that was already
-// running. It started nothing, so it holds nothing: one observation (a failed
-// list is retried observeAttempts times), no settle, and a refusal only on
-// positive evidence of a death: no record, a phase that is not running, or a
-// container status that is present and not live. An empty container status is
-// not evidence: the runtime broker's heartbeat refreshes that column, and a
-// momentary blank must not refuse a healthy manager.
-func ObserveManagerLive(ctx context.Context, d Deps, name, project string) error {
-	b := d.ManagerLiveRetry.or(defaultManagerLiveRetry)
-	a, err := scion.ObserveAgent(ctx, func(c context.Context) ([]scion.Agent, error) {
-		return d.Scion.List(c, project)
-	}, name, observeAttempts, b.Interval)
-	const remedy = "`lever attach` still tries the session; `lever doctor` shows the manager row; `lever stop` then `lever up` resumes it; `lever up --fresh` discards the conversation"
-	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return err
-		}
-		return fmt.Errorf("up: manager %q could not be observed: %w — %s", name, err, remedy)
-	}
-	switch {
-	case a == nil:
-		return fmt.Errorf("up: manager %q was running when up looked, but has no record now — %s", name, remedy)
-	case a.Phase != scion.PhaseRunning:
-		return fmt.Errorf("up: manager %q was running when up looked, but is in phase %s now (container %s) — %s", name, scion.BoundedQuote(a.Phase), scion.BoundedQuote(a.ContainerStatus), remedy)
-	case a.ContainerStatus != "" && !scion.ContainerLive(a.ContainerStatus):
-		return fmt.Errorf("up: manager %q record says running, but its container is %s — the harness died; %s", name, scion.BoundedQuote(a.ContainerStatus), remedy)
-	}
-	return nil
-}
 
 // JailPath maps a host path under tree to its location inside the jail. It
 // returns hostPath unchanged when mount is empty or hostPath is not under tree.

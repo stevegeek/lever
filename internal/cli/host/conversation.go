@@ -94,7 +94,7 @@ func newConvOps(w *applyWiring, app *config.App, st state.State) convOps {
 		sc:    w.sc,
 		log:   w.deps.Log,
 		verifyRole: func(ctx context.Context) error {
-			return verifyManagerRole(ctx, w.deps, project, app.Name)
+			return w.deps.VerifyAgentRole(ctx, hubProjectKey(project), app.Name)
 		},
 		gate: func(ctx context.Context) error {
 			return apply.WaitManagerLive(ctx, w.deps, app.Name, project, nil)

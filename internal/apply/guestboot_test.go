@@ -198,37 +198,6 @@ func TestStartManagerRecoversWithoutRecord(t *testing.T) {
 	}
 }
 
-// RecoverAfterGuestRestart reports true only once the record reads suspended.
-func TestRecoverAfterGuestRestartForUp(t *testing.T) {
-	_, f := newObserveFirstApp(t)
-	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "created"}
-	d := Deps{Scion: scion.New(r, scion.Options{}), GuestBoot: &fakeGuestBoot{current: bootB, recorded: bootA}, ContainerRunning: podmanSays(false)}
-	if !RecoverAfterGuestRestart(context.Background(), d, "hello", "/lever") {
-		t.Fatal("want the recovery")
-	}
-	if r.suspendCalls != 1 || r.resumeCalls != 0 {
-		t.Errorf("suspend=%d resume=%d: up resumes on its own path", r.suspendCalls, r.resumeCalls)
-	}
-
-	_, f2 := newObserveFirstApp(t)
-	r2 := &agentLifecycleRunner{FakeRunner: f2, slug: "hello", initPhase: "running", initContainerStatus: "created", suspendErr: errors.New("hub said no")}
-	var logged logSink
-	d2 := Deps{Scion: scion.New(r2, scion.Options{}), GuestBoot: &fakeGuestBoot{current: bootB, recorded: bootA}, ContainerRunning: podmanSays(false), Log: logged.logf}
-	if RecoverAfterGuestRestart(context.Background(), d2, "hello", "/lever") {
-		t.Fatal("a suspend that did not take must leave up on its observe path")
-	}
-	if !strings.Contains(strings.Join(logged.lines, "\n"), "warning: suspend of manager") {
-		t.Errorf("the failed suspend must be logged: %q", logged.lines)
-	}
-
-	_, f3 := newObserveFirstApp(t)
-	r3 := &agentLifecycleRunner{FakeRunner: f3, slug: "hello", initPhase: "running", initContainerStatus: "Up 2 hours"}
-	d3 := Deps{Scion: scion.New(r3, scion.Options{}), GuestBoot: &fakeGuestBoot{current: bootA, recorded: bootA}, ContainerRunning: podmanSays(true)}
-	if RecoverAfterGuestRestart(context.Background(), d3, "hello", "/lever") || r3.suspendCalls != 0 {
-		t.Fatal("a live manager is left alone")
-	}
-}
-
 func TestRecordGuestBootSkipsUnchanged(t *testing.T) {
 	gb := &fakeGuestBoot{current: bootA, recorded: bootA}
 	RecordGuestBoot(context.Background(), Deps{GuestBoot: gb})

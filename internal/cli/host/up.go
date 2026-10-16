@@ -35,9 +35,8 @@ func phaseOrAbsent(phase string, err error) (string, error) {
 type upAction string
 
 const (
-	upApply  upAction = "apply"  // absent/stopped/error, or --fresh: full bring-up (apply discards a present record under --fresh)
-	upResume upAction = "resume" // suspended: resume the existing manager
-	upNone   upAction = "none"   // already running: nothing to do, just attach
+	upApply upAction = "apply" // absent/stopped/error, or --fresh: full bring-up (apply discards a present record under --fresh)
+	upKeep  upAction = "keep"  // running or suspended: the hub survived; the manager's lifecycle (apply.EnsureManager) keeps or resumes it
 )
 
 func upDecision(phase string, fresh bool) upAction {
@@ -50,72 +49,11 @@ func upDecision(phase string, fresh bool) upAction {
 		return upApply
 	}
 	switch phase {
-	case scion.PhaseRunning:
-		return upNone
-	case scion.PhaseSuspended:
-		return upResume
+	case scion.PhaseRunning, scion.PhaseSuspended:
+		return upKeep
 	default: // absent, stopped, error
 		return upApply
 	}
-}
-
-// verifyManagerRole runs apply's pre-role record guard
-// (apply.Deps.VerifyAgentRole) on the up paths that keep a manager without
-// calling apply.Run. The hub knows the project by project's basename.
-func verifyManagerRole(ctx context.Context, deps apply.Deps, project, name string) error {
-	return deps.VerifyAgentRole(ctx, hubProjectKey(project), name)
-}
-
-// gateAfterUp is the liveness gate before up prints "is up." or attaches. The
-// apply paths are already gated inside apply.Run. A resume gets the full gate:
-// live, then held for the settle window. A manager already running gets one
-// observation, no settle, and is refused only on positive evidence of a death:
-// holding a healthy manager for ten seconds on every up is a poor trade.
-//
-// prog (may be nil) is the resume's progress line. A resume's gate waits for
-// claude to report its session start whether or not a terminal attaches next,
-// so a claude --continue with no conversation is named rather than attached
-// to. guard (resume path only) reads the tree mounts back once the manager is
-// live if that could not be done right after the resume; the manager is not
-// reported up before.
-func gateAfterUp(ctx context.Context, deps apply.Deps, d upAction, project, name string, prog *apply.Progress, guard *apply.ManagerResume) error {
-	switch d {
-	case upResume:
-		err := apply.WaitManagerLive(ctx, deps, name, project, prog)
-		if err != nil {
-			if guard != nil {
-				err = guard.AfterFailure(ctx, err)
-			}
-			return err
-		}
-		if guard == nil {
-			return errors.New("up: internal error: the resume's mount checks are missing")
-		}
-		return guard.Live(ctx)
-	case upNone:
-		return apply.ObserveManagerLive(ctx, deps, name, project)
-	default:
-		return nil
-	}
-}
-
-// resumeForUp is up's own resume, between the checks apply's start-manager
-// step runs around its resume: before it the host tree and gone mount
-// directories, right after it where each tree mount comes from (a mismatch
-// suspends the manager). The guard's Live runs after the gate.
-func resumeForUp(ctx context.Context, deps apply.Deps, app *config.App, project string, resume func(context.Context) error) (*apply.ManagerResume, error) {
-	guard, err := apply.BeginManagerResume(ctx, deps, app, project, "up")
-	if err != nil {
-		return nil, err
-	}
-	if err := resume(ctx); err != nil {
-		// The container may have started all the same.
-		return nil, guard.AfterFailure(ctx, apply.ResumeError("resume", err))
-	}
-	if err := guard.Resumed(ctx); err != nil {
-		return nil, err
-	}
-	return guard, nil
 }
 
 func newUpCmd(bf BackendFactory) *cobra.Command {
@@ -193,38 +131,29 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			// caught before the attach. --no-attach and a non-terminal stdin wait on every
 			// path.
 			attachTTY := !noAttach && isTerminal(os.Stdin)
-			// A record left "running" by a hard VM kill (new guest boot, no live
-			// container) is suspended here and resumed below. Never --fresh: the
-			// conversation is kept.
-			if decision == upNone && apply.RecoverAfterGuestRestart(ctx, deps, app.Name, project) {
-				decision = upResume
-			}
 			if probeErr == nil {
 				check.Note(upDecisionNote(phase, decision))
 			}
 			check.Done(nil)
-			var prog *apply.Progress
-			// guard checks the tree before the resume and reads the mounts back after it.
-			var guard *apply.ManagerResume
+			// --fresh: apply's start-manager deletes any record once the hub is up and
+			// creates anew; a failed delete is fatal, so the old session is never resumed
+			// silently. Unless --no-backup the conversation is backed up first, and a
+			// failed backup keeps the record.
+			//
+			// Without --fresh, a resume whose claude finds no conversation is started
+			// fresh once the guest shows the home holds no transcript; the backup guards
+			// that start too.
+			var saved *convbackup.Meta
+			conv := newConvOps(w, app, stateFor(path))
+			switch {
+			case fresh && !noBackup:
+				deps.BackupManagerConversation = conv.backupBeforeDelete(&saved)
+			case !fresh:
+				deps.BackupManagerConversation = conv.backupBeforeNoConversationFresh(&saved)
+			}
+			deps.ManagerConversationEmpty = conv.conversationEmpty
 			switch decision {
 			case upApply:
-				// --fresh: apply's start-manager deletes any record once the hub is up and
-				// creates anew; a failed delete is fatal, so the old session is never resumed
-				// silently. Unless --no-backup the conversation is backed up first, and a
-				// failed backup keeps the record.
-				//
-				// Without --fresh, a resume whose claude finds no conversation is started
-				// fresh once the guest shows the home holds no transcript; the backup guards
-				// that start too.
-				var saved *convbackup.Meta
-				conv := newConvOps(w, app, stateFor(path))
-				switch {
-				case fresh && !noBackup:
-					deps.BackupManagerConversation = conv.backupBeforeDelete(&saved)
-				case !fresh:
-					deps.BackupManagerConversation = conv.backupBeforeNoConversationFresh(&saved)
-				}
-				deps.ManagerConversationEmpty = conv.conversationEmpty
 				if err := apply.Run(ctx, app, deps, apply.PlanOpts{Fresh: fresh, Attach: attachTTY, FreshWithoutConversation: !fresh}); err != nil {
 					if saved != nil {
 						rep.Log(fmt.Sprintf("lever: the previous conversation is backed up as %s; once the manager is up, `lever conversation restore %s` brings it back", saved.ID, saved.ID))
@@ -244,54 +173,29 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 						}
 					}
 				}
-			case upResume:
-				// up resumes a suspended manager without apply.Run, so apply's pre-role guard
-				// must run here too.
-				if err := verifyManagerRole(ctx, deps, project, app.Name); err != nil {
-					return err
-				}
-				if err := ensureBrokerForUp(ctx, rep, deps, w.stepTail(apply.KindBrokerUp), app.Tree, true); err != nil {
-					return err
-				}
-				guard, err = resumeForUp(ctx, deps, app, project, func(ctx context.Context) error {
-					resume := rep.Start("resume manager")
-					resume.TailFrom(w.stepTail(apply.KindStartManager))
-					// The resume and its gate can run over a minute: print progress about every
-					// 15 s, or hand the stages to the progress list.
-					prog = apply.StartProgress(ctx, deps, "up", app.Name, "asking scion to resume the container")
-					return apply.ResumeClearingStopClaim(ctx, deps, app.Name, project, "up", func() error {
-						return sc.Resume(ctx, app.Name, project)
-					})
-				})
-				defer prog.Stop()
+			case upKeep:
+				// The hub survived: no plan, but the broker the manager and its
+				// workers need, and the manager's lifecycle, which keeps a running
+				// manager (healing its session), resumes a suspended one or one whose
+				// container died under it, and gates it.
+				staged, err := ensureBrokerForUp(ctx, rep, deps, w.stepTail(apply.KindBrokerUp), app.Tree)
 				if err != nil {
 					return err
 				}
-			case upNone:
-				// A running manager is not exempt: scion re-derives scopes from the stored
-				// role on every token refresh, so an unrolled record gains full authority
-				// without restarting.
-				if err := verifyManagerRole(ctx, deps, project, app.Name); err != nil {
+				step := rep.Start(string(apply.KindStartManager))
+				step.TailFrom(w.stepTail(apply.KindStartManager))
+				_, err = apply.EnsureManager(ctx, app, deps, apply.ManagerRequest{
+					Intent: apply.ManagerKeep, Subject: "up", What: "lever up",
+					Attach: attachTTY, FreshWithoutConversation: true, TicketStaged: staged,
+				})
+				step.Done(err)
+				if err != nil {
+					if saved != nil {
+						rep.Log(fmt.Sprintf("lever: the previous conversation is backed up as %s; once the manager is up, `lever conversation restore %s` brings it back", saved.ID, saved.ID))
+					}
 					return err
 				}
-				if err := ensureBrokerForUp(ctx, rep, deps, w.stepTail(apply.KindBrokerUp), app.Tree, false); err != nil {
-					return err
-				}
-				// A running manager or its workers can hold an expired hub token (the refresh
-				// timer stalls while the host sleeps); this path bypasses apply.Run's heal.
-				heal := rep.Start("refresh agent sessions")
-				apply.HealSessions(ctx, deps, app, project)
-				heal.Done(nil)
-				rep.Start("check manager is live")
 			}
-			// Gate every path before claiming up: a harness can die a moment after its
-			// first live look.
-			err = gateAfterUp(ctx, deps, decision, project, app.Name, prog, guard)
-			prog.Stop()
-			if err != nil {
-				return err
-			}
-			apply.RecordGuestBoot(ctx, deps)
 			var remoteWarn string
 			if decision != upApply {
 				remoteWarn = ensureRemoteForUp(ctx, rep, app, w.remote.EnsureForUp)
@@ -346,12 +250,9 @@ func checkFreshFlags(fresh, noBackup, keepConv bool) error {
 }
 
 func upDecisionNote(phase string, d upAction) string {
-	switch d {
-	case upNone:
-		return "running"
-	case upResume:
+	if d == upKeep {
 		if phase == scion.PhaseRunning {
-			return "the VM restarted under it; resuming it"
+			return "running"
 		}
 		return "suspended; resuming it"
 	}
@@ -415,19 +316,19 @@ func managerPhase(ctx context.Context, sc *scion.Client, project, name string) (
 	return "", nil
 }
 
-// ensureBrokerForUp is apply's broker-up for the up paths that keep the
+// ensureBrokerForUp is apply's broker-up for the up path that keeps the
 // manager: a broker that died under a live hub, or one of an older binary or
 // config, would otherwise stay so until the next apply, and the manager and
-// its workers would have no tools.
-func ensureBrokerForUp(ctx context.Context, rep *progress.Reporter, deps apply.Deps, tail func() (string, []string), tree string, forResume bool) error {
+// its workers would have no tools. staged: apply.EnsureBrokerForUp.
+func ensureBrokerForUp(ctx context.Context, rep *progress.Reporter, deps apply.Deps, tail func() (string, []string), tree string) (staged bool, err error) {
 	step := rep.Start(string(apply.KindBrokerUp))
 	step.TailFrom(tail)
-	err := apply.EnsureBrokerForUp(ctx, deps, tree, forResume)
+	staged, err = apply.EnsureBrokerForUp(ctx, deps, tree)
 	step.Done(err)
 	if err != nil {
-		return fmt.Errorf("broker-up: %w", err)
+		return false, fmt.Errorf("broker-up: %w", err)
 	}
-	return nil
+	return staged, nil
 }
 
 // ensureRemoteForUp: a proxy that is not serving does not fail the up, since

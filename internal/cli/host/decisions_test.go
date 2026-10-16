@@ -11,13 +11,16 @@ import (
 
 // TestUpDecisions pins up's path over the shared observation set
 // (characterization; start-manager's table is apply's
-// TestStartManagerDecisions). up decides on the phase alone: a running record
-// over a dead container takes the attach-only path here, and its gate
-// (ObserveManagerLive) refuses it later.
+// TestStartManagerDecisions). up decides on the phase alone between the
+// plan and the manager's lifecycle (apply.EnsureManager, whose own table is
+// TestPlanManagerKeepAndFresh): a running or suspended record means the hub
+// survived. A running record over a dead container no longer takes an
+// attach-only path refused by its gate: EnsureManager suspends and resumes it
+// when podman shows the container gone or exited.
 func TestUpDecisions(t *testing.T) {
 	want := map[string]upAction{
-		"absent": upApply, "running": upNone, "running-exited": upNone, "running-created": upNone,
-		"running-no-status": upNone, "suspended": upResume, "stopped": upApply, "error": upApply,
+		"absent": upApply, "running": upKeep, "running-exited": upKeep, "running-created": upKeep,
+		"running-no-status": upKeep, "suspended": upKeep, "stopped": upApply, "error": upApply,
 		"created": upApply, "provisioning": upApply, "cloning": upApply, "starting": upApply,
 		"stopping": upApply, "resumed": upApply, "unknown": upApply,
 	}

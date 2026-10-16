@@ -3377,49 +3377,6 @@ func TestWaitManagerLiveGatesUpsResumePath(t *testing.T) {
 	}
 }
 
-// ObserveManagerLive gives a manager `up` found running one look, no settle.
-// Only positive evidence of a death refuses, naming the ways out; an empty
-// container column is not evidence.
-func TestObserveManagerLiveRefusesOnlyOnEvidenceOfDeath(t *testing.T) {
-	observe := func(phase, container string) (error, int) {
-		r := &agentLifecycleRunner{FakeRunner: scionOKRunner(), slug: "hello", initPhase: phase, initContainerStatus: container}
-		deps := Deps{Scion: scion.New(r, scion.Options{}), ManagerLiveRetry: RetryBudget{Attempts: 3, Interval: time.Millisecond, Settle: time.Hour}}
-		return ObserveManagerLive(context.Background(), deps, "hello", "/lever"), r.listCalls
-	}
-	if err, calls := observe("running", "Up 3 days"); err != nil || calls != 1 {
-		t.Fatalf("running + live: want pass in one look, got %v (%d calls)", err, calls)
-	}
-	if err, _ := observe("running", ""); err != nil {
-		t.Fatalf("running + empty container column is not evidence of death: %v", err)
-	}
-	if err, _ := observe("running", "Exited (1) 5 minutes ago"); err == nil || !strings.Contains(err.Error(), "container") || !strings.Contains(err.Error(), "lever up --fresh") {
-		t.Fatalf("running record over an exited container must refuse and name a way out, got %v", err)
-	}
-	if err, _ := observe("error", "Exited (1) 5 minutes ago"); err == nil || !strings.Contains(err.Error(), `phase "error"`) || !strings.Contains(err.Error(), "lever doctor") {
-		t.Fatalf("an error phase must refuse and point at doctor, got %v", err)
-	}
-	// Absent record: observed once as running (upNone), gone at the look.
-	r := &agentLifecycleRunner{FakeRunner: scionOKRunner(), slug: "other", initPhase: "running", initContainerStatus: "Up"}
-	deps := Deps{Scion: scion.New(r, scion.Options{}), ManagerLiveRetry: RetryBudget{Attempts: 3, Interval: time.Millisecond}}
-	if err := ObserveManagerLive(context.Background(), deps, "hello", "/lever"); err == nil || !strings.Contains(err.Error(), "no record") {
-		t.Fatalf("a vanished record must refuse, got %v", err)
-	}
-}
-
-// A refusal must arrive in seconds, not after the start gate's fifteen
-// attempts: the observation retries only a few times on a list error.
-func TestObserveManagerLiveGivesUpQuicklyWhenTheHubIsDown(t *testing.T) {
-	f := proc.NewFakeRunner() // nothing scripted: every scion call fails, like a down hub
-	deps := Deps{Scion: scion.New(f, scion.Options{}), ManagerLiveRetry: RetryBudget{Attempts: 15, Interval: time.Millisecond}}
-	err := ObserveManagerLive(context.Background(), deps, "hello", "/lever")
-	if err == nil || !strings.Contains(err.Error(), "could not be observed") {
-		t.Fatalf("want a could-not-observe error, got %v", err)
-	}
-	if len(f.Calls) > observeAttempts {
-		t.Fatalf("%d list calls, want at most %d", len(f.Calls), observeAttempts)
-	}
-}
-
 // An apply over a running manager acts on nothing, so it takes one look and
 // does not hold for the settle window: `lever apply` and `lever reload` are
 // the everyday reconfigure commands.

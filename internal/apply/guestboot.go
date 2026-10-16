@@ -79,28 +79,6 @@ func suspendAfterGuestRestart(ctx context.Context, d Deps, subject, project, nam
 	}
 }
 
-// RecoverAfterGuestRestart suspends a running manager record left over from
-// an ended guest boot and reports true once the record reads suspended, so
-// `lever up` takes its resume path. False otherwise, including when the
-// suspend did not take.
-func RecoverAfterGuestRestart(ctx context.Context, d Deps, name, project string) bool {
-	agents, err := d.Scion.List(ctx, project)
-	if err != nil {
-		return false
-	}
-	rec := scion.FindAgent(agents, name)
-	if !guestRestartedUnder(ctx, d, project, name, rec) {
-		return false
-	}
-	suspendAfterGuestRestart(ctx, d, "up", project, name, rec)
-	agents, err = d.Scion.List(ctx, project)
-	if err != nil {
-		return false
-	}
-	rec = scion.FindAgent(agents, name)
-	return rec != nil && rec.Phase == scion.PhaseSuspended
-}
-
 func (d Deps) logf(format string, args ...any) {
 	if d.Log != nil {
 		d.Log(format, args...)

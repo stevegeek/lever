@@ -159,12 +159,6 @@ func healHubToken(ctx context.Context, h SessionHealer, project, slug, ref strin
 	log("lever: warning: agent %q: scion reset-auth answered, but its token file does not show a valid token yet; re-run `lever doctor` in a minute", slug)
 }
 
-// HealSessions runs HealAgentSession over the manager and every configured
-// worker, from one listing.
-func HealSessions(ctx context.Context, d Deps, app *config.App, project string) {
-	healNamedSessions(ctx, d, project, append([]string{app.Name}, workerNames(app)...))
-}
-
 // healNamedSessions runs without the broker's per-worker lifecycle lock, so
 // it can race a lifecycle op the manager ordered. Both heals are safe: a
 // reset-auth on a dying container fails or writes a token the next start

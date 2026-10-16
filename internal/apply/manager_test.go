@@ -155,3 +155,31 @@ func TestKeepRecoversARunningRecordOverAGoneContainer(t *testing.T) {
 		t.Fatalf("err %v suspend %d resume %d", err, r.suspendCalls, r.resumeCalls)
 	}
 }
+
+// TestKeepStagesATicketOnlyToStartOrResume: up's keep path passes whether
+// its broker-up staged a ticket; a resume or create without one re-arms the
+// latch once, a kept running manager needs none.
+func TestKeepStagesATicketOnlyToStartOrResume(t *testing.T) {
+	for _, c := range []struct {
+		phase, container string
+		staged           bool
+		rearms           int
+	}{
+		{"suspended", "stopped", false, 1},
+		{"suspended", "stopped", true, 0},
+		{"", "", false, 1},
+		{"running", "Up 1 minute", false, 0},
+	} {
+		app, f := newObserveFirstApp(t)
+		r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: c.phase, initContainerStatus: c.container}
+		rearms := 0
+		d := fillDeps(Deps{Scion: scion.New(r, scion.Options{}), Log: func(string, ...any) {},
+			RearmBootstrap: func(context.Context) error { rearms++; return nil }})
+		if _, err := EnsureManager(context.Background(), app, d, ManagerRequest{Intent: ManagerKeep, Subject: "up", TicketStaged: c.staged}); err != nil {
+			t.Fatalf("%+v: %v", c, err)
+		}
+		if rearms != c.rearms {
+			t.Errorf("%+v: %d re-arm(s), want %d", c, rearms, c.rearms)
+		}
+	}
+}

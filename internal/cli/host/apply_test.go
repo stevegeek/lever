@@ -913,7 +913,7 @@ func stampedRemoteState(t *testing.T, version, hash string) state.State {
 func TestEnsureForUpRestartsTheLastAppliedProxy(t *testing.T) {
 	st := stampedRemoteState(t, "v-test", "hash-test")
 	rc := shortenRemoteProxyStartWait(&remoteController{state: st, configPath: filepath.Join(st.Dir, "lever.yaml"), port: 48995,
-		selfExe: "/usr/bin/true", version: "v-test", cfgHash: func() string { return "hash-test" }})
+		selfExe: "/usr/bin/true", version: "v-test", cfgHash: func() string { return "hash-test" }, stateInTree: outsideTree})
 	testutil.WantErrIs(t, rc.EnsureForUp(context.Background()), errRemoteProxyNotListening)
 	if _, err := os.Stat(st.RemoteLog()); err != nil {
 		t.Fatalf("remote.log not created by the spawn: %v", err)
@@ -931,7 +931,7 @@ func TestEnsureForUpLeavesAChangedConfigToApply(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			st := stampedRemoteState(t, c.version, c.hash)
 			rc := &remoteController{state: st, configPath: "/x/lever.yaml", port: 48994,
-				selfExe: "/no/such/lever-binary", version: "v-test", cfgHash: func() string { return "hash-test" }}
+				selfExe: "/no/such/lever-binary", version: "v-test", cfgHash: func() string { return "hash-test" }, stateInTree: outsideTree}
 			testutil.WantErrIs(t, rc.EnsureForUp(context.Background()), errRemoteProxyNoStamp)
 			if _, err := os.Stat(st.RemoteLog()); err == nil {
 				t.Fatal("up spawned a proxy for a config the last apply did not start")
@@ -941,7 +941,7 @@ func TestEnsureForUpLeavesAChangedConfigToApply(t *testing.T) {
 	t.Run("never applied", func(t *testing.T) {
 		st := state.ForConfig(t.TempDir())
 		rc := &remoteController{state: st, configPath: "/x/lever.yaml", port: 48994,
-			selfExe: "/no/such/lever-binary", version: "v-test", cfgHash: func() string { return "hash-test" }}
+			selfExe: "/no/such/lever-binary", version: "v-test", cfgHash: func() string { return "hash-test" }, stateInTree: outsideTree}
 		testutil.WantErrIs(t, rc.EnsureForUp(context.Background()), errRemoteProxyNoStamp)
 	})
 	t.Run("stale proxy running", func(t *testing.T) {
@@ -958,7 +958,7 @@ func TestEnsureForUpLeavesAChangedConfigToApply(t *testing.T) {
 			t.Fatal(err)
 		}
 		rc := &remoteController{state: st, configPath: "/x/lever.yaml", port: 48994,
-			selfExe: "/no/such/lever-binary", version: "v-test", cfgHash: func() string { return "hash-test" }}
+			selfExe: "/no/such/lever-binary", version: "v-test", cfgHash: func() string { return "hash-test" }, stateInTree: outsideTree}
 		testutil.WantErrIs(t, rc.EnsureForUp(context.Background()), errRemoteProxyStale)
 		select {
 		case <-proxyDone:
@@ -989,7 +989,7 @@ func TestEnsureForUpLeavesAHealthyProxyAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	rc := &remoteController{state: st, configPath: "/x/lever.yaml", port: ln.Addr().(*net.TCPAddr).Port,
-		selfExe: "/no/such/lever-binary", version: "v-test", cfgHash: func() string { return "hash-test" }}
+		selfExe: "/no/such/lever-binary", version: "v-test", cfgHash: func() string { return "hash-test" }, stateInTree: outsideTree}
 	if err := rc.EnsureForUp(context.Background()); err != nil {
 		t.Fatalf("EnsureForUp on a healthy proxy = %v, want nil", err)
 	}
@@ -997,5 +997,24 @@ func TestEnsureForUpLeavesAHealthyProxyAlone(t *testing.T) {
 	case <-proxyDone:
 		t.Fatal("the healthy proxy was stopped")
 	default:
+	}
+}
+
+func outsideTree() bool { return false }
+
+// TestEnsureForUpIgnoresAStampInsideTheTree: with the state directory inside
+// the tree an agent can write the stamp and remote.pid, so up starts nothing
+// and stops nothing on their word, and says to run apply.
+func TestEnsureForUpIgnoresAStampInsideTheTree(t *testing.T) {
+	st := stampedRemoteState(t, "v-test", "hash-test")
+	for name, inTree := range map[string]func() bool{"inside": func() bool { return true }, "unknown": nil} {
+		rc := &remoteController{state: st, configPath: filepath.Join(st.Dir, "lever.yaml"), port: 48993,
+			selfExe: "/usr/bin/true", version: "v-test", cfgHash: func() string { return "hash-test" }, stateInTree: inTree}
+		err := rc.EnsureForUp(context.Background())
+		testutil.WantErrIs(t, err, errRemoteProxyStateInTree)
+		testutil.WantErrIs(t, err, errRemoteProxyNeedsApply)
+		if _, serr := os.Stat(st.RemoteLog()); serr == nil {
+			t.Fatalf("%s: up spawned a proxy on a stamp the agent could have written", name)
+		}
 	}
 }

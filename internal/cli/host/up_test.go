@@ -399,7 +399,7 @@ func TestEnsureRemoteForUp(t *testing.T) {
 	if w := ensureRemoteForUp(context.Background(), rep, on, func(context.Context) error { return nil }); w != "" {
 		t.Fatalf("a serving proxy warned: %q", w)
 	}
-	for _, err := range []error{errRemoteProxyNoStamp, errRemoteProxyStale, errors.New("bind: address already in use")} {
+	for _, err := range []error{errRemoteProxyNoStamp, errRemoteProxyStale, errRemoteProxyStateInTree, errors.New("bind: address already in use")} {
 		w := ensureRemoteForUp(context.Background(), rep, on, func(context.Context) error { return err })
 		if !strings.Contains(w, "proxy") || !strings.Contains(w, "lever apply") || !strings.Contains(w, err.Error()) {
 			t.Errorf("warning for %v = %q, want the cause and `lever apply`", err, w)

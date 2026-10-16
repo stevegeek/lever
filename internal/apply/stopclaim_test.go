@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -24,9 +25,6 @@ const (
 type fakeJanitor struct {
 	states    []jail.ContainerState
 	stateErr  error
-	size      int64
-	sizeErr   error
-	commitErr error
 	removeErr error
 	calls     []string
 }
@@ -43,24 +41,9 @@ func (f *fakeJanitor) State(_ context.Context, ref string) (jail.ContainerState,
 	return st, nil
 }
 
-func (f *fakeJanitor) WritableSize(_ context.Context, id string) (int64, error) {
-	f.calls = append(f.calls, "size "+id[:12])
-	return f.size, f.sizeErr
-}
-
-func (f *fakeJanitor) Commit(_ context.Context, id, image string) error {
-	f.calls = append(f.calls, "commit "+id[:12]+" "+image)
-	return f.commitErr
-}
-
 func (f *fakeJanitor) Remove(_ context.Context, id string) error {
 	f.calls = append(f.calls, "rm "+id[:12])
 	return f.removeErr
-}
-
-func (f *fakeJanitor) PruneBackups(_ context.Context, repo string, keep int) ([]string, error) {
-	f.calls = append(f.calls, fmt.Sprintf("prune %s %d", repo, keep))
-	return []string{repo + ":20200101T000000Z"}, nil
 }
 
 func (f *fakeJanitor) did(prefix string) bool {
@@ -77,13 +60,19 @@ func created(id string) jail.ContainerState {
 }
 
 func stopClaimDeps(j *fakeJanitor, logs *[]string) Deps {
-	clock := time.Date(2026, 10, 15, 6, 30, 0, 0, time.UTC)
 	return Deps{
 		StaleContainer: j,
 		StopClaimRetry: RetryBudget{Attempts: 4, Interval: time.Millisecond},
 		Log:            func(f string, a ...any) { *logs = append(*logs, fmt.Sprintf(f, a...)) },
-		clock:          func() time.Time { return clock },
 	}
+}
+
+var defaultStopClaimSettle = stopClaimSettle
+
+func TestMain(m *testing.M) {
+	defaultStopClaimSettle = stopClaimSettle
+	stopClaimSettle.Stopped, stopClaimSettle.Created = time.Millisecond, 2*time.Millisecond
+	os.Exit(m.Run())
 }
 
 // resumes returns a resume that answers errs in turn, then nil.
@@ -113,7 +102,7 @@ func TestStopClaimOtherErrorsPassThrough(t *testing.T) {
 }
 
 func TestStopClaimHappyPath(t *testing.T) {
-	j := &fakeJanitor{states: []jail.ContainerState{created(staleID)}, size: 300 << 20}
+	j := &fakeJanitor{states: []jail.ContainerState{created(staleID)}}
 	var logs []string
 	n := 0
 	held := errors.New(stopClaimMsg)
@@ -123,11 +112,8 @@ func TestStopClaimHappyPath(t *testing.T) {
 	}
 	want := []string{
 		"state proj--m",
-		"size 0123456789ab",
-		"commit 0123456789ab lever.local/proj--m-backup:20261015T063000Z",
 		"state proj--m",
 		"rm 0123456789ab",
-		"prune lever.local/proj--m-backup 2",
 	}
 	if strings.Join(j.calls, "|") != strings.Join(want, "|") {
 		t.Fatalf("calls\n %v\nwant\n %v", j.calls, want)
@@ -136,28 +122,31 @@ func TestStopClaimHappyPath(t *testing.T) {
 		t.Fatalf("resumes %d; want the refused one, one still held, then the one that works", n)
 	}
 	all := strings.Join(logs, "\n")
-	for _, w := range []string{"stop claim", "lever.local/proj--m-backup:20261015T063000Z", "conversation is in the agent home and is kept", "is gone", "removed older backup images"} {
+	if strings.Contains(all, "backup") || strings.Contains(all, "lever.local") {
+		t.Errorf("no backup image is taken:\n%s", all)
+	}
+	for _, w := range []string{"stop claim", "checking again in 2ms", "writable layer is lost", "conversation is in the agent home and is kept", "is gone"} {
 		if !strings.Contains(all, w) {
 			t.Errorf("log lacks %q:\n%s", w, all)
 		}
 	}
 }
 
-func TestStopClaimCommitFailureRemovesNothing(t *testing.T) {
-	j := &fakeJanitor{states: []jail.ContainerState{created(staleID)}, commitErr: errors.New("no space left on device")}
+func TestStopClaimRemoveFailure(t *testing.T) {
+	j := &fakeJanitor{states: []jail.ContainerState{created(staleID)}, removeErr: errors.New("cannot remove container as it is running")}
 	var logs []string
 	n := 0
 	err := ResumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, errors.New(stopClaimMsg)))
-	if !errors.Is(err, ErrStopClaimHeld) || j.did("rm ") {
-		t.Fatalf("a failed backup must refuse and remove nothing: err %v, calls %v", err, j.calls)
+	if !errors.Is(err, ErrStopClaimHeld) {
+		t.Fatalf("err %v, calls %v", err, j.calls)
 	}
-	for _, w := range []string{"no space left on device", "podman rm proj--m", "podman commit proj--m", "conversation"} {
+	for _, w := range []string{"as it is running", "podman rm proj--m", "writable layer", "conversation"} {
 		if !strings.Contains(err.Error(), w) {
 			t.Errorf("error lacks %q: %v", w, err)
 		}
 	}
-	if strings.Contains(err.Error(), "transient failure clears") {
-		t.Fatalf("the stop-claim refusal must not say a retry clears it: %v", err)
+	if strings.Contains(err.Error(), "transient failure clears") || strings.Contains(err.Error(), "podman commit") {
+		t.Fatalf("the stop-claim refusal must not say a retry clears it, nor suggest a commit: %v", err)
 	}
 	var ee *cli.ExitError
 	if !errors.As(err, &ee) || ee.Code != cli.ExitManagerResumeFailed {
@@ -180,7 +169,7 @@ func TestStopClaimNeverRemovesARunningContainer(t *testing.T) {
 		n := 0
 		held := errors.New(stopClaimMsg)
 		err := ResumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, held, held, held, held, held))
-		if !errors.Is(err, ErrStopClaimHeld) || j.did("rm ") || j.did("commit ") {
+		if !errors.Is(err, ErrStopClaimHeld) || j.did("rm ") {
 			t.Fatalf("%+v: err %v, calls %v", st, err, j.calls)
 		}
 		if n != 4 {
@@ -219,25 +208,43 @@ func TestStopClaimContainerReplacedMeanwhile(t *testing.T) {
 	}
 }
 
-func TestStopClaimHugeLayerSkipsBackup(t *testing.T) {
-	j := &fakeJanitor{states: []jail.ContainerState{{ID: staleID, Name: "proj--m", Status: "exited"}}, size: 17 << 30}
-	var logs []string
-	n := 0
-	if err := ResumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, errors.New(stopClaimMsg))); err != nil {
-		t.Fatal(err)
+// TestStopClaimStateMustPersist: a container is removed only when a second
+// look, after the settle wait, shows the same id in the same state; created
+// is also the state of a container between scion's create and its start.
+func TestStopClaimStateMustPersist(t *testing.T) {
+	exited := jail.ContainerState{ID: staleID, Name: "proj--m", Status: "exited"}
+	for _, seq := range [][]jail.ContainerState{
+		{created(staleID), exited}, // started and exited meanwhile
+		{created(staleID), {ID: staleID, Name: "proj--m", Status: "running", Running: true}},
+		{created(staleID), created(otherID)},
+		{exited, {ID: staleID, Name: "proj--m", Status: "stopped"}},
+		{exited, {ID: otherID, Name: "proj--m", Status: "exited"}},
+	} {
+		j := &fakeJanitor{states: seq}
+		var logs []string
+		n := 0
+		err := ResumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, errors.New(stopClaimMsg)))
+		if !errors.Is(err, ErrStopClaimHeld) || j.did("rm ") || !strings.Contains(err.Error(), "a start may be under way") {
+			t.Fatalf("%v: a container that changed between the looks must not be removed: err %v, calls %v", seq, err, j.calls)
+		}
 	}
-	if j.did("commit ") || j.did("prune ") || !j.did("rm ") {
-		t.Fatalf("calls %v", j.calls)
+	// The wait is longer for created than for exited.
+	for _, c := range []struct {
+		st   jail.ContainerState
+		want string
+	}{{created(staleID), "checking again in 2ms"}, {exited, "checking again in 1ms"}, {jail.ContainerState{ID: staleID, Name: "proj--m", Status: "initialized"}, "checking again in 2ms"}, {jail.ContainerState{ID: staleID, Name: "proj--m", Status: "configured"}, "checking again in 2ms"}, {jail.ContainerState{ID: staleID, Name: "proj--m", Status: "stopped"}, "checking again in 1ms"}} {
+		j := &fakeJanitor{states: []jail.ContainerState{c.st}}
+		var logs []string
+		n := 0
+		if err := ResumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, errors.New(stopClaimMsg))); err != nil || !j.did("rm ") {
+			t.Fatalf("%s: err %v calls %v", c.st.Status, err, j.calls)
+		}
+		if all := strings.Join(logs, "\n"); !strings.Contains(all, c.want) {
+			t.Fatalf("%s: want %q in\n%s", c.st.Status, c.want, all)
+		}
 	}
-	if all := strings.Join(logs, "\n"); !strings.Contains(all, "17.0 GiB") || !strings.Contains(all, "no backup was taken") {
-		t.Fatalf("logs:\n%s", all)
-	}
-	// A size podman could not report is not backed up either: the agent can
-	// make the measurement slow.
-	j = &fakeJanitor{states: []jail.ContainerState{created(staleID)}, sizeErr: errors.New("timeout")}
-	n = 0
-	if err := ResumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, errors.New(stopClaimMsg))); err != nil || j.did("commit ") || !j.did("rm ") {
-		t.Fatalf("err %v calls %v", err, j.calls)
+	if defaultStopClaimSettle.Stopped < 5*time.Second || defaultStopClaimSettle.Created < 30*time.Second {
+		t.Fatalf("settle defaults %+v: at least 5 s, and 30 s for created", defaultStopClaimSettle)
 	}
 }
 
@@ -301,7 +308,7 @@ func TestStartManagerClearsStopClaim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if r.resumeCalls != 3 || !j.did("commit ") || !j.did("rm ") || r.deleteCalls != 0 || r.startCalls != 0 {
+	if r.resumeCalls != 3 || !j.did("rm ") || r.deleteCalls != 0 || r.startCalls != 0 {
 		t.Fatalf("resumes %d deletes %d starts %d calls %v", r.resumeCalls, r.deleteCalls, r.startCalls, j.calls)
 	}
 }

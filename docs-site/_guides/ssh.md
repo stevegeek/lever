@@ -38,8 +38,10 @@ Then `lever apply`. On a scion with the controls, apply:
    forwarding off. scion sends the same policy to every agent it starts as
    `SCION_CONDUIT_POLICY`, and `sciontool` enforces it on SSH forwards, which the hub cannot see.
    Every apply also drops any `server.hub.conduit` block from the jail's `settings.yaml` (lever
-   never writes one; an agent could, to open the relay's internal listener) and restarts the hub
-   when it did;
+   never writes one; an agent could, to open the relay's internal listener), in any case, as some
+   of scion's readers match keys in any case, and restarts the hub when it did. The apply fails
+   on a `server` or `hub` key on that path spelled in another case or repeated, or a key there
+   that is an alias, a complex key, `!!binary` or a merge key;
 2. reads the running hub's environment back and turns `hub.conduit` on as `lever-admin` only if
    the policy is there, keeping `hub.artifacts`, `hub.chat_thread_groups` and
    `federation.project_visitors` off;

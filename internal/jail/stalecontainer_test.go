@@ -3,9 +3,7 @@ package jail
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
-	"time"
 
 	"github.com/stevegeek/lever/internal/proc"
 )
@@ -58,32 +56,21 @@ func TestContainerStateRemovable(t *testing.T) {
 	}
 }
 
-func TestCommitAndRemoveArgs(t *testing.T) {
+func TestRemoveArgs(t *testing.T) {
 	f := proc.NewFakeRunner()
 	f.Script("podman", proc.Result{})
-	if err := CommitContainer(context.Background(), f, testID, "lever.local/proj--m-backup:20261015T063000Z"); err != nil {
-		t.Fatal(err)
-	}
 	if err := RemoveStoppedContainer(context.Background(), f, testID); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.Calls[0].Argv(); got != "podman commit --quiet "+testID+" lever.local/proj--m-backup:20261015T063000Z" {
-		t.Fatalf("commit argv %q", got)
-	}
-	if got := f.Calls[1].Argv(); got != "podman rm "+testID {
+	if got := f.Calls[0].Argv(); got != "podman rm "+testID {
 		t.Fatalf("rm argv %q (never --force)", got)
 	}
-	for _, img := range []string{"docker.io/library/alpine:latest", "lever.local/x-backup", "lever.local/X-backup:1", "--rm:1"} {
-		if err := CommitContainer(context.Background(), f, testID, img); err == nil {
-			t.Errorf("image %q must be refused", img)
-		}
-	}
 	for _, id := range []string{"proj--m", "-f", testID[:12]} {
-		if CommitContainer(context.Background(), f, id, "lever.local/proj--m-backup:1") == nil || RemoveStoppedContainer(context.Background(), f, id) == nil {
+		if RemoveStoppedContainer(context.Background(), f, id) == nil {
 			t.Errorf("id %q must be refused", id)
 		}
 	}
-	if len(f.Calls) != 2 {
+	if len(f.Calls) != 1 {
 		t.Fatalf("refused calls reached podman: %v", f.Calls)
 	}
 	if err := RemoveStoppedContainer(context.Background(), failRunner{"Error: no such container"}, testID); err != nil {
@@ -91,55 +78,5 @@ func TestCommitAndRemoveArgs(t *testing.T) {
 	}
 	if err := RemoveStoppedContainer(context.Background(), failRunner{"Error: cannot remove container as it is running"}, testID); err == nil {
 		t.Fatal("podman's refusal must come back")
-	}
-}
-
-func TestBackupImageRepo(t *testing.T) {
-	if r, err := BackupImageRepo("proj--m"); err != nil || r != "lever.local/proj--m-backup" {
-		t.Fatalf("%q %v", r, err)
-	}
-	for _, n := range []string{"Proj--m", "a/b", "", "-x", "a..b", "a b"} {
-		if _, err := BackupImageRepo(n); err == nil {
-			t.Errorf("%q must be refused", n)
-		}
-	}
-	if got := BackupTag(time.Date(2026, 10, 15, 6, 30, 1, 0, time.FixedZone("x", 3600))); got != "20261015T053001Z" {
-		t.Fatal(got)
-	}
-}
-
-func TestPruneBackupImagesKeepsNewest(t *testing.T) {
-	f := proc.NewFakeRunner()
-	f.Script("podman images", proc.Result{Stdout: strings.Join([]string{
-		"lever.local/proj--m-backup:20261013T000000Z",
-		"lever.local/proj--m-backup:20261015T000000Z",
-		"lever.local/proj--m-backup:manual",
-		"lever.local/proj--m-backup:20261014T000000Z",
-		"lever.local/proj--m-backup:20261012T000000Z",
-	}, "\n")})
-	f.Script("podman rmi", proc.Result{})
-	removed, err := PruneBackupImages(context.Background(), f, "lever.local/proj--m-backup", 2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := "lever.local/proj--m-backup:20261013T000000Z lever.local/proj--m-backup:20261012T000000Z"
-	if strings.Join(removed, " ") != want {
-		t.Fatalf("removed %v; want %s (a tag lever did not write is left alone)", removed, want)
-	}
-	if _, err := PruneBackupImages(context.Background(), f, "docker.io/library/alpine", 2); err == nil {
-		t.Fatal("a repository lever does not own must be refused")
-	}
-}
-
-func TestContainerWritableSize(t *testing.T) {
-	f := proc.NewFakeRunner()
-	f.Script("podman container inspect --size --format {{json .SizeRw}} "+testID, proc.Result{Stdout: "18253611008\n"})
-	if n, err := ContainerWritableSize(context.Background(), f, testID); err != nil || n != 18253611008 {
-		t.Fatalf("%d %v", n, err)
-	}
-	g := proc.NewFakeRunner()
-	g.Script("podman container inspect", proc.Result{Stdout: "null\n"})
-	if _, err := ContainerWritableSize(context.Background(), g, testID); err == nil {
-		t.Fatal("an unknown size must be an error")
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/stevegeek/lever/internal/backend/types"
@@ -108,6 +109,68 @@ func (g Guest) EnsureHubAuth(ctx context.Context, spec types.HubAuth) (bool, err
 // writes.
 const keyConduit = "conduit"
 
+// plainKeys refuses a mapping on the path to server.hub.conduit with a key
+// lever cannot read as the hub will: an alias or a complex key (a node's
+// Value is then not the key's text) or a tag that decodes to other text
+// (!!binary). path names the mapping in the error.
+func plainKeys(m *yaml.Node, path string) error {
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		k := m.Content[i]
+		switch {
+		case k.Kind != yaml.ScalarNode: // refused below
+		case k.Tag == "" || k.Tag == "!" || strings.HasPrefix(k.Tag, "!!") && k.Tag != "!!binary":
+			continue
+		}
+		return fmt.Errorf("guest: `%s` in the jail's %s has a key that is an alias, a complex key or a tagged value (%s); lever cannot tell which key the hub reads from it. Write it as a plain key and re-run `lever apply`",
+			path, layout.SettingsRel, strconv.Quote(k.Tag+" "+k.Value))
+	}
+	return nil
+}
+
+// mapGetExact is layout.MapGet for a key on the path to server.hub.conduit.
+// The hub reads settings.yaml with exact-case keys, but other scion readers
+// (koanf with mapstructure) match keys in any case, so a key that differs from
+// key only in case, a repeated key, and a key plainKeys refuses are all
+// refused: which of them a reader takes is not lever's to guess.
+func mapGetExact(m *yaml.Node, key, path string) (*yaml.Node, error) {
+	if err := plainKeys(m, path); err != nil {
+		return nil, err
+	}
+	var found *yaml.Node
+	var spellings []string
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == "<<" {
+			return nil, fmt.Errorf("guest: the mapping holding `%s` in the jail's %s uses a YAML merge key, which can hide keys lever must check; remove it and re-run `lever apply`",
+				path, layout.SettingsRel)
+		}
+		if strings.EqualFold(m.Content[i].Value, key) {
+			found = m.Content[i+1]
+			spellings = append(spellings, strconv.Quote(m.Content[i].Value))
+		}
+	}
+	if len(spellings) > 1 || len(spellings) == 1 && spellings[0] != strconv.Quote(key) {
+		return nil, fmt.Errorf("guest: the jail's %s spells `%s` as %s, which differ from %q at most in case or repeat it; scion's readers disagree on which they take, so lever cannot check the one the hub uses. Keep one, spelled %q, and re-run `lever apply`",
+			layout.SettingsRel, path, strings.Join(spellings, ", "), key, key)
+	}
+	return found, nil
+}
+
+// mapDeleteFold removes every pair whose key is key in any case and reports
+// whether it removed one: koanf-based scion readers match keys in any case.
+func mapDeleteFold(m *yaml.Node, key string) bool {
+	kept := m.Content[:0]
+	removed := false
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if strings.EqualFold(m.Content[i].Value, key) {
+			removed = true
+			continue
+		}
+		kept = append(kept, m.Content[i], m.Content[i+1])
+	}
+	m.Content = kept
+	return removed
+}
+
 // HubAuthSettings is the auth block lever writes under `server:` for anyone
 // reading settings.yaml. The hub itself takes these values from the
 // SCION_SERVER_* env lever starts it with.
@@ -145,7 +208,10 @@ func hubAuthSettingsConverged(existing []byte, spec types.HubAuth, hasServerYAML
 	if root == nil {
 		return nil, false, false, fmt.Errorf("guest: the jail's %s is not a YAML mapping", layout.SettingsRel)
 	}
-	server := layout.MapGet(root, layout.KeyServer)
+	server, err := mapGetExact(root, layout.KeyServer, layout.KeyServer)
+	if err != nil {
+		return nil, false, false, err
+	}
 	if server == nil && hasServerYAML {
 		// settings.yaml wins outright once it has a `server` key, so adding one
 		// would make scion silently stop reading server.yaml.
@@ -196,7 +262,10 @@ func hubAuthSettingsConverged(existing []byte, spec types.HubAuth, hasServerYAML
 			changed = true
 		}
 	}
-	hub := layout.MapGet(server, "hub")
+	hub, err := mapGetExact(server, "hub", "server.hub")
+	if err != nil {
+		return nil, false, false, err
+	}
 	if hub != nil && hub.Kind != yaml.MappingNode {
 		return nil, false, false, fmt.Errorf("guest: `server.hub` in the jail's %s is not a mapping", layout.SettingsRel)
 	}
@@ -211,8 +280,10 @@ func hubAuthSettingsConverged(existing []byte, spec types.HubAuth, hasServerYAML
 	if layout.MapGet(hub, "<<") != nil {
 		return nil, false, false, fmt.Errorf("guest: `server.hub` in the jail's %s uses a YAML merge key, which can hide keys lever must check; remove it", layout.SettingsRel)
 	}
-	if layout.MapGet(hub, keyConduit) != nil {
-		layout.MapDelete(hub, keyConduit)
+	if err := plainKeys(hub, "server.hub"); err != nil {
+		return nil, false, false, err
+	}
+	if mapDeleteFold(hub, keyConduit) {
 		restart, changed = true, true
 	}
 	var admins yaml.Node

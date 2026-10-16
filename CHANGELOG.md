@@ -57,7 +57,10 @@ version bump moves the block under the new version heading.
   settings it needs (`remote.SSH.localServerDownload: always`, `remote.autoForwardPorts: false`).
   The remote proxy still refuses conduit to every web login. Every apply, ssh on or off, also drops
   a `server.hub.conduit` block from the jail's `settings.yaml` (lever never writes one, and agents
-  can write that file) and restarts the hub when it did. See the new SSH and VS Code guide.
+  can write that file), in any case, as some of scion's readers match keys in any case, and
+  restarts the hub when it did. A `server` or `hub` key on that path spelled in another case or
+  repeated, or a key there that is an alias, a complex key, `!!binary` or a merge key, fails the apply. See the
+  new SSH and VS Code guide.
 
 ### Changed
 
@@ -74,8 +77,9 @@ version bump moves the block under the new version heading.
   it only when the stamp the proxy left records this lever binary and the current `remote:` config,
   so a changed config or an upgrade still waits for `lever apply`, and so does turning remote
   access back on (an apply with it off removes the stamp); a running proxy with an older config is
-  not restarted. When the proxy cannot start, `up` succeeds and warns at the end with
-  the fix. (lever#225)
+  not restarted. With the state directory inside the tree, where an agent could write the stamp,
+  `up` starts no proxy and warns to run `lever apply`. When the proxy cannot start, `up` succeeds
+  and warns at the end with the fix. (lever#225)
 - **No false "reboot pending" when a GA kernel update lands under `guest_kernel: hwe`.** The
   check compared the running kernel with `/boot/vmlinuz`, which names the kernel installed last,
   so an `unattended-upgrades` update of the GA 6.8 kernel on a guest running the HWE 7.0 kernel
@@ -92,17 +96,17 @@ version bump moves the block under the new version heading.
   that running it again would clear a transient failure, which it never did. Now, when the manager's
   resume (in `lever up`, `lever apply` and `lever conversation restore`) gets that refusal, lever
   asks podman for the manager's container, by the name lever derives from the project and the
-  manager, and, only when podman reports it with no process in it (created, exited or stopped),
-  commits it to a backup image `lever.local/<container>-backup:<UTC time>` (the newest two are kept),
-  looks again, removes it by its id without `--force`, and retries the resume for up to about three
-  minutes while the hub releases the claim. A failed backup removes nothing; a running or paused
-  container is never removed. A writable layer over 2 GiB, or one podman cannot measure within a minute, is removed
-  without a backup, and the output says so: scion's own resume removes a stopped container without a copy, and a 17 GB copy
-  on the guest's grow-only disk costs more than it saves. The conversation lives in the agent home,
-  a bind mount, and is not touched. When the claim stays held, the error says why and gives the fix
-  by hand, not "a transient failure clears". `lever doctor`'s *manager agent* row names a stopped,
-  suspended or error record over a `Created` container as this state, with the fix. Workers are
-  not covered: the broker resumes them, and lever does not remove containers on that path.
+  manager, and, only when podman reports it with no process in it (created, exited or stopped)
+  and a second look 5 s later (30 s for created, which is also the state between a create and its
+  start) shows the same container id in the same state, removes it by that id without `--force`,
+  and retries the resume for up to about three minutes while the hub releases the claim. A running
+  or paused container, or one that changed between the looks, is never removed. The container is
+  removed without a copy: its writable layer (files written outside the agent home and the tree,
+  such as packages installed by hand) is lost, as with any scion resume of a container that is not
+  running. The conversation lives in the agent home, a bind mount, and is not touched. When the
+  claim stays held, the error says why and gives the fix by hand, not "a transient failure
+  clears". `lever doctor`'s *manager agent* row names a stopped, suspended or error record over a
+  `Created` container as this state, with the fix. Workers are not covered: the broker resumes them, and lever does not remove containers on that path.
 
 ### Docs
 

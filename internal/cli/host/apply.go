@@ -152,18 +152,22 @@ type remoteController struct {
 	startTimeout  time.Duration
 	startInterval time.Duration
 	log           logFunc // apply's user-facing line sink (applyWiring.log)
+	// stateInTree reports whether the state directory, which holds the stamp
+	// and remote.pid, is inside the tree.
+	stateInTree func() bool
 }
 
 func newRemoteController(app *config.App, st state.State, configPath, selfExe string, log logFunc) *remoteController {
 	return &remoteController{
-		state:      st,
-		configPath: configPath,
-		selfExe:    selfExe,
-		port:       app.EffectiveRemotePort(),
-		probeHost:  remoteProbeHost(app),
-		version:    cli.VersionString(),
-		cfgHash:    func() string { return brokerctl.RemoteConfigHash(app, st) },
-		log:        log,
+		state:       st,
+		configPath:  configPath,
+		selfExe:     selfExe,
+		port:        app.EffectiveRemotePort(),
+		probeHost:   remoteProbeHost(app),
+		version:     cli.VersionString(),
+		cfgHash:     func() string { return brokerctl.RemoteConfigHash(app, st) },
+		log:         log,
+		stateInTree: func() bool { return brokerctl.StateInsideTree(app, st) },
 	}
 }
 
@@ -220,11 +224,12 @@ func (rc *remoteController) Start(ctx context.Context) error {
 }
 
 // errRemoteProxyNeedsApply: up does not converge a changed remote config or
-// binary itself. Both wrap it.
+// binary itself, nor trusts a stamp an agent could write. Each wraps it.
 var (
-	errRemoteProxyNeedsApply = errors.New("the proxy needs `lever apply`")
-	errRemoteProxyStale      = fmt.Errorf("%w: a proxy started with another remote config or lever binary is still running", errRemoteProxyNeedsApply)
-	errRemoteProxyNoStamp    = fmt.Errorf("%w: it is not running, and no proxy has run this lever binary with the current remote config", errRemoteProxyNeedsApply)
+	errRemoteProxyNeedsApply  = errors.New("the proxy needs `lever apply`")
+	errRemoteProxyStale       = fmt.Errorf("%w: a proxy started with another remote config or lever binary is still running", errRemoteProxyNeedsApply)
+	errRemoteProxyNoStamp     = fmt.Errorf("%w: it is not running, and no proxy has run this lever binary with the current remote config", errRemoteProxyNeedsApply)
+	errRemoteProxyStateInTree = fmt.Errorf("%w: the state directory (%s) is inside the tree the agents mount, where an agent could write the proxy's stamp and pid file, so `lever up` does not start it", errRemoteProxyNeedsApply, state.DirName)
 )
 
 // EnsureForUp restarts the proxy on up's paths that skip apply.Run (a resume,
@@ -232,8 +237,13 @@ var (
 // A healthy current proxy is left alone. It starts one only when the stamp
 // records this binary and this remote config: a changed config is apply's to
 // converge (hub identity, broker, grants), and a stale proxy that is still
-// running stays fenced by the login grants rather than restarted here.
+// running stays fenced by the login grants rather than restarted here. With
+// the state directory inside the tree the stamp is the agent's to forge, so
+// up neither trusts nor acts on it.
 func (rc *remoteController) EnsureForUp(ctx context.Context) error {
+	if rc.stateInTree == nil || rc.stateInTree() {
+		return errRemoteProxyStateInTree
+	}
 	hash := rc.cfgHash()
 	_, found, alive := rc.state.RemoteStatus()
 	live := found && alive
@@ -1178,12 +1188,12 @@ func (w *applyWiring) ensureHubIdentity(ctx context.Context) error {
 			// Again here: agents can rewrite settings.yaml since the
 			// scion-server step converged it, and the hub reads it at start.
 			if _, err := w.ensureHubAuth(ctx); err != nil {
-				return err
+				return fmt.Errorf("the hub is stopped: it was stopped for a restart, and converging its settings before the start failed (%w); fix the cause and run `lever apply`, which starts it again", err)
 			}
 			opts := apply.HubServerOpts(w.app, w.deps.HubSessionSecret, w.deps.HubAuthEnv)
 			opts.Progress = w.deps.Log
 			if err := w.sc.ServerStart(ctx, opts); err != nil {
-				return err
+				return fmt.Errorf("the hub is stopped: it was stopped for a restart, and starting it again failed (%w); fix the cause and run `lever apply`, which starts it again", err)
 			}
 			online, err := w.sc.RuntimeBrokerReady(ctx, "global")
 			if err == nil && !online {

@@ -19,26 +19,22 @@ import (
 // the agent or its hub record.
 type StaleContainerOps interface {
 	State(ctx context.Context, ref string) (jail.ContainerState, error)
-	WritableSize(ctx context.Context, id string) (int64, error)
-	Commit(ctx context.Context, id, image string) error
 	Remove(ctx context.Context, id string) error
-	PruneBackups(ctx context.Context, repo string, keep int) ([]string, error)
 }
 
 // ErrStopClaimHeld marks a resume the hub still refuses with its stop claim
 // after lever's recovery, or one lever could not recover.
 var ErrStopClaimHeld = errors.New("the hub holds a stop claim on the manager")
 
-const (
-	// stopClaimBackupKeep is how many backup images of one container are kept.
-	stopClaimBackupKeep = 2
-	// stopClaimBackupMax is the largest writable layer lever commits before it
-	// removes a container. scion's own resume removes a stopped container
-	// without a copy, so the layer is not something a resume keeps; a larger
-	// copy on the guest's grow-only disk costs more than it saves.
-	stopClaimBackupMax   int64 = 2 << 30
-	stopClaimMaxInterval       = 30 * time.Second
-)
+const stopClaimMaxInterval = 30 * time.Second
+
+// stopClaimSettle is how long a container must keep the same id and the same
+// state between two looks before it is removed. created is also the state
+// between scion's create and its start, so a container must stay created far
+// longer than a start takes before it counts as an interrupted one; the
+// wait is measured on lever's own clock, as podman's creation time is on the
+// guest's.
+var stopClaimSettle = struct{ Stopped, Created time.Duration }{5 * time.Second, 30 * time.Second}
 
 // The hub releases the claim on the reaper's next tick (every minute) after a
 // broker heartbeat shows the container gone: 5+10+20+30*5 s, about 3 min.
@@ -55,10 +51,12 @@ var defaultStopClaimRetry = RetryBudget{Attempts: 9, Interval: 5 * time.Second}
 // decided by lever alone: the container name comes from the project and the
 // configured manager name, and the state is podman's. Only a container with
 // no process in it (jail.ContainerState.Removable) is removed, by the id that
-// was inspected, after a second look, and without --force. It is committed to
-// a backup image first; a failed commit removes nothing. The conversation is
-// in the agent home, a bind mount, so neither the commit nor the removal
-// touches it.
+// was inspected, once a second look after stopClaimSettle shows the same id in
+// the same state, and without --force. Its writable layer is lost, as on any
+// scion resume of a container that is not running; lever keeps no copy, since
+// a committed image would hold the container's environment, credentials
+// included, as a runnable image. The conversation is in the agent home, a bind
+// mount, so the removal does not touch it.
 //
 // It returns resume's own error for any other failure, nil once a resume
 // succeeds, and an error wrapping ErrStopClaimHeld otherwise.
@@ -120,31 +118,18 @@ func ResumeClearingStopClaim(ctx context.Context, d Deps, name, project, subject
 	return stopClaimFailure(subject, ref, why, err)
 }
 
-// clearStaleContainer backs up and removes the stopped container st. It
-// returns an error wrapping ErrStopClaimHeld when it removed nothing.
+// clearStaleContainer removes the stopped container st once a second look
+// shows it unchanged. It returns an error wrapping ErrStopClaimHeld when it
+// removed nothing.
 func clearStaleContainer(ctx context.Context, d Deps, subject, ref string, st jail.ContainerState) error {
 	ops := d.StaleContainer
-	repo, err := jail.BackupImageRepo(ref)
-	if err != nil {
-		return stopClaimFailure(subject, ref, "lever cannot name a backup image for it ("+err.Error()+"), so it removed nothing", nil)
+	settle := stopClaimSettle.Stopped
+	if st.Status != "exited" && st.Status != "stopped" {
+		settle = stopClaimSettle.Created
 	}
-	image := ""
-	// An unknown size is skipped like a large one: the agent can make the
-	// measurement slow, and the commit could then fill the guest's disk.
-	size, serr := ops.WritableSize(ctx, st.ID)
-	switch {
-	case serr != nil:
-		d.Log("%s: lever could not measure container %s's writable layer (%s): it is removed without a backup (scion's own resume removes a stopped container without one too)",
-			subject, ref, termsafe.Sanitize(serr.Error()))
-	case size > stopClaimBackupMax:
-		d.Log("%s: container %s's writable layer is %s, over lever's %s backup limit: it is removed without a backup (scion's own resume removes a stopped container without one too)",
-			subject, ref, humanBytes(size), humanBytes(stopClaimBackupMax))
-	default:
-		image = repo + ":" + jail.BackupTag(nowFunc(d)())
-		if cerr := ops.Commit(ctx, st.ID, image); cerr != nil {
-			return stopClaimFailure(subject, ref, "backing up the container failed ("+termsafe.Sanitize(cerr.Error())+"), so lever removed nothing", nil)
-		}
-		d.Log("%s: backed up container %s (podman state %s, %s) as image %s; like the container, the image's configuration holds the container's environment, credentials included", subject, ref, st.Status, humanBytes(size), image)
+	d.Log("%s: container %s is %s; checking again in %s that it stays so before removing it", subject, ref, st.Status, settle)
+	if !sleepCtx(ctx, settle) {
+		return ctx.Err()
 	}
 	again, aerr := ops.State(ctx, ref)
 	switch {
@@ -153,27 +138,14 @@ func clearStaleContainer(ctx context.Context, d Deps, subject, ref string, st ja
 		return nil
 	case aerr != nil:
 		return stopClaimFailure(subject, ref, "lever could not read the container's state again before removing it ("+termsafe.Sanitize(aerr.Error())+"), so it removed nothing", nil)
-	case again.ID != st.ID || !again.Removable():
-		return stopClaimFailure(subject, ref, "the container changed while lever backed it up (now "+termsafe.Sanitize(again.Status)+"), so lever removed nothing", nil)
+	case again.ID != st.ID || again.Status != st.Status || !again.Removable():
+		return stopClaimFailure(subject, ref, "the container changed between lever's two looks (now "+termsafe.Sanitize(again.Status)+"), so lever removed nothing; a start may be under way", nil)
 	}
 	if rerr := ops.Remove(ctx, st.ID); rerr != nil {
 		return stopClaimFailure(subject, ref, "removing the container failed ("+termsafe.Sanitize(rerr.Error())+")", nil)
 	}
-	kept := "no backup was taken"
-	if image != "" {
-		kept = "the old layer is in image " + image + " (`podman rmi " + image + "` in the guest frees its space)"
-	}
-	d.Log("%s: removed manager container %s (podman state %s) so the hub can release its stop claim. The resume creates a new container: whatever was written outside the agent home and the mounted tree (packages installed by hand, files in /tmp) is gone; %s. The conversation is in the agent home and is kept. Waiting for the hub to release the claim (at most about %s)",
-		subject, ref, st.Status, kept, stopClaimWaitTotal(d.StopClaimRetry.or(defaultStopClaimRetry)).Round(time.Second))
-	if image != "" {
-		removed, perr := ops.PruneBackups(ctx, repo, stopClaimBackupKeep)
-		if len(removed) > 0 {
-			d.Log("%s: removed older backup images (lever keeps the newest %d): %s", subject, stopClaimBackupKeep, strings.Join(removed, ", "))
-		}
-		if perr != nil {
-			d.Log("%s: warning: %s", subject, termsafe.Sanitize(perr.Error()))
-		}
-	}
+	d.Log("%s: removed manager container %s (podman state %s) so the hub can release its stop claim. The resume creates a new container, as any scion resume of a container that is not running does: its writable layer is lost, that is whatever was written outside the agent home and the mounted tree (packages installed by hand, files in /tmp). The conversation is in the agent home and is kept. Waiting for the hub to release the claim (at most about %s)",
+		subject, ref, st.Status, stopClaimWaitTotal(d.StopClaimRetry.or(defaultStopClaimRetry)).Round(time.Second))
 	return nil
 }
 
@@ -193,10 +165,10 @@ func stopClaimFailure(subject, ref, why string, cause error) error {
 // holds.
 func StopClaimManualFix(ref string) string {
 	return fmt.Sprintf("By hand, in the guest as the jail user: `podman ps -a --filter name=^%s$` must not show it Up; "+
-		"`podman commit %s lever.local/%s-backup:manual` keeps a copy of its writable layer (optional; it takes as much disk as the layer, and the image holds the container's environment, credentials included); "+
-		"`podman rm %s` removes it. The hub releases the claim within about two minutes of the broker's next heartbeat; then run `lever up`. "+
+		"`podman rm %s` removes it, and with it its writable layer (files written outside the agent home and the tree, such as packages installed by hand), as any scion resume of a stopped container does. "+
+		"The hub releases the claim within about two minutes of the broker's next heartbeat; then run `lever up`. "+
 		"The conversation is in the agent home and is not touched",
-		ref, ref, ref, ref)
+		ref, ref)
 }
 
 // ResumeError maps a failed manager resume to the error its caller reports:
@@ -221,13 +193,6 @@ func stopClaimWaitTotal(b RetryBudget) time.Duration {
 	return total
 }
 
-func nowFunc(d Deps) func() time.Time {
-	if d.clock != nil {
-		return d.clock
-	}
-	return time.Now
-}
-
 func sleepCtx(ctx context.Context, d time.Duration) bool {
 	t := time.NewTimer(d)
 	defer t.Stop()
@@ -237,14 +202,6 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	case <-t.C:
 		return true
 	}
-}
-
-func humanBytes(n int64) string {
-	const gib, mib = 1 << 30, 1 << 20
-	if n >= gib {
-		return fmt.Sprintf("%.1f GiB", float64(n)/gib)
-	}
-	return fmt.Sprintf("%.0f MiB", float64(n)/mib)
 }
 
 // IsStopClaimHeld reports whether err from a scion start or resume is the

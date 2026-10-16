@@ -153,7 +153,7 @@ type remoteController struct {
 	startInterval time.Duration
 	log           logFunc // apply's user-facing line sink (applyWiring.log)
 	// stateInTree reports whether the state directory, which holds the stamp
-	// and remote.pid, is inside the tree.
+	// and remote.pid, is inside the tree. nil reads as inside.
 	stateInTree func() bool
 }
 
@@ -170,6 +170,8 @@ func newRemoteController(app *config.App, st state.State, configPath, selfExe st
 		stateInTree: func() bool { return brokerctl.StateInsideTree(app, st) },
 	}
 }
+
+func (rc *remoteController) inTree() bool { return rc.stateInTree == nil || rc.stateInTree() }
 
 func (rc *remoteController) addr() string {
 	return net.JoinHostPort(cmp.Or(rc.probeHost, "127.0.0.1"), strconv.Itoa(rc.port))
@@ -191,7 +193,9 @@ func (rc *remoteController) addr() string {
 func (rc *remoteController) Start(ctx context.Context) error {
 	hash := rc.cfgHash()
 	if _, found, alive := rc.state.RemoteStatus(); found && alive {
-		if rc.state.RemoteStampMatches(rc.version, hash) && tcpDial(rc.addr()) == nil {
+		// With the state directory inside the tree the stamp is the agents' to
+		// forge, so it vouches for nothing and the proxy is always replaced.
+		if !rc.inTree() && rc.state.RemoteStampMatches(rc.version, hash) && tcpDial(rc.addr()) == nil {
 			progress.From(ctx).Note("reused")
 			return nil // already serving: this binary, this config, this port
 		}
@@ -215,54 +219,19 @@ func (rc *remoteController) Start(ctx context.Context) error {
 	if err := rc.awaitListening(ctx, cmd); err != nil {
 		return err
 	}
-	// Stamp only once the proxy is proven listening. Best-effort: a write failure
-	// costs the next apply a redundant restart, never a stale process kept alive.
-	if err := rc.recordStamp(ctx, cmd.Process.Pid, hash); err != nil {
-		rc.log.printf("lever: could not record the remote proxy stamp (%v) — the next apply will restart it", err)
+	// Best-effort: a proxy with no matching stamp costs the next bring-up a
+	// restart, never a stale process kept alive.
+	if err := rc.awaitStamp(ctx, cmd.Process.Pid, hash); err != nil {
+		rc.log.printf("lever: the remote proxy runs, but it did not stamp this config (%v) — the next bring-up restarts it", err)
 	}
 	return nil
 }
 
-// errRemoteProxyNeedsApply: up does not converge a changed remote config or
-// binary itself, nor trusts a stamp an agent could write. Each wraps it.
-var (
-	errRemoteProxyNeedsApply  = errors.New("the proxy needs `lever apply`")
-	errRemoteProxyStale       = fmt.Errorf("%w: a proxy started with another remote config or lever binary is still running", errRemoteProxyNeedsApply)
-	errRemoteProxyNoStamp     = fmt.Errorf("%w: it is not running, and no proxy has run this lever binary with the current remote config", errRemoteProxyNeedsApply)
-	errRemoteProxyStateInTree = fmt.Errorf("%w: the state directory (%s) is inside the tree the agents mount, where an agent could write the proxy's stamp and pid file, so `lever up` does not start it", errRemoteProxyNeedsApply, state.DirName)
-)
-
-// EnsureForUp restarts the proxy on up's paths that skip apply.Run (a resume,
-// or a manager already running), as after a restart of the host or the VM.
-// A healthy current proxy is left alone. It starts one only when the stamp
-// records this binary and this remote config: a changed config is apply's to
-// converge (hub identity, broker, grants), and a stale proxy that is still
-// running stays fenced by the login grants rather than restarted here. With
-// the state directory inside the tree the stamp is the agent's to forge, so
-// up neither trusts nor acts on it.
-func (rc *remoteController) EnsureForUp(ctx context.Context) error {
-	if rc.stateInTree == nil || rc.stateInTree() {
-		return errRemoteProxyStateInTree
-	}
-	hash := rc.cfgHash()
-	_, found, alive := rc.state.RemoteStatus()
-	live := found && alive
-	if live && rc.state.RemoteStampMatches(rc.version, hash) && tcpDial(rc.addr()) == nil {
-		progress.From(ctx).Note("running")
-		return nil
-	}
-	if !rc.state.RemoteStampRecords(rc.version, hash) {
-		if live {
-			return errRemoteProxyStale
-		}
-		return errRemoteProxyNoStamp
-	}
-	return rc.Start(ctx)
-}
-
-// recordStamp waits until remote.pid names pid: the proxy binds its port
-// before it writes that file.
-func (rc *remoteController) recordStamp(ctx context.Context, pid int, hash string) error {
+// awaitStamp waits until remote.pid names pid and the proxy has stamped the
+// config apply converged. The proxy is the stamp's only writer: it records
+// the config it loaded, which an edit made since this apply hashed it would
+// make another.
+func (rc *remoteController) awaitStamp(ctx context.Context, pid int, hash string) error {
 	timeout := cmp.Or(rc.startTimeout, remoteProxyStartTimeout)
 	interval := cmp.Or(rc.startInterval, remoteProxyStartInterval)
 	var last error
@@ -273,16 +242,17 @@ func (rc *remoteController) recordStamp(ctx context.Context, pid int, hash strin
 			last = err
 		case got != pid:
 			last = fmt.Errorf("%s names pid %d, not the new proxy %d", rc.state.RemotePID(), got, pid)
+		case !rc.state.RemoteStampMatches(rc.version, hash):
+			last = errors.New("the proxy has not stamped the remote config this apply converged")
+		default:
+			return true, nil
 		}
-		return err == nil && got == pid, nil
+		return false, nil
 	})
 	if errors.Is(err, retry.ErrExhausted) {
 		return fmt.Errorf("after %s: %w", timeout, last)
 	}
-	if err != nil {
-		return err
-	}
-	return rc.state.WriteRemoteStamp(rc.version, hash)
+	return err
 }
 
 // remoteProxyStartTimeout/Interval are the default bounds on the waits for the
@@ -785,8 +755,6 @@ type applyWiring struct {
 	cmd        *cobra.Command // for Log; nil ⇒ stderr
 	// rep, when set, takes the Log lines so they print above its live line.
 	rep *progress.Reporter
-	// remote is Deps.StartRemoteProxy's controller, for up's EnsureForUp.
-	remote *remoteController
 }
 
 type applyOpts struct {
@@ -856,7 +824,6 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 	}
 
 	rc := newRemoteController(app, st, configPath, selfExe, w.log)
-	w.remote = rc
 
 	w.deps = w.newDeps(bc, rc, sessionSecret)
 	if opts.Locked {

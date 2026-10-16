@@ -456,7 +456,7 @@ func TestRemoteControllerStartReusesAlreadyServingProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 	rc := &remoteController{state: st, configPath: "/x/lever.yaml", port: port,
-		version: "v-test", cfgHash: func() string { return "hash-test" }, selfExe: selfExe}
+		version: "v-test", cfgHash: func() string { return "hash-test" }, selfExe: selfExe, stateInTree: outsideTree}
 	if err := rc.Start(context.Background()); err != nil {
 		t.Fatalf("Start on an already-serving proxy must reuse (nil), got: %v", err)
 	}
@@ -764,10 +764,10 @@ func TestDetachedSelfCmdRelativeConfigRunsInInstanceRoot(t *testing.T) {
 	}
 }
 
-// TestRemoteRecordStampWaitsForThePIDFile: the proxy binds its port before
-// it writes remote.pid, so apply can see it listening first. The stamp must
-// wait for the new proxy's pid file instead of failing to read it.
-func TestRemoteRecordStampWaitsForThePIDFile(t *testing.T) {
+// TestRemoteAwaitStampWaitsForTheProxy: the proxy binds its port before it
+// writes remote.pid and its stamp, so apply can see it listening first; it
+// waits for the new proxy's own stamp of this config and writes none itself.
+func TestRemoteAwaitStampWaitsForTheProxy(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -781,32 +781,44 @@ func TestRemoteRecordStampWaitsForThePIDFile(t *testing.T) {
 	wrote := make(chan error, 1)
 	go func() {
 		time.Sleep(100 * time.Millisecond)
-		wrote <- os.WriteFile(st.RemotePID(), []byte(strconv.Itoa(pid)+"\n"), 0o600)
+		if err := os.WriteFile(st.RemotePID(), []byte(strconv.Itoa(pid)+"\n"), 0o600); err != nil {
+			wrote <- err
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+		wrote <- st.WriteRemoteStamp("v-test", "hash-test")
 	}()
-	if err := rc.recordStamp(context.Background(), pid, "hash-test"); err != nil {
-		t.Fatalf("recordStamp: %v", err)
+	if err := rc.awaitStamp(context.Background(), pid, "hash-test"); err != nil {
+		t.Fatalf("awaitStamp: %v", err)
 	}
 	if err := <-wrote; err != nil {
 		t.Fatal(err)
 	}
-	if !st.RemoteStampMatches("v-test", "hash-test") {
-		t.Fatal("no stamp for the new proxy")
-	}
 }
 
-// TestRemoteRecordStampTimesOut: a proxy that never writes its pid file
-// gets no stamp, and the error says why (apply prints it as a warning).
-func TestRemoteRecordStampTimesOut(t *testing.T) {
+// TestRemoteAwaitStampTimesOut: a proxy that never writes its pid file, or
+// stamps another config, leaves no stamp of this one, and the error says why
+// (apply prints it as a warning).
+func TestRemoteAwaitStampTimesOut(t *testing.T) {
 	st := state.ForConfig(t.TempDir())
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	rc := &remoteController{state: st, version: "v-test", cfgHash: func() string { return "hash-test" },
 		startTimeout: 50 * time.Millisecond, startInterval: 5 * time.Millisecond}
-	err := rc.recordStamp(context.Background(), 4242, "hash-test")
-	testutil.WantErrContaining(t, err, "remote.pid")
+	testutil.WantErrContaining(t, rc.awaitStamp(context.Background(), 4242, "hash-test"), "remote.pid")
 	if _, serr := os.Stat(st.RemoteStamp()); serr == nil {
-		t.Fatal("a stamp was written for a proxy that never wrote its pid file")
+		t.Fatal("apply wrote a stamp for a proxy that never wrote its pid file")
+	}
+	if err := os.WriteFile(st.RemotePID(), []byte("4242\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WriteRemoteStamp("v-test", "hash-edited"); err != nil {
+		t.Fatal(err)
+	}
+	testutil.WantErrContaining(t, rc.awaitStamp(context.Background(), 4242, "hash-test"), "has not stamped")
+	if !st.RemoteStampMatches("v-test", "hash-edited") {
+		t.Fatal("apply overwrote the proxy's own stamp")
 	}
 }
 
@@ -889,132 +901,41 @@ func TestAgentRevoked(t *testing.T) {
 	}
 }
 
-// stampedRemoteState records a stamp for (version, hash) and leaves remote.pid
-// naming a dead pid, as a host or VM restart leaves them.
-func stampedRemoteState(t *testing.T, version, hash string) state.State {
-	t.Helper()
-	dir := t.TempDir()
-	st := state.ForConfig(dir)
-	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(st.RemotePID(), []byte("2147483646\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.WriteRemoteStamp(version, hash); err != nil {
-		t.Fatal(err)
-	}
-	return st
-}
-
-// TestEnsureForUpRestartsTheLastAppliedProxy: after a restart, up starts the
-// proxy the last apply ran when the binary and remote config are unchanged.
-// The stand-in never listens, so the not-listening error proves the spawn.
-func TestEnsureForUpRestartsTheLastAppliedProxy(t *testing.T) {
-	st := stampedRemoteState(t, "v-test", "hash-test")
-	rc := shortenRemoteProxyStartWait(&remoteController{state: st, configPath: filepath.Join(st.Dir, "lever.yaml"), port: 48995,
-		selfExe: "/usr/bin/true", version: "v-test", cfgHash: func() string { return "hash-test" }, stateInTree: outsideTree})
-	testutil.WantErrIs(t, rc.EnsureForUp(context.Background()), errRemoteProxyNotListening)
-	if _, err := os.Stat(st.RemoteLog()); err != nil {
-		t.Fatalf("remote.log not created by the spawn: %v", err)
-	}
-}
-
-// TestEnsureForUpLeavesAChangedConfigToApply: without a stamp for this binary
-// and config, up neither starts a proxy nor stops a running one.
-func TestEnsureForUpLeavesAChangedConfigToApply(t *testing.T) {
-	cases := map[string]struct{ version, hash string }{
-		"config changed": {"v-test", "hash-OLD"},
-		"binary changed": {"v-OLD", "hash-test"},
-	}
-	for name, c := range cases {
-		t.Run(name, func(t *testing.T) {
-			st := stampedRemoteState(t, c.version, c.hash)
-			rc := &remoteController{state: st, configPath: "/x/lever.yaml", port: 48994,
-				selfExe: "/no/such/lever-binary", version: "v-test", cfgHash: func() string { return "hash-test" }, stateInTree: outsideTree}
-			testutil.WantErrIs(t, rc.EnsureForUp(context.Background()), errRemoteProxyNoStamp)
-			if _, err := os.Stat(st.RemoteLog()); err == nil {
-				t.Fatal("up spawned a proxy for a config the last apply did not start")
-			}
-		})
-	}
-	t.Run("never applied", func(t *testing.T) {
-		st := state.ForConfig(t.TempDir())
-		rc := &remoteController{state: st, configPath: "/x/lever.yaml", port: 48994,
-			selfExe: "/no/such/lever-binary", version: "v-test", cfgHash: func() string { return "hash-test" }, stateInTree: outsideTree}
-		testutil.WantErrIs(t, rc.EnsureForUp(context.Background()), errRemoteProxyNoStamp)
-	})
-	t.Run("stale proxy running", func(t *testing.T) {
-		dir := t.TempDir()
-		st := state.ForConfig(dir)
-		if err := os.MkdirAll(st.Dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		proxy, proxyDone := testutil.StartServeProcess(t, state.RemoteDaemon, filepath.Join(dir, "lever.yaml"))
-		if err := os.WriteFile(st.RemotePID(), []byte(strconv.Itoa(proxy.Process.Pid)+"\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := st.WriteRemoteStamp("v-test", "hash-OLD"); err != nil {
-			t.Fatal(err)
-		}
-		rc := &remoteController{state: st, configPath: "/x/lever.yaml", port: 48994,
-			selfExe: "/no/such/lever-binary", version: "v-test", cfgHash: func() string { return "hash-test" }, stateInTree: outsideTree}
-		testutil.WantErrIs(t, rc.EnsureForUp(context.Background()), errRemoteProxyStale)
-		select {
-		case <-proxyDone:
-			t.Fatal("up stopped a running proxy; converging it is apply's job")
-		default:
-		}
-	})
-}
-
-// TestEnsureForUpLeavesAHealthyProxyAlone: a live, listening, current proxy
-// is neither stopped nor respawned.
-func TestEnsureForUpLeavesAHealthyProxyAlone(t *testing.T) {
-	dir := t.TempDir()
-	st := state.ForConfig(dir)
-	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	proxy, proxyDone := testutil.StartServeProcess(t, state.RemoteDaemon, filepath.Join(dir, "lever.yaml"))
-	if err := os.WriteFile(st.RemotePID(), []byte(strconv.Itoa(proxy.Process.Pid)+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-	if err := st.WriteRemoteStamp("v-test", "hash-test"); err != nil {
-		t.Fatal(err)
-	}
-	rc := &remoteController{state: st, configPath: "/x/lever.yaml", port: ln.Addr().(*net.TCPAddr).Port,
-		selfExe: "/no/such/lever-binary", version: "v-test", cfgHash: func() string { return "hash-test" }, stateInTree: outsideTree}
-	if err := rc.EnsureForUp(context.Background()); err != nil {
-		t.Fatalf("EnsureForUp on a healthy proxy = %v, want nil", err)
-	}
-	select {
-	case <-proxyDone:
-		t.Fatal("the healthy proxy was stopped")
-	default:
-	}
-}
-
 func outsideTree() bool { return false }
 
-// TestEnsureForUpIgnoresAStampInsideTheTree: with the state directory inside
-// the tree an agent can write the stamp and remote.pid, so up starts nothing
-// and stops nothing on their word, and says to run apply.
-func TestEnsureForUpIgnoresAStampInsideTheTree(t *testing.T) {
-	st := stampedRemoteState(t, "v-test", "hash-test")
+// TestRemoteControllerStartReplacesAProxyInsideTheTree: with the state
+// directory inside the tree an agent can write the stamp and remote.pid, so a
+// stamp that matches vouches for nothing and the proxy is replaced.
+func TestRemoteControllerStartReplacesAProxyInsideTheTree(t *testing.T) {
 	for name, inTree := range map[string]func() bool{"inside": func() bool { return true }, "unknown": nil} {
-		rc := &remoteController{state: st, configPath: filepath.Join(st.Dir, "lever.yaml"), port: 48993,
-			selfExe: "/usr/bin/true", version: "v-test", cfgHash: func() string { return "hash-test" }, stateInTree: inTree}
-		err := rc.EnsureForUp(context.Background())
-		testutil.WantErrIs(t, err, errRemoteProxyStateInTree)
-		testutil.WantErrIs(t, err, errRemoteProxyNeedsApply)
-		if _, serr := os.Stat(st.RemoteLog()); serr == nil {
-			t.Fatalf("%s: up spawned a proxy on a stamp the agent could have written", name)
-		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			st := state.ForConfig(dir)
+			if err := os.MkdirAll(st.Dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			proxy, proxyDone := testutil.StartServeProcess(t, state.RemoteDaemon, filepath.Join(dir, "lever.yaml"))
+			if err := os.WriteFile(st.RemotePID(), []byte(strconv.Itoa(proxy.Process.Pid)+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ln.Close()
+			if err := st.WriteRemoteStamp("v-test", "hash-test"); err != nil {
+				t.Fatal(err)
+			}
+			rc := &remoteController{state: st, configPath: "/x/lever.yaml", port: ln.Addr().(*net.TCPAddr).Port,
+				selfExe: "/no/such/lever-binary", version: "v-test", cfgHash: func() string { return "hash-test" }, stateInTree: inTree}
+			if err := rc.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "/no/such/lever-binary") {
+				t.Fatalf("Start = %v, want the respawn's failure", err)
+			}
+			select {
+			case <-proxyDone:
+			case <-time.After(5 * time.Second):
+				t.Fatal("a proxy whose stamp an agent could have written was kept")
+			}
+		})
 	}
 }

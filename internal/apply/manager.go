@@ -138,10 +138,6 @@ type ManagerRequest struct {
 	Attach bool
 	// FreshWithoutConversation: PlanOpts.FreshWithoutConversation.
 	FreshWithoutConversation bool
-	// NoCreate (Keep): the caller ran none of the bring-up steps a create
-	// needs (the image load and its tag policy, the agent template, the
-	// credential), so a record that is gone is refused, not created.
-	NoCreate bool
 	// TicketStaged: a fresh enrolment ticket was staged for this run, so no
 	// re-arm is needed before a create or resume.
 	TicketStaged bool
@@ -381,8 +377,6 @@ func planManager(q ManagerRequest, name string, o managerObservation) (managerPl
 		return managerPlan{verb: verbDeleteCreate}, nil
 	case ManagerKeep:
 		switch {
-		case !o.present && q.NoCreate:
-			return managerPlan{}, fmt.Errorf("%s: manager %q has no record any more; nothing was created. Run `lever stop`, then `lever up`, which brings the whole application up and creates it", q.subject(), name)
 		case !o.present:
 			return managerPlan{verb: verbCreate}, nil
 		case o.phase == scion.PhaseRunning:

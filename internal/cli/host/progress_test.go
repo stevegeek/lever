@@ -49,12 +49,6 @@ func TestFileTailRedactsAndBounds(t *testing.T) {
 	}
 }
 
-func TestUpProbeReasonNeverEmpty(t *testing.T) {
-	if upProbeReason(os.ErrNotExist) == "" {
-		t.Fatal("empty reason")
-	}
-}
-
 // TestFinishOnReturnRecordsAPanicAsAFailure: a crashed run must not be
 // saved as a success, and the panic goes on.
 func TestFinishOnReturnRecordsAPanicAsAFailure(t *testing.T) {

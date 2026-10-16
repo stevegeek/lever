@@ -9,44 +9,6 @@ import (
 	"github.com/stevegeek/lever/internal/testutil"
 )
 
-// TestUpDecisions pins up's path over the shared observation set
-// (characterization; start-manager's table is apply's
-// TestStartManagerDecisions). up decides on the phase alone between the
-// plan and the manager's lifecycle (apply.EnsureManager, whose own table is
-// TestPlanManagerKeepAndFresh): a running or suspended record means the hub
-// survived. A running record over a dead container no longer takes an
-// attach-only path refused by its gate: EnsureManager suspends and resumes it
-// when podman shows the container gone or exited.
-func TestUpDecisions(t *testing.T) {
-	want := map[string]upAction{
-		"absent": upApply, "running": upKeep, "running-exited": upKeep, "running-created": upKeep,
-		"running-no-status": upKeep, "suspended": upKeep, "stopped": upApply, "error": upApply,
-		"created": upApply, "provisioning": upApply, "cloning": upApply, "starting": upApply,
-		"stopping": upApply, "resumed": upApply, "unknown": upApply,
-	}
-	for _, o := range testutil.ManagerObservations {
-		w, ok := want[o.Name]
-		if !ok {
-			t.Errorf("%s: the observation set grew; pin up's decision for it", o.Name)
-			continue
-		}
-		if got := upDecision(o.Phase, false); got != w {
-			t.Errorf("%s: up = %s, want %s", o.Name, got, w)
-		}
-		if got := upDecision(o.Phase, true); got != upApply {
-			t.Errorf("%s: up --fresh = %s, want apply", o.Name, got)
-		}
-	}
-	// A failed probe that proves the manager is down is "absent"; any other
-	// failure stops up rather than forcing an apply.
-	if p, err := phaseOrAbsent("", errors.New("hub at http://127.0.0.1:8080 is not responding")); err != nil || upDecision(p, false) != upApply {
-		t.Errorf("hub down: phase %q err %v", p, err)
-	}
-	if _, err := phaseOrAbsent("", errors.New("exit status 2")); err == nil {
-		t.Error("an unknown probe failure must stop up")
-	}
-}
-
 // convEntry is how conversation new and restore begin over an observation:
 // the scion calls they made (all of them, to the end) or the refusal.
 type convEntry struct {

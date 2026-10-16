@@ -838,33 +838,6 @@ func runBrokerUp(ctx context.Context, d Deps) error {
 	return d.BrokerHealthy(ctx)
 }
 
-// EnsureBrokerForUp is the broker-up and mint-manager-bootstrap steps for the
-// `lever up` paths that keep a manager without running the plan. A broker
-// this call started has its single-use latch open: the ticket is minted and
-// staged in tree at once, as apply's mint step does, so no latch stays open
-// for whoever reaches the admin listener first. staged reports that ticket
-// (ManagerRequest.TicketStaged); a spent latch stages none, and
-// EnsureManager re-arms it before a resume or create.
-func EnsureBrokerForUp(ctx context.Context, d Deps, tree string) (staged bool, err error) {
-	if d.StartBroker == nil || d.BrokerHealthy == nil || d.MintManagerBootstrap == nil {
-		return false, errors.New("broker-up: internal error: the broker controller is not wired")
-	}
-	if err := runBrokerUp(ctx, d); err != nil {
-		return false, err
-	}
-	m, err := d.MintManagerBootstrap(ctx)
-	switch {
-	case errors.Is(err, ErrBootstrapLatched):
-		return false, nil
-	case err != nil:
-		return false, err
-	}
-	if err := StageBootstrapMaterial(tree, m); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
 // agentTemplate logs only on change: the change is otherwise invisible, and a
 // no-op re-apply stays quiet.
 func (r *run) agentTemplate(ctx context.Context, s Step) error {

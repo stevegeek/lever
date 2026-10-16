@@ -42,6 +42,11 @@ const (
 	// old session, so the shared SessionEnd hook then reports a phase that is
 	// true.
 	ManagerNewSession
+	// ManagerPark suspends the manager for a power-off. A record the hub
+	// reads stopped while its claude still runs is reported running first
+	// (HealAgentSession), or the suspend would not keep its conversation.
+	// The suspend's own error is returned as scion gave it.
+	ManagerPark
 )
 
 // The refusals of ManagerNewSession a caller tells apart. Nothing was
@@ -92,6 +97,8 @@ func (i ManagerIntent) String() string {
 		return "restore"
 	case ManagerNewSession:
 		return "new-session"
+	case ManagerPark:
+		return "park"
 	}
 	return fmt.Sprintf("intent(%d)", int(i))
 }
@@ -126,6 +133,10 @@ type ManagerRequest struct {
 	// BeginSession (NewSession) runs once the old session has ended and
 	// returns the commit that records the new one once it started.
 	BeginSession func() (commit func() error, err error)
+
+	// HealBudget (Park) bounds the session heal before the suspend, so a slow
+	// one cannot cost the manager its suspend. Zero means parkHealBudget.
+	HealBudget time.Duration
 
 	// WhileSuspended (Restore, NewSession) runs once the hub reads the manager suspended
 	// with no live container, so no agent process runs while its files
@@ -225,6 +236,8 @@ func EnsureManager(ctx context.Context, app *config.App, d Deps, q ManagerReques
 			return ManagerResult{}, fmt.Errorf("%s: internal error: the manager's lifecycle is not wired", subject)
 		}
 		return r.newSession(ctx, jp, q)
+	case ManagerPark:
+		return r.park(ctx, jp, q)
 	}
 	return ManagerResult{}, fmt.Errorf("%s: internal error: unknown manager intent %s", subject, q.Intent)
 }
@@ -268,6 +281,7 @@ const (
 	verbDeleteCreate
 	// verbResumeTask resumes a stopped record in a new session with a task.
 	verbResumeTask
+	verbSuspend
 )
 
 func (v managerVerb) String() string {
@@ -282,6 +296,8 @@ func (v managerVerb) String() string {
 		return "delete+create"
 	case verbResumeTask:
 		return "stop+resume"
+	case verbSuspend:
+		return "suspend"
 	}
 	return ""
 }
@@ -294,6 +310,8 @@ type managerPlan struct {
 	suspend bool
 	// stop: stop the suspended record and wait until it reads stopped.
 	stop bool
+	// heal: report a stopped record's live session running first.
+	heal bool
 	verb managerVerb
 	// mustCreate: a create that finds a record fails rather than keeps it.
 	mustCreate bool
@@ -359,6 +377,10 @@ func planManager(q ManagerRequest, name string, o managerObservation) (managerPl
 			return managerPlan{stop: true, verb: verbResumeTask}, nil
 		}
 		return managerPlan{}, fmt.Errorf("manager %q is in phase %s; a new conversation needs it running or suspended (`lever up` first)", name, scion.BoundedQuote(o.phase))
+	case ManagerPark:
+		// The suspend is sent whatever the reading: a power-off follows, and
+		// scion's answer is what the caller reports.
+		return managerPlan{heal: o.present && o.phase == scion.PhaseStopped, verb: verbSuspend}, nil
 	}
 	return managerPlan{}, fmt.Errorf("%s: internal error: unknown manager intent %s", q.subject(), q.Intent)
 }
@@ -850,4 +872,37 @@ func (r *run) stillSuspended(ctx context.Context, jp string) bool {
 	}
 	rec := scion.FindAgent(agents, r.app.Name)
 	return rec != nil && rec.Phase == scion.PhaseSuspended
+}
+
+// parkHealBudget and parkSuspendTimeout bound ManagerPark's two steps
+// apart: a hung hub must not keep the operator from powering off.
+const (
+	parkHealBudget     = 20 * time.Second
+	parkSuspendTimeout = 30 * time.Second
+)
+
+// park is ManagerPark. A list that fails reads as no record: the suspend
+// that follows reports a hub that cannot answer.
+func (r *run) park(ctx context.Context, jp string, q ManagerRequest) (ManagerResult, error) {
+	sc := r.d.managerScion()
+	budget := q.HealBudget
+	if budget <= 0 {
+		budget = parkHealBudget
+	}
+	hctx, cancel := context.WithTimeout(ctx, budget)
+	var rec *scion.Agent
+	if agents, err := sc.List(hctx, jp); err == nil {
+		rec = scion.FindAgent(agents, r.app.Name)
+	}
+	p, err := planManager(q, r.app.Name, observationOf(rec))
+	if err == nil && p.heal {
+		HealAgentSession(hctx, r.d.sessionHealer(), jp, rec)
+	}
+	cancel()
+	if err != nil {
+		return ManagerResult{}, err
+	}
+	sctx, scancel := context.WithTimeout(ctx, parkSuspendTimeout)
+	defer scancel()
+	return ManagerResult{Verb: p.verb.String()}, sc.Suspend(sctx, r.app.Name, jp)
 }

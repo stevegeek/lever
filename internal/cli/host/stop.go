@@ -89,18 +89,11 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 					// role: only start emits --role.
 					sc := brokerctl.HostScionClient(b.JailRunner(), st, "")
 					hub = sc
-					// The heal has its own budget, so a slow one cannot cost the manager its
-					// suspend.
-					hctx, hcancel := context.WithTimeout(cmd.Context(), stopHealBudget)
-					healStoppedManager(hctx, cmd, sc, stopSessionProbe(b.JailRunner()), stopRoleVerifier(b.JailRunner(), st, sc), agentRevoked(ia.app, st), appName, b.MountDest())
-					hcancel()
-					sctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
-					if serr := sc.Suspend(sctx, appName, b.MountDest()); serr != nil {
+					if serr := parkManager(cmd.Context(), cmd, ia.app, sc, stopSessionProbe(b.JailRunner()), stopRoleVerifier(b.JailRunner(), st, sc), agentRevoked(ia.app, st), b.MountDest()); serr != nil {
 						if !reportManagerSuspendError(cmd, sc, appName, b.MountDest(), serr) {
 							suspended = false
 						}
 					}
-					cancel()
 					// After the manager, under its own budget, so a slow worker pass cannot cost
 					// the manager its suspend.
 					if !suspendRunningWorkers(cmd, sc, ia.app, b.MountDest()) {
@@ -193,27 +186,24 @@ func reportManagerSuspendError(cmd *cobra.Command, sc workerSuspender, name, pro
 	return false
 }
 
-// healStoppedManager runs before the manager's suspend. A manager whose hub
-// phase reads stopped while claude still runs (another claude fired the shared
-// SessionEnd hook) cannot be suspended, and scion resumes a stopped record
-// with a fresh session, losing the conversation. Reporting the session running
-// first lets the suspend keep it (apply.HealAgentSession). Best-effort.
-//
-// The report travels on the agent's hub token, often expired by then, so an
-// expired token is reset first (scion reset-auth, behind verifyRole, the
-// pre-role record guard). verifyRole nil means no reset.
-func healStoppedManager(ctx context.Context, cmd *cobra.Command, sc *scion.Client, probe apply.AgentSessionProbe, verifyRole func(ctx context.Context, project, agent string) error, revoked func(agent string) bool, name, project string) {
-	agents, err := sc.List(ctx, project)
-	if err != nil {
-		return // the suspend that follows reports a hub that cannot answer
+// parkManager suspends the manager before the power-off, through its
+// lifecycle (apply.ManagerPark), under the lifecycle lock stop holds. A
+// manager whose hub phase reads stopped while claude still runs (another
+// claude fired the shared SessionEnd hook) cannot be suspended, and scion
+// resumes a stopped record with a fresh session, losing the conversation:
+// it is reported running first (apply.HealAgentSession), within
+// stopHealBudget. The report travels on the agent's hub token, often expired
+// by then, so an expired token is reset first (scion reset-auth, behind
+// verifyRole, the pre-role record guard); verifyRole nil means no reset. It
+// returns the suspend's error.
+func parkManager(ctx context.Context, cmd *cobra.Command, app *config.App, sc *scion.Client, probe apply.AgentSessionProbe, verifyRole func(ctx context.Context, project, agent string) error, revoked func(agent string) bool, project string) error {
+	d := apply.Deps{
+		Scion: sc, AgentSession: probe, VerifyAgentRole: verifyRole, AgentRevoked: revoked,
+		JailMount: project, ManagerLock: apply.HeldManagerLock,
+		Log: func(format string, args ...any) { logLine(cmd.ErrOrStderr(), "lever stop: "+format, args...) },
 	}
-	rec := scion.FindAgent(agents, name)
-	if rec == nil || rec.Phase != scion.PhaseStopped {
-		return
-	}
-	apply.HealAgentSession(ctx, apply.SessionHealer{Scion: sc, Probe: probe, VerifyRole: verifyRole, Revoked: revoked, Log: func(format string, args ...any) {
-		logLine(cmd.ErrOrStderr(), "lever stop: "+format, args...)
-	}}, project, rec)
+	_, err := apply.EnsureManager(ctx, app, d, apply.ManagerRequest{Intent: apply.ManagerPark, Subject: "lever stop", HealBudget: stopHealBudget})
+	return err
 }
 
 // stopRoleVerifier is apply's pre-role record guard (hubapi.VerifyAgentRole),
@@ -225,7 +215,7 @@ func stopRoleVerifier(jr proc.Runner, st state.State, sc *scion.Client) func(ctx
 	}
 }
 
-// stopHealBudget bounds healStoppedManager. A var so a test can shrink it.
+// stopHealBudget bounds parkManager's heal. A var so a test can shrink it.
 var stopHealBudget = 20 * time.Second
 
 var stopSessionProbe = func(r proc.Runner) apply.AgentSessionProbe { return jail.AgentProbe{R: r} }

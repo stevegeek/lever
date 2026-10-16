@@ -50,7 +50,7 @@ func TestStopSuspendsManager(t *testing.T) {
 	if !sb.stopped {
 		t.Fatal("stop must call Backend.Stop")
 	}
-	// A list (healStoppedManager's phase check), then the suspend.
+	// A list (the park's phase check), then the suspend.
 	if len(f.Calls) != 2 || f.Calls[0].Args[0] != "list" {
 		t.Fatalf("expected a list then the suspend, got %+v", f.Calls)
 	}
@@ -384,7 +384,7 @@ func TestSuspendRunningWorkersReportsInConfigOrder(t *testing.T) {
 	}
 }
 
-// reportProbe is an apply.AgentSessionProbe for healStoppedManager: a valid
+// reportProbe is an apply.AgentSessionProbe for parkManager's heal: a valid
 // token, a live harness, and a count of session reports.
 type reportProbe struct{ reports int }
 
@@ -398,11 +398,11 @@ func (p *reportProbe) ReportSessionRunning(context.Context, string) error {
 	return nil
 }
 
-// TestHealStoppedManagerBeforeSuspend: a manager whose hub phase reads
+// TestParkHealsAStoppedManagerBeforeSuspend: a manager whose hub phase reads
 // stopped while its claude still runs is reported running before `lever
 // stop` suspends it, so the next `lever up` resumes the conversation; any
 // other phase is left to the suspend alone.
-func TestHealStoppedManagerBeforeSuspend(t *testing.T) {
+func TestParkHealsAStoppedManagerBeforeSuspend(t *testing.T) {
 	for _, tc := range []struct {
 		list        string
 		wantReports int
@@ -418,7 +418,7 @@ func TestHealStoppedManagerBeforeSuspend(t *testing.T) {
 		var out bytes.Buffer
 		cmd.SetErr(&out)
 		p := &reportProbe{}
-		healStoppedManager(context.Background(), cmd, scion.New(f, scion.Options{}), p, nil, nil, "demo", "/lever")
+		_ = parkManager(context.Background(), cmd, &config.App{Name: "demo", Tree: t.TempDir()}, scion.New(f, scion.Options{}), p, nil, nil, "/lever")
 		if p.reports != tc.wantReports {
 			t.Fatalf("%s: reports = %d, want %d (%s)", tc.list, p.reports, tc.wantReports, out.String())
 		}
@@ -516,10 +516,10 @@ func (p *expiredThenReportProbe) ReportSessionRunning(context.Context, string) e
 	return nil
 }
 
-// TestHealStoppedManagerResetsAnExpiredTokenFirst: an expired token is reset
+// TestParkResetsAnExpiredTokenFirst: an expired token is reset
 // (behind the role guard) before the session report, which the hub would
 // otherwise refuse; a guard refusal resets nothing.
-func TestHealStoppedManagerResetsAnExpiredTokenFirst(t *testing.T) {
+func TestParkResetsAnExpiredTokenFirst(t *testing.T) {
 	for _, refuse := range []bool{false, true} {
 		f := proc.NewFakeRunner()
 		f.Script("scion list", proc.Result{Stdout: `[{"slug":"demo","phase":"stopped","containerStatus":"Up 2 hours"}]`})
@@ -536,7 +536,7 @@ func TestHealStoppedManagerResetsAnExpiredTokenFirst(t *testing.T) {
 		cmd := &cobra.Command{}
 		var out bytes.Buffer
 		cmd.SetErr(&out)
-		healStoppedManager(context.Background(), cmd, scion.New(f, scion.Options{}), p, verify, nil, "demo", "/lever")
+		_ = parkManager(context.Background(), cmd, &config.App{Name: "demo", Tree: t.TempDir()}, scion.New(f, scion.Options{}), p, verify, nil, "/lever")
 		if len(guarded) != 1 || guarded[0] != "lever/demo" {
 			t.Fatalf("refuse=%v: guard calls %v", refuse, guarded)
 		}

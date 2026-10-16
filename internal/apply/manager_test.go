@@ -288,3 +288,14 @@ func TestPlanManagerNewSession(t *testing.T) {
 		}
 	}
 }
+
+// TestPlanManagerPark: the suspend is sent whatever the reading (a power-off
+// follows); only a stopped record is healed first.
+func TestPlanManagerPark(t *testing.T) {
+	for _, o := range testutil.ManagerObservations {
+		p, err := planManager(ManagerRequest{Intent: ManagerPark}, "m", managerObservation{present: o.Phase != "", phase: o.Phase, container: o.Container})
+		if err != nil || p.verb != verbSuspend || p.heal != (o.Phase == scion.PhaseStopped) {
+			t.Errorf("%s: %+v %v", o.Name, p, err)
+		}
+	}
+}

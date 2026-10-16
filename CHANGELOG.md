@@ -73,6 +73,14 @@ version bump moves the block under the new version heading.
   the hub's list does not show the controller token lever holds. Doctor's row now names
   `lever apply` as the fix.
 
+### Upgrade
+
+- **Jail ABI 6.** `internal/scion`, which `lever-manager` imports, changed (the hub start and the
+  shared wait code); nothing the manager does with it changed. Rebuild the agent image
+  (`make lever-image` or `make lever-image-slim`, then any instance image built from it) and
+  recreate the manager on it with `lever up --fresh --keep-conversation`. Doctor's *agent lever
+  version* row says so.
+
 ## [0.42.0] - 2026-10-15
 
 ### Added

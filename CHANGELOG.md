@@ -7,7 +7,51 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **`--wait <duration>` on every command that changes an instance.** While another lever command
+  holds the instance's lifecycle lock, `lever up`, `apply`, `reload`, `stop`, `destroy`,
+  `acceptance` and `conversation new`, `restore` and `backup` exit `6` at once, naming the holder,
+  as before; with `--wait 5m`, say, they wait up to that long for it to finish, saying once what
+  they wait for, and only then exit `6`. Use it in scripts and scheduled runs. A new conversation
+  from the chat page now waits up to 3 minutes and the daily reset up to 10, instead of failing
+  and trying again 10 minutes later.
+
 ### Changed
+
+- **`lever up` applies config changes: every `up` runs the whole bring-up, as `lever apply` does,
+  then attaches.** `up` used to look at the manager first: when the hub had survived (`lever stop
+  --keep-vm`, a guest that restarted under a running hub) it kept or resumed the manager on a path
+  of its own, and left a changed config "for `lever apply`" (a changed `remote:` config kept the
+  proxy down until then). Each fix to the bring-up had to be made on that path too. Now `up`
+  converges the instance on `lever.yaml` as it is now (the hub, lever's hub identities, the
+  broker, the images, the manager and the remote proxy) and then attaches, so an edited config
+  takes effect at the next `up`. Before it starts, `up` says when the config or the lever binary
+  changed since the last bring-up. A step whose own check finds it done is skipped: a broker of
+  this binary and config, a hub started with these settings, an image already loaded. The image
+  warm-up, which can take minutes on a large image, now runs only when no finished warm-up of the
+  same image archive and lever binary is recorded and the jail still holds the image. The
+  security fences (removed logins, the hub's runtime and registry pins, unrecorded hub tokens) run
+  on every `up`. A manager record that is gone is created again, as `apply` does. `lever apply`
+  is `up` without the attach.
+- **At most one hub restart per bring-up, and a hub lever starts must have its runtime broker
+  online.** A bring-up could restart the hub twice: once for its auth settings and once more to
+  pin scion's experiments. lever now pins the experiments before the first restart, so that
+  restart takes them, and restarts again only to turn conduit on for `lever ssh`, which needs the
+  restarted hub's proof. After lever starts or restarts the hub, the step waits up to about two
+  minutes for its runtime broker and fails if it does not come online, instead of going on and
+  failing the manager's start later.
+- **lever's lifecycle record is `.lever-state/lifecycle.json`.** It holds the guest boot the
+  manager last ran in (formerly `guest-boot.json`, taken over and removed on the first write), the
+  image warm-up records and the last full bring-up. Only the command holding the lifecycle lock
+  writes it; `lever destroy` removes it; with the state directory inside the tree lever neither
+  reads nor writes it. The remote proxy's `remote.stamp` now has a single writer, the proxy.
+- **`lever attach`, `lever conversation backup` and `lever acceptance` take the lifecycle lock.**
+  `attach` holds it only while it detaches other terminals and stages its token, waiting up to 2
+  minutes for another command by default; the attach itself holds no lock. `lever destroy
+  --machine` naming the instance's own machine takes it too. The broker's certificate heal of the
+  manager lets go of the lock once the resumed manager's mounts are checked, before it waits for
+  claude, which can take minutes.
 
 - **One lifecycle for the manager.** `lever apply`, `lever up`, `lever conversation new` and
   `restore`, `lever stop`, and the broker's certificate heal and hub token reset of the manager now
@@ -27,13 +71,11 @@ version bump moves the block under the new version heading.
   survived (`lever stop --keep-vm`, a guest that restarted under a running hub), `up` resumed or
   kept the manager on a path of its own. It now runs what `apply` runs for the manager: the wait
   for the runtime broker and its retry, the workers' session heal and the mount and settings
-  warnings. It still creates nothing there: a record that is gone is refused with the fix. A
-  running manager is gated as `apply` gates it: a container column the hub leaves blank is waited
+  warnings. A running manager is gated as `apply` gates it: a container column the hub leaves blank is waited
   on, and refused if it stays blank.
 - **The broker's certificate heal of the manager waits for the manager to come up.** The bounce
-  read the tree mounts back but did not check that claude started, and recorded the guest boot
-  regardless. It now passes the same liveness gate as `lever up` before it is audited as healed and
-  the boot recorded; the heal's bound grows from 9 to 13 minutes. Since the manager can make such a
+  read the tree mounts back but did not check that claude started. It now passes the same liveness
+  gate as `lever up` before it is audited as healed; the heal's bound grows from 9 to 13 minutes. Since the manager can make such a
   heal last minutes, `lever stop` no longer refuses while the broker holds the lifecycle lock: it
   stops the broker first, which ends the hold. A `lever revoke` that lands while
   the heal waits for the lifecycle lock now stops it, as it already did for workers, and the

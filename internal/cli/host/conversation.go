@@ -60,6 +60,22 @@ type convOps struct {
 	session func() sessionBegin
 	// bootTask reads the boot prompt a new conversation's session runs.
 	bootTask func() (string, error)
+	// recordBoot notes the guest boot the manager now runs in, once it passed
+	// its liveness gate (apply.RecordGuestBoot); nil records nothing.
+	recordBoot func(ctx context.Context)
+}
+
+// live is the end of every resume that passed its gate: the mounts are read
+// back, then the guest boot is recorded, so a later up does not take this
+// boot for one the manager never ran in.
+func (o convOps) live(ctx context.Context, guard managerResume) error {
+	if err := guard.Live(ctx); err != nil {
+		return err
+	}
+	if o.recordBoot != nil {
+		o.recordBoot(ctx)
+	}
+	return nil
 }
 
 type managerResume interface {
@@ -89,8 +105,9 @@ func newConvOps(w *applyWiring, app *config.App, st state.State) convOps {
 		clearStopClaim: func(ctx context.Context, resume func() error) error {
 			return apply.ResumeClearingStopClaim(ctx, w.deps, app.Name, project, "conversation", resume)
 		},
-		session:  func() sessionBegin { return beginFreshSession(app, st) },
-		bootTask: func() (string, error) { return apply.ManagerTask(app) },
+		session:    func() sessionBegin { return beginFreshSession(app, st) },
+		bootTask:   func() (string, error) { return apply.ManagerTask(app) },
+		recordBoot: func(ctx context.Context) { apply.RecordGuestBoot(ctx, w.deps) },
 	}
 }
 
@@ -383,7 +400,7 @@ func (o convOps) restore(ctx context.Context, id string, backupFirst bool) (err 
 	if err := o.gate(ctx); err != nil {
 		return guard.AfterFailure(ctx, err)
 	}
-	return guard.Live(ctx)
+	return o.live(ctx, guard)
 }
 
 // resumeAfterFailure resumes a manager this code suspended, through the

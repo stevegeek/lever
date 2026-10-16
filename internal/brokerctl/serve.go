@@ -395,6 +395,8 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 			return out, nil
 		},
 	}, jailMount)
+	guestBoot := apply.Deps{GuestBoot: JailGuestBoot{R: jr, State: st}, Log: daemon.Warnf}
+	d.RecordManagerBoot = func(ctx context.Context) { apply.RecordGuestBoot(ctx, guestBoot) }
 	if len(app.SharedFolders) > 0 {
 		d.RecordVolumes = readVolumes
 	} else {

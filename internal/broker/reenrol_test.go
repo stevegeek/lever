@@ -117,6 +117,20 @@ func TestHealLapsedManager(t *testing.T) {
 	}
 }
 
+// A worker's heal never records the guest boot: the record is the manager's.
+func TestHealLapsedWorkerRecordsNoBoot(t *testing.T) {
+	rt := &fakeRuntime{staticPhases: true, agents: map[string][]scion.Agent{
+		testInstanceProject: {{Slug: "scratch", Phase: "suspended", ContainerStatus: "stopped"}},
+	}}
+	b, _, _ := reenrolBroker(t, rt, "all")
+	boots := 0
+	b.recordManagerBoot = func(context.Context) { boots++ }
+	b.healLapse(context.Background(), "scratch")
+	if len(rt.resumed) != 1 || boots != 0 {
+		t.Fatalf("resumed %v, boots recorded %d; want the worker resumed and no boot recorded", rt.resumed, boots)
+	}
+}
+
 // Gate: revoked identities are NEVER healed — expiry stays a kill-switch.
 func TestHealRefusesRevoked(t *testing.T) {
 	rt := &fakeRuntime{staticPhases: true, agents: map[string][]scion.Agent{
@@ -534,7 +548,8 @@ func TestFreshStartResetsTheAttemptCount(t *testing.T) {
 // (DispatchConfig.ManagerResumeGuard). Unwired, or refusing before, the
 // manager is neither staged a ticket nor bounced; refusing after the
 // resume, the heal fails (the guard suspended the manager); a failed
-// resume is checked too; a check that never ran is said in the audit.
+// resume is checked too; a check that never ran is said in the audit. Only a
+// heal records the guest boot.
 func TestHealManagerResumeGuard(t *testing.T) {
 	guardOf := func(c *fakeResumeCheck, err error) func(context.Context) (ManagerResumeCheck, error) {
 		return func(context.Context) (ManagerResumeCheck, error) {
@@ -573,14 +588,19 @@ func TestHealManagerResumeGuard(t *testing.T) {
 			}}
 			var buf bytes.Buffer
 			managerDir := filepath.Join(t.TempDir(), ".lever")
+			boots := 0
 			b := New(testConfig(t, withManager("test-manager", "appname"), withRuntime(rt), withAudit(&buf),
 				func(c *Config) {
 					c.Dispatch.AutoReenrol, c.Dispatch.ManagerBootstrapDir = "all", managerDir
+					c.Dispatch.RecordManagerBoot = func(context.Context) { boots++ }
 					if !tc.unwired {
 						c.Dispatch.ManagerResumeGuard = guardOf(tc.check, tc.guardErr)
 					}
 				}))
 			b.healLapse(context.Background(), "test-manager")
+			if recorded := boots == 1; recorded != tc.wantHeal || boots > 1 {
+				t.Fatalf("guest boot recorded %d times, want it once only after a heal (%v)", boots, tc.wantHeal)
+			}
 			if staged := stagedCN(t, managerDir) != ""; staged != tc.wantStaged {
 				t.Fatalf("staged = %v, want %v", staged, tc.wantStaged)
 			}

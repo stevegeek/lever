@@ -21,6 +21,11 @@ version bump moves the block under the new version heading.
   unspent enrolment ticket. `lever apply` stages a fresh one before every resume; `lever up`'s own
   resume did not, so a manager suspended past its certificate's life came back with no tools. `up`
   now re-arms the broker's ticket before it resumes the manager, as `apply` does.
+- **`lever conversation new`, `lever conversation restore` and the broker's certificate heal of the
+  manager record the guest boot.** lever keeps the guest boot the manager last ran in, to tell a
+  manager record a VM restart left behind from a live one. `apply` and `up` recorded it; these three
+  start the manager too and did not, so a later `lever up` could compare against an older boot.
+  Each now records the boot once the manager passed its checks.
 
 ## [0.42.0] - 2026-10-15
 

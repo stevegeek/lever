@@ -182,6 +182,7 @@ func newConvFixture(t *testing.T) *convFixture {
 		gate:        func(context.Context) error { f.gated++; return nil },
 		beginResume: f.guard.begin,
 		suspendWait: apply.RetryBudget{Attempts: 3, Interval: time.Millisecond},
+		recordBoot:  func(ctx context.Context) { _ = f.guard.step("boot") },
 	}
 	return f
 }
@@ -254,8 +255,8 @@ func TestFreshBackupThenRestore(t *testing.T) {
 	if strings.Join(f.sc.calls, ",") != "suspend,resume" || f.gated != 1 {
 		t.Fatalf("calls = %v, gated %d", f.sc.calls, f.gated)
 	}
-	if got := strings.Join(f.guard.steps, ","); got != "begin,resumed,live" {
-		t.Fatalf("resume checks = %q, want begin,resumed,live (lever#158)", got)
+	if got := strings.Join(f.guard.steps, ","); got != "begin,resumed,live,boot" {
+		t.Fatalf("resume checks = %q, want begin,resumed,live (lever#158), then the guest boot recorded", got)
 	}
 	if b, err := os.ReadFile(f.transcript("old.jsonl")); err != nil || string(b) != "{\"old\":1}\n" {
 		t.Fatalf("restored: %q %v", b, err)

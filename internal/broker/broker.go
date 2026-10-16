@@ -217,6 +217,11 @@ type DispatchConfig struct {
 	// mounts are not as planned; the returned check runs after the resume.
 	// nil: the broker never resumes the manager (fail closed).
 	ManagerResumeGuard func(ctx context.Context) (ManagerResumeCheck, error)
+	// RecordManagerBoot notes the guest boot the manager runs in after a
+	// bounce whose checks passed, as lever's own resumes do, so a later
+	// `lever up` does not take the boot for one the manager never ran in.
+	// nil records nothing.
+	RecordManagerBoot func(ctx context.Context)
 	// Tickets stages a worker's enrolment envelope in the guest, outside the
 	// instance tree: the manager mounts the whole tree, so nothing a worker
 	// must redeem may be written there. nil ⇒ every dispatch fails closed.
@@ -298,6 +303,7 @@ type Broker struct {
 	leftoverShareVolumes RecordVolumesFunc
 	sharedGuard          func(ctx context.Context) error
 	managerResumeGuard   func(ctx context.Context) (ManagerResumeCheck, error)
+	recordManagerBoot    func(ctx context.Context)
 	// afterWorkspaceMkdir is a test seam between a strict workspace mkdir
 	// and the walk that follows it.
 	afterWorkspaceMkdir func()
@@ -426,6 +432,7 @@ func New(c Config) *Broker {
 		verifyRole: d.VerifyAgentRole, resolveAgentID: d.ResolveAgentID, beginSession: d.BeginSession, lockManager: d.LockManager, tree: d.Tree, readOnlyDirs: d.ReadOnlyDirs,
 		recordVolumes: d.RecordVolumes, leftoverShareVolumes: d.LeftoverShareVolumes, sharedGuard: d.SharedGuard,
 		managerResumeGuard: d.ManagerResumeGuard,
+		recordManagerBoot:  d.RecordManagerBoot,
 		liveAttempts:       defaultLiveAttempts, liveInterval: defaultLiveInterval, liveSettle: d.LiveSettle,
 		maxRunningWorkers:   d.MaxRunningWorkers,
 		autoReenrol:         cmp.Or(d.AutoReenrol, autoReenrolAll),

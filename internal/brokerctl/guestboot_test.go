@@ -1,4 +1,4 @@
-package host
+package brokerctl
 
 import (
 	"context"
@@ -15,7 +15,7 @@ func TestJailGuestBoot(t *testing.T) {
 	f := proc.NewFakeRunner()
 	f.Script("cat "+guestBootIDPath, proc.Result{Stdout: id + "\n"})
 	st := state.State{Dir: t.TempDir()}
-	g := jailGuestBoot{jr: f, st: st, now: func() time.Time { return time.Unix(0, 0) }}
+	g := JailGuestBoot{R: f, State: st, Now: func() time.Time { return time.Unix(0, 0) }}
 
 	got, err := g.Current(context.Background())
 	if err != nil || got != id {
@@ -40,7 +40,7 @@ func TestJailGuestBootRefusesOddValues(t *testing.T) {
 	f := proc.NewFakeRunner()
 	f.Script("cat "+guestBootIDPath, proc.Result{Stdout: "../../etc/passwd\n"})
 	st := state.State{Dir: t.TempDir()}
-	g := jailGuestBoot{jr: f, st: st}
+	g := JailGuestBoot{R: f, State: st}
 	if _, err := g.Current(context.Background()); err == nil {
 		t.Fatal("a value that is not a boot id must be refused")
 	}

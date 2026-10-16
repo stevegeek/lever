@@ -216,7 +216,7 @@ func (o convOps) newConversation(ctx context.Context, req newConvRequest) (m con
 	if err := o.gate(ctx); err != nil {
 		return m, saved, o.afterStop(m, saved, guard.AfterFailure(ctx, err))
 	}
-	return m, saved, guard.Live(ctx)
+	return m, saved, o.live(ctx, guard)
 }
 
 // resumeFresh starts the stopped record in a new session on task, the

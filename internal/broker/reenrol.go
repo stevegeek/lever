@@ -163,6 +163,9 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 	if afterResume != nil && !afterResume.Verified() {
 		verb += "; warning: the manager's tree mounts could not be checked after the resume, run `lever doctor` (row \"manager read-only paths\")"
 	}
+	if afterResume != nil && b.recordManagerBoot != nil {
+		b.recordManagerBoot(hctx)
+	}
 	// The cap only bounds consecutive failures.
 	b.resetReenrolTries(cn)
 	b.audit("reenrol", cn, "allow", "natural lapse: ticket re-staged, healed via "+verb)

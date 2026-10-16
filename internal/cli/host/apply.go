@@ -1061,7 +1061,7 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		AgentRevoked:   agentRevoked(w.app, st),
 		// GuestBoot lets start-manager and up recover a manager record a hard VM kill
 		// left "running".
-		GuestBoot: jailGuestBoot{jr: b.JailRunner(), st: st},
+		GuestBoot: brokerctl.JailGuestBoot{R: b.JailRunner(), State: st},
 
 		EnsureScionTelemetry: w.ensureScionTelemetry,
 		EnsureAgentTemplate:  w.ensureAgentTemplate,

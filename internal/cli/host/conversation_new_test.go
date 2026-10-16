@@ -50,8 +50,8 @@ func (f *convFixture) calls() string { return strings.Join(f.sc.calls, ",") }
 // TestNewConversation is the whole path: the running manager is suspended,
 // its transcripts backed up, stopped (its old session ends) and started in a
 // fresh session with the boot prompt, through the resume checks, the gate,
-// and a session record committed after the start. The old transcript stays
-// in its home.
+// and a session record committed after the start; the guest boot is recorded
+// once the manager is live. The old transcript stays in its home.
 func TestNewConversation(t *testing.T) {
 	f, sess := newConvFixtureWith(t)
 	writeConvFile(t, f.transcript("old.jsonl"), "{\"old\":1}\n")
@@ -71,7 +71,7 @@ func TestNewConversation(t *testing.T) {
 	if f.sc.phase != scion.PhaseRunning {
 		t.Fatalf("phase %q", f.sc.phase)
 	}
-	if got := strings.Join(f.guard.steps, ","); got != "begin,resumed,live" || f.gated != 1 {
+	if got := strings.Join(f.guard.steps, ","); got != "begin,resumed,live,boot" || f.gated != 1 {
 		t.Fatalf("checks = %q gated %d", got, f.gated)
 	}
 	if sess.asked != 1 || sess.began != 1 || sess.committed != 1 {

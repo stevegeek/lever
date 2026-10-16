@@ -1,4 +1,4 @@
-package host
+package brokerctl
 
 import (
 	"context"
@@ -23,14 +23,17 @@ type guestBootRecord struct {
 	RecordedAt time.Time `json:"recorded_at"`
 }
 
-type jailGuestBoot struct {
-	jr  proc.Runner
-	st  state.State
-	now func() time.Time
+// JailGuestBoot is apply.GuestBoot over the jail runner and the state
+// directory's guest boot record, for apply's wiring and the broker's bounce
+// of the manager alike.
+type JailGuestBoot struct {
+	R     proc.Runner
+	State state.State
+	Now   func() time.Time
 }
 
-func (g jailGuestBoot) Current(ctx context.Context) (string, error) {
-	res, err := g.jr.Run(ctx, nil, "cat", guestBootIDPath)
+func (g JailGuestBoot) Current(ctx context.Context) (string, error) {
+	res, err := g.R.Run(ctx, nil, "cat", guestBootIDPath)
 	if err != nil {
 		return "", err
 	}
@@ -41,8 +44,8 @@ func (g jailGuestBoot) Current(ctx context.Context) (string, error) {
 	return id, nil
 }
 
-func (g jailGuestBoot) Recorded() (string, error) {
-	r, err := state.LoadJSON[guestBootRecord](g.st.GuestBoot(), "guest boot record")
+func (g JailGuestBoot) Recorded() (string, error) {
+	r, err := state.LoadJSON[guestBootRecord](g.State.GuestBoot(), "guest boot record")
 	if err != nil {
 		return "", err
 	}
@@ -52,10 +55,10 @@ func (g jailGuestBoot) Recorded() (string, error) {
 	return r.BootID, nil
 }
 
-func (g jailGuestBoot) Record(id string) error {
-	now := g.now
+func (g JailGuestBoot) Record(id string) error {
+	now := g.Now
 	if now == nil {
 		now = time.Now
 	}
-	return state.SaveJSON(g.st.GuestBoot(), "guest boot record", guestBootRecord{BootID: id, RecordedAt: now().UTC()})
+	return state.SaveJSON(g.State.GuestBoot(), "guest boot record", guestBootRecord{BootID: id, RecordedAt: now().UTC()})
 }

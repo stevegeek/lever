@@ -35,6 +35,15 @@ version bump moves the block under the new version heading.
   names the holder, for a command that is stuck (a `lever stop` hung in the guest). The broker's
   reset of the manager's token is skipped while the lock is held, as its certificate heal already
   was, and retried at the next check.
+- **The broker's certificate heal of the manager gets past a hub stop claim.** When the manager's
+  certificate lapses the broker bounces it so its boot re-enrols. That resume did not have the
+  stop-claim recovery `lever up`, `apply` and `conversation restore` gained in 0.42.0, so after a
+  VM power-off during a manager start the heal failed on every lapse with the hub's
+  `start_in_progress` refusal. It now resumes through the same recovery: it removes the manager's
+  own container, by the name lever derives, only when podman shows no process in it and a second
+  look shows it unchanged, and retries for about three minutes; when the claim stays held its audit
+  line names the claim and the fix. Only the manager's own lapsed certificate starts this bounce.
+  Worker resumes are still not covered: the manager asks for those.
 
 ## [0.42.0] - 2026-10-15
 

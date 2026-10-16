@@ -355,8 +355,8 @@ func TestDispatchConfigWiresTheRecordReaderByFolders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dispatchConfig: %v", err)
 	}
-	if d.ManagerResumeGuard == nil || d.RecordManagerBoot == nil {
-		t.Fatal("the manager's bounce must run apply's resume checks and record the guest boot")
+	if d.ManagerResumeGuard == nil || d.RecordManagerBoot == nil || d.ClearManagerStopClaim == nil {
+		t.Fatal("the manager's bounce must run apply's resume checks and stop-claim recovery, and record the guest boot")
 	}
 	if d.RecordVolumes != nil || d.LeftoverShareVolumes == nil {
 		t.Fatalf("no folders: RecordVolumes wired=%v LeftoverShareVolumes wired=%v, want only the best-effort reader",

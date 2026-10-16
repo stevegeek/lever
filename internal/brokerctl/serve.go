@@ -395,6 +395,10 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 			return out, nil
 		},
 	}, jailMount)
+	stopClaim := apply.Deps{StaleContainer: jail.ContainerJanitor{R: jr}, Log: daemon.Warnf}
+	d.ClearManagerStopClaim = func(ctx context.Context, resume func() error) error {
+		return apply.ResumeClearingStopClaim(ctx, stopClaim, app.Name, jailMount, "broker", resume)
+	}
 	guestBoot := apply.Deps{GuestBoot: JailGuestBoot{R: jr, State: st}, Log: daemon.Warnf}
 	d.RecordManagerBoot = func(ctx context.Context) { apply.RecordGuestBoot(ctx, guestBoot) }
 	if len(app.SharedFolders) > 0 {

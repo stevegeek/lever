@@ -218,6 +218,15 @@ type DispatchConfig struct {
 	// mounts are not as planned; the returned check runs after the resume.
 	// nil: the broker never resumes the manager (fail closed).
 	ManagerResumeGuard func(ctx context.Context) (ManagerResumeCheck, error)
+	// ClearManagerStopClaim runs the manager bounce's resume through apply's
+	// stop-claim recovery (apply.ResumeClearingStopClaim): on the hub's held
+	// stop claim it removes the manager's own container, by the name lever
+	// derives, only when podman shows no process in it, and retries. Only
+	// the manager's own lapsed certificate starts that bounce, so at worst
+	// the manager costs itself its container's writable layer, as any scion
+	// resume of a stopped container does. Worker resumes never get it: the
+	// manager asks for those. nil runs the resume as is.
+	ClearManagerStopClaim func(ctx context.Context, resume func() error) error
 	// RecordManagerBoot notes the guest boot the manager runs in after a
 	// bounce whose checks passed, as lever's own resumes do, so a later
 	// `lever up` does not take the boot for one the manager never ran in.
@@ -305,6 +314,7 @@ type Broker struct {
 	sharedGuard          func(ctx context.Context) error
 	managerResumeGuard   func(ctx context.Context) (ManagerResumeCheck, error)
 	recordManagerBoot    func(ctx context.Context)
+	clearStopClaim       func(ctx context.Context, resume func() error) error
 	// afterWorkspaceMkdir is a test seam between a strict workspace mkdir
 	// and the walk that follows it.
 	afterWorkspaceMkdir func()
@@ -434,6 +444,7 @@ func New(c Config) *Broker {
 		recordVolumes: d.RecordVolumes, leftoverShareVolumes: d.LeftoverShareVolumes, sharedGuard: d.SharedGuard,
 		managerResumeGuard: d.ManagerResumeGuard,
 		recordManagerBoot:  d.RecordManagerBoot,
+		clearStopClaim:     d.ClearManagerStopClaim,
 		liveAttempts:       defaultLiveAttempts, liveInterval: defaultLiveInterval, liveSettle: d.LiveSettle,
 		maxRunningWorkers:   d.MaxRunningWorkers,
 		autoReenrol:         cmp.Or(d.AutoReenrol, autoReenrolAll),

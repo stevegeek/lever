@@ -1689,8 +1689,8 @@ released and every resume is refused with
 `lever doctor`'s *manager agent* row names a stopped, suspended or error record over a `Created`
 container.
 
-`lever up` (and `lever apply`, and `lever conversation restore`) recover from it on their own when
-the resume gets that answer:
+`lever up` (and `lever apply`, `lever conversation restore` and the broker's bounce of the manager
+when its certificate lapsed) recover from it on their own when the resume gets that answer:
 
 1. lever asks podman, as the jail user, for the manager's container (`<project>--<manager>`, the
    name lever derives itself). It acts only when podman reports the container with no process in
@@ -1718,8 +1718,9 @@ podman ps -a --filter name='^<project>--<manager>$'      # must not show it Up
 podman rm <project>--<manager>
 ```
 
-then, within about two minutes, `lever up`. Workers are not covered: the broker resumes them, and
-lever does not remove containers on that path.
+then, within about two minutes, `lever up`. Workers are not covered: the broker resumes them at
+the manager's request, and lever does not remove a worker's container on that path. The broker's
+own bounce of the manager is covered, since only the manager's own lapsed certificate starts it.
 
 ### If a nested VM wedges the guest
 

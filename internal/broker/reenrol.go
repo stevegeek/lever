@@ -272,18 +272,26 @@ func (b *Broker) bounceForReenrol(ctx context.Context, cn, slug string, afterRes
 		}
 		defer release()
 	}
+	// afterResume is set for the manager only.
+	clearing := func(resume func(context.Context, string, string) error) error {
+		run := func() error { return resume(ctx, slug, b.instanceProject) }
+		if afterResume == nil || b.clearStopClaim == nil {
+			return run()
+		}
+		return b.clearStopClaim(ctx, run)
+	}
 	switch phase {
 	case scion.PhaseRunning:
 		verb = "suspend+resume"
 		if err = b.runtime.Suspend(ctx, slug, b.instanceProject); err == nil {
-			err = b.runtime.Resume(ctx, slug, b.instanceProject)
+			err = clearing(b.runtime.Resume)
 		}
 	case scion.PhaseSuspended, scion.PhaseStopped:
 		verb = "resume"
-		err = b.runtime.Resume(ctx, slug, b.instanceProject)
+		err = clearing(b.runtime.Resume)
 	case scion.PhaseError:
 		verb = "resume --force"
-		err = b.runtime.ResumeForce(ctx, slug, b.instanceProject)
+		err = clearing(b.runtime.ResumeForce)
 	default:
 		b.audit("reenrol", cn, "error", "natural lapse detected but agent "+slug+" is in phase "+phase+" — not bounceable, run `lever up`")
 		return "", false

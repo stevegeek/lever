@@ -117,6 +117,51 @@ func TestHealLapsedManager(t *testing.T) {
 	}
 }
 
+// The manager's bounce resumes through the stop-claim recovery, in every
+// phase it bounces; a worker's never does, and a recovery that gives up fails
+// the heal through the post-failure check.
+func TestHealManagerClearsAStopClaim(t *testing.T) {
+	for _, phase := range []string{"running", "suspended", "error"} {
+		t.Run(phase, func(t *testing.T) {
+			rt := &fakeRuntime{staticPhases: true, agents: map[string][]scion.Agent{
+				testInstanceProject: {{Slug: "appname", Phase: phase}, {Slug: "scratch", Phase: "suspended"}},
+			}}
+			b, _, _ := reenrolBroker(t, rt, "all")
+			cleared := 0
+			b.clearStopClaim = func(_ context.Context, resume func() error) error {
+				cleared++
+				return resume()
+			}
+			b.healLapse(context.Background(), "test-manager")
+			if cleared != 1 || len(rt.resumed)+len(rt.resumeForced) != 1 {
+				t.Fatalf("cleared %d, resumed %v forced %v; want one resume through the recovery", cleared, rt.resumed, rt.resumeForced)
+			}
+			b.healLapse(context.Background(), "scratch")
+			if cleared != 1 || len(rt.resumed)+len(rt.resumeForced) != 2 {
+				t.Fatalf("worker heal: cleared %d, resumed %v forced %v; want a plain resume", cleared, rt.resumed, rt.resumeForced)
+			}
+		})
+	}
+
+	rt := &fakeRuntime{staticPhases: true, agents: map[string][]scion.Agent{
+		testInstanceProject: {{Slug: "appname", Phase: "suspended"}},
+	}}
+	var buf bytes.Buffer
+	check := &fakeResumeCheck{verified: true}
+	b := New(testConfig(t, withManager("test-manager", "appname"), withRuntime(rt), withAudit(&buf),
+		func(c *Config) {
+			c.Dispatch.AutoReenrol, c.Dispatch.ManagerBootstrapDir = "all", filepath.Join(t.TempDir(), ".lever")
+			c.Dispatch.ManagerResumeGuard = func(context.Context) (ManagerResumeCheck, error) { return check, nil }
+			c.Dispatch.ClearManagerStopClaim = func(context.Context, func() error) error {
+				return errors.New("the hub holds a stop claim on the manager")
+			}
+		}))
+	b.healLapse(context.Background(), "test-manager")
+	if !strings.Contains(buf.String(), "resume failed: the hub holds a stop claim") || check.failedWith == nil || strings.Contains(buf.String(), "healed via") {
+		t.Fatalf("audit %q, checked after the failure %v", buf.String(), check.failedWith)
+	}
+}
+
 // A worker's heal never records the guest boot: the record is the manager's.
 func TestHealLapsedWorkerRecordsNoBoot(t *testing.T) {
 	rt := &fakeRuntime{staticPhases: true, agents: map[string][]scion.Agent{

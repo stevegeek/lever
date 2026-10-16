@@ -18,6 +18,7 @@ import (
 	"github.com/stevegeek/lever/internal/sessionrec"
 	"github.com/stevegeek/lever/internal/state"
 	"github.com/stevegeek/lever/internal/termsafe"
+	"github.com/stevegeek/lever/internal/wait"
 )
 
 // newConvRequest is one new conversation. Reason names it in the backup list.
@@ -156,22 +157,23 @@ func (o convOps) afterStop(m convbackup.Meta, saved bool, cause error) error {
 // lockConversation keeps the changes to one instance's manager record apart:
 // new and restore suspend, swap or stop it; up, apply, stop and reload
 // resume, suspend or recreate it. verb and from (where the command came from, or "")
-// name the caller to the one it turns away.
-func lockConversation(app *config.App, st state.State, verb, from string) (func(), error) {
+// name the caller to the one it turns away; maxWait is lockWait's.
+func lockConversation(ctx context.Context, app *config.App, st state.State, verb, from string, maxWait time.Duration, notice func(string)) (func(), error) {
 	if brokerctl.StateInsideTree(app, st) {
 		return nil, errConvStateInTree
 	}
-	return takeManagerLock(st, verb, from)
+	return takeManagerLock(ctx, st, verb, from, maxWait, notice)
 }
 
-// lockLifecycle is lockConversation for up, apply, stop, reload and destroy.
-// With the state directory inside the tree there is no new or restore to keep
-// apart from, and a lock file there would be the agents' to hold.
-func lockLifecycle(app *config.App, st state.State, verb string) (func(), error) {
+// lockLifecycle is lockConversation for the other commands that change the
+// instance. With the state directory inside the tree there is no new or
+// restore to keep apart from, and a lock file there would be the agents' to
+// hold.
+func lockLifecycle(ctx context.Context, app *config.App, st state.State, verb string, maxWait time.Duration, notice func(string)) (func(), error) {
 	if brokerctl.StateInsideTree(app, st) {
 		return func() {}, nil
 	}
-	return takeManagerLock(st, verb, "")
+	return takeManagerLock(ctx, st, verb, "", maxWait, notice)
 }
 
 // managerLockHolder names the command that holds the manager lock now, or ""
@@ -189,25 +191,68 @@ func managerLockHolder(app *config.App, st state.State) string {
 	if !errors.Is(err, hostledger.ErrLocked) {
 		return ""
 	}
+	return lockHolderName(p)
+}
+
+func lockHolderName(p string) string {
 	return cmp.Or(termsafe.Sanitize(hostledger.LockHolder(p)), "another lever command")
 }
 
-// takeManagerLock never waits: a new conversation can hold the lock for
-// minutes, and a command that waited on it silently would look hung. The
-// one it turns away exits 6 and names the holder.
-func takeManagerLock(st state.State, verb, from string) (func(), error) {
+// lockWaitFlagUsage is --wait's help on the commands that take the lock.
+const lockWaitFlagUsage = "when another lever command is changing this instance, wait up to this long for it to finish (e.g. 5m) instead of exiting 6 at once"
+
+func addLockWaitFlag(c *cobra.Command, d *time.Duration, def time.Duration) {
+	c.Flags().DurationVar(d, "wait", def, lockWaitFlagUsage)
+}
+
+// lockNotice prints a lock wait's notice on the command's stderr.
+func lockNotice(cmd *cobra.Command) func(string) {
+	return func(msg string) { cmd.PrintErrln(msg) }
+}
+
+// lockPoll is how often a waiting command tries the lock again.
+var lockPoll = time.Second
+
+// takeManagerLock turns the caller away at once (exit 6, naming the holder)
+// unless maxWait is set: then it waits up to maxWait for the holder to
+// finish, saying once what it waits for (notice). Only scripts and lever's
+// own unattended callers wait by default: a command that waited silently
+// would look hung.
+func takeManagerLock(ctx context.Context, st state.State, verb, from string, maxWait time.Duration, notice func(string)) (func(), error) {
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		return nil, fmt.Errorf("locking the manager record: %w", err)
 	}
 	p := st.ConversationLock()
-	holder := fmt.Sprintf("`%s`%s (pid %d, since %s)", verb, from, os.Getpid(), time.Now().UTC().Format("15:04:05 UTC"))
-	unlock, err := hostledger.TryLockFileAs(p, holder)
+	try := func() (func(), error) {
+		holder := fmt.Sprintf("`%s`%s (pid %d, since %s)", verb, from, os.Getpid(), time.Now().UTC().Format("15:04:05 UTC"))
+		return hostledger.TryLockFileAs(p, holder)
+	}
+	unlock, err := try()
+	if errors.Is(err, hostledger.ErrLocked) && maxWait > 0 {
+		if notice != nil {
+			notice(fmt.Sprintf("lever: %s is changing this instance; waiting up to %s for it to finish (--wait)", lockHolderName(p), maxWait))
+		}
+		werr := wait.For(ctx, wait.Spec{Name: "the lifecycle lock", Budget: maxWait, Interval: lockPoll}, func(context.Context) wait.Result {
+			unlock, err = try()
+			if errors.Is(err, hostledger.ErrLocked) {
+				return wait.NotYet("held")
+			}
+			return wait.Ready()
+		})
+		if werr != nil && !errors.Is(werr, wait.ErrTimeout) {
+			return nil, werr
+		}
+	}
 	if errors.Is(err, hostledger.ErrLocked) {
 		other := termsafe.Sanitize(hostledger.LockHolder(p))
 		if other == "" {
-			other = "another `lever conversation new`, `conversation restore`, `up`, `apply`, `stop`, `reload` or `destroy`"
+			other = "another `lever conversation new`, `conversation restore`, `conversation backup`, `up`, `apply`, `stop`, `reload`, `destroy`, `attach` or `acceptance`"
 		}
-		return nil, cli.WithExitCode(fmt.Errorf("%s is changing this instance's manager; nothing was changed. Run `%s` again once it has finished", other, verb), exitConversationLocked)
+		waited := ""
+		if maxWait > 0 {
+			waited = fmt.Sprintf(" (waited %s)", maxWait)
+		}
+		return nil, cli.WithExitCode(fmt.Errorf("%s is changing this instance's manager; nothing was changed%s. Run `%s` again once it has finished, or pass --wait", other, waited, verb), exitConversationLocked)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("locking the manager record: %w", err)
@@ -231,6 +276,7 @@ var newConvBy = map[string]newConvRequest{
 func newConversationNewCmd(bf BackendFactory) *cobra.Command {
 	var force bool
 	var by, progressMode string
+	var lockWait time.Duration
 	c := &cobra.Command{
 		Use:   "new [CONFIG]",
 		Args:  cobra.MaximumNArgs(1),
@@ -260,7 +306,7 @@ func newConversationNewCmd(bf BackendFactory) *cobra.Command {
 			case "daily":
 				from = " for the daily reset"
 			}
-			unlock, err := lockConversation(app, st, "lever conversation new", from)
+			unlock, err := lockConversation(cmd.Context(), app, st, "lever conversation new", from, lockWait, lockNotice(cmd))
 			if err != nil {
 				return err
 			}
@@ -308,5 +354,6 @@ func newConversationNewCmd(bf BackendFactory) *cobra.Command {
 	c.Flags().StringVar(&by, "by", "", "the caller that asks (chat, daily); for lever's own use")
 	_ = c.Flags().MarkHidden("by")
 	c.Flags().StringVar(&progressMode, "progress", "", progressFlagUsage)
+	addLockWaitFlag(c, &lockWait, 0)
 	return c
 }

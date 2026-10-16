@@ -317,8 +317,8 @@ func reenrolDeps(r *agentLifecycleRunner, staged *int) (Deps, ManagerRequest) {
 // TestReenrolBouncesByPhase: the broker's bounce stages a ticket and
 // suspends and resumes a running manager, resumes a suspended or stopped
 // one, forces an error one; it never creates or deletes, and refuses any
-// other phase before the stage. The guest boot is recorded only after a
-// bounce that passed the gate.
+// other phase before the stage. The guest boot is recorded once the resumed
+// container's mounts were read back.
 func TestReenrolBouncesByPhase(t *testing.T) {
 	for _, c := range []struct {
 		phase, container string
@@ -358,8 +358,7 @@ func TestReenrolBouncesByPhase(t *testing.T) {
 
 // TestReenrolRefusals: what the lifecycle refuses for the broker is marked
 // ErrManagerRefused and changes nothing; a revoke caught under the lock
-// reads nothing at all; a resume that dies fails the gate and records no
-// boot.
+// reads nothing at all; a resume that dies fails the gate.
 func TestReenrolRefusals(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "stopped"}
@@ -389,8 +388,57 @@ func TestReenrolRefusals(t *testing.T) {
 	d2, q2 := reenrolDeps(r2, &staged)
 	gb := &fakeGuestBoot{current: bootB}
 	d2.GuestBoot = gb
-	if _, err := EnsureManager(context.Background(), app2, d2, q2); err == nil || errors.Is(err, ErrManagerRefused) || len(gb.records) != 0 {
-		t.Fatalf("dead resume: err %v boots %v", err, gb.records)
+	if _, err := EnsureManager(context.Background(), app2, d2, q2); err == nil || errors.Is(err, ErrManagerRefused) {
+		t.Fatalf("dead resume: err %v", err)
+	}
+}
+
+// heldSpy notes whether the lifecycle lock was held at the manager's
+// resume and at its last list.
+type heldSpy struct {
+	ManagerScion
+	held                      *bool
+	heldAtResume, heldAtLast  bool
+	resumed, listsAfterResume int
+}
+
+func (s *heldSpy) Resume(ctx context.Context, worker, project string) error {
+	s.resumed++
+	s.heldAtResume = *s.held
+	return s.ManagerScion.Resume(ctx, worker, project)
+}
+
+func (s *heldSpy) List(ctx context.Context, project string) ([]scion.Agent, error) {
+	if s.resumed > 0 {
+		s.listsAfterResume++
+		s.heldAtLast = *s.held
+	}
+	return s.ManagerScion.List(ctx, project)
+}
+
+// TestReenrolReleasesTheLockBeforeTheGate: the broker's bounce holds the
+// lifecycle lock through the resume and its mount read-back, and lets go
+// before the liveness gate, which can wait minutes on claude.
+func TestReenrolReleasesTheLockBeforeTheGate(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "stopped"}
+	staged := 0
+	d, q := reenrolDeps(r, &staged)
+	held := false
+	d.ManagerLock = func(string) (func(), error) {
+		held = true
+		return func() { held = false }, nil
+	}
+	spy := &heldSpy{ManagerScion: d.Scion, held: &held}
+	d.ManagerVerbs = spy
+	gb := &fakeGuestBoot{current: bootB}
+	d.GuestBoot = gb
+	if _, err := EnsureManager(context.Background(), app, d, q); err != nil {
+		t.Fatal(err)
+	}
+	if spy.resumed != 1 || !spy.heldAtResume || spy.listsAfterResume == 0 || spy.heldAtLast || held || len(gb.records) != 1 {
+		t.Fatalf("resumes %d held at resume %v lists after %d held at the last %v held at the end %v boots %v",
+			spy.resumed, spy.heldAtResume, spy.listsAfterResume, spy.heldAtLast, held, gb.records)
 	}
 }
 

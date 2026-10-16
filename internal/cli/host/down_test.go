@@ -225,21 +225,21 @@ func TestLockForDestroy(t *testing.T) {
 	st := state.State{Dir: filepath.Join(root, "state")}
 	app := &config.App{Name: "mgr", Tree: filepath.Join(root, "tree")}
 
-	unlock, err := lockForDestroy(app, st, false, func(string) { t.Error("warned on a free lock") })
+	unlock, err := lockForDestroy(context.Background(), app, st, false, 0, func(string) { t.Error("warned on a free lock") })
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := lockLifecycle(app, st, "lever up"); err == nil || !strings.Contains(err.Error(), "`lever destroy` (pid ") {
+	if _, err := lockLifecycle(context.Background(), app, st, "lever up", 0, nil); err == nil || !strings.Contains(err.Error(), "`lever destroy` (pid ") {
 		t.Fatalf("up during destroy: %v", err)
 	}
 	unlock()
 
-	held, err := lockLifecycle(app, st, "lever stop")
+	held, err := lockLifecycle(context.Background(), app, st, "lever stop", 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer held()
-	_, err = lockForDestroy(app, st, false, func(string) { t.Error("warned without --force") })
+	_, err = lockForDestroy(context.Background(), app, st, false, 0, func(string) { t.Error("warned without --force") })
 	var ee *cli.ExitError
 	if !errors.As(err, &ee) || ee.Code != exitConversationLocked {
 		t.Fatalf("held: %v", err)
@@ -249,7 +249,7 @@ func TestLockForDestroy(t *testing.T) {
 		t.Fatalf("held: %v", err)
 	}
 	var warned string
-	unlock, err = lockForDestroy(app, st, true, func(s string) { warned = s })
+	unlock, err = lockForDestroy(context.Background(), app, st, true, 0, func(s string) { warned = s })
 	if err != nil || unlock == nil {
 		t.Fatalf("--force: %v", err)
 	}
@@ -263,16 +263,16 @@ func TestLockForDestroy(t *testing.T) {
 	if err := os.WriteFile(blocked.Dir, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := lockForDestroy(app, blocked, false, func(string) {}); err == nil || !strings.Contains(err.Error(), "--force") {
+	if _, err := lockForDestroy(context.Background(), app, blocked, false, 0, func(string) {}); err == nil || !strings.Contains(err.Error(), "--force") {
 		t.Fatalf("unlockable: %v", err)
 	}
 	warned = ""
-	if _, err := lockForDestroy(app, blocked, true, func(s string) { warned = s }); err != nil || !strings.Contains(warned, "without the lifecycle lock") {
+	if _, err := lockForDestroy(context.Background(), app, blocked, true, 0, func(s string) { warned = s }); err != nil || !strings.Contains(warned, "without the lifecycle lock") {
 		t.Fatalf("unlockable --force: %v, warned %q", err, warned)
 	}
 
 	in := &config.App{Name: "mgr", Tree: root}
-	free, err := lockForDestroy(in, st, false, func(string) { t.Error("warned with the state in the tree") })
+	free, err := lockForDestroy(context.Background(), in, st, false, 0, func(string) { t.Error("warned with the state in the tree") })
 	if err != nil {
 		t.Fatalf("state in the tree: %v", err)
 	}

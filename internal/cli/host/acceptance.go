@@ -69,6 +69,7 @@ func formatNote(results map[string]bool, date string) string {
 
 func newAcceptanceCmd(bf BackendFactory) *cobra.Command {
 	var progressMode string
+	var lockWait time.Duration
 	c := &cobra.Command{
 		Use:   "acceptance [CONFIG]",
 		Args:  cobra.MaximumNArgs(1),
@@ -78,6 +79,12 @@ func newAcceptanceCmd(bf BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// It starts the broker and mints the manager's ticket, as apply does.
+			unlock, err := lockLifecycle(cmd.Context(), app, stateFor(path), "lever acceptance", lockWait, lockNotice(cmd))
+			if err != nil {
+				return err
+			}
+			defer unlock()
 			// The bring-up is listed and timed like apply's: the e2e reads the phase times
 			// from its record.
 			run, ctx, err := startBringup(cmd, app, stateFor(path), "acceptance", progressMode)
@@ -89,6 +96,7 @@ func newAcceptanceCmd(bf BackendFactory) *cobra.Command {
 		},
 	}
 	c.Flags().StringVar(&progressMode, "progress", "", progressFlagUsage)
+	addLockWaitFlag(c, &lockWait, 0)
 	return c
 }
 

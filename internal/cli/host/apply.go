@@ -499,6 +499,7 @@ func applySignalContext(parent context.Context) (ctx context.Context, stop func(
 func newApplyCmd(bf BackendFactory) *cobra.Command {
 	var dryRun, resetHubIdentity bool
 	var progressMode string
+	var lockWait time.Duration
 	c := &cobra.Command{
 		Use:   "apply [CONFIG]",
 		Args:  cobra.MaximumNArgs(1),
@@ -526,7 +527,7 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 				}
 				return nil
 			}
-			unlock, err := lockLifecycle(app, stateFor(path), "lever apply")
+			unlock, err := lockLifecycle(cmd.Context(), app, stateFor(path), "lever apply", lockWait, lockNotice(cmd))
 			if err != nil {
 				return err
 			}
@@ -562,6 +563,7 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 	c.Flags().BoolVar(&dryRun, "dry-run", false, "print the bring-up plan and exit")
 	c.Flags().StringVar(&progressMode, "progress", "", progressFlagUsage)
 	c.Flags().BoolVar(&resetHubIdentity, "reset-hub-identity", false, resetHubIdentityUsage)
+	addLockWaitFlag(c, &lockWait, 0)
 	return c
 }
 

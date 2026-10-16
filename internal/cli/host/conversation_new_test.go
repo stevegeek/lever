@@ -239,7 +239,7 @@ func TestLockConversation(t *testing.T) {
 	root := t.TempDir()
 	st := state.State{Dir: filepath.Join(root, "state")}
 	app := &config.App{Name: "mgr", Tree: filepath.Join(root, "tree")}
-	unlock, err := lockConversation(app, st, "lever conversation new", " from the chat page")
+	unlock, err := lockConversation(context.Background(), app, st, "lever conversation new", " from the chat page", 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,9 +247,9 @@ func TestLockConversation(t *testing.T) {
 		t.Fatalf("holder = %q", got)
 	}
 	for _, verb := range []string{"lever conversation restore", "lever up", "lever apply", "lever stop", "lever reload"} {
-		take := func() (func(), error) { return lockLifecycle(app, st, verb) }
+		take := func() (func(), error) { return lockLifecycle(context.Background(), app, st, verb, 0, nil) }
 		if verb == "lever conversation restore" {
-			take = func() (func(), error) { return lockConversation(app, st, verb, "") }
+			take = func() (func(), error) { return lockConversation(context.Background(), app, st, verb, "", 0, nil) }
 		}
 		_, err = take()
 		var ee *cli.ExitError
@@ -264,23 +264,71 @@ func TestLockConversation(t *testing.T) {
 	if got := managerLockHolder(app, st); got != "" {
 		t.Fatalf("holder after release = %q", got)
 	}
-	up, err := lockLifecycle(app, st, "lever up")
+	up, err := lockLifecycle(context.Background(), app, st, "lever up", 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := lockConversation(app, st, "lever conversation new", ""); err == nil || !strings.Contains(err.Error(), "`lever up` (pid ") {
+	if _, err := lockConversation(context.Background(), app, st, "lever conversation new", "", 0, nil); err == nil || !strings.Contains(err.Error(), "`lever up` (pid ") {
 		t.Fatalf("new under up: %v", err)
 	}
 	up()
 	in := &config.App{Name: "mgr", Tree: root}
-	if _, err := lockConversation(in, st, "lever conversation new", ""); !errors.Is(err, errConvStateInTree) {
+	if _, err := lockConversation(context.Background(), in, st, "lever conversation new", "", 0, nil); !errors.Is(err, errConvStateInTree) {
 		t.Fatalf("state in tree: %v", err)
 	}
-	free, err := lockLifecycle(in, st, "lever up")
+	free, err := lockLifecycle(context.Background(), in, st, "lever up", 0, nil)
 	if err != nil {
 		t.Fatalf("up with the state in the tree: %v", err)
 	}
 	free()
+}
+
+// TestLockWait: --wait takes the lock once its holder lets go, says once
+// what it waits for, and still exits 6 naming the holder when the wait runs
+// out.
+func TestLockWait(t *testing.T) {
+	old := lockPoll
+	lockPoll = 5 * time.Millisecond
+	t.Cleanup(func() { lockPoll = old })
+	root := t.TempDir()
+	st := state.State{Dir: filepath.Join(root, "state")}
+	app := &config.App{Name: "mgr", Tree: filepath.Join(root, "tree")}
+	held, err := lockLifecycle(context.Background(), app, st, "lever up", 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var notices []string
+	notice := func(s string) { notices = append(notices, s) }
+	_, err = lockConversation(context.Background(), app, st, "lever conversation new", " for the daily reset", 30*time.Millisecond, notice)
+	var ee *cli.ExitError
+	if !errors.As(err, &ee) || ee.Code != exitConversationLocked || !strings.Contains(err.Error(), "`lever up` (pid ") || !strings.Contains(err.Error(), "waited") {
+		t.Fatalf("wait ran out: %v", err)
+	}
+	if len(notices) != 1 || !strings.Contains(notices[0], "`lever up`") || !strings.Contains(notices[0], "--wait") {
+		t.Fatalf("notices = %q", notices)
+	}
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		held()
+	}()
+	unlock, err := lockConversation(context.Background(), app, st, "lever conversation new", " for the daily reset", 5*time.Second, nil)
+	if err != nil {
+		t.Fatalf("the lock was let go: %v", err)
+	}
+	if got := managerLockHolder(app, st); !strings.Contains(got, "for the daily reset") {
+		t.Fatalf("holder = %q", got)
+	}
+	unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	held, err = lockLifecycle(context.Background(), app, st, "lever up", 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held()
+	cancel()
+	if _, err := lockLifecycle(ctx, app, st, "lever stop", time.Minute, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a cancelled wait: %v", err)
+	}
 }
 
 // TestNewConversationEmptyTranscripts: transcripts with no content are not

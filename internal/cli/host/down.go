@@ -2,11 +2,13 @@ package host
 
 import (
 	"cmp"
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/cli"
@@ -20,6 +22,7 @@ import (
 func newDestroyCmd(factory BackendFactory) *cobra.Command {
 	var machine, backendFlag *string
 	var noTreeBackup, force bool
+	var lockWait time.Duration
 	cmd := &cobra.Command{
 		Use:     "destroy",
 		Aliases: []string{"down"},
@@ -29,10 +32,20 @@ func newDestroyCmd(factory BackendFactory) *cobra.Command {
 			// staged state: a surviving broker's spent bootstrap latch would be reused by
 			// the next apply, leaving the new manager unable to enrol.
 			ia := loadInstanceApp()
+			if *machine != "" && ia.app != nil && *machine == machineName(ia.app.Name) {
+				// This instance's own machine: nothing may act on it while it goes.
+				// Another instance's state directory is not known here, so its machine
+				// is destroyed without its lock.
+				unlock, err := lockForDestroy(cmd.Context(), ia.app, stateFor(ia.path), force, lockWait, lockNotice(cmd))
+				if err != nil {
+					return err
+				}
+				defer unlock()
+			}
 			if *machine == "" {
 				if ia.app != nil {
 					st := stateFor(ia.path)
-					unlock, err := lockForDestroy(ia.app, st, force, func(msg string) { cmd.PrintErrln(msg) })
+					unlock, err := lockForDestroy(cmd.Context(), ia.app, st, force, lockWait, lockNotice(cmd))
 					if err != nil {
 						return err
 					}
@@ -77,6 +90,7 @@ func newDestroyCmd(factory BackendFactory) *cobra.Command {
 	machine, backendFlag = addJailTargetFlags(cmd)
 	cmd.Flags().BoolVar(&noTreeBackup, "no-tree-backup", false, "do not take the tree snapshot this destroy would take (tree_backup.at_stop)")
 	cmd.Flags().BoolVar(&force, "force", false, "destroy even while another lever command holds this instance's lifecycle lock (one that is stuck)")
+	addLockWaitFlag(cmd, &lockWait, 0)
 	return cmd
 }
 
@@ -86,8 +100,8 @@ func newDestroyCmd(factory BackendFactory) *cobra.Command {
 // lifecycle commands. destroy is the last resort, also for a holder that
 // never ends (a `lever stop` stuck in the guest), so force goes on without
 // the lock after a warning naming the holder.
-func lockForDestroy(app *config.App, st state.State, force bool, warn func(string)) (func(), error) {
-	unlock, err := lockLifecycle(app, st, "lever destroy")
+func lockForDestroy(ctx context.Context, app *config.App, st state.State, force bool, maxWait time.Duration, warn func(string)) (func(), error) {
+	unlock, err := lockLifecycle(ctx, app, st, "lever destroy", maxWait, warn)
 	if err == nil {
 		return unlock, nil
 	}

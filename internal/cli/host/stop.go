@@ -35,6 +35,7 @@ var errNoHub = errors.New("the jail did not answer")
 func newStopCmd(factory BackendFactory) *cobra.Command {
 	var machine, backendFlag *string
 	var keepVM, noTreeBackup bool
+	var lockWait time.Duration
 	cmd := &cobra.Command{
 		Use:   "stop",
 		Short: "Power off the jail, keeping its disk (fast `lever up` resume)",
@@ -55,14 +56,15 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 			if ia.app != nil {
 				st = stateFor(ia.path)
 				appName = ia.app.Name
-				unlock, err := lockLifecycle(ia.app, st, "lever stop")
-				if err != nil && *machine == "" && brokerHoldsLock(st) {
-					// The broker heals the manager under the lock, and the manager can make
-					// a heal last minutes, again after every cooldown: the power-off must
-					// not wait on it. Stopping the broker ends its hold.
-					cmd.PrintErrln("lever: the broker is changing the manager (a certificate heal or a token reset); stopping the broker first.")
-					stopHostDaemons(cmd, st)
-					unlock, err = lockLifecycle(ia.app, st, "lever stop")
+				unlock, err := lockLifecycle(cmd.Context(), ia.app, st, "lever stop", 0, nil)
+				if err != nil {
+					if *machine == "" && brokerHoldsLock(st) {
+						// The broker heals the manager under the lock: the power-off must
+						// not wait on it. Stopping the broker ends its hold.
+						cmd.PrintErrln("lever: the broker is changing the manager (a certificate heal or a token reset); stopping the broker first.")
+						stopHostDaemons(cmd, st)
+					}
+					unlock, err = lockLifecycle(cmd.Context(), ia.app, st, "lever stop", lockWait, lockNotice(cmd))
 				}
 				if err != nil {
 					return err
@@ -137,6 +139,7 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 	}
 	machine, backendFlag = addJailTargetFlags(cmd)
 	cmd.Flags().BoolVar(&noTreeBackup, "no-tree-backup", false, "do not take the tree snapshot this stop would take (tree_backup.at_stop)")
+	addLockWaitFlag(cmd, &lockWait, 0)
 	cmd.Flags().BoolVar(&keepVM, "keep-vm", false, "suspend the agents and stop the hub and the broker, but leave the VM running (it keeps its memory on the host); the next `lever up` skips the VM boot")
 	return cmd
 }

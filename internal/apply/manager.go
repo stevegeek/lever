@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/stevegeek/lever/internal/config"
@@ -244,10 +245,11 @@ func EnsureManager(ctx context.Context, app *config.App, d Deps, q ManagerReques
 	if (q.Intent == ManagerKeep || q.Intent == ManagerFresh) && (d.WaitBrokerReady == nil || d.RearmBootstrap == nil || d.VerifyAgentRole == nil) {
 		return ManagerResult{}, fmt.Errorf("%s: internal error: the manager's lifecycle is not wired", subject)
 	}
-	release, err := d.ManagerLock(cmp.Or(q.What, subject))
+	unlock, err := d.ManagerLock(cmp.Or(q.What, subject))
 	if err != nil {
 		return ManagerResult{}, err
 	}
+	release := sync.OnceFunc(unlock)
 	defer release()
 	if q.UnderLock != nil {
 		if err := q.UnderLock(); err != nil {
@@ -285,7 +287,7 @@ func EnsureManager(ctx context.Context, app *config.App, d Deps, q ManagerReques
 		if q.StageTicket == nil || d.VerifyAgentRole == nil {
 			return ManagerResult{}, fmt.Errorf("%s: internal error: the manager's lifecycle is not wired", subject)
 		}
-		return r.reenrol(ctx, jp, q)
+		return r.reenrol(ctx, jp, q, release)
 	case ManagerTokenReset:
 		if d.VerifyAgentRole == nil {
 			return ManagerResult{}, refused(errors.New("no pre-role record guard is wired"))
@@ -979,7 +981,13 @@ func (r *run) park(ctx context.Context, jp string, q ManagerRequest) (ManagerRes
 // follows is scion's answer to it. A stop claim is cleared only on the
 // manager's own container (resumeClearingStopClaim), which only the
 // manager's own lapsed certificate brings about.
-func (r *run) reenrol(ctx context.Context, jp string, q ManagerRequest) (res ManagerResult, err error) {
+//
+// The lock is released once the resumed container's mounts were read back,
+// before the liveness gate, which can wait minutes on claude: the broker's
+// heal must not keep the operator's commands out that long. What runs after
+// it only reads the manager, and suspends it on a mount mismatch, which is
+// right whoever holds the lock by then.
+func (r *run) reenrol(ctx context.Context, jp string, q ManagerRequest, release func()) (res ManagerResult, err error) {
 	sc := r.d.managerScion()
 	agents, err := sc.List(ctx, jp)
 	if err != nil {
@@ -1019,6 +1027,9 @@ func (r *run) reenrol(ctx context.Context, jp string, q ManagerRequest) (res Man
 	if err := guard.Resumed(ctx); err != nil {
 		return res, refused(err)
 	}
+	// The container runs in this boot; the record is written under the lock.
+	recordGuestBoot(ctx, r.d)
+	release()
 	if err := r.gateResumed(ctx, jp); err != nil {
 		return res, guard.AfterFailure(ctx, err)
 	}
@@ -1026,7 +1037,6 @@ func (r *run) reenrol(ctx context.Context, jp string, q ManagerRequest) (res Man
 		return res, refused(err)
 	}
 	res.MountsUnverified = !guard.Verified()
-	recordGuestBoot(ctx, r.d)
 	return res, nil
 }
 

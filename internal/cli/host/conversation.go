@@ -364,7 +364,8 @@ func newConversationListCmd() *cobra.Command {
 }
 
 func newConversationBackupCmd(bf BackendFactory) *cobra.Command {
-	return &cobra.Command{
+	var lockWait time.Duration
+	c := &cobra.Command{
 		Use:   "backup",
 		Args:  cobra.NoArgs,
 		Short: "Back up the manager's conversation to the state directory",
@@ -373,6 +374,12 @@ func newConversationBackupCmd(bf BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// A new conversation or a restore rotates and reads the same backups.
+			unlock, err := lockConversation(cmd.Context(), app, st, "lever conversation backup", "", lockWait, lockNotice(cmd))
+			if err != nil {
+				return err
+			}
+			defer unlock()
 			_, b, err := resolveJailBackend(bf, "", "")
 			if err != nil {
 				return err
@@ -394,11 +401,14 @@ func newConversationBackupCmd(bf BackendFactory) *cobra.Command {
 			return nil
 		},
 	}
+	addLockWaitFlag(c, &lockWait, 0)
+	return c
 }
 
 func newConversationRestoreCmd(bf BackendFactory) *cobra.Command {
 	var noBackup bool
 	var progressMode string
+	var lockWait time.Duration
 	c := &cobra.Command{
 		Use:   "restore [ID]",
 		Args:  cobra.MaximumNArgs(1),
@@ -416,7 +426,7 @@ func newConversationRestoreCmd(bf BackendFactory) *cobra.Command {
 				return err
 			}
 			st := stateFor(path)
-			unlock, err := lockConversation(app, st, "lever conversation restore", "")
+			unlock, err := lockConversation(cmd.Context(), app, st, "lever conversation restore", "", lockWait, lockNotice(cmd))
 			if err != nil {
 				return err
 			}
@@ -449,5 +459,6 @@ func newConversationRestoreCmd(bf BackendFactory) *cobra.Command {
 	}
 	c.Flags().BoolVar(&noBackup, "no-backup", false, "do not back up the conversation the restore replaces")
 	c.Flags().StringVar(&progressMode, "progress", "", progressFlagUsage)
+	addLockWaitFlag(c, &lockWait, 0)
 	return c
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/apply"
@@ -59,6 +60,7 @@ func upDecision(phase string, fresh bool) upAction {
 func newUpCmd(bf BackendFactory) *cobra.Command {
 	var fresh, noAttach, detachOthers, noBackup, keepConv, resetHubIdentity bool
 	var progressMode string
+	var lockWait time.Duration
 	c := &cobra.Command{
 		Use:   "up [CONFIG]",
 		Args:  cobra.MaximumNArgs(1),
@@ -71,7 +73,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			unlock, err := lockLifecycle(app, stateFor(path), "lever up")
+			unlock, err := lockLifecycle(cmd.Context(), app, stateFor(path), "lever up", lockWait, lockNotice(cmd))
 			if err != nil {
 				return err
 			}
@@ -205,6 +207,14 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 			if decision != upApply {
 				remoteWarn = ensureRemoteForUp(ctx, rep, app, w.remote.EnsureForUp)
 			}
+			// The attach's token is staged while the lock is held, so the attach
+			// itself needs nothing of it.
+			var attachArgs []string
+			if !noAttach {
+				if attachArgs, err = prepareAttach(cmd.Context(), cmd.ErrOrStderr(), b, sc, app.Name, project, detachOthers); err != nil {
+					return err
+				}
+			}
 			stop()
 			// The list ends before the attach: from here the terminal is the manager's.
 			run.finish(nil)
@@ -218,9 +228,9 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				return nil
 			}
 			if !attachTTY {
-				return runAttach(cmd.Context(), cmd.ErrOrStderr(), b, sc, app.Name, project, detachOthers)
+				return attachChild(attachArgs, os.Stdin, os.Stdout, os.Stderr)
 			}
-			attachErr := runAttach(cmd.Context(), cmd.ErrOrStderr(), b, sc, app.Name, project, detachOthers)
+			attachErr := attachChild(attachArgs, os.Stdin, os.Stdout, os.Stderr)
 			if holder := managerLockHolder(app, stateFor(path)); holder != "" {
 				// Its stop ended the attach; the manager is down by design.
 				cmd.PrintErrf("lever: the attach ended because %s is changing the manager; `lever up` attaches again once it has finished.\n", holder)
@@ -239,6 +249,7 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 	c.Flags().BoolVar(&noAttach, "no-attach", false, "bring up but do not attach")
 	c.Flags().BoolVar(&detachOthers, "detach-others", false, detachOthersFlagUsage)
 	c.Flags().StringVar(&progressMode, "progress", "", progressFlagUsage)
+	addLockWaitFlag(c, &lockWait, 0)
 	return c
 }
 

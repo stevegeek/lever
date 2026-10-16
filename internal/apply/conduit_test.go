@@ -92,7 +92,7 @@ func TestScionServerComparesTheConduitPolicy(t *testing.T) {
 				Scion:         hubScion(f, app),
 				HubAuthEnv:    want,
 				HubConduitEnv: func(context.Context) (map[string]string, error) { return tc.live, tc.readErr },
-				EnsureHubAuth: func(context.Context) (bool, error) { return false, nil },
+				EnsureHubAuth: func(context.Context) (string, error) { return "", nil },
 				Log:           sink.logf,
 			})
 			if (err != nil) != tc.wantErr {

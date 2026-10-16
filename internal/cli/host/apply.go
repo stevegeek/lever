@@ -1196,7 +1196,7 @@ func (w *applyWiring) verifyAgentRole(ctx context.Context, projectName, agentNam
 
 // ensureHubAuth installs the assertion public key and the hub's auth block
 // in the guest (see guest.EnsureHubAuth).
-func (w *applyWiring) ensureHubAuth(ctx context.Context) (bool, error) {
+func (w *applyWiring) ensureHubAuth(ctx context.Context) (string, error) {
 	return w.b.EnsureHubAuth(ctx, types.HubAuth{
 		PublicKeyPEM: w.hubKey.PublicPEM(),
 		Issuer:       hubauth.Issuer(w.instanceID),

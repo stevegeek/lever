@@ -197,7 +197,7 @@ func (r scionServerRun) startEnv(t *testing.T) map[string]string {
 
 // runScionServer applies helloApp against a jail whose hub probe prints live
 // ("" is no hub running).
-func runScionServer(t *testing.T, live string, guestChanged bool, guestErr error) scionServerRun {
+func runScionServer(t *testing.T, live string, guestRestart string, guestErr error) scionServerRun {
 	t.Helper()
 	f := scionOKRunner()
 	scriptRunningHub(f, live)
@@ -206,7 +206,7 @@ func runScionServer(t *testing.T, live string, guestChanged bool, guestErr error
 	err := runApply(app, Deps{
 		Scion:         hubScion(f, app),
 		HubAuthEnv:    testHubAuthEnv(),
-		EnsureHubAuth: func(context.Context) (bool, error) { return guestChanged, guestErr },
+		EnsureHubAuth: func(context.Context) (string, error) { return guestRestart, guestErr },
 		Log:           sink.logf,
 	})
 	return scionServerRun{f: f, logs: sink, err: err}
@@ -227,7 +227,7 @@ func wantStartEnv(t *testing.T, r scionServerRun) {
 
 func TestScionServerKeepsAMatchingHub(t *testing.T) {
 	app := helloApp("")
-	r := runScionServer(t, runningHubOut(42, matchingHubArgv(app), testHubAuthEnv()), false, nil)
+	r := runScionServer(t, runningHubOut(42, matchingHubArgv(app), testHubAuthEnv()), "", nil)
 	if r.err != nil {
 		t.Fatalf("Run: %v", r.err)
 	}
@@ -251,7 +251,7 @@ func TestScionServerRestartsAHubWithOtherAuthEnv(t *testing.T) {
 		"extra lever key": func() map[string]string { m := testHubAuthEnv(); m["LEVER_HUB_X"] = "1"; return m }(),
 	} {
 		t.Run(name, func(t *testing.T) {
-			r := runScionServer(t, runningHubOut(42, matchingHubArgv(app), live), false, nil)
+			r := runScionServer(t, runningHubOut(42, matchingHubArgv(app), live), "", nil)
 			if r.err != nil {
 				t.Fatalf("Run: %v", r.err)
 			}
@@ -269,7 +269,7 @@ func TestScionServerRestartsAHubWithOtherAuthEnv(t *testing.T) {
 // A hub an operator started by hand gets scion's dev-auth default.
 func TestScionServerRestartsADevAuthHub(t *testing.T) {
 	argv := slices.DeleteFunc(matchingHubArgv(helloApp("")), func(a string) bool { return strings.HasPrefix(a, "--dev-auth") })
-	r := runScionServer(t, runningHubOut(42, argv, testHubAuthEnv()), false, nil)
+	r := runScionServer(t, runningHubOut(42, argv, testHubAuthEnv()), "", nil)
 	if r.err != nil {
 		t.Fatalf("Run: %v", r.err)
 	}
@@ -279,24 +279,29 @@ func TestScionServerRestartsADevAuthHub(t *testing.T) {
 }
 
 func TestScionServerRestartsARunningHubWhenTheGuestChanged(t *testing.T) {
-	r := runScionServer(t, runningHubOut(42, matchingHubArgv(helloApp("")), testHubAuthEnv()), true, nil)
+	r := runScionServer(t, runningHubOut(42, matchingHubArgv(helloApp("")), testHubAuthEnv()), "server.oidc_login in ~/.scion/settings.yaml", nil)
 	if r.err != nil {
 		t.Fatalf("Run: %v", r.err)
 	}
 	if got := r.serverCalls(); !slices.Equal(got, []string{"stop", "start"}) {
 		t.Fatalf("server calls = %q, want stop then start", got)
 	}
+	if !slices.ContainsFunc(r.logs.lines, func(l string) bool {
+		return strings.Contains(l, "restarting the hub") && strings.Contains(l, "server.oidc_login in ~/.scion/settings.yaml")
+	}) {
+		t.Fatalf("the restart log does not name what changed: %q", r.logs.lines)
+	}
 	wantStartEnv(t, r)
 }
 
 func TestScionServerJustStartsWhenNoHubRuns(t *testing.T) {
-	for _, changed := range []bool{false, true} {
+	for _, changed := range []string{"", "/etc/lever/hub-auth.pub"} {
 		r := runScionServer(t, "", changed, nil)
 		if r.err != nil {
-			t.Fatalf("changed=%v: Run: %v", changed, r.err)
+			t.Fatalf("changed=%q: Run: %v", changed, r.err)
 		}
 		if got := r.serverCalls(); !slices.Equal(got, []string{"start"}) {
-			t.Fatalf("changed=%v: server calls = %q, want just start", changed, got)
+			t.Fatalf("changed=%q: server calls = %q, want just start", changed, got)
 		}
 		wantStartEnv(t, r)
 	}
@@ -305,7 +310,7 @@ func TestScionServerJustStartsWhenNoHubRuns(t *testing.T) {
 // A hub must never start on auth settings lever could not install.
 func TestScionServerFailsWhenEnsureHubAuthFails(t *testing.T) {
 	boom := errors.New("key install failed")
-	r := runScionServer(t, "", false, boom)
+	r := runScionServer(t, "", "", boom)
 	if !errors.Is(r.err, boom) || !strings.Contains(r.err.Error(), "hub auth") {
 		t.Fatalf("err = %v, want the hub auth failure", r.err)
 	}
@@ -420,9 +425,9 @@ func TestScionServerPinsBeforeItsOneRestart(t *testing.T) {
 				Scion:      hubScion(f, a),
 				HubAuthEnv: testHubAuthEnv(),
 				Log:        sink.logf,
-				EnsureHubAuth: func(context.Context) (bool, error) {
+				EnsureHubAuth: func(context.Context) (string, error) {
 					auths++
-					return false, nil
+					return "", nil
 				},
 				BeforeHubRestart: func(context.Context) error {
 					pins++

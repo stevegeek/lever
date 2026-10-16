@@ -89,7 +89,7 @@ func fillDeps(d Deps) Deps {
 		d.RearmBootstrap = func(context.Context) error { return nil }
 	}
 	if d.EnsureHubAuth == nil {
-		d.EnsureHubAuth = func(context.Context) (bool, error) { return false, nil }
+		d.EnsureHubAuth = func(context.Context) (string, error) { return "", nil }
 	}
 	if d.EnsureScionTelemetry == nil {
 		d.EnsureScionTelemetry = func(context.Context) (bool, error) { return false, nil }
@@ -3171,7 +3171,7 @@ func TestScionServerRestartsAHubThatIsAlreadyStopped(t *testing.T) {
 	deps := Deps{
 		Scion:         scion.New(runner, scion.Options{HubEndpoint: testHubEndpoint}),
 		HubAuthEnv:    testHubAuthEnv(),
-		EnsureHubAuth: func(context.Context) (bool, error) { return true, nil },
+		EnsureHubAuth: func(context.Context) (string, error) { return "/etc/lever/hub-auth.pub", nil },
 	}
 
 	if err := runApply(app, deps); err != nil {

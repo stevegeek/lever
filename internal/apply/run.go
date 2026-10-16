@@ -249,9 +249,9 @@ type Deps struct {
 	// create path calls it when this apply minted none.
 	RearmBootstrap func(ctx context.Context) error
 	// EnsureHubAuth installs the assertion public key in the guest and
-	// converges the hub's auth settings before the hub starts. It reports
-	// whether a running hub must restart to read them.
-	EnsureHubAuth func(ctx context.Context) (bool, error)
+	// converges the hub's auth settings before the hub starts. It names what
+	// changed that a running hub reads only at start ("" for nothing).
+	EnsureHubAuth func(ctx context.Context) (restart string, err error)
 	// BeforeHubRestart, when set, writes the database settings the hub reads
 	// only at start (scion's experiments) into a hub the scion-server step is
 	// about to restart, so that one restart takes them. An error is logged:
@@ -650,7 +650,7 @@ func (r *run) scionServer(ctx context.Context) error {
 		r.d.Log("lever: agent telemetry in the jail's scion settings is now %q (scion.telemetry) — agents started from here on use it; "+
 			"a hub or manager that was already running keeps the old setting until `lever stop && lever up`", r.app.EffectiveScionTelemetry())
 	}
-	guestChanged, err := r.d.EnsureHubAuth(ctx)
+	guestRestart, err := r.d.EnsureHubAuth(ctx)
 	if err != nil {
 		return fmt.Errorf("hub auth: %w", err)
 	}
@@ -671,8 +671,8 @@ func (r *run) scionServer(ctx context.Context) error {
 		maps.Copy(live.Env, env)
 	}
 	reason := HubRestartReason(live, opts)
-	if reason == "" && guestChanged && live.Running {
-		reason = "the hub's key file or settings changed"
+	if reason == "" && guestRestart != "" && live.Running {
+		reason = "what it reads at start changed: " + guestRestart
 	}
 	if reason != "" {
 		// The database settings the hub reads at start go in first, so this one

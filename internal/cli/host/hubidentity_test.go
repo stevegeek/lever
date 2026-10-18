@@ -508,7 +508,7 @@ func (h *hiHub) handle(c hiCaller, method, raw string, body []byte) (int, []byte
 		exp, _ := time.Parse(time.RFC3339, req.ExpiresAt)
 		scopes := slices.DeleteFunc(slices.Clone(req.Scopes), func(s string) bool { return slices.Contains(h.dropScopes, s) })
 		t := &hiToken{ID: h.id("tok"), Owner: me.ID, Name: req.Name, ProjectID: req.ProjectID, Scopes: scopes, Expires: exp}
-		t.Secret = "scion_pat_" + t.ID
+		t.Secret = "scion_pat_" + t.ID + "-0123456789abcdef"
 		h.tokens = append(h.tokens, t)
 		h.event("mint %s by %s", req.Name, me.ID)
 		return hiJSON(201, map[string]any{"token": t.Secret, "accessToken": hubapi.Token{ID: t.ID, Name: t.Name,
@@ -525,7 +525,8 @@ func (h *hiHub) handle(c hiCaller, method, raw string, body []byte) (int, []byte
 		items := []hubapi.Token{}
 		for _, t := range h.tokens {
 			if t.Owner == me.ID {
-				items = append(items, hubapi.Token{ID: t.ID, Name: t.Name, ProjectID: t.ProjectID, Scopes: t.Scopes, Revoked: t.Revoked, ExpiresAt: t.Expires})
+				items = append(items, hubapi.Token{ID: t.ID, Name: t.Name, ProjectID: t.ProjectID, Scopes: t.Scopes, Revoked: t.Revoked, ExpiresAt: t.Expires,
+					Prefix: t.Secret[:min(len(t.Secret), len(uatPrefix)+12)]})
 			}
 		}
 		return hiJSON(200, map[string]any{"items": items})
@@ -857,6 +858,8 @@ type hiEnv struct {
 	keyFP  string
 	// cacheWait and cachePoll go to the step; zero keeps its defaults.
 	cacheWait, cachePoll time.Duration
+	// runStart goes to the step.
+	runStart time.Time
 }
 
 func newHIEnv(t *testing.T, app *config.App) *hiEnv {
@@ -891,6 +894,7 @@ func (e *hiEnv) step() *hubIdentity {
 		jailMount: hiJailMount + "/",
 		keyFP:     e.keyFP,
 		guestNow:  func() time.Time { return e.now },
+		runStart:  e.runStart,
 		reset:     e.reset,
 		log:       func(f string, a ...any) { e.logs = append(e.logs, fmt.Sprintf(f, a...)) },
 		warn:      func(f string, a ...any) { e.warns = append(e.warns, fmt.Sprintf(f, a...)) },
@@ -957,13 +961,13 @@ func (e *hiEnv) seedMigrated(devEmail string, lifecycle bool) {
 		ScopeType: hubapi.RoleScopeProject, Permissions: controllerRolePermissions(lifecycle)})
 	h.addBinding("role-ctl-old", devUserID, hubapi.RoleScopeProject, "proj-1", devUserID)
 	h.tokens = append(h.tokens, &hiToken{ID: "tok-old", Owner: devUserID, Name: "lever-controller", ProjectID: "proj-1",
-		Secret: "scion_pat_old", Scopes: controllerPATScopes(lifecycle, false), Expires: e.now.Add(300 * 24 * time.Hour)})
+		Secret: "scion_pat_old-0123456789abcdef", Scopes: controllerPATScopes(lifecycle, false), Expires: e.now.Add(300 * 24 * time.Hour)})
 	acts := controllerActions(lifecycle)
 	h.agents = []hiAgent{{Slug: "manager", Actions: acts}, {Slug: "worker", Actions: acts}}
 	e.sc.lifecycle = lifecycle
 	// scion hub link registered the project under the tree's marker ID.
 	e.jr.marker = "project-id: proj-1\nproject-slug: lever\n"
-	if err := e.st.SaveControllerPAT("scion_pat_old"); err != nil {
+	if err := e.st.SaveControllerPAT("scion_pat_old-0123456789abcdef"); err != nil {
 		e.t.Fatal(err)
 	}
 	if err := e.st.SaveControllerPATRecord(state.PATRecord{ID: "tok-old", Requested: controllerPATScopes(lifecycle, false),
@@ -1163,7 +1167,7 @@ func TestHubIdentityMigrates(t *testing.T) {
 	if got := hiEventsWith(h.events, "mint", "register", "scion init", "scion link", "invite", "revoke"); len(got) > 0 {
 		t.Fatalf("a migration with a current PAT must not mint, register, link or invite: %q", got)
 	}
-	if tok, _ := e.st.LoadControllerPAT(); tok != "scion_pat_old" {
+	if tok, _ := e.st.LoadControllerPAT(); tok != "scion_pat_old-0123456789abcdef" {
 		t.Fatal("the controller PAT on disk changed")
 	}
 	rec := e.record()
@@ -1289,6 +1293,45 @@ func TestHubIdentityRebootstrapsANewHubDatabase(t *testing.T) {
 	}
 	if u := h.byEmail("op@example.com"); u == nil || rec.Users["op@example.com"] != u.ID {
 		t.Fatalf("the remote login was not re-invited: %+v", rec.Users)
+	}
+}
+
+// The scion-server step's broker check asserts as lever-admin before this
+// step, so on a new hub database lever-admin's row can be minutes older
+// than the step and still be this run's.
+func TestHubIdentityRebootstrapsWhenLeverAdminWasCreatedEarlierThisRun(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		runStart bool
+		wantErr  string
+	}{
+		{name: "the run's start is known", runStart: true},
+		{name: "only the step's start is known", wantErr: "predates this run"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e := newHIEnv(t, hiRemoteApp(false))
+			e.mustRun()
+			h := e.newHub()
+			e.now = e.now.Add(48 * time.Hour)
+			if c.runStart {
+				e.runStart = e.now
+			}
+			h.addUser("", hubauth.AdminEmail, "admin", "active", e.now)
+			e.now = e.now.Add(5 * time.Minute)
+			err := e.run()
+			if c.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+					t.Fatalf("run = %v, want %q", err, c.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !hiAnyContains(e.logs, "WARNING", "bootstrapping it as new") {
+				t.Fatalf("no re-bootstrap: %q", e.logs)
+			}
+		})
 	}
 }
 

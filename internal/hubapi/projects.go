@@ -73,6 +73,8 @@ type RuntimeBroker struct {
 	ID     string
 	Name   string
 	Status string
+	// ConnectionState is set by RuntimeBrokers only.
+	ConnectionState string
 }
 
 // RuntimeBrokers lists the hub's runtime brokers (GET /api/v1/runtime-brokers).
@@ -88,16 +90,17 @@ func (c *Client) RuntimeBrokers(ctx context.Context) ([]RuntimeBroker, error) {
 		return nil, &APIError{Msg: "runtime broker list has no \"brokers\" field; the hub API changed shape"}
 	}
 	var wire []struct {
-		ID     string `json:"id"`
-		Name   string `json:"name"`
-		Status string `json:"status"`
+		ID              string `json:"id"`
+		Name            string `json:"name"`
+		Status          string `json:"status"`
+		ConnectionState string `json:"connectionState"`
 	}
 	if err := json.Unmarshal(field, &wire); err != nil {
 		return nil, &APIError{Msg: fmt.Sprintf("decoding runtime broker list: %v", err)}
 	}
 	out := make([]RuntimeBroker, 0, len(wire))
 	for _, b := range wire {
-		out = append(out, RuntimeBroker{ID: b.ID, Name: b.Name, Status: b.Status})
+		out = append(out, RuntimeBroker{ID: b.ID, Name: b.Name, Status: b.Status, ConnectionState: b.ConnectionState})
 	}
 	return out, nil
 }

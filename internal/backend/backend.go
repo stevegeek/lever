@@ -147,10 +147,11 @@ type Backend interface {
 	// EnsureHubAuth installs the hub's assertion public key root-owned in the
 	// guest and converges the hub's auth block in ~/.scion/settings.yaml (the
 	// running hub takes its auth settings from env; the file is for readers),
-	// dropping any oidc_login block. It reports whether the hub must restart:
-	// the key file changed or an oidc_login block was removed, both read only
-	// at hub startup. See guest.EnsureHubAuth.
-	EnsureHubAuth(ctx context.Context, spec types.HubAuth) (bool, error)
+	// dropping any oidc_login block. It names what the hub reads only at
+	// startup that changed (the key file, a removed oidc_login or conduit
+	// block), "" when nothing did; a running hub must restart to read it. See
+	// guest.EnsureHubAuth.
+	EnsureHubAuth(ctx context.Context, spec types.HubAuth) (string, error)
 	// EnsureLeverTemplate creates lever's overlay agent template in the guest,
 	// reporting whether it wrote anything. See guest.EnsureLeverTemplate.
 	EnsureLeverTemplate(ctx context.Context) (bool, error)

@@ -66,43 +66,49 @@ echo CHANGED
 var removeDevTokenScript = `rm -f -- "$HOME/` + layout.DevTokenRel + `"`
 
 // EnsureHubAuth: see backend.Backend.EnsureHubAuth.
-func (g Guest) EnsureHubAuth(ctx context.Context, spec types.HubAuth) (bool, error) {
+func (g Guest) EnsureHubAuth(ctx context.Context, spec types.HubAuth) (string, error) {
 	if len(bytes.TrimSpace(spec.PublicKeyPEM)) == 0 || spec.Issuer == "" || spec.Audience == "" || spec.AdminEmail == "" || spec.Header == "" {
-		return false, fmt.Errorf("guest: hub auth: public key, issuer, audience, admin email and header are all required")
+		return "", fmt.Errorf("guest: hub auth: public key, issuer, audience, admin email and header are all required")
 	}
 	if _, err := g.RootRun(ctx, "bash", "-c", removeLoginForwardScript); err != nil {
-		return false, fmt.Errorf("guest: remove the old login forwarder: %w", err)
+		return "", fmt.Errorf("guest: remove the old login forwarder: %w", err)
 	}
 	argv := append(append([]string{}, g.RootPrefix[1:]...), "bash", "-c", installHubAuthKeyScript)
 	res, err := g.Host.RunStdin(ctx, bytes.NewReader(spec.PublicKeyPEM), nil, g.RootPrefix[0], argv...)
 	if err != nil {
-		return false, fmt.Errorf("guest: install %s: %w: %s", HubAuthKeyPath, err, strings.TrimSpace(res.Stderr))
+		return "", fmt.Errorf("guest: install %s: %w: %s", HubAuthKeyPath, err, strings.TrimSpace(res.Stderr))
 	}
-	keyChanged := strings.TrimSpace(res.Stdout) == "CHANGED"
+	var restart []string
+	if strings.TrimSpace(res.Stdout) == "CHANGED" {
+		restart = append(restart, HubAuthKeyPath)
+	}
 	if _, err := g.UserRun(ctx, "/bin/bash", "-c", removeDevTokenScript); err != nil {
-		return false, fmt.Errorf("guest: remove scion's dev token ~/%s: %w", layout.DevTokenRel, err)
+		return "", fmt.Errorf("guest: remove scion's dev token ~/%s: %w", layout.DevTokenRel, err)
 	}
 
 	read, err := g.UserRun(ctx, "/bin/bash", "-c", readScionSettingsScript)
 	if err != nil {
 		// Fatal rather than "assume empty", which would rewrite scion's machine
 		// configuration from nothing.
-		return false, fmt.Errorf("guest: read %s: %w", layout.SettingsRel, err)
+		return "", fmt.Errorf("guest: read %s: %w", layout.SettingsRel, err)
 	}
 	existing, hasServerYAML, err := parseScionSettingsRead(read.Stdout)
 	if err != nil {
-		return false, err
+		return "", err
 	}
-	updated, restart, changed, err := hubAuthSettingsConverged(existing, spec, hasServerYAML)
+	updated, dropped, changed, err := hubAuthSettingsConverged(existing, spec, hasServerYAML)
 	if err != nil {
-		return false, err
+		return "", err
 	}
 	if changed {
 		if err := g.writeScionSettings(ctx, updated); err != nil {
-			return false, err
+			return "", err
 		}
 	}
-	return keyChanged || restart, nil
+	if dropped != "" {
+		restart = append(restart, dropped+" in ~/"+layout.SettingsRel)
+	}
+	return strings.Join(restart, ", "), nil
 }
 
 // keyConduit is the hub's relay block (server.hub.conduit), which lever never
@@ -193,29 +199,30 @@ func HubAuthSettings(spec types.HubAuth) map[string]any {
 
 // hubAuthSettingsConverged drops `oidc_login` (scion builds its OAuth service
 // whenever the block is present, whatever the auth mode, and env cannot unset
-// it) and `hub.conduit`, reporting either as a reason to restart the hub,
+// it) and `hub.conduit`, naming either in restart (the hub reads them only at start),
 // writes lever's auth keys and admin_emails, and keeps the web-only
 // settings in line with RemoteOn. It edits the parsed document, so every other
 // key and comment survives, and decides "changed" semantically. Keys under
 // `auth` lever does not own (email, display_name: scion's identity route
 // writes them) are left alone.
-func hubAuthSettingsConverged(existing []byte, spec types.HubAuth, hasServerYAML bool) (out []byte, restart, changed bool, err error) {
+func hubAuthSettingsConverged(existing []byte, spec types.HubAuth, hasServerYAML bool) (out []byte, restart string, changed bool, err error) {
+	var dropped []string
 	doc, err := layout.ParseSettings(existing)
 	if err != nil {
-		return nil, false, false, fmt.Errorf("guest: parse the jail's %s: %w", layout.SettingsRel, err)
+		return nil, "", false, fmt.Errorf("guest: parse the jail's %s: %w", layout.SettingsRel, err)
 	}
 	root := layout.DocumentRoot(doc)
 	if root == nil {
-		return nil, false, false, fmt.Errorf("guest: the jail's %s is not a YAML mapping", layout.SettingsRel)
+		return nil, "", false, fmt.Errorf("guest: the jail's %s is not a YAML mapping", layout.SettingsRel)
 	}
 	server, err := mapGetExact(root, layout.KeyServer, layout.KeyServer)
 	if err != nil {
-		return nil, false, false, err
+		return nil, "", false, err
 	}
 	if server == nil && hasServerYAML {
 		// settings.yaml wins outright once it has a `server` key, so adding one
 		// would make scion silently stop reading server.yaml.
-		return nil, false, false, fmt.Errorf("guest: the jail has a legacy ~/%s and no `server:` key in ~/%s — "+
+		return nil, "", false, fmt.Errorf("guest: the jail has a legacy ~/%s and no `server:` key in ~/%s — "+
 			"adding one would make scion ignore server.yaml entirely. Consolidate them first "+
 			"(`scion config migrate --server` in the jail), then re-run `lever apply`",
 			layout.ServerYAMLRel, layout.SettingsRel)
@@ -225,15 +232,15 @@ func hubAuthSettingsConverged(existing []byte, spec types.HubAuth, hasServerYAML
 		layout.MapSet(root, layout.KeyServer, server)
 	}
 	if server.Kind != yaml.MappingNode {
-		return nil, false, false, fmt.Errorf("guest: `server:` in the jail's %s is not a mapping", layout.SettingsRel)
+		return nil, "", false, fmt.Errorf("guest: `server:` in the jail's %s is not a mapping", layout.SettingsRel)
 	}
 	if layout.MapGet(server, layout.KeyOIDCLogin) != nil {
 		layout.MapDelete(server, layout.KeyOIDCLogin)
-		restart, changed = true, true
+		dropped, changed = append(dropped, "server."+layout.KeyOIDCLogin), true
 	}
 	auth := layout.MapGet(server, layout.KeyAuth)
 	if auth != nil && auth.Kind != yaml.MappingNode {
-		return nil, false, false, fmt.Errorf("guest: `server.auth` in the jail's %s is not a mapping", layout.SettingsRel)
+		return nil, "", false, fmt.Errorf("guest: `server.auth` in the jail's %s is not a mapping", layout.SettingsRel)
 	}
 	if auth == nil {
 		auth = layout.NewMapping()
@@ -242,12 +249,12 @@ func hubAuthSettingsConverged(existing []byte, spec types.HubAuth, hasServerYAML
 	for k, v := range HubAuthSettings(spec) {
 		var want yaml.Node
 		if err := want.Encode(v); err != nil {
-			return nil, false, false, fmt.Errorf("guest: encode server.auth.%s: %w", k, err)
+			return nil, "", false, fmt.Errorf("guest: encode server.auth.%s: %w", k, err)
 		}
 		if cur := layout.MapGet(auth, k); cur != nil {
 			same, err := layout.SameYAML(cur, &want)
 			if err != nil {
-				return nil, false, false, fmt.Errorf("guest: compare server.auth.%s: %w", k, err)
+				return nil, "", false, fmt.Errorf("guest: compare server.auth.%s: %w", k, err)
 			}
 			if same {
 				continue
@@ -264,10 +271,10 @@ func hubAuthSettingsConverged(existing []byte, spec types.HubAuth, hasServerYAML
 	}
 	hub, err := mapGetExact(server, "hub", "server.hub")
 	if err != nil {
-		return nil, false, false, err
+		return nil, "", false, err
 	}
 	if hub != nil && hub.Kind != yaml.MappingNode {
-		return nil, false, false, fmt.Errorf("guest: `server.hub` in the jail's %s is not a mapping", layout.SettingsRel)
+		return nil, "", false, fmt.Errorf("guest: `server.hub` in the jail's %s is not a mapping", layout.SettingsRel)
 	}
 	if hub == nil {
 		hub = layout.NewMapping()
@@ -278,23 +285,23 @@ func hubAuthSettingsConverged(existing []byte, spec types.HubAuth, hasServerYAML
 	// stream lifetimes, more allowed ports) is the relay's attack surface,
 	// and agents can write this file through the workstation routes.
 	if layout.MapGet(hub, "<<") != nil {
-		return nil, false, false, fmt.Errorf("guest: `server.hub` in the jail's %s uses a YAML merge key, which can hide keys lever must check; remove it", layout.SettingsRel)
+		return nil, "", false, fmt.Errorf("guest: `server.hub` in the jail's %s uses a YAML merge key, which can hide keys lever must check; remove it", layout.SettingsRel)
 	}
 	if err := plainKeys(hub, "server.hub"); err != nil {
-		return nil, false, false, err
+		return nil, "", false, err
 	}
 	if mapDeleteFold(hub, keyConduit) {
-		restart, changed = true, true
+		dropped, changed = append(dropped, "server.hub."+keyConduit), true
 	}
 	var admins yaml.Node
 	if err := admins.Encode([]string{spec.AdminEmail}); err != nil {
-		return nil, false, false, fmt.Errorf("guest: encode server.hub.admin_emails: %w", err)
+		return nil, "", false, fmt.Errorf("guest: encode server.hub.admin_emails: %w", err)
 	}
 	if cur := layout.MapGet(hub, "admin_emails"); cur == nil {
 		layout.MapSet(hub, "admin_emails", &admins)
 		changed = true
 	} else if same, err := layout.SameYAML(cur, &admins); err != nil {
-		return nil, false, false, fmt.Errorf("guest: compare server.hub.admin_emails: %w", err)
+		return nil, "", false, fmt.Errorf("guest: compare server.hub.admin_emails: %w", err)
 	} else if !same {
 		layout.MapSet(hub, "admin_emails", &admins)
 		changed = true
@@ -310,11 +317,11 @@ func hubAuthSettingsConverged(existing []byte, spec types.HubAuth, hasServerYAML
 		changed = true
 	}
 	if !changed {
-		return existing, false, false, nil
+		return existing, "", false, nil
 	}
 	out, err = encodeSettings(doc)
 	if err != nil {
-		return nil, false, false, err
+		return nil, "", false, err
 	}
-	return out, restart, true, nil
+	return out, strings.Join(dropped, ", "), true, nil
 }

@@ -10,6 +10,7 @@ import (
 	"path"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/backend"
@@ -82,16 +83,12 @@ func detachBeforeAttach(ctx context.Context, w io.Writer, r proc.Runner, slug, p
 	fmt.Fprintf(w, "lever: detached %d other %s attached to %q (--detach-others)\n", n, noun, slug)
 }
 
-// runAttach runs the attach as a child and returns when the operator detaches
-// or the session ends, so `lever up` can check the manager after the detach and
-// the operator's terminal can be restored.
-func runAttach(ctx context.Context, w io.Writer, b backend.Backend, sc *scion.Client, slug, project string, detachOthers bool) error {
+// prepareAttach is the part of an attach that changes the jail: it detaches
+// the other terminals (detachOthers) and stages the token, and returns the
+// argv that attaches.
+func prepareAttach(ctx context.Context, w io.Writer, b backend.Backend, sc *scion.Client, slug, project string, detachOthers bool) ([]string, error) {
 	detachBeforeAttach(ctx, w, b.JailRunner(), slug, project, detachOthers)
-	argv, err := attachArgv(ctx, b, sc, slug, project)
-	if err != nil {
-		return err
-	}
-	return attachChild(argv, os.Stdin, os.Stdout, os.Stderr)
+	return attachArgv(ctx, b, sc, slug, project)
 }
 
 // attachChild runs argv on the operator's terminal. The child stays in lever's
@@ -158,11 +155,16 @@ func withAttachExitCode(err error) error {
 	return err
 }
 
+// attachLockWait is attach's default --wait: an operator who attaches
+// during a bring-up or a heal is let in once it is done.
+const attachLockWait = 2 * time.Minute
+
 // newAttachCmd attaches to a running agent and does no lifecycle work. It is
 // passive: a jail that is not up fails ResolveRunUser rather than being
 // provisioned; an agent that is not running surfaces scion's own error.
 func newAttachCmd(bf BackendFactory) *cobra.Command {
 	var detachOthers bool
+	var lockWait time.Duration
 	c := &cobra.Command{
 		Use:   "attach [NAME]",
 		Args:  cobra.MaximumNArgs(1),
@@ -187,9 +189,22 @@ func newAttachCmd(bf BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return withAttachExitCode(runAttach(cmd.Context(), cmd.ErrOrStderr(), b, sc, slug, project, detachOthers))
+			// Staging the token and detaching terminals change the jail, so they
+			// wait out a bring-up or a heal; the attach itself, which can last all
+			// day, holds nothing.
+			unlock, err := lockLifecycle(cmd.Context(), app, state, "lever attach", lockWait, lockNotice(cmd))
+			if err != nil {
+				return err
+			}
+			argv, err := prepareAttach(cmd.Context(), cmd.ErrOrStderr(), b, sc, slug, project, detachOthers)
+			unlock()
+			if err != nil {
+				return err
+			}
+			return withAttachExitCode(attachChild(argv, os.Stdin, os.Stdout, os.Stderr))
 		},
 	}
 	c.Flags().BoolVar(&detachOthers, "detach-others", false, detachOthersFlagUsage)
+	addLockWaitFlag(c, &lockWait, attachLockWait)
 	return c
 }

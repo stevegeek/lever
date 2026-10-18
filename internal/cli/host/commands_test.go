@@ -28,7 +28,7 @@ type stubBackend struct {
 	registeredResult  bool // ScionProjectRegistered return value
 	registeredErr     error
 	registeredCalls   []string // workspace paths passed to ScionProjectRegistered
-	hubAuthChanged    bool     // EnsureHubAuth's "the hub config changed" answer
+	hubAuthChanged    string   // EnsureHubAuth's restart answer
 	hubAuthErr        error
 	hubAuthCalls      []types.HubAuth
 	telemetryCalls    []bool         // EnsureScionTelemetry "off" arguments, in call order
@@ -75,7 +75,7 @@ func (s *stubBackend) ImageLoadedTar(context.Context, string, string) bool      
 func (s *stubBackend) PruneJailImages(context.Context) error                    { return nil }
 func (s *stubBackend) WarmJailImage(context.Context, string) error              { return nil }
 func (s *stubBackend) InstallGuestBinary(context.Context, string, string) error { return nil }
-func (s *stubBackend) EnsureHubAuth(_ context.Context, spec types.HubAuth) (bool, error) {
+func (s *stubBackend) EnsureHubAuth(_ context.Context, spec types.HubAuth) (string, error) {
 	s.hubAuthCalls = append(s.hubAuthCalls, spec)
 	return s.hubAuthChanged, s.hubAuthErr
 }

@@ -10,9 +10,9 @@ import (
 	"net/http"
 	"path"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/config"
@@ -247,25 +247,12 @@ func checkHubIdentities(ctx context.Context, d doctorHubAuth) checkResult {
 			}
 		}
 	}
-	want := map[string]bool{}
-	for _, load := range []func() (state.PATRecord, bool, error){d.st.LoadControllerPATRecord, d.st.LoadRemotePATRecord} {
-		if r, ok, _ := load(); ok && r.ID != "" {
-			want[r.ID] = true
-		}
-	}
-	if toks, err := d.client(d.signer.Controller).ListTokens(ctx); err != nil {
+	if keep, err := loadLeverTokens(d.st); err != nil {
+		problems = append(problems, "could not read lever's token records: "+err.Error())
+	} else if toks, err := d.client(d.signer.Controller).ListTokens(ctx); err != nil {
 		problems = append(problems, "could not list the controller's tokens: "+err.Error())
-	} else {
-		var extra []string
-		for _, t := range toks {
-			if !t.Revoked && !want[t.ID] {
-				extra = append(extra, t.ID+" ("+t.Name+")")
-			}
-		}
-		if len(extra) > 0 {
-			sort.Strings(extra)
-			problems = append(problems, "the controller holds tokens lever did not record: "+strings.Join(extra, ", "))
-		}
+	} else if p := unrecordedTokenProblem(keep, toks, time.Now()); p != "" {
+		problems = append(problems, p)
 	}
 	dev, devFound, err := admin.GetUser(ctx, devUserID)
 	switch {
@@ -277,7 +264,7 @@ func checkHubIdentities(ctx context.Context, d doctorHubAuth) checkResult {
 		problems = append(problems, "scion's dev user exists on a hub lever brought up without dev auth: something started this hub with dev auth")
 	}
 	if len(problems) > 0 {
-		return checkResult{name, false, strings.Join(problems, "; "), "run `lever apply` (it repairs renames and demotes extra admins); a token lever did not record can be revoked with scion"}
+		return checkResult{name, false, strings.Join(problems, "; "), "run `lever apply` (it repairs renames, demotes extra admins and revokes the controller's tokens lever did not record)"}
 	}
 	return checkResult{name, true, fmt.Sprintf("%s mode; lever-admin %s is the only admin; controller %s holds only lever's tokens", rec.Mode, rec.AdminID, rec.ControllerID), ""}
 }

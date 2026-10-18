@@ -13,11 +13,12 @@ import (
 type fakeGuestBoot struct {
 	current, recorded string
 	currentErr        error
+	recordedErr       error
 	records           []string
 }
 
 func (g *fakeGuestBoot) Current(context.Context) (string, error) { return g.current, g.currentErr }
-func (g *fakeGuestBoot) Recorded() (string, error)               { return g.recorded, nil }
+func (g *fakeGuestBoot) Recorded() (string, error)               { return g.recorded, g.recordedErr }
 func (g *fakeGuestBoot) Record(id string) error {
 	g.records = append(g.records, id)
 	g.recorded = id
@@ -167,6 +168,15 @@ func TestGuestRestartedUnderWithoutRecord(t *testing.T) {
 			}
 		})
 	}
+	// An unreadable record (a corrupt lifecycle.json) is no record: podman's
+	// start time decides.
+	unreadable := &fakeGuestBoot{current: bootB, recorded: bootA, recordedErr: errors.New("lifecycle.json: unexpected end of JSON input")}
+	for _, before := range []bool{true, false} {
+		d := Deps{GuestBoot: unreadable, ContainerRunning: podmanSays(false), ContainerStartedBeforeBoot: startedBefore(before, nil)}
+		if got := guestRestartedUnder(context.Background(), d, "/lever", "hello", running); got != before {
+			t.Errorf("unreadable record, started before the boot %t: got %t", before, got)
+		}
+	}
 	// A kept boot id decides alone: the same boot is never a restart,
 	// whatever podman's start time says.
 	d := Deps{GuestBoot: &fakeGuestBoot{current: bootA, recorded: bootA}, ContainerRunning: podmanSays(false), ContainerStartedBeforeBoot: startedBefore(true, nil)}
@@ -198,47 +208,16 @@ func TestStartManagerRecoversWithoutRecord(t *testing.T) {
 	}
 }
 
-// RecoverAfterGuestRestart reports true only once the record reads suspended.
-func TestRecoverAfterGuestRestartForUp(t *testing.T) {
-	_, f := newObserveFirstApp(t)
-	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "created"}
-	d := Deps{Scion: scion.New(r, scion.Options{}), GuestBoot: &fakeGuestBoot{current: bootB, recorded: bootA}, ContainerRunning: podmanSays(false)}
-	if !RecoverAfterGuestRestart(context.Background(), d, "hello", "/lever") {
-		t.Fatal("want the recovery")
-	}
-	if r.suspendCalls != 1 || r.resumeCalls != 0 {
-		t.Errorf("suspend=%d resume=%d: up resumes on its own path", r.suspendCalls, r.resumeCalls)
-	}
-
-	_, f2 := newObserveFirstApp(t)
-	r2 := &agentLifecycleRunner{FakeRunner: f2, slug: "hello", initPhase: "running", initContainerStatus: "created", suspendErr: errors.New("hub said no")}
-	var logged logSink
-	d2 := Deps{Scion: scion.New(r2, scion.Options{}), GuestBoot: &fakeGuestBoot{current: bootB, recorded: bootA}, ContainerRunning: podmanSays(false), Log: logged.logf}
-	if RecoverAfterGuestRestart(context.Background(), d2, "hello", "/lever") {
-		t.Fatal("a suspend that did not take must leave up on its observe path")
-	}
-	if !strings.Contains(strings.Join(logged.lines, "\n"), "warning: suspend of manager") {
-		t.Errorf("the failed suspend must be logged: %q", logged.lines)
-	}
-
-	_, f3 := newObserveFirstApp(t)
-	r3 := &agentLifecycleRunner{FakeRunner: f3, slug: "hello", initPhase: "running", initContainerStatus: "Up 2 hours"}
-	d3 := Deps{Scion: scion.New(r3, scion.Options{}), GuestBoot: &fakeGuestBoot{current: bootA, recorded: bootA}, ContainerRunning: podmanSays(true)}
-	if RecoverAfterGuestRestart(context.Background(), d3, "hello", "/lever") || r3.suspendCalls != 0 {
-		t.Fatal("a live manager is left alone")
-	}
-}
-
 func TestRecordGuestBootSkipsUnchanged(t *testing.T) {
 	gb := &fakeGuestBoot{current: bootA, recorded: bootA}
-	RecordGuestBoot(context.Background(), Deps{GuestBoot: gb})
+	recordGuestBoot(context.Background(), Deps{GuestBoot: gb})
 	if len(gb.records) != 0 {
 		t.Errorf("an unchanged boot must not be rewritten: %v", gb.records)
 	}
 	gb.current = bootB
-	RecordGuestBoot(context.Background(), Deps{GuestBoot: gb})
+	recordGuestBoot(context.Background(), Deps{GuestBoot: gb})
 	if len(gb.records) != 1 || gb.recorded != bootB {
 		t.Errorf("records = %v", gb.records)
 	}
-	RecordGuestBoot(context.Background(), Deps{}) // nil tracker: no panic
+	recordGuestBoot(context.Background(), Deps{}) // nil tracker: no panic
 }

@@ -210,8 +210,14 @@ member role plus project ownership and `lever-controller` is all it can ever do.
   no longer holds is retried once with the new one, so a rotation needs no broker restart. An open
   `lever attach` keeps streaming across a rotation; a new attach uses the new token. `lever doctor`'s
   `hub tokens` row applies the same test and names the reason, and its `hub identities` row fails
-  if the controller holds a token lever did not record. Nothing else touches the token: it persists
-  across `stop`→`up`, and only `lever destroy` clears it.
+  if the controller holds a token lever did not record. Every apply then revokes, as the
+  controller, each of the controller's tokens that lever neither recorded nor holds (PATs an older
+  lever minted before it kept records), and prints their ids. It tells its own tokens by the
+  records and by the prefix the hub lists of each token against the secrets it holds, never revokes
+  one it holds or a `lever ssh` token still in its life, and revokes nothing when it cannot read its
+  own records, when the controller assertion does not resolve to the recorded controller, or when
+  the hub's list does not show the controller token lever holds. Nothing else touches the token: it
+  persists across `stop`→`up`, and only `lever destroy` clears it.
 - **Tied to one hub database.** A hub whose database is new (the VM recreated out of band, the
   database moved aside) no longer lists the `lever-controller` role whose ID lever recorded. Lever
   re-bootstraps on its own only on positive evidence: that role is absent from a role list the hub

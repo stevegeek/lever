@@ -286,7 +286,7 @@ func TestServerStopArgv(t *testing.T) {
 	if len(f.Calls) != 2 {
 		t.Fatalf("want 2 calls (pid probe, stop), got %d: %+v", len(f.Calls), f.Calls)
 	}
-	if probe := f.Calls[0]; probe.Name != "sh" || probe.Args[len(probe.Args)-1] != layout.ServerPIDRel {
+	if probe := f.Calls[0]; probe.Name != "sh" || probe.Args[len(probe.Args)-2] != layout.ServerPIDRel || probe.Args[len(probe.Args)-1] != layout.ScionBin {
 		t.Errorf("first call = %+v, want the pid probe on %s", probe, layout.ServerPIDRel)
 	}
 	got := strings.Join(f.Calls[1].Args, " ")

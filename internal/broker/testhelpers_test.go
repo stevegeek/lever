@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -265,11 +266,9 @@ func reenrolBroker(t *testing.T, rt WorkerRuntime, mode string) (*Broker, Worker
 	b := New(testConfig(t, withManager("test-manager", "appname"), withRuntime(rt, spec),
 		func(c *Config) {
 			c.Dispatch.AutoReenrol, c.Dispatch.ManagerBootstrapDir = mode, managerDir
-			// The manager's resume checks pass (TestHealManagerResumeGuard
-			// covers their refusals).
-			c.Dispatch.ManagerResumeGuard = func(context.Context) (ManagerResumeCheck, error) {
-				return &fakeResumeCheck{verified: true}, nil
-			}
+			// The manager's lifecycle passes its checks
+			// (TestHealManagerLifecycleOutcomes covers the rest).
+			c.Dispatch.EnsureManager = (&fakeLifecycle{rt: rt}).ensure
 		}))
 	return b, spec, managerDir
 }
@@ -382,20 +381,74 @@ func mintWorkerTicket(t *testing.T, b *Broker, worker string) string {
 	return bs.Ticket
 }
 
-// fakeResumeCheck is a ManagerResumeCheck: After fails with afterErr,
-// AfterFailure records that it ran and joins failErr.
-type fakeResumeCheck struct {
-	afterErr, failErr error
-	verified          bool
-	failedWith        error
+// fakeLifecycle stands in for apply.EnsureManager: under its lock (nil:
+// free) it runs UnderLock, refuses with refuse (before the stage), stages,
+// and bounces the manager ("appname") on the runtime by its phase.
+type fakeLifecycle struct {
+	rt         WorkerRuntime
+	lock       func(what string) (func(), error)
+	refuse     error
+	fail       error
+	unverified bool
+	// reset is ManagerTokenReset's reset-auth, its guard included.
+	reset func(ctx context.Context) error
+	calls []ManagerChange
 }
 
-func (c *fakeResumeCheck) After(context.Context) error { return c.afterErr }
-func (c *fakeResumeCheck) AfterFailure(_ context.Context, cause error) error {
-	c.failedWith = cause
-	if c.failErr != nil {
-		return errors.Join(cause, c.failErr)
+func (f *fakeLifecycle) ensure(ctx context.Context, c ManagerChange) (ManagerOutcome, error) {
+	f.calls = append(f.calls, c)
+	if f.lock != nil {
+		unlock, err := f.lock(c.What)
+		if err != nil {
+			return ManagerOutcome{}, fmt.Errorf("%w: %v", ErrManagerBusy, err)
+		}
+		defer unlock()
 	}
-	return cause
+	if c.UnderLock != nil {
+		if err := c.UnderLock(); err != nil {
+			return ManagerOutcome{}, err
+		}
+	}
+	if f.refuse != nil {
+		return ManagerOutcome{}, fmt.Errorf("%w: %v", ErrManagerRefused, f.refuse)
+	}
+	if c.Kind == ManagerTokenReset {
+		if f.reset == nil {
+			return ManagerOutcome{}, errors.New("fake: no reset wired")
+		}
+		if err := f.reset(ctx); err != nil {
+			return ManagerOutcome{}, err
+		}
+		return ManagerOutcome{Verb: "reset-auth"}, nil
+	}
+	if c.Kind != ManagerReenrol {
+		return ManagerOutcome{}, f.fail
+	}
+	if err := c.StageTicket(ctx); err != nil {
+		return ManagerOutcome{}, err
+	}
+	agents, err := f.rt.List(ctx, testInstanceProject)
+	if err != nil {
+		return ManagerOutcome{}, err
+	}
+	var verb string
+	switch a := scion.FindAgent(agents, "appname"); {
+	case a == nil:
+		return ManagerOutcome{}, errors.New("no manager record")
+	case a.Phase == scion.PhaseRunning:
+		verb = "suspend+resume"
+		if err = f.rt.Suspend(ctx, "appname", testInstanceProject); err == nil {
+			err = f.rt.Resume(ctx, "appname", testInstanceProject)
+		}
+	case a.Phase == scion.PhaseError:
+		verb = "resume --force"
+		err = f.rt.ResumeForce(ctx, "appname", testInstanceProject)
+	default:
+		verb = "resume"
+		err = f.rt.Resume(ctx, "appname", testInstanceProject)
+	}
+	if err == nil {
+		err = f.fail
+	}
+	return ManagerOutcome{Verb: verb, MountsUnverified: f.unverified}, err
 }
-func (c *fakeResumeCheck) Verified() bool { return c.verified }

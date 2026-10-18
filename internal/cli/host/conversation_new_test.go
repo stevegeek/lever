@@ -3,12 +3,15 @@ package host
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/stevegeek/lever/internal/apply"
+	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
@@ -50,8 +53,8 @@ func (f *convFixture) calls() string { return strings.Join(f.sc.calls, ",") }
 // TestNewConversation is the whole path: the running manager is suspended,
 // its transcripts backed up, stopped (its old session ends) and started in a
 // fresh session with the boot prompt, through the resume checks, the gate,
-// and a session record committed after the start. The old transcript stays
-// in its home.
+// and a session record committed after the start; the guest boot is recorded
+// once the manager is live. The old transcript stays in its home.
 func TestNewConversation(t *testing.T) {
 	f, sess := newConvFixtureWith(t)
 	writeConvFile(t, f.transcript("old.jsonl"), "{\"old\":1}\n")
@@ -71,8 +74,8 @@ func TestNewConversation(t *testing.T) {
 	if f.sc.phase != scion.PhaseRunning {
 		t.Fatalf("phase %q", f.sc.phase)
 	}
-	if got := strings.Join(f.guard.steps, ","); got != "begin,resumed,live" || f.gated != 1 {
-		t.Fatalf("checks = %q gated %d", got, f.gated)
+	if f.mounts.checks != 1 || len(f.boots.records) != 1 {
+		t.Fatalf("mount checks %d boots %v: want the mounts read back after the start, then the guest boot recorded", f.mounts.checks, f.boots.records)
 	}
 	if sess.asked != 1 || sess.began != 1 || sess.committed != 1 {
 		t.Fatalf("session = %+v", sess)
@@ -107,7 +110,7 @@ func TestNewConversationBusy(t *testing.T) {
 		t.Fatalf("forced: %v", err)
 	}
 	for _, act := range []string{"", "completed", "stalled", "waiting_for_input", "blocked"} {
-		if managerBusy(act) {
+		if apply.ManagerBusy(act) {
 			t.Errorf("%q counts as busy", act)
 		}
 	}
@@ -178,13 +181,14 @@ func TestNewConversationFailureAfterStop(t *testing.T) {
 	}{
 		{"start fails", func(f *convFixture, _ *newConvSession) { f.sc.resumeErr = errors.New("broker down") }, "suspend,stop,resume-fresh"},
 		{"session begin fails", func(_ *convFixture, s *newConvSession) { s.beginErr = errors.New("disk full") }, "suspend,stop"},
-		{"resume check refuses", func(f *convFixture, _ *newConvSession) { f.guard.failAt = "begin" }, "suspend,stop"},
-		{"role guard refuses", func(f *convFixture, _ *newConvSession) {
-			f.ops.verifyRole = func(context.Context) error { return errors.New("pre-role record") }
+		{"resume check refuses", func(f *convFixture, _ *newConvSession) {
+			if err := os.Remove(filepath.Join(f.tree, "kb")); err != nil {
+				t.Fatal(err)
+			}
 		}, "suspend,stop"},
-		{"gate fails", func(f *convFixture, _ *newConvSession) {
-			f.ops.gate = func(context.Context) error { return errors.New("claude died") }
-		}, "suspend,stop,resume-fresh"},
+		{"role guard refuses", func(f *convFixture, _ *newConvSession) { f.roleErr = errors.New("pre-role record") }, "suspend,stop"},
+		{"gate fails", func(f *convFixture, _ *newConvSession) { f.sc.deadAfterResume = true }, "suspend,stop,resume-fresh"},
+		{"mount check refuses", func(f *convFixture, _ *newConvSession) { f.mounts.answers = []string{"elsewhere"} }, "suspend,stop,resume-fresh,suspend"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, sess := newConvFixtureWith(t)
@@ -237,7 +241,7 @@ func TestLockConversation(t *testing.T) {
 	root := t.TempDir()
 	st := state.State{Dir: filepath.Join(root, "state")}
 	app := &config.App{Name: "mgr", Tree: filepath.Join(root, "tree")}
-	unlock, err := lockConversation(app, st, "lever conversation new", " from the chat page")
+	unlock, err := lockConversation(context.Background(), app, st, "lever conversation new", " from the chat page", 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,9 +249,9 @@ func TestLockConversation(t *testing.T) {
 		t.Fatalf("holder = %q", got)
 	}
 	for _, verb := range []string{"lever conversation restore", "lever up", "lever apply", "lever stop", "lever reload"} {
-		take := func() (func(), error) { return lockLifecycle(app, st, verb) }
+		take := func() (func(), error) { return lockLifecycle(context.Background(), app, st, verb, 0, nil) }
 		if verb == "lever conversation restore" {
-			take = func() (func(), error) { return lockConversation(app, st, verb, "") }
+			take = func() (func(), error) { return lockConversation(context.Background(), app, st, verb, "", 0, nil) }
 		}
 		_, err = take()
 		var ee *cli.ExitError
@@ -262,23 +266,71 @@ func TestLockConversation(t *testing.T) {
 	if got := managerLockHolder(app, st); got != "" {
 		t.Fatalf("holder after release = %q", got)
 	}
-	up, err := lockLifecycle(app, st, "lever up")
+	up, err := lockLifecycle(context.Background(), app, st, "lever up", 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := lockConversation(app, st, "lever conversation new", ""); err == nil || !strings.Contains(err.Error(), "`lever up` (pid ") {
+	if _, err := lockConversation(context.Background(), app, st, "lever conversation new", "", 0, nil); err == nil || !strings.Contains(err.Error(), "`lever up` (pid ") {
 		t.Fatalf("new under up: %v", err)
 	}
 	up()
 	in := &config.App{Name: "mgr", Tree: root}
-	if _, err := lockConversation(in, st, "lever conversation new", ""); !errors.Is(err, errConvStateInTree) {
+	if _, err := lockConversation(context.Background(), in, st, "lever conversation new", "", 0, nil); !errors.Is(err, errConvStateInTree) {
 		t.Fatalf("state in tree: %v", err)
 	}
-	free, err := lockLifecycle(in, st, "lever up")
+	free, err := lockLifecycle(context.Background(), in, st, "lever up", 0, nil)
 	if err != nil {
 		t.Fatalf("up with the state in the tree: %v", err)
 	}
 	free()
+}
+
+// TestLockWait: --wait takes the lock once its holder lets go, says once
+// what it waits for, and still exits 6 naming the holder when the wait runs
+// out.
+func TestLockWait(t *testing.T) {
+	old := lockPoll
+	lockPoll = 5 * time.Millisecond
+	t.Cleanup(func() { lockPoll = old })
+	root := t.TempDir()
+	st := state.State{Dir: filepath.Join(root, "state")}
+	app := &config.App{Name: "mgr", Tree: filepath.Join(root, "tree")}
+	held, err := lockLifecycle(context.Background(), app, st, "lever up", 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var notices []string
+	notice := func(s string) { notices = append(notices, s) }
+	_, err = lockConversation(context.Background(), app, st, "lever conversation new", " for the daily reset", 30*time.Millisecond, notice)
+	var ee *cli.ExitError
+	if !errors.As(err, &ee) || ee.Code != exitConversationLocked || !strings.Contains(err.Error(), "`lever up` (pid ") || !strings.Contains(err.Error(), "waited") {
+		t.Fatalf("wait ran out: %v", err)
+	}
+	if len(notices) != 1 || !strings.Contains(notices[0], "`lever up`") || !strings.Contains(notices[0], "--wait") {
+		t.Fatalf("notices = %q", notices)
+	}
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		held()
+	}()
+	unlock, err := lockConversation(context.Background(), app, st, "lever conversation new", " for the daily reset", 5*time.Second, nil)
+	if err != nil {
+		t.Fatalf("the lock was let go: %v", err)
+	}
+	if got := managerLockHolder(app, st); !strings.Contains(got, "for the daily reset") {
+		t.Fatalf("holder = %q", got)
+	}
+	unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	held, err = lockLifecycle(context.Background(), app, st, "lever up", 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held()
+	cancel()
+	if _, err := lockLifecycle(ctx, app, st, "lever stop", time.Minute, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a cancelled wait: %v", err)
+	}
 }
 
 // TestNewConversationEmptyTranscripts: transcripts with no content are not
@@ -363,5 +415,26 @@ func TestNewConversationBootTask(t *testing.T) {
 	}
 	if got := f.calls(); got != "suspend,stop,resume-fresh" || f.sc.task != "" {
 		t.Fatalf("calls = %q task %q", got, f.sc.task)
+	}
+}
+
+// TestUnattendedNewConversationBootsNoJail: a new conversation lever starts
+// on its own may have waited for the lock behind a stop or a destroy, so a
+// jail that is not up refuses it (exit 7) before anything is brought up.
+func TestUnattendedNewConversationBootsNoJail(t *testing.T) {
+	p := writeTmpConfig(t)
+	sb := &stubBackend{resolveRunUserErr: errors.New("machine is stopped")}
+	bf := func(string, string) (backend.Backend, error) { return sb, nil }
+	c := newConversationNewCmd(bf)
+	c.SetArgs([]string{"--by", "daily", "--", p})
+	c.SetOut(io.Discard)
+	c.SetErr(io.Discard)
+	err := c.Execute()
+	var ee *cli.ExitError
+	if !errors.As(err, &ee) || ee.Code != exitConversationNotRunning || !strings.Contains(err.Error(), "the jail is not up") {
+		t.Fatalf("err = %v", err)
+	}
+	if sb.up {
+		t.Fatal("the jail was brought up")
 	}
 }

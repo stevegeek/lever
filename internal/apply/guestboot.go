@@ -26,18 +26,16 @@ type GuestBoot interface {
 // guestRestartedUnder reports whether rec is a running manager record left
 // over from an ended guest boot. Only podman's answer counts as evidence the
 // container is dead: the hub briefly reports "created" for a container that
-// is starting. Any read that fails answers no. With no boot id kept, podman's
-// start time stands in for it (startedInEndedBoot).
+// is starting. Any podman or boot id read that fails answers no. With no
+// boot id kept, or a record that cannot be read, podman's start time stands
+// in for it (startedInEndedBoot).
 func guestRestartedUnder(ctx context.Context, d Deps, project, name string, rec *scion.Agent) bool {
 	if rec == nil || rec.Phase != scion.PhaseRunning || d.GuestBoot == nil {
 		return false
 	}
 	was, err := d.GuestBoot.Recorded()
-	if err != nil {
-		return false
-	}
 	ref := jail.ContainerName(path.Base(project), name)
-	if was == "" {
+	if err != nil || was == "" {
 		return startedInEndedBoot(ctx, d, ref)
 	}
 	now, err := d.GuestBoot.Current(ctx)
@@ -74,31 +72,9 @@ func startedInEndedBoot(ctx context.Context, d Deps, ref string) bool {
 func suspendAfterGuestRestart(ctx context.Context, d Deps, subject, project, name string, rec *scion.Agent) {
 	d.logf("%s: manager %q: the jail VM restarted since the manager last ran (a new guest boot) and its container is %s; suspending and resuming it (the conversation is kept)",
 		subject, name, scion.BoundedQuote(rec.ContainerStatus))
-	if err := d.Scion.Suspend(ctx, name, project); err != nil {
+	if err := d.managerScion().Suspend(ctx, name, project); err != nil {
 		d.logf("%s: warning: suspend of manager %q failed: %s", subject, name, scion.ErrSummary(err))
 	}
-}
-
-// RecoverAfterGuestRestart suspends a running manager record left over from
-// an ended guest boot and reports true once the record reads suspended, so
-// `lever up` takes its resume path. False otherwise, including when the
-// suspend did not take.
-func RecoverAfterGuestRestart(ctx context.Context, d Deps, name, project string) bool {
-	agents, err := d.Scion.List(ctx, project)
-	if err != nil {
-		return false
-	}
-	rec := scion.FindAgent(agents, name)
-	if !guestRestartedUnder(ctx, d, project, name, rec) {
-		return false
-	}
-	suspendAfterGuestRestart(ctx, d, "up", project, name, rec)
-	agents, err = d.Scion.List(ctx, project)
-	if err != nil {
-		return false
-	}
-	rec = scion.FindAgent(agents, name)
-	return rec != nil && rec.Phase == scion.PhaseSuspended
 }
 
 func (d Deps) logf(format string, args ...any) {
@@ -107,10 +83,10 @@ func (d Deps) logf(format string, args ...any) {
 	}
 }
 
-// RecordGuestBoot notes the current guest boot as the one the manager runs
-// in; call it once lever has seen the manager live. Best-effort: a failure
+// recordGuestBoot notes the current guest boot as the one the manager runs
+// in; call it once the manager's container is known to run in this boot. Best-effort: a failure
 // only means the next restart is not recognised.
-func RecordGuestBoot(ctx context.Context, d Deps) {
+func recordGuestBoot(ctx context.Context, d Deps) {
 	if d.GuestBoot == nil {
 		return
 	}

@@ -459,3 +459,63 @@ func TestPinExperimentsConduitOnTouchesOnlyConduit(t *testing.T) {
 		t.Fatal("a hub without hub.conduit cannot have it turned on")
 	}
 }
+
+// TestPrePinExperiments: before a restart lever pins every experiment off
+// and keeps conduit on only where `lever ssh` wants it and the hub serves it
+// already, so the one restart takes the pin and hub-identity has none left
+// to restart for; it never turns conduit on, and writes nothing on a hub
+// that has no experiments or that it cannot ask.
+func TestPrePinExperiments(t *testing.T) {
+	now := func() time.Time { return time.Unix(0, 0) }
+	for _, c := range []struct {
+		name               string
+		on                 []string
+		conduitWanted      bool
+		has                bool
+		probeErr           error
+		wantErr            bool
+		wantOn             []string
+		wantPuts, wantSave bool
+	}{
+		{name: "stray experiments go off", on: []string{"hub.artifacts", "hub.conduit"}, has: true, wantPuts: true, wantSave: true},
+		{name: "conduit wanted and served stays on", on: []string{"hub.conduit", "hub.artifacts"}, conduitWanted: true, has: true, wantOn: []string{"hub.conduit"}, wantPuts: true, wantSave: true},
+		{name: "conduit wanted but not served is not turned on", conduitWanted: true, has: true, wantPuts: true, wantSave: true},
+		{name: "no experiments at the jail's scion", on: []string{"hub.artifacts"}, has: false},
+		{name: "a probe that gets no answer writes nothing", on: []string{"hub.artifacts"}, has: true, probeErr: errors.New("jail exec"), wantErr: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newFakeExperimentsHub()
+			for _, n := range c.on {
+				h.overrides[n] = true
+			}
+			h.probeErr = c.probeErr
+			st := state.ForConfig(t.TempDir())
+			if err := os.MkdirAll(st.Dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			err := prePinExperiments(context.Background(), experimentsPin{admin: &hubapi.Client{T: h}, st: st, known: knowsExperiments(c.has),
+				now: now, conduitOn: c.conduitWanted, log: func(string, ...any) {}, warn: func(string, ...any) {}})
+			if (err != nil) != c.wantErr {
+				t.Fatalf("err = %v", err)
+			}
+			if (h.putCount() > 0) != c.wantPuts {
+				t.Fatalf("puts = %v", h.puts)
+			}
+			rec, found, _ := st.LoadHubExperimentsRecord()
+			if found != c.wantSave {
+				t.Fatalf("record found = %v", found)
+			}
+			for _, n := range h.registered {
+				if !c.wantPuts {
+					break
+				}
+				if want := slices.Contains(c.wantOn, n); h.enabled(n) != want {
+					t.Errorf("%s enabled = %v, want %v", n, h.enabled(n), want)
+				}
+			}
+			if c.wantSave && !slices.Equal(rec.On, c.wantOn) {
+				t.Fatalf("record on = %v, want %v", rec.On, c.wantOn)
+			}
+		})
+	}
+}

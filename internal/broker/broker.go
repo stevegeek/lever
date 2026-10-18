@@ -7,6 +7,7 @@ package broker
 import (
 	"cmp"
 	"context"
+	"errors"
 	"log/slog"
 	"net/url"
 	"sync"
@@ -122,19 +123,47 @@ type LLMConfig struct {
 	Upstream string
 }
 
-// ManagerResumeCheck is the half of DispatchConfig.ManagerResumeGuard that
-// runs after the bounce's resume (apply.ManagerResume in production).
-type ManagerResumeCheck interface {
-	// After reads back from the guest where each of the resumed manager's
-	// tree mounts comes from; a mismatch suspends the manager and is the
-	// error.
-	After(ctx context.Context) error
-	// AfterFailure is After for a resume that failed with cause: a
-	// container it started anyway is checked, its error joined to cause.
-	AfterFailure(ctx context.Context, cause error) error
-	// Verified reports whether After could read the mounts back.
-	Verified() bool
+// ManagerChangeKind is a change the broker makes to the manager.
+type ManagerChangeKind int
+
+const (
+	// ManagerReenrol bounces the manager so its boot re-enrols with the
+	// ticket ManagerChange.StageTicket stages.
+	ManagerReenrol ManagerChangeKind = iota + 1
+	// ManagerTokenReset resets a running manager's hub token (scion
+	// reset-auth). Verb "" says the manager no longer runs.
+	ManagerTokenReset
+)
+
+// ManagerChange is one call of DispatchConfig.EnsureManager.
+type ManagerChange struct {
+	Kind ManagerChangeKind
+	// What names the broker to a lever command the lifecycle lock turns
+	// away.
+	What string
+	// UnderLock runs once the lifecycle lock is held, before anything is
+	// read; its error is returned as it is.
+	UnderLock func() error
+	// StageTicket (ManagerReenrol) stages a fresh enrolment ticket, after
+	// the checks before the resume.
+	StageTicket func(ctx context.Context) error
 }
+
+// ManagerOutcome is what the manager's lifecycle did.
+type ManagerOutcome struct {
+	Verb string
+	// MountsUnverified: the manager's tree mounts could not be read back
+	// after its resume.
+	MountsUnverified bool
+}
+
+var (
+	// ErrManagerBusy: a lever command holds the lifecycle lock.
+	ErrManagerBusy = errors.New("lever is changing the manager")
+	// ErrManagerRefused: a check refused the change (the record's stored
+	// role, or the manager's tree mounts, before or after the resume).
+	ErrManagerRefused = errors.New("the manager's checks refused the change")
+)
 
 // DispatchConfig is the host-side worker dispatch and messaging wiring.
 type DispatchConfig struct {
@@ -170,12 +199,6 @@ type DispatchConfig struct {
 	// nothing: the remote proxy lets a contact post to an agent only while
 	// its last fresh start saw the skill on disk. nil ⇒ nothing is recorded.
 	BeginSession func(agent string) (commit func() error)
-	// LockManager takes, without waiting, the lock lever's own changes to
-	// the manager record hold (a new conversation, a restore, up, stop), so
-	// the heal never bounces the manager in the middle of one. nil ⇒ no
-	// lock (the state directory is inside the tree, where none of those
-	// that stop the record can run).
-	LockManager func() (unlock func(), err error)
 	// AutoReenrol gates the natural-lapse healer: "all" | "manager" | "off"
 	// (empty = all).
 	AutoReenrol string
@@ -212,11 +235,18 @@ type DispatchConfig struct {
 	// nil skips it. ErrSharedCheckUnavailable means the mounts could not be
 	// read.
 	SharedGuard func(ctx context.Context) error
-	// ManagerResumeGuard runs apply's manager-resume checks for the re-enrol
-	// bounce: before staging it refuses when the host tree or the record's
-	// mounts are not as planned; the returned check runs after the resume.
-	// nil: the broker never resumes the manager (fail closed).
-	ManagerResumeGuard func(ctx context.Context) (ManagerResumeCheck, error)
+	// EnsureManager makes the broker's changes to the manager through its
+	// one lifecycle (apply.EnsureManager): it takes lever's lifecycle lock
+	// (busy: ErrManagerBusy), runs UnderLock, refuses a record whose stored
+	// role the installed scion reads as full and a manager whose tree
+	// mounts are not as planned (ErrManagerRefused), and around the bounce
+	// clears a hub stop claim on the manager's own container, gates the
+	// manager and records the guest boot. Only the manager's own lapsed
+	// certificate starts the bounce, so at worst the manager costs itself
+	// its container's writable layer, as any scion resume of a stopped
+	// container does. Worker resumes never go through it. nil: the broker
+	// never changes the manager (fail closed).
+	EnsureManager func(ctx context.Context, c ManagerChange) (ManagerOutcome, error)
 	// Tickets stages a worker's enrolment envelope in the guest, outside the
 	// instance tree: the manager mounts the whole tree, so nothing a worker
 	// must redeem may be written there. nil ⇒ every dispatch fails closed.
@@ -290,14 +320,13 @@ type Broker struct {
 	verifyRole     func(ctx context.Context, agent string) error
 	resolveAgentID func(ctx context.Context, agentSlug string) (string, error)
 	beginSession   func(agent string) (commit func() error)
-	lockManager    func() (func(), error)
 	tree           string
 	readOnlyDirs   []string
 	recordVolumes  RecordVolumesFunc
 	// leftoverShareVolumes is best-effort (see DispatchConfig).
 	leftoverShareVolumes RecordVolumesFunc
 	sharedGuard          func(ctx context.Context) error
-	managerResumeGuard   func(ctx context.Context) (ManagerResumeCheck, error)
+	ensureManager        func(ctx context.Context, c ManagerChange) (ManagerOutcome, error)
 	// afterWorkspaceMkdir is a test seam between a strict workspace mkdir
 	// and the walk that follows it.
 	afterWorkspaceMkdir func()
@@ -423,10 +452,10 @@ func New(c Config) *Broker {
 		apiKey:     llm.APIKey, llmUpstream: up,
 		runtime: d.Runtime, workers: workers, brokerCAPEM: d.BrokerCAPEM, brokerURL: d.BrokerURL,
 		instanceProject: d.InstanceProject, workerToWorker: d.WorkerToWorker,
-		verifyRole: d.VerifyAgentRole, resolveAgentID: d.ResolveAgentID, beginSession: d.BeginSession, lockManager: d.LockManager, tree: d.Tree, readOnlyDirs: d.ReadOnlyDirs,
+		verifyRole: d.VerifyAgentRole, resolveAgentID: d.ResolveAgentID, beginSession: d.BeginSession, tree: d.Tree, readOnlyDirs: d.ReadOnlyDirs,
 		recordVolumes: d.RecordVolumes, leftoverShareVolumes: d.LeftoverShareVolumes, sharedGuard: d.SharedGuard,
-		managerResumeGuard: d.ManagerResumeGuard,
-		liveAttempts:       defaultLiveAttempts, liveInterval: defaultLiveInterval, liveSettle: d.LiveSettle,
+		ensureManager: d.EnsureManager,
+		liveAttempts:  defaultLiveAttempts, liveInterval: defaultLiveInterval, liveSettle: d.LiveSettle,
 		maxRunningWorkers:   d.MaxRunningWorkers,
 		autoReenrol:         cmp.Or(d.AutoReenrol, autoReenrolAll),
 		managerBootstrapDir: d.ManagerBootstrapDir,

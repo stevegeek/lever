@@ -90,13 +90,18 @@ func TestLoadImageRunsAlongsideTheHubSteps(t *testing.T) {
 	}
 }
 
-// The fake runtime broker never reports online, so start-manager makes its
-// own runtime-broker wait and that call shows when it began.
+// The hub kept running and its fake runtime broker never reports online, so
+// start-manager makes its own runtime-broker wait and that call shows when
+// it began.
 func TestStartManagerWaitsForTheImagesAndTheBroker(t *testing.T) {
 	var warmed, healthy atomic.Bool
 	var mu sync.Mutex
 	var ready []bool // per WaitBrokerReady call; start-manager's is the last
+	_, f := newObserveFirstApp(t)
+	keptHub(f, helloApp(""))
 	_, err := runWithProgress(t, Deps{
+		Scion:      scion.New(&agentLifecycleRunner{FakeRunner: f, slug: "hello"}, scion.Options{}),
+		HubAuthEnv: testHubAuthEnv(),
 		WarmImage: func(context.Context, string) error {
 			time.Sleep(20 * time.Millisecond)
 			warmed.Store(true)
@@ -143,8 +148,8 @@ func TestRuntimeBrokerSeenOnlineSkipsStartManagersWait(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(projects) != 1 || projects[0] != scionGlobalProject {
-		t.Fatalf("WaitBrokerReady calls = %q; want only the scion-server step's", projects)
+	if len(projects) != 0 {
+		t.Fatalf("WaitBrokerReady calls = %q; want none after the scion-server step's hard wait", projects)
 	}
 }
 
@@ -335,6 +340,8 @@ func TestBrokerOnlyPlanMintsAfterTheBroker(t *testing.T) {
 			ok.Store(started.Load())
 			return BootstrapMaterial{Ticket: "t"}, nil
 		},
+		// The broker-only VM has no scion to answer the role check.
+		VerifyAgentRole: func(context.Context, string, string) error { return errors.New("no scion in the jail") },
 	})
 	if err := Run(context.Background(), app, d, PlanOpts{BrokerOnly: true}); err != nil {
 		t.Fatalf("Run: %v", err)

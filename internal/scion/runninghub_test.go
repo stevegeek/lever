@@ -110,7 +110,7 @@ func TestRunningHubCallsTheScriptOnThePidFile(t *testing.T) {
 		t.Fatalf("got %+v", h)
 	}
 	call := f.Calls[0]
-	if call.Name != "sh" || len(call.Args) != 4 || call.Args[1] != runningHubScript || call.Args[3] != layout.ServerPIDRel {
+	if call.Name != "sh" || len(call.Args) != 5 || call.Args[1] != runningHubScript || call.Args[3] != layout.ServerPIDRel || call.Args[4] != layout.ScionBin {
 		t.Fatalf("call = %+v", call)
 	}
 }
@@ -153,10 +153,21 @@ func TestRunningHubScriptRunsForReal(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, layout.ServerPIDRel), []byte(strconv.Itoa(hub.Process.Pid)), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// The script counts only a process running the installed scion ($2): here
+	// that is the shell the fake hub runs in.
+	bin, err := os.Readlink("/proc/" + strconv.Itoa(hub.Process.Pid) + "/exe")
+	if err != nil {
+		t.Skip("cannot read the fake hub's exe")
+	}
+	decoy := exec.Command("sh", "-c", runningHubScript, "_", layout.ServerPIDRel, layout.ScionBin)
+	decoy.Env = append(os.Environ(), "HOME="+home)
+	if out, err := decoy.Output(); err != nil || len(out) != 0 {
+		t.Fatalf("a server argv on another binary read as the hub: %q %v", out, err)
+	}
 	var out []byte
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		cmd := exec.Command("sh", "-c", runningHubScript, "_", layout.ServerPIDRel)
+		cmd := exec.Command("sh", "-c", runningHubScript, "_", layout.ServerPIDRel, bin)
 		cmd.Env = append(os.Environ(), "HOME="+home)
 		var err error
 		if out, err = cmd.Output(); err != nil {

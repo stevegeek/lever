@@ -16,7 +16,6 @@ import (
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/convbackup"
-	"github.com/stevegeek/lever/internal/retry"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/sessionrec"
 	"github.com/stevegeek/lever/internal/state"
@@ -28,33 +27,16 @@ import (
 // first (package convbackup), and --keep-conversation or `lever conversation
 // restore` puts them back into the new record's home.
 
-type convScion interface {
-	List(ctx context.Context, project string) ([]scion.Agent, error)
-	Suspend(ctx context.Context, worker, project string) error
-	Resume(ctx context.Context, worker, project string) error
-	ResumeTask(ctx context.Context, worker, project, task string) error
-	Stop(ctx context.Context, worker, project string) error
-}
-
 type convOps struct {
 	app   *config.App
 	st    state.State
 	guest convbackup.Guest
-	sc    convScion // restore and the pre-backup suspend only
 	log   func(format string, args ...any)
-	// verifyRole is the pre-role record guard a resume passes, and gate the
-	// liveness gate after it.
-	verifyRole func(ctx context.Context) error
-	gate       func(ctx context.Context) error
-	// beginResume starts the checks around every manager resume
-	// (apply.BeginManagerResume): the host tree before it, the mounts read back
-	// after it. newConvOps always sets it.
-	beginResume func(ctx context.Context) (managerResume, error)
-	// clearStopClaim runs a resume through apply.ResumeClearingStopClaim; nil
-	// runs it as is.
-	clearStopClaim func(ctx context.Context, resume func() error) error
-	now            func() time.Time
-	suspendWait    apply.RetryBudget
+	// deps carries the manager's lifecycle (apply.EnsureManager), which
+	// suspends, stops, resumes and gates the manager around a restore or a
+	// new conversation.
+	deps apply.Deps
+	now  func() time.Time
 	// session begins the record of a new conversation's fresh session (see
 	// newConversation).
 	session func() sessionBegin
@@ -62,52 +44,22 @@ type convOps struct {
 	bootTask func() (string, error)
 }
 
-type managerResume interface {
-	Resumed(ctx context.Context) error
-	Live(ctx context.Context) error
-	Settle(ctx context.Context) error
-	AfterFailure(ctx context.Context, cause error) error
-}
-
 func newConvOps(w *applyWiring, app *config.App, st state.State) convOps {
-	project := w.b.MountDest()
 	return convOps{
-		app:   app,
-		st:    st,
-		guest: convbackup.Guest{R: w.b.JailRunner(), Workspace: project, Agent: app.Name},
-		sc:    w.sc,
-		log:   w.deps.Log,
-		verifyRole: func(ctx context.Context) error {
-			return verifyManagerRole(ctx, w.deps, project, app.Name)
-		},
-		gate: func(ctx context.Context) error {
-			return apply.WaitManagerLive(ctx, w.deps, app.Name, project, nil)
-		},
-		beginResume: func(ctx context.Context) (managerResume, error) {
-			return apply.BeginManagerResume(ctx, w.deps, app, project, "conversation")
-		},
-		clearStopClaim: func(ctx context.Context, resume func() error) error {
-			return apply.ResumeClearingStopClaim(ctx, w.deps, app.Name, project, "conversation", resume)
-		},
+		app:      app,
+		st:       st,
+		guest:    convbackup.Guest{R: w.b.JailRunner(), Workspace: w.b.MountDest(), Agent: app.Name},
+		log:      w.deps.Log,
+		deps:     w.deps,
 		session:  func() sessionBegin { return beginFreshSession(app, st) },
 		bootTask: func() (string, error) { return apply.ManagerTask(app) },
 	}
 }
 
-func (o convOps) resumeClearing(ctx context.Context, resume func() error) error {
-	if o.clearStopClaim == nil {
-		return resume()
-	}
-	return o.clearStopClaim(ctx, resume)
-}
-
-// startResume refuses without beginResume: a resume whose mounts nobody reads
-// back is never made.
-func (o convOps) startResume(ctx context.Context) (managerResume, error) {
-	if o.beginResume == nil {
-		return nil, errors.New("internal error: no resume checks wired")
-	}
-	return o.beginResume(ctx)
+// ensure runs the manager's lifecycle for a conversation command.
+func (o convOps) ensure(ctx context.Context, q apply.ManagerRequest) (apply.ManagerResult, error) {
+	q.Subject = "conversation"
+	return apply.EnsureManager(ctx, o.app, o.deps, q)
 }
 
 // errConvStateInTree: a backup holds the whole conversation and whatever
@@ -189,9 +141,10 @@ func (o convOps) backupIf(ctx context.Context, reason string, skipEmpty bool) (m
 	return m, true, nil
 }
 
-// backupBeforeDelete is BackupManagerConversation for `up --fresh`: a running
-// manager is suspended first so the copy is the conversation as it ends. *saved
-// is set when there was a conversation to save.
+// backupBeforeDelete is BackupManagerConversation for `up --fresh` (the
+// manager's lifecycle suspends a running manager first, so the copy is the
+// conversation as it ends). *saved is set when there was a conversation to
+// save.
 func (o convOps) backupBeforeDelete(saved **convbackup.Meta) func(ctx context.Context, rec *scion.Agent) error {
 	return o.backupBeforeDeleteAs(saved, "up --fresh", false)
 }
@@ -203,17 +156,7 @@ func (o convOps) backupBeforeNoConversationFresh(saved **convbackup.Meta) func(c
 }
 
 func (o convOps) backupBeforeDeleteAs(saved **convbackup.Meta, reason string, skipEmpty bool) func(ctx context.Context, rec *scion.Agent) error {
-	return func(ctx context.Context, rec *scion.Agent) error {
-		suspended := false
-		if rec != nil && rec.Phase == scion.PhaseRunning && o.sc != nil {
-			sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			if err := o.sc.Suspend(sctx, o.app.Name, o.guest.Workspace); err != nil {
-				o.log("conversation: could not suspend manager %q before the backup (%s); copying it while it runs", o.app.Name, termsafe.Sanitize(scion.ErrSummary(err)))
-			} else {
-				suspended = true
-			}
-			cancel()
-		}
+	return func(ctx context.Context, _ *scion.Agent) error {
 		m, found, err := o.backupIf(ctx, reason, skipEmpty)
 		if errors.Is(err, convbackup.ErrNoHome) {
 			// scion will delete a home lever could not find: no proof there is nothing to
@@ -221,9 +164,6 @@ func (o convOps) backupBeforeDeleteAs(saved **convbackup.Meta, reason string, sk
 			err = fmt.Errorf("%w for the record it is about to delete, so it cannot tell whether a conversation would be lost", err)
 		}
 		if err != nil {
-			if suspended {
-				err = o.resumeAfterFailure(ctx, err, "")
-			}
 			return err
 		}
 		if !found {
@@ -282,141 +222,68 @@ func (o convOps) restore(ctx context.Context, id string, backupFirst bool) (err 
 	}
 	defer archive.Close()
 
-	project := o.guest.Workspace
-	agents, err := o.sc.List(ctx, project)
-	if err != nil {
-		return fmt.Errorf("the hub does not answer (%s); bring the instance up first (`lever up --no-attach`)", termsafe.Sanitize(scion.ErrSummary(err)))
-	}
-	rec := scion.FindAgent(agents, o.app.Name)
-	if rec == nil {
-		return fmt.Errorf("there is no manager record to restore into; run `lever up --no-attach` first")
-	}
-	// suspended: this restore suspended the manager; done: a later failure must
-	// not resume it (already resumed, or the role guard refused).
-	suspended, done := false, false
-	switch rec.Phase {
-	case scion.PhaseRunning:
-		o.log("conversation: suspending manager %q to swap its transcripts", o.app.Name)
-		if err := o.sc.Suspend(ctx, o.app.Name, project); err != nil {
-			return fmt.Errorf("suspending the manager failed, nothing was restored: %s", termsafe.Sanitize(scion.ErrSummary(err)))
-		}
-		suspended = true
-	case scion.PhaseSuspended:
-	default:
-		return fmt.Errorf("manager %q is in phase %s; a restore needs it running or suspended (`lever up --no-attach` first)", o.app.Name, scion.BoundedQuote(rec.Phase))
-	}
 	// unsure: an install failed possibly after the swap, so either conversation
 	// may be in place.
 	unsure := false
-	defer func() {
-		if err != nil && suspended && !done {
-			how := "on its own conversation"
-			if unsure {
-				how = "on whichever conversation its home now holds"
+	_, err = o.ensure(ctx, apply.ManagerRequest{
+		Intent: apply.ManagerRestore,
+		WhileSuspended: func(ctx context.Context) error {
+			if backupFirst {
+				if _, _, err := o.backup(ctx, "before restore"); err != nil {
+					return fmt.Errorf("backing up the conversation it would replace failed, nothing was restored (--no-backup skips that backup): %w", err)
+				}
 			}
-			err = o.resumeAfterFailure(ctx, err, how)
-		}
-	}()
-	if err := o.waitSuspended(ctx); err != nil {
-		return err
-	}
-	if backupFirst {
-		if _, _, err := o.backup(ctx, "before restore"); err != nil {
-			return fmt.Errorf("backing up the conversation it would replace failed, nothing was restored (--no-backup skips that backup): %w", err)
-		}
-	}
-	prev, hadPrev, err := o.latestSession()
-	if err != nil {
-		return err
-	}
-	hash := m.SkillHash
-	if hash == "" {
-		hash = restoredUnknownSkill
-	}
-	if err := o.recordSession(hash); err != nil {
-		return fmt.Errorf("recording the restored session failed, nothing was restored: %w", err)
-	}
-	parked, err := o.guest.Install(ctx, archive, o.clock().Format("20060102T150405Z"))
-	if err != nil {
-		// Only an install known to have changed nothing gets its record back.
-		// Otherwise the record refuses contacts until the manager next starts fresh:
-		// never the old conversation under the current skill.
-		back := restoredUnknownSkill
-		if errors.Is(err, convbackup.ErrNotSwapped) && hadPrev {
-			back = prev.SkillHash
-		} else if !errors.Is(err, convbackup.ErrNotSwapped) {
-			unsure = true
-		}
-		if rerr := o.recordSession(back); rerr != nil {
-			o.log("conversation: warning: restoring the session record failed: %v", rerr)
-		}
-		return fmt.Errorf("writing the conversation into the manager's home failed: %w", err)
-	}
-	newest := "none"
-	if m.Newest != "" {
-		newest = termsafe.Sanitize(m.Newest)
-	}
-	o.log("conversation: restored backup %s into manager %q (%d files; it resumes %s)", m.ID, o.app.Name, m.Files, newest)
-	if parked != "" {
-		o.log("conversation: the transcripts it replaced are in the manager's home at %s", parked)
-	}
-	switch hash {
-	case restoredUnknownSkill:
-		o.log("conversation: the backup does not say which lever skill the conversation started with, so contacts cannot post to the manager until it next starts fresh")
-	case brokerctl.UncheckedSkill:
-		o.log("conversation: the conversation comes from a fresh start lever made on its own over a changed skill, so contacts cannot post to the manager until it next starts fresh without --keep-conversation")
-	}
-	done = true
-	if err := o.verifyRole(ctx); err != nil {
-		return err
-	}
-	guard, err := o.startResume(ctx)
-	if err != nil {
-		return fmt.Errorf("%w; the conversation is restored, but the manager stays suspended: fix that, then run `lever up`", err)
-	}
-	if err := o.resumeClearing(ctx, func() error { return o.sc.Resume(ctx, o.app.Name, project) }); err != nil {
-		return guard.AfterFailure(ctx, apply.ResumeError("resume", err))
-	}
-	if err := guard.Resumed(ctx); err != nil {
-		return err
-	}
-	if err := o.gate(ctx); err != nil {
-		return guard.AfterFailure(ctx, err)
-	}
-	return guard.Live(ctx)
-}
-
-// resumeAfterFailure resumes a manager this code suspended, through the
-// pre-role record guard, on its own context (ctx may be what was cancelled).
-// how names the conversation ("" leaves it out).
-func (o convOps) resumeAfterFailure(ctx context.Context, cause error, how string) error {
-	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
-	defer cancel()
-	if o.verifyRole != nil {
-		if gerr := o.verifyRole(rctx); gerr != nil {
-			return fmt.Errorf("%w; the manager stays suspended: %w", cause, gerr)
-		}
-	}
-	guard, gerr := o.startResume(rctx)
-	if gerr != nil {
-		return fmt.Errorf("%w; the manager stays suspended: %w", cause, gerr)
-	}
-	if rerr := o.sc.Resume(rctx, o.app.Name, o.guest.Workspace); rerr != nil {
-		err := fmt.Errorf("%w; the manager is suspended and resuming it failed (%s): run `lever up`", cause, termsafe.Sanitize(scion.ErrSummary(rerr)))
-		return guard.AfterFailure(rctx, err)
-	}
-	// No liveness gate here: Settle checks until the container runs.
-	verr := guard.Resumed(rctx)
-	if verr == nil {
-		verr = guard.Settle(rctx)
-	}
-	if verr != nil {
-		return fmt.Errorf("%w; resuming the manager after that failed its mount check: %w", cause, verr)
-	}
-	if how != "" {
-		how = " " + how
-	}
-	return fmt.Errorf("%w; the manager was resumed%s", cause, how)
+			prev, hadPrev, err := o.latestSession()
+			if err != nil {
+				return err
+			}
+			hash := m.SkillHash
+			if hash == "" {
+				hash = restoredUnknownSkill
+			}
+			if err := o.recordSession(hash); err != nil {
+				return fmt.Errorf("recording the restored session failed, nothing was restored: %w", err)
+			}
+			parked, err := o.guest.Install(ctx, archive, o.clock().Format("20060102T150405Z"))
+			if err != nil {
+				// Only an install known to have changed nothing gets its record back.
+				// Otherwise the record refuses contacts until the manager next starts
+				// fresh: never the old conversation under the current skill.
+				back := restoredUnknownSkill
+				if errors.Is(err, convbackup.ErrNotSwapped) && hadPrev {
+					back = prev.SkillHash
+				} else if !errors.Is(err, convbackup.ErrNotSwapped) {
+					unsure = true
+				}
+				if rerr := o.recordSession(back); rerr != nil {
+					o.log("conversation: warning: restoring the session record failed: %v", rerr)
+				}
+				return fmt.Errorf("writing the conversation into the manager's home failed: %w", err)
+			}
+			newest := "none"
+			if m.Newest != "" {
+				newest = termsafe.Sanitize(m.Newest)
+			}
+			o.log("conversation: restored backup %s into manager %q (%d files; it resumes %s)", m.ID, o.app.Name, m.Files, newest)
+			if parked != "" {
+				o.log("conversation: the transcripts it replaced are in the manager's home at %s", parked)
+			}
+			switch hash {
+			case restoredUnknownSkill:
+				o.log("conversation: the backup does not say which lever skill the conversation started with, so contacts cannot post to the manager until it next starts fresh")
+			case brokerctl.UncheckedSkill:
+				o.log("conversation: the conversation comes from a fresh start lever made on its own over a changed skill, so contacts cannot post to the manager until it next starts fresh without --keep-conversation")
+			}
+			return nil
+		},
+		ResumeHow: func() string {
+			if unsure {
+				return "on whichever conversation its home now holds"
+			}
+			return "on its own conversation"
+		},
+	})
+	return err
 }
 
 func verifyStored(store convbackup.Store, id string) error {
@@ -429,39 +296,6 @@ func verifyStored(store convbackup.Store, id string) error {
 		return fmt.Errorf("backup %s is damaged, nothing was restored: %w", id, err)
 	}
 	return nil
-}
-
-// waitSuspended waits until the hub reads the manager suspended with no live
-// container: no agent process may run while its files move.
-func (o convOps) waitSuspended(ctx context.Context) error {
-	last, err := o.waitPhase(ctx, scion.PhaseSuspended)
-	if errors.Is(err, retry.ErrExhausted) {
-		return fmt.Errorf("the manager did not suspend (last seen %s); nothing was restored", scion.BoundedQuote(last))
-	}
-	return err
-}
-
-// waitPhase waits until the hub reads the manager in phase with no live
-// container, within suspendWait. last is the phase/container status last
-// seen; an exhausted wait is retry.ErrExhausted.
-func (o convOps) waitPhase(ctx context.Context, phase string) (last string, err error) {
-	b := o.suspendWait
-	if b.Attempts <= 0 {
-		b = apply.RetryBudget{Attempts: 30, Interval: time.Second}
-	}
-	err = retry.Until(ctx, b.Attempts, b.Interval, func() (bool, error) {
-		agents, err := o.sc.List(ctx, o.guest.Workspace)
-		if err != nil {
-			return false, nil
-		}
-		rec := scion.FindAgent(agents, o.app.Name)
-		if rec == nil {
-			return false, errors.New("the manager record disappeared")
-		}
-		last = rec.Phase + "/" + rec.ContainerStatus
-		return rec.Phase == phase && !scion.ContainerLive(rec.ContainerStatus), nil
-	})
-	return last, err
 }
 
 func (o convOps) latestSession() (sessionrec.Record, bool, error) {
@@ -530,7 +364,8 @@ func newConversationListCmd() *cobra.Command {
 }
 
 func newConversationBackupCmd(bf BackendFactory) *cobra.Command {
-	return &cobra.Command{
+	var lockWait time.Duration
+	c := &cobra.Command{
 		Use:   "backup",
 		Args:  cobra.NoArgs,
 		Short: "Back up the manager's conversation to the state directory",
@@ -539,6 +374,12 @@ func newConversationBackupCmd(bf BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// A new conversation or a restore rotates and reads the same backups.
+			unlock, err := lockConversation(cmd.Context(), app, st, "lever conversation backup", "", lockWait, lockNotice(cmd))
+			if err != nil {
+				return err
+			}
+			defer unlock()
 			_, b, err := resolveJailBackend(bf, "", "")
 			if err != nil {
 				return err
@@ -560,11 +401,14 @@ func newConversationBackupCmd(bf BackendFactory) *cobra.Command {
 			return nil
 		},
 	}
+	addLockWaitFlag(c, &lockWait, 0)
+	return c
 }
 
 func newConversationRestoreCmd(bf BackendFactory) *cobra.Command {
 	var noBackup bool
 	var progressMode string
+	var lockWait time.Duration
 	c := &cobra.Command{
 		Use:   "restore [ID]",
 		Args:  cobra.MaximumNArgs(1),
@@ -582,7 +426,7 @@ func newConversationRestoreCmd(bf BackendFactory) *cobra.Command {
 				return err
 			}
 			st := stateFor(path)
-			unlock, err := lockConversation(app, st, "lever conversation restore", "")
+			unlock, err := lockConversation(cmd.Context(), app, st, "lever conversation restore", "", lockWait, lockNotice(cmd))
 			if err != nil {
 				return err
 			}
@@ -596,7 +440,7 @@ func newConversationRestoreCmd(bf BackendFactory) *cobra.Command {
 			ctx, stop := applySignalContext(pctx)
 			defer stop()
 			rep.Group("jail", 0)
-			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd, Rep: rep})
+			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd, Rep: rep, Locked: true})
 			if err != nil {
 				return err
 			}
@@ -615,5 +459,6 @@ func newConversationRestoreCmd(bf BackendFactory) *cobra.Command {
 	}
 	c.Flags().BoolVar(&noBackup, "no-backup", false, "do not back up the conversation the restore replaces")
 	c.Flags().StringVar(&progressMode, "progress", "", progressFlagUsage)
+	addLockWaitFlag(c, &lockWait, 0)
 	return c
 }

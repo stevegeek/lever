@@ -16,13 +16,13 @@ import (
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/hubauth"
-	"github.com/stevegeek/lever/internal/imageref"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/progress"
-	"github.com/stevegeek/lever/internal/retry"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/scion/layout"
+	"github.com/stevegeek/lever/internal/state"
 	"github.com/stevegeek/lever/internal/termsafe"
+	"github.com/stevegeek/lever/internal/wait"
 	"github.com/stevegeek/lever/internal/wire"
 )
 
@@ -56,10 +56,20 @@ func (b RetryBudget) or(def RetryBudget) RetryBudget {
 	return b
 }
 
+// spec is b as a wait of b.Attempts probes b.Interval apart.
+func (b RetryBudget) spec(name string) wait.Spec {
+	return wait.Attempts(name, b.Attempts, b.Interval)
+}
+
+// budgetOf is the RetryBudget of a fixed-interval wait.Spec.
+func budgetOf(s wait.Spec) RetryBudget {
+	return RetryBudget{Attempts: s.MinAttempts, Interval: s.Interval}
+}
+
 // defaultBrokerStartRetry absorbs the runtime broker's asynchronous
 // registration with the hub: a start-manager that runs too soon gets "no
 // runtime brokers available" although the hub is up.
-var defaultBrokerStartRetry = RetryBudget{Attempts: 30, Interval: time.Second}
+var defaultBrokerStartRetry = budgetOf(wait.BrokerUnavailable)
 
 // defaultManagerLiveRetry bounds waitManagerLive's post-start poll. scion
 // reports the record running before the harness has run a line, and every
@@ -68,15 +78,17 @@ var defaultBrokerStartRetry = RetryBudget{Attempts: 30, Interval: time.Second}
 // those with margin but is still probabilistic. It applies to a gate that never
 // saw claude's pane; after that the window is harnessSettle, counted from the
 // pane.
-var defaultManagerLiveRetry = RetryBudget{Attempts: 15, Interval: time.Second, Settle: 10 * time.Second}
+var defaultManagerLiveRetry = RetryBudget{
+	Attempts: wait.ManagerRunning.MinAttempts, Interval: wait.ManagerRunning.Interval, Settle: wait.ManagerSettle,
+}
 
 // defaultPhaseSettleRetry bounds settleManagerPhase. It errs long: exhausting
 // it is a loud failure the operator must act on, while an early settle costs
 // one more list.
-var defaultPhaseSettleRetry = RetryBudget{Attempts: 60, Interval: time.Second}
+var defaultPhaseSettleRetry = budgetOf(wait.ManagerPhaseSettle)
 
 // transitionalPhases are scion record phases (pkg/agent/state/state.go) that a
-// record only passes through. convergeManager has no verb for them and a
+// record only passes through. planManager has no verb for them and a
 // snapshot of one says nothing about where the record ends up, so apply waits
 // for it to settle (settleManagerPhase) instead of acting on it.
 //
@@ -110,6 +122,9 @@ type run struct {
 	// fresh is PlanOpts.Fresh: discard any present manager record at
 	// start-manager.
 	fresh bool
+	// brokerOnly is PlanOpts.BrokerOnly: no hub, no project, no manager
+	// record to check.
+	brokerOnly bool
 	// attach is PlanOpts.Attach: the gate for a manager this run created ends once
 	// claude's pane is alive; a resume's gate still waits for claude's session
 	// start.
@@ -177,12 +192,18 @@ type Deps struct {
 	// not grow the grow-only jail disk by a full image. Best-effort.
 	PruneImages func(ctx context.Context) error
 	// WarmImage starts imageRef once under scion's user-namespace mapping so the
-	// first agent start finds podman's id-mapped layer copy built. It runs on every
-	// image, bounded by imageWarmTimeout. Best-effort.
+	// first agent start finds podman's id-mapped layer copy built. It runs on an
+	// image the jail held already only when no finished warm-up of the same
+	// inputs is recorded (Fingerprints), bounded by imageWarmTimeout.
+	// Best-effort.
 	WarmImage func(ctx context.Context, imageRef string) error
-	Scion     *scion.Client
-	ReadCred  func(path string) (string, error) // nil ⇒ defaultReadCred
-	JailMount string                            // jail path where app.Tree is bind-mounted (e.g. "/lever"); "" disables translation
+	// Fingerprints records what a step last converged on, so a converge skips
+	// work that step's own check still vouches for. It never gates a fence.
+	// nil skips nothing.
+	Fingerprints StepFingerprints
+	Scion        *scion.Client
+	ReadCred     func(path string) (string, error) // nil ⇒ defaultReadCred
+	JailMount    string                            // jail path where app.Tree is bind-mounted (e.g. "/lever"); "" disables translation
 	// HubSessionSecret is the hub's session-cookie signing key, passed to every
 	// hub start (HubServerOpts) so browser sessions survive hub restarts. It is
 	// argv-only: a running hub keeps its old key, and apply does not restart the
@@ -218,7 +239,12 @@ type Deps struct {
 	// async registration. It is fail-soft (nil on timeout); the start path's
 	// broker-unavailable retry backstops it. It reports whether it saw the broker
 	// online so start-manager can skip its own wait.
-	WaitBrokerReady      func(ctx context.Context, project string) (online bool, err error)
+	WaitBrokerReady func(ctx context.Context, project string) (online bool, err error)
+	// BrokerOnline asks the hub once whether it lists an online runtime
+	// broker; seen describes what it listed, for a timeout's evidence. It is
+	// the probe of the hard wait after lever starts or restarts the hub, so
+	// it must work before hub-identity has minted any token.
+	BrokerOnline         func(ctx context.Context) (online bool, seen string, err error)
 	MintManagerBootstrap func(ctx context.Context) (BootstrapMaterial, error)
 	// RearmBootstrap restarts the broker to re-arm its single-use /bootstrap latch
 	// (the CA and signing keys persist, so agent certs and capability tokens
@@ -226,9 +252,15 @@ type Deps struct {
 	// create path calls it when this apply minted none.
 	RearmBootstrap func(ctx context.Context) error
 	// EnsureHubAuth installs the assertion public key in the guest and
-	// converges the hub's auth settings before the hub starts. It reports
-	// whether a running hub must restart to read them.
-	EnsureHubAuth func(ctx context.Context) (bool, error)
+	// converges the hub's auth settings before the hub starts. It names what
+	// changed that a running hub reads only at start ("" for nothing).
+	EnsureHubAuth func(ctx context.Context) (restart string, err error)
+	// BeforeHubRestart, when set, writes the database settings the hub reads
+	// only at start (scion's experiments) into a hub the scion-server step is
+	// about to restart, so that one restart takes them. An error is logged:
+	// hub-identity converges them after the restart and restarts again if it
+	// must.
+	BeforeHubRestart func(ctx context.Context) error
 	// EnsureScionTelemetry converges the telemetry block of the guest's
 	// ~/.scion/settings.yaml on config scion.telemetry and reports whether it
 	// changed. A change is only logged: the runtime broker reads the block at every
@@ -427,12 +459,23 @@ type Deps struct {
 	// phase to settle. Zero takes the default.
 	PhaseSettleRetry RetryBudget
 	// StaleContainer is podman in the jail, for clearing a hub stop claim that
-	// only a container removal releases (ResumeClearingStopClaim). nil: lever
-	// removes nothing and names the manual fix.
+	// only a container removal releases (resumeClearingStopClaim), and for
+	// telling a running record whose container is gone or exited
+	// (containerGoneUnder). nil: lever removes nothing and names the manual
+	// fix, and keeps such a record for the gate to refuse.
 	StaleContainer StaleContainerOps
 	// StopClaimRetry bounds the wait for the hub to release that claim; the
 	// interval doubles up to stopClaimMaxInterval. Zero takes the default.
 	StopClaimRetry RetryBudget
+	// ManagerLock is the lifecycle lock EnsureManager takes before it reads or
+	// changes the manager. nil: EnsureManager refuses.
+	ManagerLock ManagerLock
+	// ManagerVerbs, when set, takes the place of Scion for the verbs on the
+	// manager's record. nil means Scion.
+	ManagerVerbs ManagerScion
+	// ManagerPhaseWait bounds the wait for a suspend or stop of the manager to
+	// read in the hub. Zero takes the default.
+	ManagerPhaseWait RetryBudget
 }
 
 func (d Deps) check() error {
@@ -452,6 +495,7 @@ func (d Deps) check() error {
 		{"EnsureHubIdentity", d.EnsureHubIdentity == nil},
 		{"EnsureProjectProvider", d.EnsureProjectProvider == nil},
 		{"WaitBrokerReady", d.WaitBrokerReady == nil},
+		{"BrokerOnline", d.BrokerOnline == nil},
 		{"MintManagerBootstrap", d.MintManagerBootstrap == nil},
 		{"RearmBootstrap", d.RearmBootstrap == nil},
 		{"EnsureHubAuth", d.EnsureHubAuth == nil},
@@ -475,6 +519,15 @@ func (d Deps) check() error {
 		}
 	}
 	return nil
+}
+
+// StepFingerprints is the lifecycle record's step fingerprints
+// (state.Lifecycle). inputs is a digest of everything the step's result
+// depends on.
+type StepFingerprints interface {
+	Matches(step, inputs string) bool
+	Record(step, inputs string) error
+	Forget(step string) error
 }
 
 // UnattendedSession is Deps.BeginUnattendedSession's answer.
@@ -501,6 +554,7 @@ func Run(ctx context.Context, app *config.App, d Deps, opts PlanOpts) error {
 		managerLive: d.ManagerLiveRetry.or(defaultManagerLiveRetry),
 		phaseSettle: d.PhaseSettleRetry.or(defaultPhaseSettleRetry),
 		fresh:       opts.Fresh,
+		brokerOnly:  opts.BrokerOnly,
 		attach:      opts.Attach,
 		freshNoConv: opts.FreshWithoutConversation,
 	}
@@ -588,7 +642,7 @@ func (r *run) step(ctx context.Context, s Step) error {
 
 // scionServer runs the scion-server step. It restarts a running hub only when
 // it was started with other auth settings, another key, or another argv than
-// this apply wants (HubRestartReason), or when the guest's key file or
+// this run wants (HubRestartReason), or when the guest's key file or
 // settings changed in a way the hub reads only at startup: a restart drops
 // every agent's hub connection.
 func (r *run) scionServer(ctx context.Context) error {
@@ -600,7 +654,7 @@ func (r *run) scionServer(ctx context.Context) error {
 		r.d.Log("lever: agent telemetry in the jail's scion settings is now %q (scion.telemetry) — agents started from here on use it; "+
 			"a hub or manager that was already running keeps the old setting until `lever stop && lever up`", r.app.EffectiveScionTelemetry())
 	}
-	guestChanged, err := r.d.EnsureHubAuth(ctx)
+	guestRestart, err := r.d.EnsureHubAuth(ctx)
 	if err != nil {
 		return fmt.Errorf("hub auth: %w", err)
 	}
@@ -621,31 +675,99 @@ func (r *run) scionServer(ctx context.Context) error {
 		maps.Copy(live.Env, env)
 	}
 	reason := HubRestartReason(live, opts)
-	if reason == "" && guestChanged && live.Running {
-		reason = "the hub's key file or settings changed"
+	if reason == "" && guestRestart != "" && live.Running {
+		reason = "what it reads at start changed: " + guestRestart
 	}
 	if reason != "" {
-		r.d.Log("lever: restarting the hub: %s", reason)
-		// Stop-then-start, not scion server restart: scion's restart replays the
-		// old argv without this apply's env, and refuses when no daemon runs.
-		if err := r.d.Scion.ServerStop(ctx); err != nil {
-			return fmt.Errorf("restart the hub: %w", err)
+		// The database settings the hub reads at start go in first, so this one
+		// restart takes them too and hub-identity has none left to make.
+		if r.d.BeforeHubRestart != nil {
+			if err := r.d.BeforeHubRestart(ctx); err != nil {
+				r.d.Log("lever: %v; hub-identity pins them after the restart", err)
+			}
 		}
+		if err := RestartHub(ctx, r.app, r.d, reason); err != nil {
+			return err
+		}
+		r.brokerOnline = true
+		return nil
 	}
+	// On a running hub the start only waits until it answers.
 	if err := r.d.Scion.ServerStart(ctx, opts); err != nil {
 		return err
 	}
-	// A just-started hub registers its runtime broker only after it serves, and
-	// register-project's hub link would race that and fail with a 422
-	// no_runtime_broker, so wait on every apply (one hub brokers call when the
-	// broker is online). Fail-soft. It asks scion's global settings because the
-	// tree may not be a scion project yet.
+	if !live.Running {
+		if err := hubBrokerOnline(ctx, r.d, hubColdBroker); err != nil {
+			return fmt.Errorf("scion-server: %w", err)
+		}
+		r.brokerOnline = true
+		return nil
+	}
+	// A hub that kept running: its runtime broker is only looked at, so a
+	// broker that went away is the manager's start retry's to wait out.
 	online, err := r.d.WaitBrokerReady(ctx, scionGlobalProject)
 	if err != nil {
 		return fmt.Errorf("scion-server: waiting for runtime broker: %w", err)
 	}
 	r.brokerOnline = online
 	return nil
+}
+
+// RestartHub is the one way lever restarts the hub: stop it (stop-then-start,
+// not scion server restart, which replays the old argv without this run's
+// env and refuses when no daemon runs), converge the guest settings it reads
+// at start again (agents can rewrite them while it runs), start it, and hold
+// it to the start's postcondition (hubBrokerOnline). reason, when set, is
+// logged.
+func RestartHub(ctx context.Context, app *config.App, d Deps, reason string) error {
+	if reason != "" {
+		d.Log("lever: restarting the hub: %s", reason)
+	}
+	if err := d.Scion.ServerStop(ctx); err != nil {
+		return fmt.Errorf("restart the hub: %w", err)
+	}
+	if _, err := d.EnsureHubAuth(ctx); err != nil {
+		return fmt.Errorf("the hub is stopped: it was stopped for a restart, and converging its settings before the start failed (%w); fix the cause and run `lever up`, which starts it again", err)
+	}
+	opts := HubServerOpts(app, d.HubSessionSecret, d.HubAuthEnv)
+	opts.Progress = d.Log
+	if err := d.Scion.ServerStart(ctx, opts); err != nil {
+		return fmt.Errorf("the hub is stopped: it was stopped for a restart, and starting it again failed (%w); fix the cause and run `lever up`, which starts it again", err)
+	}
+	return hubBrokerOnline(ctx, d, hubRestartedBroker)
+}
+
+// hubRestartedBroker and hubColdBroker bound the wait, after lever restarted
+// or started the hub, for its runtime broker. A cold start also covers a
+// freshly booted VM, where the broker's first connect is slowest.
+var (
+	hubRestartedBroker = wait.Spec{Name: "the hub's runtime broker to come online after the restart",
+		Budget: 2 * time.Minute, MinAttempts: 3, Interval: time.Second, MaxInterval: 5 * time.Second}
+	hubColdBroker = wait.Spec{Name: "the hub's runtime broker to come online after the start",
+		Budget: 5 * time.Minute, MinAttempts: 3, Interval: time.Second, MaxInterval: 5 * time.Second}
+)
+
+// hubBrokerOnline is the postcondition of a hub lever started: the hub
+// answers (ServerStart waited for that) and its runtime broker is online. A
+// hub that serves before its broker registers fails every agent create and
+// resume, so this is a hard requirement. A probe error is evidence, not the
+// end of the wait: the hub may still be settling.
+func hubBrokerOnline(ctx context.Context, d Deps, s wait.Spec) error {
+	err := wait.For(ctx, s, func(ctx context.Context) wait.Result {
+		online, seen, err := d.BrokerOnline(ctx)
+		switch {
+		case err != nil:
+			return wait.NotYetErr(err)
+		case online:
+			return wait.Ready()
+		}
+		return wait.NotYet(seen)
+	})
+	if errors.Is(err, wait.ErrTimeout) {
+		return fmt.Errorf("the hub is running, but its runtime broker did not come online: %w; "+
+			"check the hub's log in the jail (~/.scion/server.log), then run `lever up` again", err)
+	}
+	return err
 }
 
 // HubRestartReason says why a running hub does not match the start opts, or ""
@@ -767,9 +889,24 @@ func runLoadImage(ctx context.Context, s Step, d Deps, app *config.App) error {
 		}
 	}
 	rep := progress.From(ctx)
+	key, inputs := warmFingerprint(s)
 	if loaded(ctx, s.Target) {
+		// The jail holds the configured image (by image ID), so the layer copy
+		// the last finished warm-up of these inputs built is still the one an
+		// agent start uses.
+		if d.Fingerprints != nil && d.Fingerprints.Matches(key, inputs) {
+			rep.Note("already loaded and warmed")
+			return ctx.Err()
+		}
 		rep.Note("already loaded")
 	} else {
+		// A warm-up record that outlived the image it covered would skip the
+		// warm-up of the image loaded next.
+		if d.Fingerprints != nil {
+			if err := d.Fingerprints.Forget(key); err != nil {
+				return fmt.Errorf("load-image: forgetting the warm-up of the image the jail no longer holds: %w", err)
+			}
+		}
 		rep.Detail("loading the image into the jail")
 		if err := load(ctx, s.Target); err != nil {
 			return err
@@ -783,10 +920,37 @@ func runLoadImage(ctx context.Context, s Step, d Deps, app *config.App) error {
 	}
 	// Warm an already-loaded image too: an earlier apply may have failed before its
 	// warm-up finished.
-	warmImage(ctx, s.Target, d)
+	warmed := warmImage(ctx, s.Target, d)
 	// A warm-up cut short by the run stopping or an interrupt is not a finished
 	// step.
-	return ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if warmed && d.Fingerprints != nil {
+		if err := d.Fingerprints.Record(key, inputs); err != nil {
+			d.Log("load-image: warning: could not record the warm-up of %s (the next bring-up warms it again): %v", s.Target, err)
+		}
+	}
+	return nil
+}
+
+// warmFingerprint is the lifecycle key and the inputs of an image's warm-up:
+// the reference, the archive it ships in as the host has it now, and this
+// lever (whose warm-up run may differ). "" inputs never match.
+func warmFingerprint(s Step) (key, inputs string) {
+	in := struct {
+		Ref, Tar, Version string
+		Size              int64
+		ModTime           time.Time
+	}{Ref: s.Target, Tar: s.TarPath, Version: cli.VersionString()}
+	if s.TarPath != "" {
+		fi, err := os.Stat(s.TarPath)
+		if err != nil {
+			return "warm-image " + s.Target, ""
+		}
+		in.Size, in.ModTime = fi.Size(), fi.ModTime().UTC()
+	}
+	return "warm-image " + s.Target, state.HashJSON(in)
 }
 
 // imageWarmTimeout bounds one image's warm-up. The measured first run of a
@@ -801,7 +965,7 @@ var imageWarmNoticeAfter = 3 * time.Second
 // warmImage only warns on failure: the agent start may still succeed (a small
 // image, a podman with native id-mapped mounts), and the start-manager error
 // names the cause if it does not.
-func warmImage(ctx context.Context, ref string, d Deps) {
+func warmImage(ctx context.Context, ref string, d Deps) (warmed bool) {
 	wctx, cancel := context.WithTimeout(ctx, imageWarmTimeout)
 	defer cancel()
 	done := make(chan error, 1)
@@ -820,6 +984,7 @@ func warmImage(ctx context.Context, ref string, d Deps) {
 	if err != nil && ctx.Err() == nil {
 		d.Log("load-image: warning: warming %s failed: %v. The first agent start on it may stay in phase created; see the start-manager error if it does", ref, err)
 	}
+	return err == nil
 }
 
 func runCredential(ctx context.Context, s Step, d Deps) error {
@@ -976,7 +1141,19 @@ func (r *run) settleProject(ctx context.Context, jp string) error {
 
 // mintManagerBootstrap is idempotent against the live broker latch, not a
 // stale file: a spent latch is tolerated only when a ticket is already staged.
+//
+// The ticket lands in the tree, which a running manager reads, so a record
+// start-manager would refuse to keep (Deps.VerifyAgentRole) is refused here,
+// before a ticket exists for it to enrol with. Under --fresh the record is
+// discarded, so its role does not matter; a broker-only plan has no hub to
+// ask and starts no manager.
 func (r *run) mintManagerBootstrap(ctx context.Context, s Step) error {
+	if !r.fresh && !r.brokerOnly {
+		jp := JailPath(r.app.Tree, r.app.Tree, r.d.JailMount)
+		if err := r.d.VerifyAgentRole(ctx, path.Base(jp), r.app.Name); err != nil {
+			return fmt.Errorf("mint-manager-bootstrap: no enrolment ticket was staged: %w", err)
+		}
+	}
 	// After a broker restart the latch reopens and a fresh ticket is deposited, so
 	// a first apply that failed before the manager enrolled recovers on re-apply.
 	m, err := r.d.MintManagerBootstrap(ctx)
@@ -996,126 +1173,20 @@ func (r *run) mintManagerBootstrap(ctx context.Context, s Step) error {
 	return StageBootstrapMaterial(s.Target, m)
 }
 
-// startManager observes the manager record, acts on the delta (create, no-op,
-// resume, forced resume, or a refusal on a failed resume or a phase lever
-// cannot act on) and verifies the container is live. Only --fresh deletes a
-// record (recoverDeleteAndCreate).
-func (r *run) startManager(ctx context.Context, s Step) error {
-	jp := JailPath(r.app.Tree, r.app.Tree, r.d.JailMount)
-	// Read the prompt before any waiting: a missing or unreadable prompt file is a
-	// config error and should fail fast.
-	task, err := ManagerTask(r.app)
-	if err != nil {
-		return err
+// startManager is the start-manager step: the manager's one lifecycle
+// (EnsureManager) with what this run knows: the ticket the mint step staged
+// and whether the scion-server step saw the runtime broker online.
+func (r *run) startManager(ctx context.Context, _ Step) error {
+	intent := ManagerKeep
+	if r.fresh {
+		intent = ManagerFresh
 	}
-	instructions, err := r.managerInstructions()
-	if err != nil {
-		return err
-	}
-	// The read_only paths must be real directories reached through no symlink
-	// before anything is acted on: under --fresh the delete runs before the create,
-	// and refusing only at the create would discard the old session and start
-	// none. Checked on resume too: a failure means the tree changed under a manager
-	// that may hold it writable. startManagerCreate checks again right before the
-	// create, once the old manager (which may hold the paths writable) is gone.
-	if err := r.app.PrepareManagerReadOnlyHost(); err != nil {
-		return fmt.Errorf("start-manager: %w", err)
-	}
-	// Wait for runtime-broker readiness before any create or resume: the daemon
-	// registers its broker asynchronously after its Hub API is up. Fail-soft; the
-	// broker-unavailable retry backstops it. Skipped when the scion-server step of
-	// this run saw the broker online, since nothing between the two restarts the
-	// hub.
-	if !r.brokerOnline {
-		if _, err := r.d.WaitBrokerReady(ctx, jp); err != nil {
-			return fmt.Errorf("start-manager: waiting for runtime broker: %w", err)
-		}
-	}
-	opts, err := r.managerStartOpts(ctx, jp, task, instructions)
-	if err != nil {
-		return err
-	}
-	rec, err := r.observeManager(ctx, jp)
-	if err != nil {
-		return err
-	}
-	if !r.fresh {
-		// Before converge: a stopped record whose claude still runs must read running
-		// again, or the resume below restarts it fresh. The stale-mount check then
-		// reads the healed record, so such a record is kept (managerKept), not refused.
-		rec = HealAgentSession(ctx, r.d.sessionHealer(), jp, rec)
-		// A record left "running" by a guest that was killed and restarted is
-		// suspended here so converge resumes it. Re-read after: a suspend that did not
-		// take leaves the record running, and the gate refuses it.
-		if guestRestartedUnder(ctx, r.d, jp, r.app.Name, rec) {
-			suspendAfterGuestRestart(ctx, r.d, "start-manager", jp, r.app.Name, rec)
-			if rec, err = r.observeManager(ctx, jp); err != nil {
-				return err
-			}
-		}
-	}
-	if rec != nil && !r.fresh {
-		if err := r.checkStaleTreeMounts(ctx, jp, managerKept(rec)); err != nil {
-			return err
-		}
-	}
-	// A container start, the pre-start hook, claude's boot and the settle window
-	// can run over a minute: report progress about every 15 s until the gate ends.
-	r.progress = StartProgress(ctx, r.d, "start-manager", r.app.Name, "asking scion to start or resume the container")
-	// The post-live probes run alongside the settle window, from the moment the
-	// gate has seen claude.
-	probes := r.startPostLive(ctx, jp)
-	acted, err := r.convergeManager(ctx, jp, rec, opts)
-	// A resume recreated the container from the record's mounts: check them as
-	// soon as it runs, and again once it is live if it was not running yet.
-	resumed := err == nil && acted && rec != nil && !r.managerCreated
-	verified := false
-	if resumed {
-		verified, err = r.verifyResumedTreeMounts(ctx, jp)
-	}
-	if err == nil {
-		err = r.waitManagerLive(ctx, jp, acted, probes.start)
-	}
-	// A failed resume or gate can still leave a recreated container running: read
-	// its mounts back before the failure is reported, so a swapped mount is
-	// suspended rather than left running unchecked. A container that is not
-	// running reads as unverified, which says nothing here.
-	var mountErr error
-	if err != nil && !verified && rec != nil && !r.fresh && !managerKept(rec) && !r.managerCreated {
-		probes.wait()
-		if _, mountErr = r.verifyResumedTreeMounts(ctx, jp); mountErr != nil {
-			err = errors.Join(err, mountErr)
-		}
-	}
-	// A resume whose claude found no conversation to continue: under lever up, a
-	// home proven to hold none is started fresh. Never after a failed mount check
-	// (that manager is suspended and its operator decides), never for lever apply.
-	// A container that is not running reads as unverified there, not failed: its
-	// mounts go with the delete, and the new container's come from the config.
-	if err != nil && resumed && mountErr == nil && r.freshNoConv && !r.fresh && errors.Is(err, ErrNoConversation) {
-		probes.abandon()
-		probes = r.startPostLive(ctx, jp)
-		err = r.startFreshWithoutConversation(ctx, jp, opts, err, probes.start)
-		resumed = false
-	}
-	if err == nil && resumed && !verified {
-		// The post-live probes read the same mounts: let them end first so the two
-		// never race. The manager is not reported up until this check passes; a
-		// mismatch suspends it and the probes' warnings are dropped.
-		probes.wait()
-		if verified, err = r.verifyResumedTreeMounts(ctx, jp); err == nil && !verified {
-			r.warnUnverifiedResume()
-		}
-	}
-	r.progress.Stop()
-	r.progress = nil
-	if err != nil {
-		probes.abandon()
-		return err
-	}
-	RecordGuestBoot(ctx, r.d)
-	probes.finish()
-	return nil
+	_, err := EnsureManager(ctx, r.app, r.d, ManagerRequest{
+		Intent: intent, Subject: "start-manager",
+		Attach: r.attach, FreshWithoutConversation: r.freshNoConv,
+		TicketStaged: r.minted, BrokerOnline: r.brokerOnline,
+	})
+	return err
 }
 
 // startFreshWithoutConversation replaces a resume that died because claude
@@ -1153,10 +1224,8 @@ func (r *run) startFreshWithoutConversation(ctx context.Context, jp string, opts
 		r.d.Log("start-manager: manager %q has no conversation to continue, and its record is gone; lever did not start it fresh on its own", r.app.Name)
 		return cause
 	}
-	if r.d.BackupManagerConversation != nil {
-		if err := r.d.BackupManagerConversation(ctx, rec); err != nil {
-			return fmt.Errorf("%w; lever went to start it fresh, but backing up its conversation failed, so the manager was NOT deleted: %w", cause, err)
-		}
+	if err := r.backupBeforeDelete(ctx, jp, rec); err != nil {
+		return fmt.Errorf("%w; lever went to start it fresh, but backing up its conversation failed, so the manager was NOT deleted: %w", cause, err)
 	}
 	// Record before anything is deleted, and after the backup (which carries the
 	// last session's skill): a start the agent can bring about must not record a
@@ -1615,12 +1684,6 @@ func treeSelfMount(jp string, m jail.Mount) (string, bool) {
 	return rel, m.Source == path.Join(jp, rel)
 }
 
-// managerKept reports whether convergeManager keeps rec as it is. Every other
-// arm resumes it (plain, or forced for the error phase), which recreates the
-// container from the record's volumes. checkStaleTreeMounts uses the same
-// predicate so the two cannot drift.
-func managerKept(rec *scion.Agent) bool { return rec.Phase == scion.PhaseRunning }
-
 // checkStaleTreeMounts runs before apply keeps or resumes a manager record: a
 // mount for a gone directory fails the resume inside podman with a bare statfs
 // error, and a mount the config dropped stays until a fresh create.
@@ -1628,7 +1691,7 @@ func managerKept(rec *scion.Agent) bool { return rec.Phase == scion.PhaseRunning
 // It reads the mounts off the manager's container, which a stopped record
 // keeps, falling back to the record's volumes on the hub (Deps.RecordVolumes);
 // with neither it says nothing. A gone directory refuses the bring-up before
-// anything is acted on unless the record is kept as it is (managerKept): every
+// anything is acted on unless the record is kept as it is (verbNone): every
 // other path, the forced resume of an error phase included, recreates the
 // container. Everything else is a warning.
 func (r *run) checkStaleTreeMounts(ctx context.Context, jp string, kept bool) error {
@@ -1718,7 +1781,7 @@ func (r *run) verifyResumedTreeMounts(ctx context.Context, jp string) (verified 
 		return true, nil
 	}
 	suspended := "lever suspended it"
-	if serr := r.d.Scion.Suspend(ctx, r.app.Name, jp); serr != nil {
+	if serr := r.d.managerScion().Suspend(ctx, r.app.Name, jp); serr != nil {
 		suspended = "lever could NOT suspend it (" + scion.ErrSummary(serr) + "): stop it yourself (`lever stop`)"
 	}
 	return true, fmt.Errorf("%s: manager %q after its resume: %s; %s. Find and undo what changed on the host (put the real directory back), then run `lever up` again, or recreate the manager with `lever up --fresh` (it backs the conversation up first); treat what the manager could reach since as exposed, and if that includes the manager itself, do not add --keep-conversation, which carries the session you no longer trust into the new manager",
@@ -1836,99 +1899,35 @@ func (r *run) warnManagerNestedVirt(ctx context.Context, jp string) {
 // create (a stop and up keeps the record's volumes).
 const NestedVirtRecreateFix = "recreate it to apply the change: `lever up --fresh --keep-conversation` (`lever stop` + `lever up` keeps the old devices)"
 
-// convergeManager acts on the observed, settled manager record (nil when
-// absent): create, keep, resume, forced resume, the --fresh delete and create,
-// or, for an unknown phase, a refusal that leaves the record alone. acted
-// reports whether it started or resumed anything, which decides whether the
-// liveness gate must hold for the settle window or may take one look.
-func (r *run) convergeManager(ctx context.Context, jp string, rec *scion.Agent, opts scion.StartOpts) (acted bool, err error) {
-	if rec != nil && !r.fresh && rec.Image != "" && !strings.Contains(rec.Image, "@") && !imageref.Qualified(rec.Image) {
-		// scion keeps the image a record was created with and rewrites an
-		// unqualified one to the hub's image registry at every start, which an
-		// agent can set between applies.
-		r.d.Log("start-manager: WARNING: manager %q was created on the unqualified image name %s, which the hub rewrites to its image registry at every start, a setting any agent can change; recreate it on %s with `lever up --fresh --keep-conversation`",
-			r.app.Name, termsafe.Sanitize(rec.Image), opts.Image)
-	}
-	switch {
-	case rec == nil:
-		// Under --fresh an "already exists" answer means the observe step
-		// missed a live record (scion's lazy hub-sync can): that record is
-		// the session the operator asked to discard, never a success.
-		return true, r.startManagerCreate(ctx, opts, r.fresh)
-	case r.fresh:
-		// --fresh discards the session whatever the record's phase. Decided here,
-		// after the hub is up, because after lever stop the record is invisible until
-		// this step. The create that follows is what puts a changed manager.image into
-		// effect (a resume keeps the record's image).
-		if r.d.BackupManagerConversation != nil {
-			if err := r.d.BackupManagerConversation(ctx, rec); err != nil {
-				return false, fmt.Errorf("start-manager: --fresh: backing up manager %q's conversation failed, so the manager was NOT deleted (its record and conversation are kept): %w. Fix the cause and run `lever up --fresh` again, or run `lever up --fresh --no-backup` to discard the conversation without a backup", r.app.Name, err)
-			}
-		}
-		return true, r.recoverDeleteAndCreate(ctx, jp, opts,
-			fmt.Sprintf("start-manager: --fresh — deleting manager %q (phase %s) and starting FRESH (previous session discarded)", r.app.Name, scion.BoundedQuote(rec.Phase)),
-			"--fresh delete")
-	case managerKept(rec):
-		// The liveness gate in startManager still confirms the container is up: a
-		// running record with a dead container must fail loudly.
-		return false, nil
-	case rec.Phase == scion.PhaseSuspended || rec.Phase == scion.PhaseStopped:
-		if rec.Phase == scion.PhaseStopped {
-			// scion's hub resumes a stopped record with a fresh harness
-			// session (it passes --continue for a suspended one only), so
-			// say so: the old conversation is still in the agent home.
-			r.d.Log("start-manager: manager %q is in phase stopped; scion resumes a stopped record in a new claude session (no --continue) — the old conversation stays in the agent home (`lever attach`, then `/resume`)", r.app.Name)
-		}
-		// Resume rides the same runtime-broker-race retry as a create (see
-		// scion.IsBrokerUnavailable): on a cold VM the runtime broker may not have
-		// re-registered with the hub yet.
-		return true, r.resumeOrRecover(ctx, jp, resumeVerbPlain(func() error {
-			return r.d.Scion.Resume(ctx, r.app.Name, jp)
-		}))
-	case rec.Phase == scion.PhaseError:
-		// scion resume --force recovers the error phase. A fresh ticket is staged, as
-		// for a suspended record, since the leaf may have lapsed while wedged. A forced
-		// resume that fails keeps the record, like any failed resume, so a container
-		// state corrupted by a VM reboot never costs the conversation.
-		return true, r.resumeOrRecover(ctx, jp, resumeVerbForce(func() error {
-			return r.d.Scion.ResumeForce(ctx, r.app.Name, jp)
-		}))
-	default:
-		// observeManager settled or refused any transitional phase, so this is a phase
-		// lever does not know: a newer scion enum or a hostile hub string. Refuse and
-		// leave the record and its conversation in place; the operator's discard is up
-		// --fresh, which needs no phase.
-		return false, fmt.Errorf("start-manager: manager %q is in phase %s, which lever does not recognise; nothing was changed. Retry once it settles, or run `lever up --fresh` to discard the session and start over",
-			r.app.Name, scion.BoundedQuote(rec.Phase))
-	}
-}
-
 // settleManagerPhase re-observes a record in a transitional phase until it
-// reaches a phase convergeManager can act on, disappears (nil: a concurrent
+// reaches a phase planManager can act on, disappears (nil: a concurrent
 // delete; the caller then creates), or the budget runs out. Exhaustion is a
 // hard error that never touches the record. A list error mid-poll counts as
 // "not yet"; a phase neither transitional nor known stops the wait at once so
-// convergeManager refuses it by name.
+// planManager refuses it by name.
 func (r *run) settleManagerPhase(ctx context.Context, jp string, rec *scion.Agent) (*scion.Agent, error) {
 	b := r.phaseSettle
 	r.d.Log("start-manager: manager %q is in phase %q (mid-transition) — waiting up to %s for scion to settle it",
 		r.app.Name, rec.Phase, time.Duration(b.Attempts)*b.Interval)
 	cur := rec
 	var listErr error
-	err := retry.Until(ctx, b.Attempts, b.Interval, func() (bool, error) {
-		agents, err := r.d.Scion.List(ctx, jp)
+	err := wait.For(ctx, b.spec(wait.ManagerPhaseSettle.Name), func(ctx context.Context) wait.Result {
+		agents, err := r.d.managerScion().List(ctx, jp)
 		if err != nil {
 			listErr = err
-			return false, nil
+			return wait.NotYetErr(err)
 		}
 		listErr = nil
 		cur = scion.FindAgent(agents, r.app.Name)
-		return cur == nil || !slices.Contains(transitionalPhases, cur.Phase), nil
+		if cur == nil || !slices.Contains(transitionalPhases, cur.Phase) {
+			return wait.Ready()
+		}
+		return wait.NotYet(cur.Phase)
 	})
 	if err == nil {
 		return cur, nil
 	}
-	if !errors.Is(err, retry.ErrExhausted) {
+	if !errors.Is(err, wait.ErrTimeout) {
 		return nil, err
 	}
 	if listErr != nil {
@@ -1992,7 +1991,7 @@ func (r *run) prepareAPIKeyMode(ctx context.Context, jp string) error {
 // phase is waited on first (settleManagerPhase), so the role gate and the
 // caller both see a settled one.
 //
-// The role gate covers only the phases convergeManager keeps the record in. It
+// The role gate covers only the phases planManager keeps the record in. It
 // refuses rather than fall into recoverDeleteAndCreate on purpose: that
 // discards the conversation, and losing the session is the operator's choice,
 // not a guard's.
@@ -2021,7 +2020,7 @@ func (r *run) observeManager(ctx context.Context, jp string) (*scion.Agent, erro
 	return rec, nil
 }
 
-// resumeVerb is one of convergeManager's two resumable arms: scion resume for a
+// resumeVerb is one of planManager's two resumable verbs: scion resume for a
 // suspended or stopped record, scion resume --force for an error record.
 type resumeVerb struct {
 	label  string // verb name in the log line and the refusal
@@ -2052,9 +2051,7 @@ func (r *run) resumeOrRecover(ctx context.Context, jp string, v resumeVerb) erro
 	if err := r.ensureFreshBootstrap(ctx); err != nil {
 		return err
 	}
-	rerr := ResumeClearingStopClaim(ctx, r.d, r.app.Name, jp, "start-manager", func() error {
-		return r.retryOnBrokerUnavailable(ctx, v.resume)
-	})
+	rerr := r.resumeClearing(ctx, jp, v.resume)
 	if rerr == nil {
 		return nil
 	}
@@ -2063,7 +2060,7 @@ func (r *run) resumeOrRecover(ctx context.Context, jp string, v resumeVerb) erro
 		return nil
 	}
 	// A hub refusal says nothing about the manager.
-	return ResumeError(v.label, rerr)
+	return resumeError(v.label, rerr)
 }
 
 // ResumeFailed is the error for a manager resume that failed and was not a hub
@@ -2095,17 +2092,17 @@ func HubRefusedResume(verb string, err error) error {
 // absorbs the registration race and must not mask real failures.
 func (r *run) retryOnBrokerUnavailable(ctx context.Context, action func() error) error {
 	var last error
-	err := retry.Until(ctx, r.brokerStart.Attempts, r.brokerStart.Interval, func() (bool, error) {
+	err := wait.For(ctx, r.brokerStart.spec(wait.BrokerUnavailable.Name), func(context.Context) wait.Result {
 		last = action()
-		if last == nil {
-			return true, nil
+		switch {
+		case last == nil:
+			return wait.Ready()
+		case !scion.IsBrokerUnavailable(last):
+			return wait.Fatal(last)
 		}
-		if !scion.IsBrokerUnavailable(last) {
-			return false, last
-		}
-		return false, nil
+		return wait.NotYetErr(last)
 	})
-	if errors.Is(err, retry.ErrExhausted) {
+	if errors.Is(err, wait.ErrTimeout) {
 		return last // the transient error itself
 	}
 	return err
@@ -2117,7 +2114,7 @@ func (r *run) retryOnBrokerUnavailable(ctx context.Context, action func() error)
 func (r *run) listAgentsRetry(ctx context.Context, jp string) ([]scion.Agent, error) {
 	var agents []scion.Agent
 	if err := r.retryOnBrokerUnavailable(ctx, func() error {
-		a, e := r.d.Scion.List(ctx, jp)
+		a, e := r.d.managerScion().List(ctx, jp)
 		if e != nil {
 			return e
 		}
@@ -2183,7 +2180,7 @@ func (r *run) startManagerCreate(ctx context.Context, opts scion.StartOpts, must
 	}
 	created := false
 	err := r.retryOnBrokerUnavailable(ctx, func() error {
-		startErr := r.d.Scion.Start(ctx, opts)
+		startErr := r.d.managerScion().Start(ctx, opts)
 		// A manager already running or existing is success, not error, but it is not a
 		// fresh session, so it is not recorded as one.
 		if startErr != nil && scion.AlreadyRunning(startErr) {
@@ -2225,7 +2222,7 @@ func (r *run) recoverDeleteAndCreate(ctx context.Context, jp string, opts scion.
 	// The delete rides the same runtime-broker-race retry: --fresh is the
 	// operator's one way out of a manager that does not resume, so it must not fail
 	// on a broker that was only late.
-	derr := r.retryOnBrokerUnavailable(ctx, func() error { return r.d.Scion.Delete(ctx, r.app.Name, jp) })
+	derr := r.retryOnBrokerUnavailable(ctx, func() error { return r.d.managerScion().Delete(ctx, r.app.Name, jp) })
 	// What decides is the record, never an error's words: an attempt can remove the
 	// record and still report a failure, or report success with the record still
 	// there. --fresh evicts a session the operator no longer trusts, so
@@ -2290,49 +2287,10 @@ func (r *run) waitManagerLive(ctx context.Context, jp string, acted bool, onHarn
 	return withHarnessDeathHint(ctx, r.d, err, jp, r.app.Name)
 }
 
-// WaitManagerLive is the full gate (live, harness running, settle window) for a
-// path that just acted on the manager (lever up after its own scion resume),
-// with the same budget and harness-death hint as the start-manager step. prog
-// may be nil.
-func WaitManagerLive(ctx context.Context, d Deps, name, project string, prog *Progress) error {
-	err := gateManagerLive(ctx, d, d.ManagerLiveRetry.or(defaultManagerLiveRetry), name, project, "up", prog, gateOpts{})
-	return withHarnessDeathHint(ctx, d, err, project, name)
-}
-
-// observeAttempts bounds ObserveManagerLive's list retries: enough to ride
-// out a transient hub error, short enough that a refusal arrives in seconds
-// rather than after the fifteen the start gate allows.
+// observeAttempts bounds CheckManagerAfterDetach's list retries: enough to
+// ride out a transient hub error, short enough that an answer arrives in
+// seconds.
 const observeAttempts = 3
-
-// ObserveManagerLive is lever up's check for a manager that was already
-// running. It started nothing, so it holds nothing: one observation (a failed
-// list is retried observeAttempts times), no settle, and a refusal only on
-// positive evidence of a death: no record, a phase that is not running, or a
-// container status that is present and not live. An empty container status is
-// not evidence: the runtime broker's heartbeat refreshes that column, and a
-// momentary blank must not refuse a healthy manager.
-func ObserveManagerLive(ctx context.Context, d Deps, name, project string) error {
-	b := d.ManagerLiveRetry.or(defaultManagerLiveRetry)
-	a, err := scion.ObserveAgent(ctx, func(c context.Context) ([]scion.Agent, error) {
-		return d.Scion.List(c, project)
-	}, name, observeAttempts, b.Interval)
-	const remedy = "`lever attach` still tries the session; `lever doctor` shows the manager row; `lever stop` then `lever up` resumes it; `lever up --fresh` discards the conversation"
-	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return err
-		}
-		return fmt.Errorf("up: manager %q could not be observed: %w — %s", name, err, remedy)
-	}
-	switch {
-	case a == nil:
-		return fmt.Errorf("up: manager %q was running when up looked, but has no record now — %s", name, remedy)
-	case a.Phase != scion.PhaseRunning:
-		return fmt.Errorf("up: manager %q was running when up looked, but is in phase %s now (container %s) — %s", name, scion.BoundedQuote(a.Phase), scion.BoundedQuote(a.ContainerStatus), remedy)
-	case a.ContainerStatus != "" && !scion.ContainerLive(a.ContainerStatus):
-		return fmt.Errorf("up: manager %q record says running, but its container is %s — the harness died; %s", name, scion.BoundedQuote(a.ContainerStatus), remedy)
-	}
-	return nil
-}
 
 // JailPath maps a host path under tree to its location inside the jail. It
 // returns hostPath unchanged when mount is empty or hostPath is not under tree.

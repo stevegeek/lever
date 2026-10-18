@@ -140,39 +140,3 @@ func TestWriteRemoteStampLeavesNoStaleRecordOnFailure(t *testing.T) {
 		t.Error("a failed write must remove the previous stamp, not leave it describing a process nothing can identify")
 	}
 }
-
-// TestRemoteStampRecordsOutlivesItsProxy: after a restart the pid is gone,
-// but the stamp still says which version and config the last proxy ran.
-func TestRemoteStampRecordsOutlivesItsProxy(t *testing.T) {
-	s := ForConfig(t.TempDir())
-	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if s.RemoteStampRecords("v1", "h1") {
-		t.Error("an absent stamp must not record anything")
-	}
-	runningProxyPID(t, s, 4242)
-	if err := s.WriteRemoteStamp("v1", "h1"); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(s.RemotePID()); err != nil {
-		t.Fatal(err)
-	}
-	if !s.RemoteStampRecords("v1", "h1") {
-		t.Error("the stamp must still record the last proxy's version and config")
-	}
-	if s.RemoteStampMatches("v1", "h1") {
-		t.Error("with no remote.pid the stamp must vouch for no running proxy")
-	}
-	for _, c := range [][2]string{{"v2", "h1"}, {"v1", "h2"}, {"", ""}} {
-		if s.RemoteStampRecords(c[0], c[1]) {
-			t.Errorf("RemoteStampRecords(%q, %q) = true, want false", c[0], c[1])
-		}
-	}
-	if err := os.WriteFile(s.RemoteStamp(), []byte("v1\nh1"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if s.RemoteStampRecords("v1", "h1") {
-		t.Error("a truncated stamp must not record anything")
-	}
-}

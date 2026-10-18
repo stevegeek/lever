@@ -355,9 +355,28 @@ func TestDispatchConfigWiresTheRecordReaderByFolders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dispatchConfig: %v", err)
 	}
+	if d.EnsureManager == nil {
+		t.Fatal("the broker's changes to the manager must go through its lifecycle")
+	}
 	if d.RecordVolumes != nil || d.LeftoverShareVolumes == nil {
 		t.Fatalf("no folders: RecordVolumes wired=%v LeftoverShareVolumes wired=%v, want only the best-effort reader",
 			d.RecordVolumes != nil, d.LeftoverShareVolumes != nil)
+	}
+
+	// With the state directory inside the tree the broker writes no boot record there.
+	inTree := wiringApp(st.Dir, "")
+	inTreeState := state.ForConfig(inTree.Tree)
+	if _, ok := GuestBootFor(inTree, inTreeState, proc.RealRunner{}).(unrecordedGuestBoot); !ok {
+		t.Fatal("inside the tree the boot is read but never recorded")
+	}
+	if _, ok := GuestBootFor(app, st, proc.RealRunner{}).(JailGuestBoot); !ok {
+		t.Fatal("outside the tree the boot record is wired")
+	}
+	if err := GuestBootFor(inTree, inTreeState, proc.RealRunner{}).Record("0f4c3a9e-7b1d-4c2e-9a8f-5d6e7f8a9b0c"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(inTreeState.LifecycleFile()); !os.IsNotExist(err) {
+		t.Fatalf("a boot record was written inside the tree: %v", err)
 	}
 
 	app.SharedFolders = []config.SharedFolder{{Path: "shared/x", Readers: []string{"a"}}}

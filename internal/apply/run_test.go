@@ -33,6 +33,9 @@ func runApply(app *config.App, deps Deps) error {
 // material (boot.minted = true); a test that models a spent latch wires
 // spentLatchMint instead.
 func fillDeps(d Deps) Deps {
+	if d.ManagerLock == nil {
+		d.ManagerLock = HeldManagerLock
+	}
 	// The production default holds the manager live for 10 s; a test that
 	// does not model the settle window must not pay for it.
 	if d.ManagerLiveRetry == (RetryBudget{}) {
@@ -72,7 +75,10 @@ func fillDeps(d Deps) Deps {
 		d.EnsureProjectProvider = func(context.Context, string) error { return nil }
 	}
 	if d.WaitBrokerReady == nil {
-		d.WaitBrokerReady = func(context.Context, string) (bool, error) { return false, nil }
+		d.WaitBrokerReady = func(context.Context, string) (bool, error) { return true, nil }
+	}
+	if d.BrokerOnline == nil {
+		d.BrokerOnline = func(context.Context) (bool, string, error) { return true, "", nil }
 	}
 	if d.MintManagerBootstrap == nil {
 		d.MintManagerBootstrap = func(context.Context) (BootstrapMaterial, error) {
@@ -83,7 +89,7 @@ func fillDeps(d Deps) Deps {
 		d.RearmBootstrap = func(context.Context) error { return nil }
 	}
 	if d.EnsureHubAuth == nil {
-		d.EnsureHubAuth = func(context.Context) (bool, error) { return false, nil }
+		d.EnsureHubAuth = func(context.Context) (string, error) { return "", nil }
 	}
 	if d.EnsureScionTelemetry == nil {
 		d.EnsureScionTelemetry = func(context.Context) (bool, error) { return false, nil }
@@ -724,17 +730,26 @@ func TestStartManagerObserveListRetriesOnTransientThenSucceeds(t *testing.T) {
 	}
 }
 
-// TestStartManagerWaitsForBrokerReadyBeforeActing: the readiness gate must run
-// before the observe/create, or it races the broker's async registration.
+// keptHub answers the hub probe with a hub started as lever starts it for
+// app, so the scion-server step keeps it and only looks at its broker.
+func keptHub(f *proc.FakeRunner, app *config.App) {
+	scriptRunningHub(f, runningHubOut(42, matchingHubArgv(app), testHubAuthEnv()))
+}
+
+// TestStartManagerWaitsForBrokerReadyBeforeActing: on a hub that kept
+// running with no online runtime broker, the readiness gate must run before
+// the observe/create, or it races the broker's async registration.
 func TestStartManagerWaitsForBrokerReadyBeforeActing(t *testing.T) {
 	app, f := newObserveFirstApp(t)
+	keptHub(f, app)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello"} // absent record → create
 	var waitCalls, startCallsAtGate int
 	deps := Deps{
-		Scion: scion.New(r, scion.Options{}),
+		Scion:      scion.New(r, scion.Options{}),
+		HubAuthEnv: testHubAuthEnv(),
 		WaitBrokerReady: func(ctx context.Context, project string) (bool, error) {
 			if project == "global" {
-				return false, nil // scion-server's wait after the hub start: timed out
+				return false, nil // the kept hub's broker is not online
 			}
 			waitCalls++
 			startCallsAtGate = r.startCalls
@@ -755,8 +770,8 @@ func TestStartManagerWaitsForBrokerReadyBeforeActing(t *testing.T) {
 	}
 }
 
-// When the scion-server step saw the broker online, start-manager does not
-// wait for it a second time in the same run.
+// When the scion-server step saw the broker online after its start,
+// start-manager does not wait for it a second time in the same run.
 func TestStartManagerSkipsTheBrokerWaitWhenScionServerSawItOnline(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello"}
@@ -771,8 +786,8 @@ func TestStartManagerSkipsTheBrokerWaitWhenScionServerSawItOnline(t *testing.T) 
 	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if len(waits) != 1 || waits[0] != "global" {
-		t.Fatalf("waits = %q, want only scion-server's", waits)
+	if len(waits) != 0 {
+		t.Fatalf("soft waits = %q, want none: scion-server's hard wait saw it", waits)
 	}
 	if r.startCalls != 1 {
 		t.Errorf("startCalls = %d, want 1", r.startCalls)
@@ -784,12 +799,14 @@ func TestStartManagerSkipsTheBrokerWaitWhenScionServerSawItOnline(t *testing.T) 
 // it touches any record.
 func TestStartManagerBrokerReadyErrorAbortsBeforeActing(t *testing.T) {
 	app, f := newObserveFirstApp(t)
+	keptHub(f, app)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello"}
 	deps := Deps{
-		Scion: scion.New(r, scion.Options{}),
+		Scion:      scion.New(r, scion.Options{}),
+		HubAuthEnv: testHubAuthEnv(),
 		WaitBrokerReady: func(ctx context.Context, project string) (bool, error) {
 			if project == "global" {
-				return false, nil // scion-server's wait after the hub start: timed out
+				return false, nil // the kept hub's broker is not online
 			}
 			return false, context.Canceled
 		},
@@ -2722,6 +2739,41 @@ func TestStartManagerRefusesPreRoleRecordOnResume(t *testing.T) {
 	}
 }
 
+// A record lever would refuse to keep gets no enrolment ticket staged in
+// the tree it reads: the mint step refuses before it mints.
+func TestMintRefusesPreRoleRecordBeforeStagingATicket(t *testing.T) {
+	for _, fresh := range []bool{false, true} {
+		app, f := newObserveFirstApp(t)
+		r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "Up 6 seconds"}
+		mints := 0
+		deps := Deps{
+			Scion:           scion.New(r, scion.Options{}),
+			VerifyAgentRole: func(context.Context, string, string) error { return errPreRoleRefusal },
+			MintManagerBootstrap: func(context.Context) (BootstrapMaterial, error) {
+				mints++
+				return BootstrapMaterial{Ticket: "minted-this-run"}, nil
+			},
+		}
+		run := runApply
+		if fresh {
+			run = runApplyFresh
+		}
+		err := run(app, deps)
+		_, statErr := os.Stat(filepath.Join(app.Tree, ".lever", "bootstrap.json"))
+		if fresh {
+			// --fresh discards the record, so its role does not stop the mint.
+			if mints != 1 || err != nil && strings.Contains(err.Error(), "mint-manager-bootstrap") {
+				t.Errorf("fresh: mints = %d, err = %v; want the mint", mints, err)
+			}
+			continue
+		}
+		testutil.WantErrIs(t, err, errPreRoleRefusal)
+		if !strings.Contains(err.Error(), "mint-manager-bootstrap") || mints != 0 || statErr == nil {
+			t.Fatalf("err = %v, mints = %d, staged = %v; want the refusal before any mint", err, mints, statErr == nil)
+		}
+	}
+}
+
 // TestStartManagerRefusesPreRoleRecordWhenRunning: the no-op branch is not
 // exempt. A running agent refreshes its own token and scion re-derives scopes
 // from the stored role on every refresh, so an unrolled running record is
@@ -2738,24 +2790,26 @@ func TestStartManagerRefusesPreRoleRecordWhenRunning(t *testing.T) {
 	}
 }
 
-// TestStartManagerVerifyAgentRoleSkippedWhenRecordAbsent: a fresh create
-// stamps `--role baseline` itself, so there is nothing to refuse.
+// TestStartManagerVerifyAgentRoleSkippedWhenRecordAbsent: a first create
+// stamps `--role baseline` itself, so start-manager has nothing to refuse.
+// The mint step asks before it stages a ticket; the guard answers nil for an
+// absent record.
 func TestStartManagerVerifyAgentRoleSkippedWhenRecordAbsent(t *testing.T) {
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello"}
-	called := 0
+	var steps []string
 	deps := Deps{
 		Scion: scion.New(r, scion.Options{}),
 		VerifyAgentRole: func(context.Context, string, string) error {
-			called++
-			return errPreRoleRefusal
+			steps = append(steps, fmt.Sprintf("starts=%d", r.startCalls))
+			return nil
 		},
 	}
 	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if called != 0 {
-		t.Errorf("VerifyAgentRole called %d times, want 0 (no record to keep)", called)
+	if len(steps) != 1 || steps[0] != "starts=0" {
+		t.Errorf("VerifyAgentRole calls = %q, want only the mint step's, before any start", steps)
 	}
 	if r.startCalls != 1 {
 		t.Errorf("startCalls = %d, want 1", r.startCalls)
@@ -2870,28 +2924,44 @@ func TestRegisterFailsWhenHubEndpointRepairFails(t *testing.T) {
 
 // TestScionServerWaitsForTheBroker: a just-started hub registers its runtime
 // broker only after it serves, so the step waits for it before
-// register-project's hub link, via scion's global settings since the tree may
-// not be a project yet. It waits after a restart and after a plain start.
+// register-project's hub link: a hard wait after a start, a soft look on a
+// kept hub. Each happens once, in the scion-server step.
 func TestScionServerWaitsForTheBroker(t *testing.T) {
-	for _, changed := range []bool{false, true} {
+	for _, kept := range []bool{false, true} {
 		f := scionOKRunner()
 		app := &config.App{Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
 			Manager: config.Manager{Image: "img"},
 			Remote:  config.Remote{Enabled: true, BaseURL: "https://mac.tail.ts.net"}}
-		var waits []string
+		if kept {
+			keptHub(f, app)
+		}
+		var events []string
 		deps := Deps{
-			Scion:         hubScion(f, app),
-			EnsureHubAuth: func(context.Context) (bool, error) { return changed, nil },
+			Scion:      hubScion(f, app),
+			HubAuthEnv: testHubAuthEnv(),
+			BrokerOnline: func(context.Context) (bool, string, error) {
+				events = append(events, "hard")
+				return true, "", nil
+			},
 			WaitBrokerReady: func(_ context.Context, project string) (bool, error) {
-				waits = append(waits, project)
+				events = append(events, "soft "+project)
+				// A kept hub's broker is only looked at: not online is no failure.
 				return false, nil
+			},
+			EnsureProjectProvider: func(context.Context, string) error {
+				events = append(events, "link")
+				return nil
 			},
 		}
 		if err := runApply(app, deps); err != nil {
-			t.Fatalf("changed=%v: Run: %v", changed, err)
+			t.Fatalf("kept=%v: Run: %v", kept, err)
 		}
-		if len(waits) < 1 || waits[0] != "global" || slices.Index(waits[1:], "global") >= 0 {
-			t.Errorf("changed=%v: waits = %q, want one wait on scion's global settings, first (before register-project)", changed, waits)
+		first := "hard"
+		if kept {
+			first = "soft global"
+		}
+		if len(events) < 2 || events[0] != first || slices.Index(events[1:], first) >= 0 || events[1] != "link" {
+			t.Errorf("kept=%v: events = %q, want one %q first, before register-project's link", kept, events, first)
 		}
 	}
 }
@@ -3101,7 +3171,7 @@ func TestScionServerRestartsAHubThatIsAlreadyStopped(t *testing.T) {
 	deps := Deps{
 		Scion:         scion.New(runner, scion.Options{HubEndpoint: testHubEndpoint}),
 		HubAuthEnv:    testHubAuthEnv(),
-		EnsureHubAuth: func(context.Context) (bool, error) { return true, nil },
+		EnsureHubAuth: func(context.Context) (string, error) { return "/etc/lever/hub-auth.pub", nil },
 	}
 
 	if err := runApply(app, deps); err != nil {
@@ -3371,49 +3441,6 @@ func TestWaitManagerLiveGatesUpsResumePath(t *testing.T) {
 	err := WaitManagerLive(context.Background(), deps, "hello", "/lever", nil)
 	if !errors.Is(err, scion.ErrAgentDied) || !strings.Contains(err.Error(), "up: manager") {
 		t.Fatalf("want an up-prefixed ErrAgentDied, got %v", err)
-	}
-}
-
-// ObserveManagerLive gives a manager `up` found running one look, no settle.
-// Only positive evidence of a death refuses, naming the ways out; an empty
-// container column is not evidence.
-func TestObserveManagerLiveRefusesOnlyOnEvidenceOfDeath(t *testing.T) {
-	observe := func(phase, container string) (error, int) {
-		r := &agentLifecycleRunner{FakeRunner: scionOKRunner(), slug: "hello", initPhase: phase, initContainerStatus: container}
-		deps := Deps{Scion: scion.New(r, scion.Options{}), ManagerLiveRetry: RetryBudget{Attempts: 3, Interval: time.Millisecond, Settle: time.Hour}}
-		return ObserveManagerLive(context.Background(), deps, "hello", "/lever"), r.listCalls
-	}
-	if err, calls := observe("running", "Up 3 days"); err != nil || calls != 1 {
-		t.Fatalf("running + live: want pass in one look, got %v (%d calls)", err, calls)
-	}
-	if err, _ := observe("running", ""); err != nil {
-		t.Fatalf("running + empty container column is not evidence of death: %v", err)
-	}
-	if err, _ := observe("running", "Exited (1) 5 minutes ago"); err == nil || !strings.Contains(err.Error(), "container") || !strings.Contains(err.Error(), "lever up --fresh") {
-		t.Fatalf("running record over an exited container must refuse and name a way out, got %v", err)
-	}
-	if err, _ := observe("error", "Exited (1) 5 minutes ago"); err == nil || !strings.Contains(err.Error(), `phase "error"`) || !strings.Contains(err.Error(), "lever doctor") {
-		t.Fatalf("an error phase must refuse and point at doctor, got %v", err)
-	}
-	// Absent record: observed once as running (upNone), gone at the look.
-	r := &agentLifecycleRunner{FakeRunner: scionOKRunner(), slug: "other", initPhase: "running", initContainerStatus: "Up"}
-	deps := Deps{Scion: scion.New(r, scion.Options{}), ManagerLiveRetry: RetryBudget{Attempts: 3, Interval: time.Millisecond}}
-	if err := ObserveManagerLive(context.Background(), deps, "hello", "/lever"); err == nil || !strings.Contains(err.Error(), "no record") {
-		t.Fatalf("a vanished record must refuse, got %v", err)
-	}
-}
-
-// A refusal must arrive in seconds, not after the start gate's fifteen
-// attempts: the observation retries only a few times on a list error.
-func TestObserveManagerLiveGivesUpQuicklyWhenTheHubIsDown(t *testing.T) {
-	f := proc.NewFakeRunner() // nothing scripted: every scion call fails, like a down hub
-	deps := Deps{Scion: scion.New(f, scion.Options{}), ManagerLiveRetry: RetryBudget{Attempts: 15, Interval: time.Millisecond}}
-	err := ObserveManagerLive(context.Background(), deps, "hello", "/lever")
-	if err == nil || !strings.Contains(err.Error(), "could not be observed") {
-		t.Fatalf("want a could-not-observe error, got %v", err)
-	}
-	if len(f.Calls) > observeAttempts {
-		t.Fatalf("%d list calls, want at most %d", len(f.Calls), observeAttempts)
 	}
 }
 
@@ -4215,7 +4242,7 @@ func TestStartManagerFreshAfterAnUnconfirmedDelete(t *testing.T) {
 
 // A manager an older lever created keeps its unqualified image name, which
 // the hub's image registry still applies to: keeping or resuming it warns.
-func TestConvergeManagerWarnsOnAnUnqualifiedImage(t *testing.T) {
+func TestActUpWarnsOnAnUnqualifiedImage(t *testing.T) {
 	for _, c := range []struct {
 		image string
 		warn  bool
@@ -4228,7 +4255,7 @@ func TestConvergeManagerWarnsOnAnUnqualifiedImage(t *testing.T) {
 		var logs []string
 		r := &run{app: &config.App{Name: "m"}, d: Deps{Log: func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }}}
 		rec := &scion.Agent{Slug: "m", Phase: scion.PhaseRunning, Image: c.image}
-		if _, err := r.convergeManager(context.Background(), "/lever", rec, scion.StartOpts{Image: "lever.local/lever-claude:arm64"}); err != nil {
+		if err := r.actUp(context.Background(), "/lever", rec, managerPlan{verb: verbNone}, scion.StartOpts{Image: "lever.local/lever-claude:arm64"}); err != nil {
 			t.Fatal(err)
 		}
 		got := strings.Contains(strings.Join(logs, "\n"), "unqualified image name")

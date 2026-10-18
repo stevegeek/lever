@@ -906,7 +906,7 @@ func checkManagerLive(ctx context.Context, project, name string, list agentListe
 	}
 	if a.Phase == "running" && a.ContainerStatus == "" {
 		// The container column comes from the runtime broker's heartbeat; a blank is
-		// "cannot tell" (as for apply.ObserveManagerLive), never a death or a pass.
+		// "cannot tell", never a death or a pass.
 		return checkResult{check, true, fmt.Sprintf("%q is running; not checked further (no container status reported yet)", name), ""}
 	}
 	if a.Phase == scionpkg.PhaseStopped && scionpkg.ContainerLive(a.ContainerStatus) && session != nil {

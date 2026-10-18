@@ -11,8 +11,9 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/progress"
-	"github.com/stevegeek/lever/internal/retry"
 	"github.com/stevegeek/lever/internal/scion/layout"
+	"github.com/stevegeek/lever/internal/termsafe"
+	"github.com/stevegeek/lever/internal/wait"
 )
 
 // AlreadyRunning reports whether err is a scion "already running" error, so
@@ -154,31 +155,23 @@ func IsAgentAbsent(err error) bool {
 		strings.Contains(msg, "no git origin remote found")
 }
 
-// The default waitHubReady budget: probe every hubReadyInterval for up to
-// hubReadyTimeout; say so after hubReadyNotice and then every hubReadyEvery;
-// check every hubAliveEvery that a scion server is still alive to wait on.
-//
-// The timeout is a time, not an attempt count, and long: a cold hub start
-// after a reboot (daemon re-exec, cold page cache, a large hub.db) can take
-// many seconds before it serves at all.
-const (
-	hubReadyTimeout  = 2 * time.Minute
-	hubReadyInterval = 1 * time.Second
-	hubReadyNotice   = 15 * time.Second
-	hubReadyEvery    = 30 * time.Second
-	hubAliveEvery    = 5 * time.Second
-)
+// hubAliveEvery is how often waitHubReady checks that a scion server is
+// still alive to wait on, and how long one in-guest /healthz poll runs.
+const hubAliveEvery = 5 * time.Second
+
+// errServerGone is waitHubReady finding no live scion server to wait on.
+var errServerGone = errors.New("no scion server is running in the jail any more (it exited during start-up)")
 
 // waitHubReady polls a project-independent hub call until it succeeds or the
-// budget runs out. list --all does not resolve a project, unlike list
-// --global, which fails with "no git origin remote found" before any project
-// is registered.
+// c.hubReady budget runs out. list --all does not resolve a project, unlike
+// list --global, which fails with "no git origin remote found" before any
+// project is registered.
 //
 // An authentication failure also counts as ready: the hub answered, it only
 // refused the credential, which happens whenever lever holds no working token
 // yet. Whoever needs the credential fails on it next, with the real error.
 //
-// Every hubAliveEvery it runs serverPIDProbe, and stops with ErrHubNotReady
+// Every hubAliveEvery it runs serverPIDProbe, and stops with errServerGone
 // once no scion server is alive, so the long budget costs nothing when the
 // start failed. A probe that cannot run says nothing. notify, when non-nil,
 // gets progress lines so a slow start does not read as a hang.
@@ -188,65 +181,54 @@ func (c *Client) waitHubReady(ctx context.Context, notify func(format string, ar
 	if rep.Active() {
 		notify = nil
 	}
+	s := c.hubReady
+	if notify != nil {
+		s.Notice = func(p wait.Progress) {
+			notify("scion-server: the hub is not answering yet after %s; a cold start (the first after a reboot or a scion pin change) can take a minute — waiting up to %s",
+				p.Elapsed.Round(time.Second), s.Budget)
+		}
+	}
 	start := time.Now()
-	deadline := start.Add(c.hubReadyTimeout)
-	nextNotice := start.Add(c.hubReadyNotice)
+	deadline := start.Add(s.Budget)
 	lastAlive := start
-	attempts := 0
 	var lastErr error
-	errGone := errors.New("server gone")
 	// One jail call polls /healthz for up to hubAliveEvery; the scion CLI
 	// probe after each in-guest wait still decides readiness. Without an
 	// endpoint, or when the in-guest wait cannot run, it polls with the CLI
-	// every hubReadyInterval.
+	// every s.Interval.
 	inGuest := c.hubEndpoint != ""
-	pace := false
-	err := retry.Until(ctx, 0, 0, func() (bool, error) {
-		attempts++
-		if pace {
-			select {
-			case <-ctx.Done():
-				return false, ctx.Err()
-			case <-time.After(c.hubReadyInterval):
-			}
-		}
-		pace = true
+	err := wait.For(ctx, s, func(ctx context.Context) wait.Result {
+		waited := false
 		if inGuest {
 			switch c.awaitHealthz(ctx, min(c.hubAliveEvery, time.Until(deadline))) {
 			case healthzDown:
-				pace = false // the guest loop has already waited
+				waited = true
 			case healthzUnavailable:
 				inGuest = false
 			}
 		}
 		_, lastErr = c.run(ctx, "", "list", "--all", "--format", "json", nonInteractive)
 		if lastErr == nil || isHubAuthRefusal(lastErr) {
-			return true, nil
+			return wait.Ready()
 		}
-		now := time.Now()
-		if !now.Before(deadline) {
-			return false, retry.ErrExhausted
-		}
-		if now.Sub(lastAlive) >= c.hubAliveEvery {
+		if now := time.Now(); now.Sub(lastAlive) >= c.hubAliveEvery {
 			lastAlive = now
 			if pid, perr := c.serverPIDProbe(ctx); perr == nil && pid == 0 {
-				return false, errGone
+				return wait.Fatal(errServerGone)
 			}
 		}
-		rep.Detail(fmt.Sprintf("hub not answering yet; a cold start can take a minute (waiting up to %s)", c.hubReadyTimeout))
-		if notify != nil && !now.Before(nextNotice) {
-			notify("scion-server: the hub is not answering yet after %s; a cold start (the first after a reboot or a scion pin change) can take a minute — waiting up to %s",
-				now.Sub(start).Round(time.Second), c.hubReadyTimeout)
-			nextNotice = now.Add(hubReadyEvery)
+		rep.Detail(fmt.Sprintf("hub not answering yet; a cold start can take a minute (waiting up to %s)", s.Budget))
+		if waited {
+			return wait.NotYetErr(lastErr).Now()
 		}
-		return false, nil
+		return wait.NotYetErr(lastErr)
 	})
+	var te *wait.TimeoutError
 	switch {
-	case errors.Is(err, retry.ErrExhausted):
-		return fmt.Errorf("%w after %s (%d attempts): %w", ErrHubNotReady, time.Since(start).Round(time.Second), attempts, lastErr)
-	case errors.Is(err, errGone):
-		return fmt.Errorf("%w: no scion server is running in the jail any more (it exited during start-up); see ~/%s in the jail: %w",
-			ErrHubNotReady, layout.ServerLogRel, lastErr)
+	case errors.As(err, &te):
+		return fmt.Errorf("%w after %s (%d attempts): %w", ErrHubNotReady, te.Elapsed.Round(time.Second), te.Attempts, lastErr)
+	case errors.Is(err, errServerGone):
+		return fmt.Errorf("%w: %w; see ~/%s in the jail: %w", ErrHubNotReady, errServerGone, layout.ServerLogRel, lastErr)
 	}
 	return err
 }
@@ -304,13 +286,6 @@ func isHubAuthRefusal(err error) bool {
 // its budget, or its server is gone; the last probe error is wrapped
 // alongside it.
 var ErrHubNotReady = errors.New("hub not ready")
-
-// brokerReadyAttempts/brokerReadyInterval are the default WaitRuntimeBrokerReady
-// budget: their product is how long it waits.
-const (
-	brokerReadyAttempts = 30
-	brokerReadyInterval = 1 * time.Second
-)
 
 // brokerPollEvery is how often the in-guest broker wait asks the hub.
 const brokerPollEvery = 200 * time.Millisecond
@@ -372,8 +347,8 @@ func (c *Client) WaitRuntimeBrokerReady(ctx context.Context, project string) err
 // avoid scion's "no project" resolution failure; hub brokers is hub-wide.
 func (c *Client) RuntimeBrokerReady(ctx context.Context, project string) (bool, error) {
 	args := append([]string{"hub", "brokers", "--format", "json", nonInteractive}, projectFlag(project)...)
-	budget := time.Duration(c.brokerReadyAttempts) * c.brokerReadyInterval
-	deadline := time.Now().Add(budget)
+	s := c.brokerReady
+	deadline := time.Now().Add(s.Budget)
 	for {
 		n := int(time.Until(deadline) / brokerPollEvery)
 		argv := append([]string{"-c", brokerWaitScript, "_", strconv.Itoa(max(n, 0)), c.bin}, args...)
@@ -398,20 +373,24 @@ func (c *Client) RuntimeBrokerReady(ctx context.Context, project string) (bool, 
 		case <-time.After(brokerPollEvery):
 		}
 	}
-	attempts := c.brokerReadyAttempts
-	if c.brokerReadyInterval > 0 {
-		attempts = max(1, int(time.Until(deadline)/c.brokerReadyInterval))
+	// The host poll keeps the attempts the remaining time allows, so a slow
+	// CLI call cannot shorten it.
+	s.Budget = time.Until(deadline)
+	if s.Interval > 0 {
+		s.MinAttempts = max(1, int(s.Budget/s.Interval))
 	}
 	online := false
-	err := retry.Until(ctx, attempts, c.brokerReadyInterval, func() (bool, error) {
+	err := wait.For(ctx, s, func(ctx context.Context) wait.Result {
 		out, err := c.runValue(ctx, "", args...)
 		if err != nil {
-			return false, nil
+			return wait.NotYetErr(err)
 		}
-		online = brokersOnline(out)
-		return online, nil
+		if online = brokersOnline(out); online {
+			return wait.Ready()
+		}
+		return wait.NotYet("no online broker")
 	})
-	if errors.Is(err, retry.ErrExhausted) {
+	if errors.Is(err, wait.ErrTimeout) {
 		return false, nil
 	}
 	return online, err
@@ -505,6 +484,10 @@ type ServerOpts struct {
 //
 // scion's own readiness give-up (startGaveUpWaiting) is not a failure: the
 // daemon keeps starting, and waitHubReady decides.
+//
+// A hub that exits during start-up, or that scion falsely reports already
+// running, is started once more after c.hubRetryPause, and never again: a
+// second failure is returned with both attempts' evidence (HubExitedError).
 func (c *Client) ServerStart(ctx context.Context, o ServerOpts) error {
 	args := []string{"server", "start"}
 	if o.WebPort > 0 {
@@ -522,16 +505,204 @@ func (c *Client) ServerStart(ctx context.Context, o ServerOpts) error {
 			args = append(args, "--web-assets-dir="+o.WebAssetsDir)
 		}
 	}
-	// A pid file naming a live non-scion process (a reboot reused the pid)
-	// makes scion answer "already running" without starting anything. The
-	// probe removes such a file first; best-effort.
-	_, _ = c.serverPIDProbe(ctx)
-	// runSecret: the argv carries the session secret, which redactArgs does
-	// not know. The scrub is textual, so AlreadyRunning still matches.
-	if _, err := c.runSecretEnv(ctx, o.Env, o.SessionSecret, args...); err != nil && !startGaveUpWaiting(err) && !AlreadyRunning(err) {
+	err := c.startHubOnce(ctx, o, args)
+	var first *HubExitedError
+	if !errors.As(err, &first) {
 		return err
 	}
-	return c.waitHubReady(ctx, o.Progress)
+	if o.Progress != nil {
+		o.Progress("scion-server: %s; starting it once more in %s", first.What, c.hubRetryPause)
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(c.hubRetryPause):
+	}
+	err = c.startHubOnce(ctx, o, args)
+	var second *HubExitedError
+	switch {
+	case errors.As(err, &second):
+		second.First = first
+	case err != nil:
+		err = fmt.Errorf("%w (this was the hub's second start; the first: %s)", err, first.what())
+	}
+	return err
+}
+
+// HubExitedError is a hub start that left no scion server running: the
+// daemon exited during start-up, or scion refused to start one over a pid
+// file that names no scion server. Log is what the start added to the
+// hub's log, redacted and made safe to print; "" when it added nothing or
+// LogUnread says why lever could not tell.
+type HubExitedError struct {
+	What      string
+	Log       string
+	LogUnread string
+	Cause     error
+	// First is the earlier attempt's failure, when this is the restart.
+	First *HubExitedError
+}
+
+func (e *HubExitedError) Error() string {
+	msg := e.what()
+	if e.First != nil {
+		msg = "the hub failed to start twice. Second attempt: " + msg + ". First attempt: " + e.First.what()
+	}
+	return fmt.Sprintf("%v: %s", ErrHubNotReady, msg)
+}
+
+func (e *HubExitedError) what() string {
+	msg := e.What
+	switch {
+	case e.LogUnread != "":
+		msg += fmt.Sprintf("; lever could not read what it wrote to ~/%s (%s)", layout.ServerLogRel, e.LogUnread)
+	case e.Log != "":
+		msg += fmt.Sprintf("; ~/%s from this start: %s", layout.ServerLogRel, e.Log)
+	default:
+		msg += fmt.Sprintf("; it wrote nothing to ~/%s", layout.ServerLogRel)
+	}
+	if e.Cause != nil {
+		msg += "; " + termsafe.Sanitize(ErrSummary(e.Cause))
+	}
+	return msg
+}
+
+func (e *HubExitedError) Is(target error) bool { return target == ErrHubNotReady }
+
+// startHubOnce is one scion server start and the wait on it.
+func (c *Client) startHubOnce(ctx context.Context, o ServerOpts, args []string) error {
+	// A pid file naming a dead pid, or a live process that is not a scion
+	// server, makes scion answer "already running" without starting
+	// anything; a dead pid is reused at random after a reboot. The probe
+	// removes such a file first; best-effort.
+	_, _ = c.serverPIDProbe(ctx)
+	logFrom, logErr := c.serverLogSize(ctx)
+	exited := func(what string, cause error) error {
+		e := &HubExitedError{What: what, Cause: cause}
+		if logErr == nil {
+			e.Log, logErr = c.serverLogSince(ctx, logFrom, o.SessionSecret)
+		}
+		if logErr != nil {
+			e.LogUnread = logUnread(logErr)
+		}
+		return e
+	}
+	// runSecret: the argv carries the session secret, which redactArgs does
+	// not know. The scrub is textual, so AlreadyRunning still matches.
+	_, err := c.runSecretEnv(ctx, o.Env, o.SessionSecret, args...)
+	switch {
+	case err == nil, startGaveUpWaiting(err):
+	case startExited(err):
+		return exited("the hub exited during start-up", err)
+	case AlreadyRunning(err):
+		// scion trusts any live process the pid file names. Only a live
+		// scion server makes the refusal true.
+		if pid, perr := c.serverPIDProbe(ctx); perr == nil && pid == 0 {
+			return exited("scion refused to start the hub as already running, but no scion server runs (a stale pid file)", err)
+		}
+	default:
+		return err
+	}
+	err = c.waitHubReady(ctx, o.Progress)
+	if errors.Is(err, errServerGone) {
+		return exited("the hub exited during start-up, before it answered", nil)
+	}
+	return err
+}
+
+// startExited reports whether err is scion server start seeing the daemon it
+// launched exit before it became ready (cmd/server_start_ready.go,
+// cmd/server_daemon.go).
+func startExited(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "the server exited during startup") ||
+		strings.Contains(s, "The server process has exited") ||
+		strings.Contains(s, "daemon failed to start")
+}
+
+// serverLogSizeScript prints the size of the hub's log; 0 when there is none.
+// A symlink is refused (exit logSymlinkExit), here and in
+// serverLogTailScript, so the log read can only ever be the hub's own file.
+const serverLogSizeScript = `f="$HOME/$1"
+[ -L "$f" ] && exit 5
+if [ -f "$f" ]; then wc -c < "$f"; else echo 0; fi`
+
+const logSymlinkExit = 5
+
+// serverLogTailScript prints at most the last serverLogTailBytes the log
+// gained past offset $2, all of it when the log is now shorter (a new file).
+const serverLogTailScript = `f="$HOME/$1"
+[ -L "$f" ] && exit 5
+[ -f "$f" ] || exit 0
+off=$2
+[ "$(wc -c < "$f")" -ge "$off" ] || off=0
+tail -c +$((off+1)) "$f" | tail -c 4096`
+
+const serverLogTailBytes = 4096
+
+var errLogSymlink = errors.New("it is a symlink, which lever does not follow")
+
+func logUnread(err error) string {
+	if errors.Is(err, errLogSymlink) {
+		return err.Error()
+	}
+	return "the read in the guest failed"
+}
+
+func (c *Client) serverLogSize(ctx context.Context) (int64, error) {
+	res, err := c.r.Run(ctx, nil, "sh", "-c", serverLogSizeScript, "_", layout.ServerLogRel)
+	if err != nil {
+		if res.Code == logSymlinkExit {
+			return 0, errLogSymlink
+		}
+		return 0, err
+	}
+	return strconv.ParseInt(strings.TrimSpace(res.Stdout), 10, 64)
+}
+
+// serverLogLines is how many of the log's last lines an error quotes.
+const serverLogLines = 12
+
+// serverLogSince returns what the hub's log gained past from, as one line:
+// its last serverLogLines lines, redacted, with secret scrubbed, made safe to
+// print and bounded; "" when it gained nothing.
+func (c *Client) serverLogSince(ctx context.Context, from int64, secret string) (string, error) {
+	res, err := c.r.Run(ctx, nil, "sh", "-c", serverLogTailScript, "_", layout.ServerLogRel, strconv.FormatInt(from, 10))
+	if err != nil {
+		if res.Code == logSymlinkExit {
+			return "", errLogSymlink
+		}
+		return "", err
+	}
+	raw := res.Stdout
+	// A tail that filled its window may start inside a line, and so inside a
+	// secret the literal scrub would then miss: drop that first line.
+	if len(raw) >= serverLogTailBytes {
+		_, raw, _ = strings.Cut(raw, "\n")
+	}
+	// The literal secret goes before the pattern redaction, which could
+	// otherwise mask part of it and leave the rest unmatched.
+	if len(secret) >= 8 {
+		raw = strings.ReplaceAll(raw, secret, "***")
+	}
+	var lines []string
+	for _, l := range strings.Split(raw, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			lines = append(lines, l)
+		}
+	}
+	lines = lines[max(0, len(lines)-serverLogLines):]
+	out := cleanErr(strings.Join(lines, "\n"))
+	safe := make([]string, 0, len(lines))
+	for _, l := range strings.Split(out, "\n") {
+		if l != "" {
+			safe = append(safe, termsafe.Sanitize(l))
+		}
+	}
+	return boundSummary(strings.Join(safe, " | "), 1500), nil
 }
 
 // ServerStop stops the workstation daemon, tolerating one that is not running
@@ -560,21 +731,46 @@ func (c *Client) ServerStop(ctx context.Context) error {
 }
 
 // serverPIDProbeScript prints the pid the server pid file names when it is a
-// live scion server, nothing when there is no file or the pid is dead, and
-// removes the file when the pid is alive but not a scion server. The cmdline
-// test matches scion's own daemon argv (cmd/server_daemon.go).
+// live scion server and nothing otherwise. It removes the file when that pid
+// is dead or not a scion server: scion's own check is signal 0, so a dead pid
+// the next process reuses (lever's own scion start, after a reboot) would
+// read as a running server. The dead-pid removal re-reads the file first, so
+// a daemon that replaced it meanwhile keeps its own; one starter at a time is
+// assumed (the lifecycle lock), as nothing makes the re-read and the rm one
+// step.
+//
+// Agents can write the pid file (scion's workstation routes write under
+// $HOME) and run processes the guest sees as the jail user, so a scion server
+// must also run the root-installed scion ($2; "(deleted)" once an upgrade
+// replaced the file under it) in the reader's own pid and user namespaces,
+// not a decoy in a container. The cmdline test matches scion's own daemon
+// argv (cmd/server_daemon.go).
 const serverPIDProbeScript = `f="$HOME/$1"
 [ -f "$f" ] || exit 0
 pid=$(tr -cd '0-9' < "$f")
-[ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ] || exit 0
-case "$(tr '\000' ' ' < "/proc/$pid/cmdline")" in
-*scion*" server "*) printf '%s' "$pid" ;;
-*) rm -f -- "$f"; printf 'stale:%s' "$pid" ;;
-esac`
+[ -n "$pid" ] || exit 0
+if [ ! -r "/proc/$pid/cmdline" ]; then
+  [ "$(tr -cd '0-9' < "$f")" = "$pid" ] && rm -f -- "$f"
+  exit 0
+fi
+` + scionServerTest + `
+then
+  printf '%s' "$pid"
+else
+  rm -f -- "$f"; printf 'stale:%s' "$pid"
+fi`
+
+// scionServerTest is the condition of an if, true when $pid is a scion server
+// lever installed (see serverPIDProbeScript); $2 is layout.ScionBin.
+const scionServerTest = `exe=$(readlink "/proc/$pid/exe")
+if [ -n "$2" ] && { [ "$exe" = "$2" ] || [ "$exe" = "$2 (deleted)" ]; } &&
+  [ "$(readlink "/proc/$pid/ns/pid")" = "$(readlink /proc/self/ns/pid)" ] &&
+  [ "$(readlink "/proc/$pid/ns/user")" = "$(readlink /proc/self/ns/user)" ] &&
+  case "$(tr '\000' ' ' < "/proc/$pid/cmdline")" in *scion*" server "*) true ;; *) false ;; esac`
 
 // serverPIDProbe returns the live scion server's pid, or 0 when there is none.
 func (c *Client) serverPIDProbe(ctx context.Context) (int, error) {
-	res, err := c.r.Run(ctx, nil, "sh", "-c", serverPIDProbeScript, "_", layout.ServerPIDRel)
+	res, err := c.r.Run(ctx, nil, "sh", "-c", serverPIDProbeScript, "_", layout.ServerPIDRel, layout.ScionBin)
 	if err != nil {
 		return 0, err
 	}
@@ -606,15 +802,15 @@ var HubEnvPrefixes = []string{"SCION_SERVER_AUTH_", "SCION_SERVER_HUB_ADMINEMAIL
 
 // runningHubScript prints the server's pid, then its NUL-separated argv, a
 // separator line, then the allowed env entries. The env filter runs in the
-// guest, so nothing else of the daemon's environment is ever read out.
+// guest, so nothing else of the daemon's environment is ever read out. A
+// process that is not a scion server lever installed (scionServerTest) reads
+// as no hub.
 var runningHubScript = `f="$HOME/$1"
 [ -f "$f" ] || exit 0
 pid=$(tr -cd '0-9' < "$f")
 [ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ] || exit 0
-case "$(tr '\000' ' ' < "/proc/$pid/cmdline")" in
-*scion*" server "*) ;;
-*) exit 0 ;;
-esac
+` + scionServerTest + `
+then :; else exit 0; fi
 printf '%s\n' "$pid"
 tr '\000' '\n' < "/proc/$pid/cmdline"
 printf '%s\n' '--lever-env--'
@@ -631,7 +827,7 @@ func hubEnvPatterns() []string {
 
 // RunningHub reads the live hub's argv and pinned env from /proc in the jail.
 func (c *Client) RunningHub(ctx context.Context) (RunningHub, error) {
-	res, err := c.r.Run(ctx, nil, "sh", "-c", runningHubScript, "_", layout.ServerPIDRel)
+	res, err := c.r.Run(ctx, nil, "sh", "-c", runningHubScript, "_", layout.ServerPIDRel, layout.ScionBin)
 	if err != nil {
 		return RunningHub{}, fmt.Errorf("reading the running hub: %w", err)
 	}

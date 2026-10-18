@@ -9,79 +9,73 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/apply"
+	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/state"
 )
 
-// The broker's re-enrol bounce of the manager runs apply's resume checks: a
-// mount whose directory is gone refuses before; a tree mount from elsewhere
-// after the resume suspends the manager.
-func TestManagerResumeGuard(t *testing.T) {
-	mounts := []jail.Mount{
-		{Source: "/lever", Destination: "/workspace", RW: true},
-		{Source: "/lever/kb", Destination: "/workspace/kb"},
-	}
-	newDeps := func(problems []jail.LiveMountProblem) (apply.Deps, *proc.FakeRunner) {
-		f := proc.NewFakeRunner()
-		f.Script("scion", proc.Result{})
-		return apply.Deps{
-			Scion:                  scion.New(f, scion.Options{}),
-			InspectContainerMounts: func(context.Context, string) ([]jail.Mount, error) { return mounts, nil },
-			CheckLiveMounts: func(context.Context, string, []jail.LiveMount) ([]jail.LiveMountProblem, error) {
-				return problems, nil
-			},
-		}, f
-	}
-	suspended := func(f *proc.FakeRunner) bool {
-		for _, c := range f.Calls {
-			if len(c.Args) > 0 && c.Args[0] == "suspend" {
-				return true
-			}
-		}
-		return false
-	}
-
-	// The directory a record mount names is gone: refused before.
-	deps, _ := newDeps(nil)
+// The broker's bounce of the manager runs the manager's lifecycle: a check
+// that refuses (here a mount whose directory is gone) reads as the broker's
+// refusal, before any ticket is staged; an unknown change is refused.
+func TestManagerLifecycleMapsRefusals(t *testing.T) {
+	f := proc.NewFakeRunner()
+	f.Script("scion list", proc.Result{Stdout: `[{"slug":"assistant","phase":"suspended","containerStatus":"stopped"}]`})
 	app := &config.App{Name: "assistant", Tree: t.TempDir()}
-	if _, err := managerResumeGuard(app, deps, "/lever")(context.Background()); err == nil || !strings.Contains(err.Error(), "cannot be resumed") {
-		t.Fatalf("err = %v, want the gone directory refused before the bounce", err)
+	staged := false
+	d := apply.Deps{
+		Scion: scion.New(f, scion.Options{}), Log: func(string, ...any) {}, JailMount: "/lever",
+		ManagerLock:     apply.HeldManagerLock,
+		VerifyAgentRole: func(context.Context, string, string) error { return nil },
+		InspectContainerMounts: func(context.Context, string) ([]jail.Mount, error) {
+			return []jail.Mount{{Source: "/lever/kb", Destination: "/workspace/kb"}}, nil
+		},
+		CheckLiveMounts: func(context.Context, string, []jail.LiveMount) ([]jail.LiveMountProblem, error) { return nil, nil },
 	}
+	ensure := managerLifecycle(app, d)
+	_, err := ensure(context.Background(), broker.ManagerChange{Kind: broker.ManagerReenrol,
+		StageTicket: func(context.Context) error { staged = true; return nil }})
+	if !errors.Is(err, broker.ErrManagerRefused) || !strings.Contains(err.Error(), "cannot be resumed") || staged {
+		t.Fatalf("err = %v staged %v, want the gone directory refused before the stage", err, staged)
+	}
+	if _, err := ensure(context.Background(), broker.ManagerChange{Kind: 99}); err == nil {
+		t.Fatal("an unknown change was accepted")
+	}
+}
 
-	if err := os.Mkdir(filepath.Join(app.Tree, "kb"), 0o755); err != nil {
+// The broker takes the lifecycle lock without waiting: a held lock reads as
+// busy and names the holder; with the state directory inside the tree there
+// is no lock file.
+func TestManagerLockIsTheLifecycleLock(t *testing.T) {
+	root := t.TempDir()
+	app := &config.App{Name: "assistant", Tree: filepath.Join(root, "tree")}
+	st := state.State{Dir: filepath.Join(root, "state")}
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// Held: both halves pass, nothing suspended.
-	deps, f := newDeps(nil)
-	after, err := managerResumeGuard(app, deps, "/lever")(context.Background())
+	lock := managerLock(app, st)
+	release, err := lock("the broker's test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := after.After(context.Background()); err != nil || suspended(f) || !after.Verified() {
-		t.Fatalf("after = %v, suspended %v, verified %v", err, suspended(f), after.Verified())
+	if _, err := lock("a second taker"); !errors.Is(err, broker.ErrManagerBusy) {
+		t.Fatalf("held: %v", err)
 	}
-	// From elsewhere after the resume: refused, the manager suspended.
-	deps, f = newDeps([]jail.LiveMountProblem{{Target: "/workspace/kb", Reason: jail.LiveMountElsewhere}})
-	after, err = managerResumeGuard(app, deps, "/lever")(context.Background())
+	release()
+	again, err := lock("after release")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := after.After(context.Background()); err == nil || !strings.Contains(err.Error(), "is mounted from another place") || !suspended(f) {
-		t.Fatalf("after = %v, suspended %v", err, suspended(f))
+	again()
+	inTree := &config.App{Name: "assistant", Tree: root}
+	free := managerLock(inTree, st)
+	r1, err1 := free("x")
+	r2, err2 := free("y")
+	if err1 != nil || err2 != nil {
+		t.Fatalf("in the tree: %v %v", err1, err2)
 	}
-	// A failed resume whose container runs all the same is checked too.
-	deps, f = newDeps([]jail.LiveMountProblem{{Target: "/workspace/kb", Reason: jail.LiveMountElsewhere}})
-	after, err = managerResumeGuard(app, deps, "/lever")(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := after.AfterFailure(context.Background(), errors.New("hook failed")); err == nil || !strings.Contains(err.Error(), "hook failed") || !strings.Contains(err.Error(), "another place") || !suspended(f) {
-		t.Fatalf("after failure = %v, suspended %v", err, suspended(f))
-	}
-	// Unwired readers: refused before anything is resumed.
-	if _, err := managerResumeGuard(app, apply.Deps{}, "/lever")(context.Background()); err == nil {
-		t.Fatal("a guard without the mount readers must refuse")
-	}
+	r1()
+	r2()
 }

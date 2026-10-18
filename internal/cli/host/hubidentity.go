@@ -47,8 +47,8 @@ const hubCacheWait = 75 * time.Second
 // hubCachePoll is how often that wait asks again.
 const hubCachePoll = 5 * time.Second
 
-// markerSlack is how far before this step the hub may have stamped an admin
-// row and still count as created by it: guest and host clocks differ, and the
+// markerSlack is how far before this run's start the hub may have stamped an
+// admin row and still count as created by it: guest and host clocks differ, and the
 // signer only corrects for the offset read at the start of the run.
 const markerSlack = 2 * time.Minute
 
@@ -75,6 +75,11 @@ type hubIdentity struct {
 	keyFP     string
 	// guestNow is the hub's clock as the signer sees it.
 	guestNow func() time.Time
+	// runStart is guestNow when the apply began; zero when unknown. Steps
+	// before this one assert as lever-admin too (the scion-server step's
+	// broker check), so a new hub database can get lever-admin's row before
+	// this step starts.
+	runStart time.Time
 	reset    bool
 	// restartHub stops and starts the live hub and waits for its broker; only
 	// a pinned-off scion experiment found on needs it.
@@ -147,14 +152,17 @@ func (h *hubIdentity) run(ctx context.Context) error {
 			mode = state.HubModeMigrated
 		}
 	}
-	stepStart := h.guestNow()
+	runFrom := h.guestNow()
+	if !h.runStart.IsZero() && h.runStart.Before(runFrom) {
+		runFrom = h.runStart
+	}
 
 	admin, err := h.ensureAdmin(ctx, mode, &rec)
 	if err != nil {
 		return err
 	}
 	if found && rec.HubMarker != "" {
-		gone, err := h.markerGone(ctx, rec.HubMarker, admin, stepStart)
+		gone, err := h.markerGone(ctx, rec.HubMarker, admin, runFrom)
 		if err != nil {
 			return err
 		}
@@ -289,6 +297,7 @@ func (h *hubIdentity) run(ctx context.Context) error {
 	if !conduitOn {
 		h.revokeSSHTokens(ctx, mode)
 	}
+	h.revokeUnrecordedTokens(ctx, mode, rec.ControllerID)
 
 	// The PAT cannot register a project, so the link comes after the REST
 	// registration and the mint, and takes scion's already-linked path.
@@ -401,7 +410,7 @@ func (h *hubIdentity) waitAdminRow(ctx context.Context) (hubapi.User, error) {
 // markerGone reports positive evidence of a new hub database: the role list
 // answered without lever's role, and lever-admin's row was created by this
 // run. Anything less is not evidence and fails closed.
-func (h *hubIdentity) markerGone(ctx context.Context, marker string, admin hubapi.User, stepStart time.Time) (bool, error) {
+func (h *hubIdentity) markerGone(ctx context.Context, marker string, admin hubapi.User, runFrom time.Time) (bool, error) {
 	defs, err := h.admin.RoleDefinitions(ctx)
 	if err != nil {
 		return false, errHubIdentity("checking the hub marker: %w", err)
@@ -411,7 +420,7 @@ func (h *hubIdentity) markerGone(ctx context.Context, marker string, admin hubap
 			return false, nil
 		}
 	}
-	if admin.Created.IsZero() || admin.Created.Before(stepStart.Add(-markerSlack)) {
+	if admin.Created.IsZero() || admin.Created.Before(runFrom.Add(-markerSlack)) {
 		return false, errHubIdentity("the hub does not list lever's %s role %s, but lever-admin's row predates this run, so lever cannot tell a new hub "+
 			"database from a damaged one. If the hub database was reset on purpose, run `lever up --reset-hub-identity`", controllerRoleName, marker)
 	}

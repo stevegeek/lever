@@ -462,6 +462,10 @@ type App struct {
 	NestedVirt    bool           `yaml:"nested_virt"` // Lima-only: the manager container gets /dev/kvm (nested KVM guests). Linux hosts only.
 	CPUs          int            `yaml:"cpus"`        // Lima guest vCPUs; 0 = Lima default. Lima-only.
 	Memory        string         `yaml:"memory"`      // Lima guest memory (e.g. "24GiB"); empty = Lima default. Lima-only.
+	// HostSwap lets a Linux host swap the Lima VM's memory out. Unset, the
+	// VM starts in a systemd user scope with MemorySwapMax=0 where the host
+	// supports it. Lima-only.
+	HostSwap bool `yaml:"host_swap"`
 	// GuestKernel picks the Lima guest's Ubuntu kernel, "hwe" or "ga".
 	GuestKernel string `yaml:"guest_kernel"`
 	// GuestProfile "small" trims the Lima guest for a small host; see

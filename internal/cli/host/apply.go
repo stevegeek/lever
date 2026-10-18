@@ -949,6 +949,7 @@ func backendConfigFor(app *config.App, machine string) backend.Config {
 		CPUs:           app.CPUs,
 		Memory:         app.Memory,
 		NestedVirt:     app.NestedVirt,
+		HostSwap:       app.HostSwap,
 		GuestKernel:    app.EffectiveGuestKernel(),
 		GuestProfile:   app.EffectiveGuestProfile(),
 	}

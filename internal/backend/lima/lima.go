@@ -173,7 +173,11 @@ func (l *Lima) ensureVM(ctx context.Context, cfg backend.Config) error {
 	haLog := filepath.Join(l.instanceDir(inst), "ha.stderr.log")
 	s.TailFrom(func() (string, []string) { return haLog, lastLines(haLog, 15) })
 	stopWatch := watchLimaStage(ctx, haLog, s.Detail)
-	_, err = l.Runner().Run(ctx, nil, "limactl", "start", "--tty=false", l.Machine())
+	warn := cfg.Warn
+	if warn == nil {
+		warn = func(string, ...any) {}
+	}
+	err = l.startVM(ctx, cfg.HostSwap, l.instanceDir(inst), warn)
 	stopWatch()
 	if err != nil {
 		err = fmt.Errorf("limactl start: %w", err)

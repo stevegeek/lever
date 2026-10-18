@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -15,12 +14,7 @@ func (l *Lima) instanceDir(inst realizedInstance) string {
 	if inst.Dir != "" {
 		return inst.Dir
 	}
-	home := os.Getenv("LIMA_HOME")
-	if home == "" {
-		h, _ := os.UserHomeDir()
-		home = filepath.Join(h, ".lima")
-	}
-	return filepath.Join(home, l.Machine())
+	return InstanceDir(l.Machine())
 }
 
 const tailRead = 64 << 10

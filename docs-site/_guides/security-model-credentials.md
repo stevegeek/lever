@@ -89,8 +89,9 @@ The capability model itself — identities, minting, delegation, revocation — 
   handed reports a loopback address — the one enforcement point, fail-closed, so any future caller
   that binds the admin listener elsewhere is rejected rather than trusted. The jail reaches the
   broker only via the *separate* mTLS jail listener, never the admin port. The routes that write
-  host records for the operator (`lever msg send`'s operator note, the chat page's wake, the
-  remote proxy's agent-message match) are not on the admin port at all: they sit on a 0600 unix
+  host records for the operator or act for the operator (`lever msg send`'s operator note,
+  `lever worker resume`, the chat page's wake, the remote proxy's agent-message match) are not on
+  the admin port at all: they sit on a 0600 unix
   socket (`.lever-state/operator.sock`), and `ServeListeners` refuses any other listener type
   for it.
 - **`/bootstrap` is single-use.** The first manager-enrolment ticket latches the broker; every later

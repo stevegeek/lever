@@ -587,6 +587,8 @@ Every lever command that changes an instance holds one lock per instance
 detaches other terminals and stages the attach token. While one of them runs, another exits `6`,
 names the command that holds the lock (with its pid and start time), and changes nothing: an
 interactive command does not wait silently, since a new conversation can take minutes.
+The worker commands (`lever worker resume`, `lever worker purge`) and `lever msg send` take no
+lifecycle lock: the broker serializes what they do to one worker with that worker's own lock.
 
 `--wait <duration>` (for example `--wait 5m`) makes a command wait up to that long for the holder
 to finish instead, saying once what it waits for; when the time runs out it exits `6` as before.

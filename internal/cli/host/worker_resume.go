@@ -114,7 +114,7 @@ func newWorkerResumeCmd() *cobra.Command {
 				res.Phase = ref.Phase
 				return fail(ref, ref.Reason, workerResumeExit(ref.Reason))
 			case errors.As(err, &uerr):
-				return fail(fmt.Errorf("%w (%v); run `lever up`", errNoOperatorSocket, err), "no-operator-socket", exitOperatorSocketMissing)
+				return fail(fmt.Errorf("the broker did not answer on its operator socket (%v); it may be restarting under `lever up` or `lever reload`: try again, or run `lever up`", err), "no-operator-socket", exitOperatorSocketMissing)
 			case err != nil:
 				return fail(err, "", 1)
 			}

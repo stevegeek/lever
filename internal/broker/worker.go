@@ -834,9 +834,9 @@ func (b *Broker) resumeWorker(ctx context.Context, w http.ResponseWriter, spec W
 		return
 	}
 	defer unlock()
-	if actor == operatorActor && b.isRevoked(spec.Name) {
-		// Again under the lock: a revoke that landed while this resume waited
-		// for another must not get the worker a fresh ticket.
+	if b.isRevoked(spec.Name) {
+		// Under the lock, for every caller: a revoke that landed while this
+		// resume waited for another must not get the worker a fresh ticket.
 		b.audit("worker", actor, "deny", "resume "+spec.Name+": revoked")
 		refuse(w, ReasonRevoked, "worker "+spec.Name+" is revoked", http.StatusForbidden)
 		return

@@ -7,6 +7,17 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`lever-manager watch` no longer dies on a passing broker error (lever#233).** One failed poll
+  (for example a 502 "inbox unavailable" while the broker could not resolve the manager's agent
+  id) ended the watcher for good, and the manager stopped getting worker events without noticing.
+  A poll the broker does not answer, or answers with 5xx, 408 or 429, is now logged to stderr and
+  retried, waiting twice as long after each failure in a row, up to a minute, and the
+  `--interval` again once a poll succeeds. A 4xx refusal, a bad bootstrap or identity, a
+  certificate either side rejects, a body that does not decode, and an events-file error still
+  end the command. `--interval` below 1 is refused. JailABI 6.
+
 ## [0.42.0] - 2026-10-16
 
 ### Added

@@ -1,5 +1,5 @@
-// Package retry holds the bounded poll loop shared by the backends, the scion
-// client and the bridge.
+// Package retry holds the bounded poll loop shared by the backends and the
+// scion client.
 package retry
 
 import (

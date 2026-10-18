@@ -77,6 +77,15 @@ version bump moves the block under the new version heading.
 
 ### Fixed
 
+- **`lever-manager watch` no longer dies on a passing broker error (lever#233).** One failed poll
+  (for example a 502 "inbox unavailable" while the broker could not resolve the manager's agent
+  id) ended the watcher for good, and the manager stopped getting worker events without noticing.
+  A poll the broker does not answer, or answers with 5xx, 408 or 429, is now logged to stderr and
+  retried, waiting twice as long after each failure in a row, up to a minute, and the
+  `--interval` again once a poll succeeds. A 4xx refusal, a bad bootstrap or identity, a
+  certificate either side rejects, a body that does not decode, and an events-file error still
+  end the command. `--interval` below 1 is refused.
+
 - **No enrolment ticket for a manager record lever refuses to keep.** The mint step staged the
   manager's ticket in the tree before start-manager checked the record's stored role, so a record
   lever then refused (one a roles-aware scion reads as full authority) could still read a fresh
@@ -169,7 +178,7 @@ version bump moves the block under the new version heading.
 ### Upgrade
 
 - **Jail ABI 6.** `internal/scion`, which `lever-manager` imports, changed (the hub start and the
-  shared wait code); nothing the manager does with it changed. Rebuild the agent image
+  shared wait code), and so did `internal/bridge` (the watcher's retry, lever#233). Rebuild the agent image
   (`make lever-image` or `make lever-image-slim`, then any instance image built from it) and
   recreate the manager on it with `lever up --fresh --keep-conversation`. Doctor's *agent lever
   version* row says so.

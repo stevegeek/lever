@@ -199,28 +199,35 @@ func eventsForAgent(events []scion.Event, agentID string) []scion.Event {
 // goes on and the hub decides. The read has its own, shorter bound so a slow
 // list leaves time for the send.
 func (b *Broker) notRunningRefusal(ctx context.Context, actor, slug string, toManager bool) string {
+	refusal, _, _ := b.notRunningCheck(ctx, actor, slug, toManager)
+	return refusal
+}
+
+// notRunningCheck is notRunningRefusal with the refusal's machine-readable
+// reason (ReasonNoRecord or ReasonNotRunning) and the phase, a known label.
+func (b *Broker) notRunningCheck(ctx context.Context, actor, slug string, toManager bool) (refusal, reason, phase string) {
 	pctx, cancel := context.WithTimeout(ctx, cmp.Or(b.msgPhaseTimeout, msgPhaseTimeoutDefault))
 	phase, err := b.phaseOf(pctx, WorkerSpec{Name: slug})
 	cancel()
 	if err != nil {
 		b.audit("msg", actor, "error", "send->agent:"+slug+": phase: "+err.Error()+" (sending without the check)")
-		return ""
+		return "", "", ""
 	}
 	switch {
 	case phase == scion.PhaseRunning:
-		return ""
+		return "", "", phase
 	case toManager && phase == "":
-		return "the manager has no record on the hub; the operator starts it with `lever up`"
+		return "the manager has no record on the hub; the operator starts it with `lever up`", ReasonNoRecord, phase
 	case toManager:
-		return "the manager is not running (phase " + phase + "); the operator resumes it with `lever up`"
+		return "the manager is not running (phase " + phase + "); the operator resumes it with `lever up`", ReasonNotRunning, phase
 	case phase == "" && actor == operatorActor:
-		return "worker " + slug + " has no record on the hub (never started, or purged); ask the manager to start it (`lever-manager agent start " + slug + " --task \"…\"` in the manager's session)"
+		return "worker " + slug + " has no record on the hub (never started, or purged); ask the manager to start it (`lever-manager agent start " + slug + " --task \"…\"` in the manager's session)", ReasonNoRecord, phase
 	case phase == "":
-		return "worker " + slug + " has no record on the hub (never started, or purged); start it first: `lever-manager agent start " + slug + " --task \"…\"`"
+		return "worker " + slug + " has no record on the hub (never started, or purged); start it first: `lever-manager agent start " + slug + " --task \"…\"`", ReasonNoRecord, phase
 	case actor == operatorActor:
-		return "worker " + slug + " is not running (phase " + phase + "); ask the manager to resume it (`lever-manager agent resume " + slug + "` in the manager's session)"
+		return "worker " + slug + " is not running (phase " + phase + "); resume it with `lever worker resume " + slug + "`", ReasonNotRunning, phase
 	}
-	return "worker " + slug + " is not running (phase " + phase + "); resume it first: `lever-manager agent resume " + slug + "`"
+	return "worker " + slug + " is not running (phase " + phase + "); resume it first: `lever-manager agent resume " + slug + "`", ReasonNotRunning, phase
 }
 
 const msgPhaseTimeoutDefault = 5 * time.Second

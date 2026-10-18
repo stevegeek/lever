@@ -9,8 +9,9 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/brokerctl"
-	"github.com/stevegeek/lever/internal/httpjson"
+	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/wire"
 )
 
@@ -56,12 +57,18 @@ func hostMsgSend() *cobra.Command {
 				return fmt.Errorf("msg: %w; run `lever up` (or type into the session with `lever attach`)", errNoOperatorSocket)
 			}
 			var resp wire.OperatorNoteResponse
-			err = httpjson.Post(cmd.Context(), udsClient(sock), udsURL+wire.PathOperatorNote,
+			err = operatorPost(cmd.Context(), sock, wire.PathOperatorNote,
 				wire.OperatorNoteRequest{To: to, Body: strings.Join(args, " "), Interrupt: interrupt}, &resp)
 			if err != nil {
 				var uerr *url.Error
 				if errors.As(err, &uerr) {
 					return fmt.Errorf("msg: %w (%v); run `lever up` (or type into the session with `lever attach`)", errNoOperatorSocket, err)
+				}
+				// A recipient that is not running (or has no record) is its own
+				// exit code, so a host program can resume it and send again.
+				var ref *operatorRefusal
+				if errors.As(err, &ref) && (ref.Reason == broker.ReasonNotRunning || ref.Reason == broker.ReasonNoRecord) {
+					return cli.WithExitCode(fmt.Errorf("msg: %w (nothing was sent)", ref), exitWorkerNotRunning)
 				}
 				return fmt.Errorf("msg: %w", err)
 			}

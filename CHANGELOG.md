@@ -7,6 +7,35 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **`lever worker resume NAME [--json]`: resume a worker from the host (lever#235).** It resumes a
+  declared worker that is not running (suspended, stopped, completed, or in phase `error`, with a
+  forced resume) through the broker's operator socket and waits until it is live: the manager's
+  `agent resume` verb, with the same checks and per-worker lock, run by the host operator. A running
+  worker is left alone. It cannot resume the manager or start a worker with no record. Exit codes
+  `0`, `3`, `4`, `8`, `10`, `11`, `75` and `--json` reasons are in the CLI reference. Operator
+  socket only; no new authority for the manager or any worker. No Jail ABI change.
+- **Machine-readable refusal reasons (lever#239).** Worker refusals on the operator socket (and the
+  manager's worker resume) carry an `X-Lever-Reason` header, and `X-Lever-Phase` where the phase
+  matters, with stable names listed in the CLI reference. The text bodies are unchanged.
+
+### Changed
+
+- **`lever msg send` to a worker that is not running exits `9`** (it exited `1`), with nothing
+  sent, so a host program can resume the worker and send again. Its refusal text now names
+  `lever worker resume NAME` instead of asking the manager to resume the worker, and a broker
+  refusal is printed as the broker's text without the `POST …: status 409:` prefix. A manager
+  that is not running also exits `9`. `lever directive send` to a worker that is not running
+  names `lever worker resume NAME` the same way.
+
+### Deprecated
+
+- **The broker's `/operator/wake` route, for host programs.** Use `lever worker resume NAME`. The
+  route works exactly as before (the remote chat page uses it) and now answers with
+  `Deprecation: true` and a `Link` to `/operator/worker/resume`. It stays at least until the
+  release after this one; any change to it will be announced here.
+
 ## [0.42.0] - 2026-10-16
 
 ### Added

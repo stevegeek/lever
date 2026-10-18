@@ -104,7 +104,7 @@ func (b *Broker) identity(name string) (cn, slug string, isManager, ok bool) {
 func (b *Broker) runtimeReady(w http.ResponseWriter) bool {
 	if b.runtime == nil {
 		b.audit("worker", b.manager, "error", "runtime not wired")
-		http.Error(w, "worker dispatch unavailable", http.StatusBadGateway)
+		refuse(w, ReasonRuntimeUnavailable, "worker dispatch unavailable", http.StatusBadGateway)
 		return false
 	}
 	return true
@@ -185,7 +185,7 @@ func (b *Broker) lockWorkerOrRefuse(w http.ResponseWriter, ctx context.Context, 
 	unlock, err := b.lockWorker(ctx, name)
 	if err != nil {
 		b.audit("worker", actor, "error", verb+" "+name+": gave up waiting for another start/resume of it: "+err.Error())
-		http.Error(w, "busy: another start or resume of "+name+" is under way", http.StatusServiceUnavailable)
+		refuse(w, ReasonBusy, "busy: another start or resume of "+name+" is under way", http.StatusServiceUnavailable)
 		return nil, false
 	}
 	return unlock, true
@@ -552,7 +552,7 @@ func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec W
 		// worker is about to spend. Only wait.
 		if err := b.waitWorkerLive(ctx, spec); err != nil {
 			b.audit("worker", actor, "error", "resume "+spec.Name+" (already "+phase+"): "+err.Error())
-			http.Error(w, err.Error()+". "+workerPurgeHint(spec.Name), http.StatusBadGateway)
+			refuse(w, ReasonNotLive, err.Error()+". "+workerPurgeHint(spec.Name), http.StatusBadGateway)
 			return
 		}
 		b.audit("worker", actor, "allow", "resume "+spec.Name+" (already "+phase+")")
@@ -570,28 +570,31 @@ func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec W
 	if err := b.verifyStrictWorkspace(spec); err != nil {
 		if errors.Is(err, ErrSharedFolder) {
 			b.audit("worker", actor, "deny", "resume "+spec.Name+": "+err.Error())
-			http.Error(w, "forbidden: a shared folder of worker "+spec.Name+" is missing on the host or reached through a symbolic link; the record was kept", http.StatusForbidden)
+			refuse(w, ReasonWorkspaceUnsafe, "forbidden: a shared folder of worker "+spec.Name+" is missing on the host or reached through a symbolic link; the record was kept", http.StatusForbidden)
 			return
 		}
 		if errors.Is(err, fsutil.ErrEscapesTree) || errors.Is(err, ErrReadOnlyOverlap) {
 			b.audit("worker", actor, "deny", "resume "+spec.Name+": workspace dir: "+err.Error())
-			http.Error(w, "forbidden: worker workspace is reached through a symbolic link or overlaps a protected directory (manager.read_only or a shared folder); the record was kept", http.StatusForbidden)
+			refuse(w, ReasonWorkspaceUnsafe, "forbidden: worker workspace is reached through a symbolic link or overlaps a protected directory (manager.read_only or a shared folder); the record was kept", http.StatusForbidden)
 			return
 		}
 		b.audit("worker", actor, "error", "resume "+spec.Name+": workspace dir: "+err.Error())
 		if errors.Is(err, fs.ErrNotExist) {
-			http.Error(w, "worker "+spec.Name+"'s workspace directory "+spec.WorkspaceSubdir+" no longer exists on the host (the operator removed or moved it); the record was kept. "+
-				"Ask the operator to restore the directory, or to run `lever worker purge "+spec.Name+" --force` and dispatch it again", http.StatusConflict)
+			fix := "Ask the operator to restore the directory, or to run `lever worker purge " + spec.Name + " --force` and dispatch it again"
+			if actor == operatorActor {
+				fix = "Restore the directory, or run `lever worker purge " + spec.Name + " --force` and have the manager start it again"
+			}
+			refuse(w, ReasonWorkspaceMissing, "worker "+spec.Name+"'s workspace directory "+spec.WorkspaceSubdir+" no longer exists on the host (the operator removed or moved it); the record was kept. "+fix, http.StatusConflict)
 			return
 		}
-		http.Error(w, "workspace error", http.StatusInternalServerError)
+		refuse(w, ReasonRuntimeError, "workspace error", http.StatusInternalServerError)
 		return
 	}
 	// A resume recreates the container from the record's volumes, so a
 	// record holding access the config has withdrawn would get it back.
 	if err := b.checkSharedAccess(ctx, spec, true); err != nil {
 		b.audit("worker", actor, "deny", "resume "+spec.Name+": "+err.Error())
-		http.Error(w, "forbidden: "+sharedAccessHint(spec.Name, err)+"; the record was kept", http.StatusForbidden)
+		refuse(w, ReasonSharedAccess, "forbidden: "+sharedAccessHint(spec.Name, err)+"; the record was kept", http.StatusForbidden)
 		return
 	}
 	// Stage a fresh ticket BEFORE resuming: a worker past its leaf lifetime
@@ -600,7 +603,7 @@ func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec W
 	// Harmless when the leaf is still valid: the ticket ages out unspent.
 	if err := b.stageWorkerTicket(ctx, spec); err != nil {
 		b.audit("worker", actor, "error", "resume "+err.Error())
-		http.Error(w, "stage error", http.StatusInternalServerError)
+		refuse(w, ReasonRuntimeError, "stage error", http.StatusInternalServerError)
 		return
 	}
 	resume := b.runtime.Resume
@@ -617,17 +620,20 @@ func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec W
 		if scion.IsRefusedByHub(err) {
 			// scion folds an authorization denial and a transitional phase
 			// into one 409, so this says nothing about the worker's state.
-			http.Error(w, "the hub refused to resume worker "+spec.Name+" (phase "+phase+"); its record was kept, nothing was deleted. "+
-				"The record may be in a transitional phase: check `lever-manager agent list` and try again. "+
-				"If the refusal persists, the operator should run `lever doctor`.", http.StatusConflict)
+			next := "The record may be in a transitional phase: check `lever-manager agent list` and try again. " +
+				"If the refusal persists, the operator should run `lever doctor`."
+			if actor == operatorActor {
+				next = "The record may be in a transitional phase: try again shortly. If the refusal persists, run `lever doctor`."
+			}
+			refusePhase(w, ReasonHubRefused, phase, "the hub refused to resume worker "+spec.Name+" (phase "+phase+"); its record was kept, nothing was deleted. "+next, http.StatusConflict)
 			return
 		}
-		http.Error(w, "runtime error: worker "+spec.Name+" (phase "+phase+") did not resume. "+workerPurgeHint(spec.Name), http.StatusBadGateway)
+		refusePhase(w, ReasonRuntimeError, phase, "runtime error: worker "+spec.Name+" (phase "+phase+") did not resume. "+workerPurgeHint(spec.Name), http.StatusBadGateway)
 		return
 	}
 	if err := b.waitWorkerLive(ctx, spec); err != nil {
 		b.audit("worker", actor, "error", "resume "+spec.Name+": "+err.Error())
-		http.Error(w, err.Error()+". "+workerPurgeHint(spec.Name), http.StatusBadGateway)
+		refuse(w, ReasonNotLive, err.Error()+". "+workerPurgeHint(spec.Name), http.StatusBadGateway)
 		return
 	}
 	b.resetReenrolTries(spec.Name)
@@ -815,15 +821,29 @@ func (b *Broker) handleWorkerResume(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	ctx := r.Context()
-	unlock, ok := b.lockWorkerOrRefuse(w, ctx, b.manager, "resume", spec.Name)
+	b.resumeWorker(r.Context(), w, spec, b.manager)
+}
+
+// resumeWorker is the resume verb after its caller is authorized: the
+// manager's /worker/resume and the operator's `lever worker resume` share it,
+// so both take the worker's lock and the same checks. actor names the caller
+// in the audit lines and picks the no-record hint.
+func (b *Broker) resumeWorker(ctx context.Context, w http.ResponseWriter, spec WorkerSpec, actor string) {
+	unlock, ok := b.lockWorkerOrRefuse(w, ctx, actor, "resume", spec.Name)
 	if !ok {
 		return
 	}
 	defer unlock()
+	if actor == operatorActor && b.isRevoked(spec.Name) {
+		// Again under the lock: a revoke that landed while this resume waited
+		// for another must not get the worker a fresh ticket.
+		b.audit("worker", actor, "deny", "resume "+spec.Name+": revoked")
+		refuse(w, ReasonRevoked, "worker "+spec.Name+" is revoked", http.StatusForbidden)
+		return
+	}
 	if err := b.checkAgentRole(ctx, spec.Name); err != nil {
-		b.audit("worker", b.manager, "deny", "resume "+spec.Name+": "+err.Error())
-		http.Error(w, err.Error(), http.StatusConflict)
+		b.audit("worker", actor, "deny", "resume "+spec.Name+": "+err.Error())
+		refuse(w, ReasonRoleMismatch, err.Error(), http.StatusConflict)
 		return
 	}
 	// scion's resume of a missing record CREATES the agent from the project
@@ -831,22 +851,25 @@ func (b *Broker) handleWorkerResume(w http.ResponseWriter, r *http.Request) {
 	// harness, image, model or role. Refuse it and name start instead.
 	phase, err := b.phaseOf(ctx, spec)
 	if err != nil {
-		b.audit("worker", b.manager, "error", "resume "+spec.Name+": phase: "+err.Error())
-		http.Error(w, "runtime error", http.StatusBadGateway)
+		b.audit("worker", actor, "error", "resume "+spec.Name+": phase: "+err.Error())
+		refuse(w, ReasonRuntimeError, "runtime error", http.StatusBadGateway)
 		return
 	}
 	if phase == "" {
-		b.audit("worker", b.manager, "deny", "resume "+spec.Name+": no record")
-		http.Error(w, "worker "+spec.Name+" has no record on the hub (never started, purged, or a new jail); "+
-			"start it instead: `lever-manager agent start "+spec.Name+" --task \"…\"`", http.StatusNotFound)
+		b.audit("worker", actor, "deny", "resume "+spec.Name+": no record")
+		hint := "start it instead: `lever-manager agent start " + spec.Name + " --task \"…\"`"
+		if actor == operatorActor {
+			hint = "ask the manager to start it (`lever-manager agent start " + spec.Name + " --task \"…\"` in the manager's session)"
+		}
+		refuse(w, ReasonNoRecord, "worker "+spec.Name+" has no record on the hub (never started, purged, or a new jail); "+hint, http.StatusNotFound)
 		return
 	}
 	if phase == scion.PhaseRunning {
-		b.audit("worker", b.manager, "allow", "resume "+spec.Name+": already running")
+		b.audit("worker", actor, "allow", "resume "+spec.Name+": already running")
 		writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 		return
 	}
-	b.resumeRecord(ctx, w, spec, phase, b.manager)
+	b.resumeRecord(ctx, w, spec, phase, actor)
 }
 
 func (b *Broker) checkAgentRole(ctx context.Context, agent string) error {

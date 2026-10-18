@@ -128,10 +128,10 @@ func (b *Broker) admitOrRefuse(ctx context.Context, w http.ResponseWriter, actor
 		if actor != b.manager {
 			msg = "busy: too many workers are running"
 		}
-		http.Error(w, msg, http.StatusConflict)
+		refuse(w, ReasonWorkerCap, msg, http.StatusConflict)
 		return nil, false
 	}
 	b.audit("worker", actor, "error", verb+" "+name+": "+err.Error())
-	http.Error(w, "runtime error", http.StatusBadGateway)
+	refuse(w, ReasonRuntimeError, "runtime error", http.StatusBadGateway)
 	return nil, false
 }

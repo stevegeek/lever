@@ -114,6 +114,42 @@ Leave `recyclable` off for a worker whose conversation is worth keeping: without
 discard a record (`lever worker purge NAME --force`). `lever doctor`'s *worker recycle* row lists
 the recyclable workers.
 
+## Driving workers from a host program
+
+A program on the host (a job runner, a cron script) can drive long-lived workers without the
+manager. Everything goes through the broker's operator socket, which only the host user can reach,
+so it gives no agent anything new:
+
+- `lever worker resume NAME` brings a worker that is not running back up and waits until it is live.
+  Run it after `lever stop` and `lever up` (which resumes the manager, not the workers), or whenever
+  a send is refused with exit `9`. It is a no-op for a running worker. It does not start a worker
+  that has no record (exit `8`): the manager starts it.
+- `lever msg send "…" --to NAME` gives a running worker its next piece of work. The worker verifies
+  it as an `operator-note`. Exit `9` means the worker was not running and nothing was sent.
+
+Branch on exit codes or on `--json`'s `reason`, never on the text
+([the exit codes](/reference/cli/#lever-worker-resume-exit-codes)). A typical loop:
+
+```sh
+lever worker resume fwK --json || exit $?   # 75: busy, try again later; 8: ask the manager to start it
+lever msg send "job 42 ready at jobs/42" --to fwK
+```
+
+Two things to know about sends:
+
+- The worker reads a message as its next turn. A worker in the middle of a turn gets the text typed
+  into Claude Code's input, where it waits until the turn ends.
+- scion delivers messages sent within about 2 seconds of each other as one delivery. Each note
+  keeps its own marker and ref, and the worker's verify returns one entry per note, so none is
+  lost, but space notes out if each should be its own turn.
+
+**`/operator/wake` is deprecated for host programs.** It is the remote chat page's route (it takes
+the chat login and tier, and lets a contact wake only a suspended worker). It keeps working as
+before, and now answers with a `Deprecation: true` header naming `/operator/worker/resume` as its
+successor. A program that called it directly should run `lever worker resume NAME` instead. The
+route may become internal to the remote proxy, with its body changed, no sooner than one release
+after `lever worker resume` ships, and the CHANGELOG will say so.
+
 ## Where the logs are
 
 All host-side state lives in `.lever-state/` at the instance root:

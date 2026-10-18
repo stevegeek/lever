@@ -18,6 +18,16 @@ version bump moves the block under the new version heading.
   and trying again 10 minutes later. Either one starts nothing when the jail is not up once it has
   the lock (after a `lever stop` it waited behind, say): it exits as "not running".
 
+- **Recent activity on the chat page (lever#232).** An operator's chat has a new header button
+  (the pulse line) that opens a read-only panel with the last lines of the agent's terminal, so a
+  phone shows what a "working" agent is doing without the hub's terminal view, which cannot scroll
+  back on a touch screen. The proxy runs one fixed `tmux capture-pane` through the hub's exec
+  route with the operator login's own hub session (the `agent.attach` the Terminal link already
+  uses), cleans the text of escape sequences and control and format characters, and bounds it to 400 lines and
+  64 KiB; the page writes it as text. Contacts get no button, and the route
+  (`POST /lever/api/agents/<name>/activity`) refuses them; it takes the page's own origin, a
+  running agent, and one read per agent every 2 seconds.
+
 ### Changed
 
 - **`lever up` applies config changes: every `up` runs the whole bring-up, as `lever apply` does,

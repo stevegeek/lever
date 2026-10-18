@@ -27,8 +27,9 @@ import (
 //     learns of an agent outside its lists.
 //   - lever serves only fixed bytes: embedded files, a manifest per tier and
 //     the agent list (config, hub records reduced to fixed words, cleaned
-//     labels). The page writes hub data as text only, and its CSP allows no
-//     inline script.
+//     labels), and to an operator an agent's cleaned terminal text
+//     (activity.go). The page writes hub and agent data as text only, and its
+//     CSP allows no inline script.
 //
 // The whole /lever/ prefix is lever's: an unknown path under it is a 404,
 // never forwarded, so a route added here cannot shadow a hub route. The
@@ -127,6 +128,8 @@ type chatPage struct {
 	// is GET only.
 	hubGet  func(ctx context.Context, cookie, path string, out any) (int, error)
 	hubBody func(ctx context.Context, cookie, path string) (int, []byte, error)
+	// hubExec runs the one activity command (activity.go).
+	hubExec func(ctx context.Context, cookie, id string) (int, execAnswer, error)
 
 	mu      sync.Mutex
 	users   map[string]contactUser  // login → hub user id, for the agent list
@@ -137,7 +140,7 @@ type chatPage struct {
 // newChatPage panics on a missing embedded file: that is a build fault.
 func newChatPage(cfg Config) *chatPage {
 	p := &chatPage{csp: chatCSPFor(cfg.ServeHost, cfg.Push != nil), whoAmI: hubWhoAmI(cfg),
-		hubGet: hubGetJSON(cfg), hubBody: hubGetBody(cfg, maxHistoryAnswer), files: map[string]chatFile{}, manifests: map[string]chatFile{}}
+		hubGet: hubGetJSON(cfg), hubBody: hubGetBody(cfg, maxHistoryAnswer), hubExec: hubExecActivity(cfg), files: map[string]chatFile{}, manifests: map[string]chatFile{}}
 	file := func(contentType string, body []byte) chatFile {
 		sum := sha256.Sum256(body)
 		return chatFile{contentType: contentType, body: body, etag: `"` + hex.EncodeToString(sum[:16]) + `"`}
@@ -269,6 +272,10 @@ func (g *gate) serveChatPage(w http.ResponseWriter, r *http.Request, line *Audit
 	}
 	if p == newConvPath {
 		g.serveNewConversation(w, r, line, v)
+		return true
+	}
+	if name, ok := activityTarget(p); ok {
+		g.serveActivity(w, r, line, v, name, cookie)
 		return true
 	}
 	if name, under := wakeTarget(p); under {

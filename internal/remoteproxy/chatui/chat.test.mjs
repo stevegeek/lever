@@ -30,6 +30,7 @@ function hubWith(parts = {}) {
     viewFiles: () => ({ status: 200, body: { files: [] } }),
     transcribe: () => ({ status: 200, body: { text: 'hello from the mic' } }),
     speak: (body) => ({ status: 200, audio: `audio:${body.text}` }),
+    activity: () => ({ status: 200, body: { text: 'line 1\nline 2' } }),
     ...parts,
   };
   const fn = (method, path, body) => {
@@ -38,6 +39,7 @@ function hubWith(parts = {}) {
     if (path.startsWith('/lever/api/contacts/')) return h.transcript(path);
     if (path === '/lever/api/agents') return h.agents();
     if (path.startsWith('/lever/api/agents/') && path.endsWith('/wake')) return h.wake(path);
+    if (path.startsWith('/lever/api/agents/') && path.endsWith('/activity')) return h.activity(path, method);
     if (path === '/lever/api/new-conversation') return h.newConversation(body);
     if (path.startsWith('/lever/api/files/')) return method === 'POST' ? h.upload(body, path) : h.files(path);
     if (path === '/lever/api/voice/transcribe') return h.transcribe(body, path);
@@ -2889,4 +2891,83 @@ test('auto-send: after a send with no clear answer, or with the chat unable to t
   await tick(20);
   assert.equal(sends(env).length, 0);
   assert.equal(env.els.text.value, 'hi');
+});
+
+const activityCalls = (env) => env.calls.filter((c) => c.path.endsWith('/activity'));
+
+test('activity: an operator gets the button for a message agent with a record, nothing else does', async () => {
+  let env = await loadChat(hubWith());
+  assert.equal(env.els.activity.hidden, false);
+  assert.equal(env.els.activitypanel.hidden, true, 'closed until asked');
+  assert.equal(activityCalls(env).length, 0, 'nothing is read until asked');
+  env = await loadChat(hubWith({ agents: () => roster([BOSS()], { tier: 'contact' }) }));
+  assert.equal(env.els.activity.hidden, true, 'a contact gets no button');
+  env = await loadChat(hubWith({ agents: () => roster([BOSS({ access: 'see' })]) }));
+  assert.equal(env.els.activity.hidden, true, 'a see-only agent');
+  env = await loadChat(hubWith({ agents: () => roster([BOSS({ id: '', conversation: '' })]) }));
+  assert.equal(env.els.activity.hidden, true, 'no hub record');
+  env = await load(hubWith());
+  assert.equal(env.els.activity.hidden, true, 'no chat open');
+});
+
+test('activity: the button reads the terminal with a POST and writes it as text', async () => {
+  const evil = '<img src=x onerror=alert(1)>\u001b[31mred\u0007\u202eflip';
+  const env = await loadChat(hubWith({ activity: () => ({ status: 200, body: { text: evil } }) }));
+  env.els.activity.dispatch('click');
+  await tick(5);
+  const calls = activityCalls(env);
+  assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), ['POST /lever/api/agents/boss/activity']);
+  assert.equal(env.els.activitypanel.hidden, false);
+  assert.equal(env.els.activity.attrs['aria-expanded'], 'true');
+  assert.equal(env.els.activitytext.hidden, false);
+  assert.equal(env.els.activitytext.children.length, 0, 'text, never nodes');
+  assert.equal(env.els.activitytext.textContent, '<img src=x onerror=alert(1)>[31mredflip');
+  assert.equal(env.els.activitynote.hidden, true);
+  assert.notEqual(env.els.activitywhen.textContent, '');
+  env.els.activityreload.dispatch('click');
+  await tick(5);
+  assert.equal(activityCalls(env).length, 2, 'read again on demand');
+  env.els.activity.dispatch('click');
+  assert.equal(env.els.activitypanel.hidden, true);
+  assert.equal(env.els.activity.attrs['aria-expanded'], 'false');
+  assert.equal(env.els.activitytext.textContent, '', 'closing clears the text');
+});
+
+test('activity: refusals are fixed words, never the answer\'s text', async () => {
+  for (const [res, want] of [
+    [{ status: 409, body: { error: 'not-running', state: 'suspended' } }, 'The terminal cannot be read: boss is not running (asleep).'],
+    [{ status: 409, body: { error: 'not-running', state: '<b>x</b>' } }, 'The terminal cannot be read: boss is not running (unknown).'],
+    [{ status: 429, body: { error: 'rate-limited' } }, 'The terminal cannot be read: it was read a moment ago; try again in a few seconds.'],
+    [{ status: 502, body: { error: 'too-large' } }, 'The terminal cannot be read: the terminal holds too much to show; open the Terminal.'],
+    [{ status: 200, body: { text: 7 } }, 'The terminal cannot be read: request failed (HTTP 200).'],
+    [{ down: true }, 'The terminal cannot be read: cannot reach the server.'],
+  ]) {
+    const env = await loadChat(hubWith({ activity: () => res }));
+    env.els.activity.dispatch('click');
+    await tick(5);
+    assert.equal(env.els.activitynote.textContent, want);
+    assert.equal(env.els.activitytext.hidden, true);
+  }
+  const env = await loadChat(hubWith({ activity: () => ({ status: 200, body: { text: '' } }) }));
+  env.els.activity.dispatch('click');
+  await tick(5);
+  assert.equal(env.els.activitynote.textContent, 'The terminal is empty.');
+});
+
+test('activity: an answer for another chat is dropped, and the panel closes with the chat', async () => {
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const env = await loadChat(hubWith({ agents: () => roster([BOSS(), A('w1')]), activity: async () => {
+    await gate;
+    return { status: 200, body: { text: 'boss output' } };
+  } }));
+  env.els.activity.dispatch('click');
+  await tick(1);
+  env.els.back.dispatch('click');
+  assert.equal(env.els.activity.hidden, true, 'no chat, no button');
+  assert.equal(env.els.activitypanel.hidden, true);
+  release();
+  await tick(5);
+  assert.equal(env.els.activitytext.textContent, '');
+  assert.equal(env.els.activitypanel.hidden, true);
 });

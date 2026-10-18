@@ -156,7 +156,7 @@ test('the chat header controls are named icons', () => {
   const html = readFileSync(new URL('./chat.html', import.meta.url), 'utf8');
   const header = /<section id="pane-chat"[\s\S]*?<header>([\s\S]*?)<\/header>/.exec(html)[1];
   for (const [id, tag, name] of [['back', 'button', 'Back to the agent list'], ['refresh', 'button', 'Refresh'], ['newconv', 'button', 'New conversation'],
-    ['files', 'button', 'Files'], ['settings', 'button', 'Settings'], ['terminal', 'a', 'Terminal']]) {
+    ['activity', 'button', 'Recent activity'], ['files', 'button', 'Files'], ['settings', 'button', 'Settings'], ['terminal', 'a', 'Terminal']]) {
     const m = new RegExp(`<${tag} id="${id}"([^>]*)>([\\s\\S]*?)</${tag}>`).exec(header);
     assert.ok(m, id);
     assert.match(m[1], new RegExp(`aria-label="${name}"`), `${id} aria-label`);
@@ -165,6 +165,7 @@ test('the chat header controls are named icons', () => {
     assert.match(m[2], /^<svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false">(<path d="[^"<>]+"\/>)+<\/svg>$/, `${id}: one hidden icon, no text`);
   }
   assert.match(header, /<button id="files"[^>]*aria-controls="filespanel" aria-expanded="false"/);
+  assert.match(header, /<button id="activity"[^>]*aria-controls="activitypanel" aria-expanded="false"/);
   assert.match(header, /<button id="settings"[^>]*aria-controls="settingspanel" aria-expanded="false"/);
   assert.match(css, /nav\.tools \{ flex: none;/, 'the controls never shrink; the name gives way');
 });

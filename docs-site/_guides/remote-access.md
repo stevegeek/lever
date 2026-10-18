@@ -620,6 +620,8 @@ resolve your hub user / `remote-wake` and `deny-wake` for a [wake](#waking-a-wor
 `reason` word on a refusal, and `remote-wake-result` for the broker's late answer /
 `remote-new-conversation`, `deny-new-conversation` and `remote-new-conversation-result` for a
 [new conversation](#a-new-conversation-for-the-manager) /
+`agent-activity` and `deny-agent-activity` for [recent activity](#recent-activity), with an `agent`
+field and a `reason` word on a refusal /
 `operator-view` and `deny-operator-view` for the [operator's view of contact
 conversations](#the-operators-view-of-contact-conversations), with `contact`, `agent` and `count`
 fields and a `reason` word on a refusal / the `push-*` and `deny-push` lines of
@@ -864,11 +866,14 @@ is given and nothing else.
   agent, for the times you need Claude Code itself; **Console** opens the hub's full web UI,
   which stays at its own paths (`/agents`, `/chat`, ...). Only `/` leads to the chat page. The
   manager's chat has a **New conversation** button (the speech bubble with a plus)
-  ([below](#a-new-conversation-for-the-manager)).
+  ([below](#a-new-conversation-for-the-manager)), and every chat a **Recent activity** button
+  (the pulse line) that shows the last lines of the agent's terminal
+  ([below](#recent-activity)).
 - **A [contact](#contacts-chat-only-logins)** sees the agents of its entry: those in `agents:` it
   may message, those in `see:` it may only see (name, label and state, greyed as "view only";
   no history, no input). An agent in neither list never appears: not its name, its id, or its
-  conversation. A contact gets no Terminal and no Console link, and no New conversation button.
+  conversation. A contact gets no Terminal and no Console link, no New conversation button and no
+  Recent activity.
 
 The list comes in this order: the manager (when the login has it), then the agents it may
 message in config order, then the see-only agents. Each row shows the agent's name, then its
@@ -965,6 +970,44 @@ a line in the [audit log](#audit-log) (`remote-new-conversation` or `deny-new-co
 reason word; `remote-new-conversation-result` for the outcome when it comes after the page's
 answer).
 
+### Recent activity
+
+On a phone the hub's terminal view does not scroll back, so the chip's "working" says little about
+what the agent is doing. An operator's chat has a **Recent activity** button (the pulse line,
+beside Files). It opens a panel under the header with the last lines of the agent's Claude Code
+pane as plain text, at most about half the screen tall, scrolled to the newest line; the text
+wraps to the screen and scrolls in its own box. **Read again** reads it once more. Nothing is read
+until you open the panel, and nothing refreshes on its own. The panel is read only: it sends no
+key to the agent.
+
+The route (`POST /lever/api/agents/<name>/activity`) is accepted only:
+
+- from an operator login, for the manager or a configured worker; a contact, a see-only agent, a
+  hidden agent and a name that does not exist all get the same 403, and a contact's page never
+  shows the button;
+- from the page itself (the same `Origin` and `Sec-Fetch-Site` rule as the wake);
+- while the agent is running (409 with its state otherwise);
+- once every 2 seconds per agent, across all logins, and at most 2 at a time (429 with
+  `Retry-After`).
+
+The proxy asks the hub to run one fixed command in the agent's container,
+`tmux capture-pane -p -J -t scion:agent -S -200` (the last 200 rows of history and the screen, no
+escape sequences), through the hub's exec route, with your login's own hub session. That route
+needs `agent.attach`, which the same login already uses for the Terminal link, so the panel adds
+nothing your login could not already do; a contact's hub role has no `agent.attach`. Nothing from
+the request goes into the command. The command runs as the agent's own user, the one its session
+runs as.
+
+What the pane shows is the agent's own text, so the proxy cleans it before the page sees it: it
+removes escape sequences (none ever runs past its line), control characters (a tab and a line
+break stay) and the invisible format characters (bidi, zero-width, line separators) that could
+make one line read as another, drops blank lines at the ends,
+and keeps the last 400 lines, each at most 2,000 characters, 64 KiB in all. A hub answer over
+1 MiB is refused ("too much to show"; open the Terminal). The page cleans the text again and
+writes it as text, never as markup; a link or a fake prompt in it is just characters. Each read
+is a line in the [audit log](#audit-log) (`agent-activity`, or `deny-agent-activity` with a reason
+word), naming the agent but never holding the text.
+
 ### Labels
 
 A label is a short text the manager keeps beside a worker's name, for example the address a deal
@@ -1015,6 +1058,7 @@ but never replaces the name.
 The proxy answers these itself and forwards none of them to the hub: `GET /` (a redirect to
 `/lever/chat`), `/lever/chat`, its `.css` and two `.js` files, the app manifest and icons,
 `GET /lever/api/agents` (the list), `POST /lever/api/agents/<name>/wake`,
+`POST /lever/api/agents/<name>/activity`,
 `POST /lever/api/new-conversation`, the operator's
 `/lever/api/contacts` routes ([below](#the-operators-view-of-contact-conversations)), and, while
 their feature is on, the push routes and `/lever/sw.js` ([Notifications](#notifications)) and

@@ -311,3 +311,53 @@ textarea {
   border-radius: 50%;
   background: var(--mine);
 }
+/* Recent activity: a panel under the chat header, never taller than about
+   half the screen, so the chat stays in view; the terminal text scrolls in
+   its own box and wraps to the screen's width. */
+#activity[aria-expanded="true"] { background: var(--mine); border-color: var(--mine); color: var(--mine-text); }
+.activity {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  max-height: 55dvh;
+  padding: 8px max(16px, env(safe-area-inset-right)) 10px max(16px, env(safe-area-inset-left));
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.activityhead { display: flex; align-items: center; gap: 8px; max-width: 760px; width: 100%; margin: 0 auto 6px; }
+.activityhead h2 { margin: 0; font-size: 14px; font-weight: 600; }
+.activitywhen { flex: 1; min-width: 0; font-size: 12px; color: var(--muted); }
+#activityreload {
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+#activityreload:disabled { opacity: .5; cursor: default; }
+.activitynote { max-width: 760px; width: 100%; margin: 2px auto 6px; font-size: 13px; color: var(--muted); }
+.activitytext {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-width: 760px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 8px 10px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: 12px/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 4;
+}
+@media (min-width: 720px) {
+  .activitytext { font-size: 13px; }
+}

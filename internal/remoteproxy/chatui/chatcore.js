@@ -704,3 +704,48 @@ export function pickVoice(voices, savedURI, lang) {
     (want && local.find((v) => str(v.lang).toLowerCase().split('-')[0] === want)) ||
     local[0];
 }
+
+// Recent activity (POST /lever/api/agents/<name>/activity): the last lines of
+// an agent's terminal pane, the operator's only. The proxy cleans the text;
+// the page cleans it again and writes it as text.
+export const ACTIVITY_MAX = 64 * 1024;
+
+export function activityPath(name) {
+  return `/lever/api/agents/${encodeURIComponent(str(name))}/activity`;
+}
+
+// activityOffered: an operator, an agent it messages, with a hub record.
+export function activityOffered(list, a) {
+  return !!(list && list.tier === 'operator' && a && a.access === 'message' && a.id);
+}
+
+// activityText is {text, truncated}, or null when body is not an answer.
+// Control and format characters go (a tab and a line break stay), and the text
+// keeps its last ACTIVITY_MAX characters.
+export function activityText(body) {
+  if (!body || typeof body !== 'object' || typeof body.text !== 'string') return null;
+  let text = body.text.replace(/\r/g, '').replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200b\u200e\u200f\u2028-\u202e\u2060-\u2069\ufeff\ufff9-\ufffb\p{Cf}]/gu, '');
+  let truncated = body.truncated === true;
+  if (text.length > ACTIVITY_MAX) {
+    text = text.slice(text.length - ACTIVITY_MAX);
+    // Never start on the second half of a surrogate pair.
+    if (/^[\udc00-\udfff]/.test(text)) text = text.slice(1);
+    truncated = true;
+  }
+  return { text, truncated };
+}
+
+const ACTIVITY_WORDS = {
+  'not-allowed': 'this login may not read the terminal',
+  'rate-limited': 'it was read a moment ago; try again in a few seconds',
+  'too-large': 'the terminal holds too much to show; open the Terminal',
+  'hub-refused': 'the hub refused the read',
+  unavailable: 'the terminal cannot be read right now',
+  origin: 'the request did not come from this page',
+};
+
+export function activityErrorText(status, body, name) {
+  const word = body && typeof body === 'object' ? str(body.error) : '';
+  if (word === 'not-running') return `${name} is not running (${chipText({ state: str(body.state) })})`;
+  return Object.hasOwn(ACTIVITY_WORDS, word) ? ACTIVITY_WORDS[word] : errorText(status, body);
+}

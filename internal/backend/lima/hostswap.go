@@ -136,7 +136,7 @@ func (l *Lima) startVM(ctx context.Context, hostSwap bool, instDir string, warn 
 	}
 	if err == nil {
 		if s, serr := ReadHostSwap(instDir); serr == nil && !s.NoSwap() {
-			warn("jail: warning: the VM's qemu (pid %d) is not in a cgroup with memory.swap.max=0 (%s); the host can swap the VM's memory out (`lever doctor`, row \"VM host swap\")", s.PID, s.describeLimit())
+			warn("jail: warning: the VM's qemu (pid %d) is not in a cgroup with memory.swap.max=0 (%s); the host can swap the VM's memory out (`lever doctor`, row \"VM host swap\")", s.PID, s.Limit())
 		}
 	}
 	return err
@@ -158,7 +158,8 @@ type HostSwap struct {
 // NoSwap reports whether the kernel keeps qemu's memory out of swap.
 func (s HostSwap) NoSwap() bool { return s.SwapMax == "0" }
 
-func (s HostSwap) describeLimit() string {
+// Limit renders SwapMax and the cgroup it was read for.
+func (s HostSwap) Limit() string {
 	switch {
 	case s.SwapMax == "":
 		return "memory.swap.max unreadable"

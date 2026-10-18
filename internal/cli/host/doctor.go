@@ -3,11 +3,13 @@ package host
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/backend/lima"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
@@ -208,6 +210,26 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 				p, err = readGuestBootProbe(ctx, jr)
 			}
 			return checkLastGuestBoot(app.Backend, state.GuestLogs(), p, err)
+		},
+		func() checkResult {
+			var s lima.HostSwap
+			var err error
+			if app.Backend == config.BackendLima && runtime.GOOS == "linux" {
+				var machine string
+				if m, ok := b.(interface{ Machine() string }); ok {
+					machine = m.Machine()
+				}
+				s, err = readVMHostSwap(machine)
+			}
+			return checkVMHostSwap(app, runtime.GOOS, s, err)
+		},
+		func() checkResult {
+			var p asyncPFProbe
+			var err error
+			if app.Backend == config.BackendLima {
+				p, err = readAsyncPFProbe(ctx, jr)
+			}
+			return checkGuestAsyncPF(app.Backend, p, err)
 		},
 		func() checkResult {
 			return checkScionTelemetry(ctx, app.EffectiveScionTelemetry(), readJailScionSettings(jr), b.MountDest(), app.Name, listAgents, readContainerEnv)

@@ -13,6 +13,7 @@ import (
 	"github.com/stevegeek/lever/internal/backend"
 	"github.com/stevegeek/lever/internal/backend/backendtest"
 	"github.com/stevegeek/lever/internal/backend/common"
+	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/provision/webassets"
 )
@@ -701,7 +702,9 @@ func TestEnsureUpNestedVirtUnknownLeavesGuest(t *testing.T) {
 		t.Fatalf("EnsureUp: %v", err)
 	}
 	for _, c := range f.Calls {
-		argv := strings.Join(c.Args, " ")
+		// The crash-recovery script's no-kvmapf is a guest kernel parameter,
+		// not the nested-virt setup.
+		argv := strings.ReplaceAll(strings.Join(c.Args, " "), guest.NoKVMAPFCmdline, "")
 		// The warm-path probe reads the kvm state; it changes nothing.
 		if strings.Contains(argv, "kvm") && !strings.Contains(argv, "lever-probe") {
 			t.Fatalf("EnsureUp touched the nested-virt setup: %v", c.Args)

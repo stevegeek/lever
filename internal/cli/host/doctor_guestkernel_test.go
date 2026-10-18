@@ -18,6 +18,8 @@ sysctl.kernel.panic=10
 sysctl.kernel.softlockup_panic=1
 sysctl.kernel.hung_task_panic=0
 cmdline=1
+nokvmapf=1
+arch=x86_64
 efi_pstore=off
 running=6.17.0-5-generic
 default=6.17.0-5-generic
@@ -59,6 +61,11 @@ func TestCheckGuestCrashRecovery(t *testing.T) {
 			"kernel.panic_on_oops=0 (want 1), kernel.softlockup_panic=unreadable (want 1)", "lever apply"},
 		{"efi registered", probeWith("efi_pstore=off", "efi_pstore=active"), nil, config.BackendLima, false, "EFI pstore backend is registered", "reboot the VM"},
 		{"cmdline pending", probeWith("cmdline=1", "cmdline=0"), nil, config.BackendLima, false, "reboot pending", "reboot the VM for the kernel command line"},
+		{"no-kvmapf pending", probeWith("nokvmapf=1", "nokvmapf=0"), nil, config.BackendLima, false, "lacks no-kvmapf (KVM async page faults are on", "reboot the VM"},
+		{"both pending", probeWith("cmdline=1", "cmdline=0", "nokvmapf=1", "nokvmapf=0"), nil, config.BackendLima, false,
+			"lacks efi_pstore.pstore_disable=1 (the EFI pstore backend is off for this boot only) and no-kvmapf", "reboot the VM"},
+		{"aarch64 needs no no-kvmapf", probeWith("nokvmapf=1", "nokvmapf=0", "arch=x86_64", "arch=aarch64"), nil, config.BackendLima, true, "EFI pstore off", ""},
+		{"x86 hardened says async pf off", probeWith(), nil, config.BackendLima, true, "KVM async page faults off", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -132,7 +139,7 @@ func TestReadGuestKernelProbeUsesJail(t *testing.T) {
 		t.Fatalf("got %+v, %v", p, err)
 	}
 	script := f.Calls[0].Args[len(f.Calls[0].Args)-1]
-	for _, want := range []string{"/proc/sys/kernel/panic_on_oops", "/proc/sys/kernel/softlockup_panic", "/proc/cmdline", "/sys/module", "uname -r", "/boot/grub/grub.cfg", "/etc/os-release", guest.HWEPackage("24.04"), guest.HWEPackage("26.04")} {
+	for _, want := range []string{"no-kvmapf", "uname -m", "/proc/sys/kernel/panic_on_oops", "/proc/sys/kernel/softlockup_panic", "/proc/cmdline", "/sys/module", "uname -r", "/boot/grub/grub.cfg", "/etc/os-release", guest.HWEPackage("24.04"), guest.HWEPackage("26.04")} {
 		if !strings.Contains(script, want) {
 			t.Errorf("probe missing %q", want)
 		}

@@ -20,7 +20,13 @@ const egressChain = egress.Chain
 //     pstore backend's runtime call can hang there in a spinlock. It is
 //     unloaded now when possible, blacklisted in modprobe.d, and disabled on
 //     the kernel command line (efi_pstore.pstore_disable=1) from the next
-//     boot.
+//     boot;
+//   - no KVM async page faults on an x86_64 guest (no-kvmapf, from the next
+//     boot): with them a task that touches guest memory the host swapped
+//     out sleeps until the host says the page is back, and a lost notice
+//     leaves it in D state for good. Without them the vCPU waits for the
+//     page instead. The parameter exists only in the x86 KVM guest code, so
+//     other guests do not get it.
 //
 // kernel.hung_task_panic stays 0, written explicitly: a task blocked in D
 // state is what slow guest disk I/O looks like, and panicking on it would
@@ -39,6 +45,21 @@ const (
 // EFIPstoreCmdline keeps the EFI pstore backend from registering, built in or
 // a module.
 const EFIPstoreCmdline = "efi_pstore.pstore_disable=1"
+
+// NoKVMAPFCmdline turns KVM async page faults off in an x86_64 guest.
+const NoKVMAPFCmdline = "no-kvmapf"
+
+// NoKVMAPFArch is the uname -m of the guests that get NoKVMAPFCmdline.
+const NoKVMAPFArch = "x86_64"
+
+// crashCmdline is what the GRUB drop-in adds to the kernel command line on a
+// guest whose uname -m is arch.
+func crashCmdline(arch string) []string {
+	if arch == NoKVMAPFArch {
+		return []string{EFIPstoreCmdline, NoKVMAPFCmdline}
+	}
+	return []string{EFIPstoreCmdline}
+}
 
 // CrashSysctls are the sysctls lever sets in a Lima guest, in file order.
 var CrashSysctls = []struct{ Key, Value string }{
@@ -106,9 +127,16 @@ const crashModprobeFile = `# Written by lever (guest crash recovery, lever#179).
 blacklist efi_pstore
 install efi_pstore /bin/true`
 
-const crashGrubFile = `# Written by lever (guest crash recovery, lever#179). Do not edit: lever apply rewrites it.
-# Keeps the EFI pstore backend from registering at boot, built in or a module.
-GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX:-} ` + EFIPstoreCmdline + `"`
+func crashGrubFile(arch string) string {
+	var b strings.Builder
+	b.WriteString("# Written by lever (guest crash recovery, lever#179). Do not edit: lever apply rewrites it.\n")
+	b.WriteString("# " + EFIPstoreCmdline + ": keeps the EFI pstore backend from registering at boot, built in or a module.\n")
+	if arch == NoKVMAPFArch {
+		b.WriteString("# " + NoKVMAPFCmdline + ": no KVM async page faults, so a lost page-ready notice from the host cannot hang a task.\n")
+	}
+	b.WriteString(`GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX:-} ` + strings.Join(crashCmdline(arch), " ") + `"`)
+	return b.String()
+}
 
 // EFIPstoreActiveShell is the shell function both the provisioning script and
 // doctor's probe use to tell whether the EFI pstore backend may still be
@@ -153,19 +181,24 @@ func crashRecoveryScript(p crashPaths) string {
 	}
 	fmt.Fprintf(&b, "converge %s %s || true\n", q(p.Modprobe), q(crashModprobeFile))
 	fmt.Fprintf(&b, "if [ -e %s ]; then modprobe -r efi_pstore >/dev/null 2>&1 || true; fi\n", q(p.SysModule+"/efi_pstore/initstate"))
-	fmt.Fprintf(&b, "grub_changed=0\nconverge %s %s && grub_changed=1\n", q(p.GrubDropIn), q(crashGrubFile))
-	fmt.Fprintf(&b, `if [ "$grub_changed" = 1 ] || ! grep -q -- %s %s 2>/dev/null; then
+	// The guest's own uname decides, not the host's architecture.
+	fmt.Fprintf(&b, "case \"$(uname -m 2>/dev/null || true)\" in\n  %s) grub_file=%s; params=%s ;;\n  *) grub_file=%s; params=%s ;;\nesac\n",
+		q(NoKVMAPFArch), q(crashGrubFile(NoKVMAPFArch)), q(strings.Join(crashCmdline(NoKVMAPFArch), " ")),
+		q(crashGrubFile("")), q(strings.Join(crashCmdline(""), " ")))
+	fmt.Fprintf(&b, "grub_changed=0\nconverge %s \"$grub_file\" && grub_changed=1\n", q(p.GrubDropIn))
+	fmt.Fprintf(&b, `grub_stale=0
+for p in $params; do grep -qwF -- "$p" %[1]s 2>/dev/null || grub_stale=1; done
+if [ "$grub_changed" = 1 ] || [ "$grub_stale" = 1 ]; then
   if command -v update-grub >/dev/null 2>&1; then
-    update-grub >/dev/null 2>&1 || echo %s
+    update-grub >/dev/null 2>&1 || echo "warn: update-grub failed; the kernel command line will not get $params (run sudo update-grub in the guest)"
   else
-    echo %s
+    echo "warn: the guest has no update-grub; the kernel command line will not get $params"
   fi
 fi
-`, q(EFIPstoreCmdline), q(p.GrubCfg),
-		q("warn: update-grub failed; the kernel command line will not get "+EFIPstoreCmdline+" (run sudo update-grub in the guest)"),
-		q("warn: the guest has no update-grub; the kernel command line will not get "+EFIPstoreCmdline))
-	fmt.Fprintf(&b, "if ! grep -qw -- %s %s 2>/dev/null; then echo %s; fi\n", q(EFIPstoreCmdline), q(p.Cmdline),
-		q("reboot: the kernel command line gets "+EFIPstoreCmdline+" at the next boot"))
+missing=
+for p in $params; do grep -qwF -- "$p" %[2]s 2>/dev/null || missing="${missing:+$missing }$p"; done
+if [ -n "$missing" ]; then echo "reboot: the kernel command line gets $missing at the next boot"; fi
+`, q(p.GrubCfg), q(p.Cmdline))
 	fmt.Fprintf(&b, "if efi_pstore_active %s; then echo %s; fi\n", q(p.SysModule),
 		q("reboot: the EFI pstore backend is still registered (built in, or efi_pstore could not be unloaded); it is off from the next boot"))
 	// The tmux-core capture is diagnostics: run in a subshell, its failure is

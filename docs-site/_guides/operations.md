@@ -1545,12 +1545,21 @@ running one. They are on by default and have no switch:
   honoured by the module and by a built-in backend, also when the initramfs loads it. The cost:
   an oops is no longer saved in EFI variables for the next boot; read it on the serial console
   log instead (below).
+- **No KVM async page faults** (x86_64 guests). With them, a guest task that touches memory the
+  host has swapped out sleeps until the host sends "page ready"; one lost notice leaves the task
+  in D state in `kvm_async_pf_task_wait_schedule` for good (it was seen holding `claude`, a
+  nested QEMU, `ssh` and `sh` for over an hour, and the same boot panicked with "Host injected
+  async #PF in kernel mode"). lever adds `no-kvmapf` to the kernel command line in the same GRUB
+  drop-in; the vCPU then waits for the page instead. The parameter exists only in the x86 KVM
+  guest code, so an arm64 guest does not get it. The cost: a guest whose memory the host swapped
+  out stalls a whole vCPU per fault instead of one task, so also keep the VM out of host swap
+  (see [keeping the VM out of host swap](#keeping-the-vm-out-of-host-swap)).
 
 The same step sets up the guest's capture of tmux server cores (see [tmux server
 crashes](#tmux-server-crashes)); a failure there is a warning and does not stop the bring-up.
 
 Each file is written only when its content differs, and `update-grub` runs only when the drop-in
-changed or `grub.cfg` lacks the parameter. lever never reboots the guest.
+changed or `grub.cfg` lacks one of the parameters. lever never reboots the guest.
 
 **What a panic does to the VM.** The guest kernel asks for a reboot 10 s after a panic. What the
 VM then does depends on Lima's driver: under **qemu** the guest reboots, unless Lima starts QEMU
@@ -1567,8 +1576,8 @@ checks it.
 the kernel check reads grub's `/boot/grub/grub.cfg`. A guest that boots a kernel directly (a Lima
 template whose `images` entry sets `kernel:`, rather than the cloud image's grub) never gets the
 parameter, so apply and doctor report "reboot pending" for it forever. lever's own template boots
-the cloud image through grub; with a custom one, add `efi_pstore.pstore_disable=1` to that
-kernel's command line yourself, or ignore the line.
+the cloud image through grub; with a custom one, add `efi_pstore.pstore_disable=1` (and
+`no-kvmapf` on x86_64) to that kernel's command line yourself, or ignore the line.
 
 #### Soft lockups the host causes
 
@@ -1584,7 +1593,8 @@ kernel again. `sudo sysctl -w kernel.softlockup_panic=0` in the guest turns it o
 apply or up. If it bites repeatedly, give the VM fewer vCPUs than the host has free, keep the host
 awake while agents run, and open an issue: a switch would be the fix.
 
-**What needs a reboot:** the kernel command line (always, the first time), and the EFI pstore
+**What needs a reboot:** the kernel command line (always, the first time, and once more on a VM
+converged before `no-kvmapf` was added: the reboot-pending line names only what is missing), and the EFI pstore
 backend when it could not be unloaded (built in, or in use). The sysctls and the unload take
 effect at once. Apply prints `jail: reboot pending: …` for each; `lever stop`, then `lever up`,
 reboots the VM and keeps the manager conversation. Doctor's *guest crash recovery* row reads
@@ -1734,6 +1744,55 @@ lever does not remove containers on that path.
 4. Check `lever doctor`: the *guest crash recovery* and *guest kernel* rows should be green, and
    *last guest boot* names the saved logs and their first panic line. Add the host and guest
    kernels and the outcome to the table above.
+
+A guest that does not panic but stops answering, with tasks in D state, may be waiting on a page
+the host swapped out: doctor's *guest async page faults* row says so (below).
+
+### Keeping the VM out of host swap
+
+A Linux host under memory pressure can swap the Lima VM's QEMU process out like any other: in one
+incident a host with zram swap and `vm.swappiness=150` had 19 GiB of a 24 GiB VM in swap
+(`VmSwap` of the QEMU process) and 1.1 GiB resident. The guest still thinks that memory is RAM,
+so whatever touches it stalls on the host's swap-in, and with KVM async page faults one lost
+"page ready" notice hangs the faulting guest task for good. `guest_profile: small`'s zram and the
+manager's `resources` caps work inside the guest; they do not stop the host swapping the guest
+out.
+
+On a Linux host `lever apply` and `lever up` start a stopped VM with
+
+```
+systemd-run --user --scope --collect --property=MemorySwapMax=0 -- limactl start ...
+```
+
+Lima's host agent and QEMU stay in that scope although they detach from `limactl start`: a
+process keeps its cgroup across fork and `setsid`, and a scope lives while any of its processes
+does. The scope is used only when both hold:
+
+- **your user lingers** (`loginctl show-user $UID --property=Linger` is `yes`; turn it on with
+  `loginctl enable-linger`). The scope belongs to your systemd user manager, which stops, and
+  kills everything in it, at your last logout unless you linger, whereas a VM started from a
+  login session survives that logout.
+- **a probe scope really gets `memory.swap.max` 0**: the user manager must have the memory
+  controller delegated (systemd's default on cgroup v2) and swap accounting must be on.
+
+Otherwise, or when `systemd-run` cannot start the scope, the VM starts the old way and apply
+warns why; the limit is never a reason not to start the VM. A running VM is not moved: restart it
+(`lever stop`, then `lever up`) to get the limit. `host_swap: true` in `lever.yaml` starts it the
+old way without the warning. On macOS nothing changes.
+
+**The trade-off:** memory the host may not swap must stay resident, so a host that runs short
+reclaims other memory first and, when nothing else is left, its OOM killer can pick the VM's QEMU
+(the largest process). Size `memory` to what the host can hold resident next to everything else
+it runs.
+
+Doctor's *VM host swap* row reads the QEMU pid from the instance's `qemu.pid`, its `VmSwap` from
+`/proc/<pid>/status`, and the `memory.swap.max` of its cgroup or the nearest ancestor that sets
+one. It warns above 1 GiB in host swap, and while the host may swap the VM out without
+`host_swap: true`. Its *guest async page faults* row lists guest tasks in D state in
+`kvm_async_pf_task_wait_schedule` (read as root through `sudo -n`; it samples a second time 5 s
+later only when the first finds one, and a task whose context-switch count did not move is stuck)
+and counts the kernel's hung-task traces in that function this boot. Stuck tasks do not recover:
+`lever stop` (or `limactl stop -f <vm>` when that hangs), then `lever up`.
 
 ### Saved guest console logs
 

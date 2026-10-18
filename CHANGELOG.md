@@ -7,6 +7,26 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Lima VM stays out of host swap, and its guest kernel no longer uses KVM async page faults
+  (lever#240).** A Linux host had swapped 19 GiB of the 24 GiB VM out; a nested VM start touched
+  those pages, and guest tasks (`claude`, a nested QEMU, `ssh`) sat in D state in
+  `kvm_async_pf_task_wait_schedule` for over an hour, waiting for a "page ready" notice that never
+  came. On a Linux host `lever apply` and `lever up` now start a stopped VM inside
+  `systemd-run --user --scope --property=MemorySwapMax=0`, when your user lingers
+  (`loginctl enable-linger`; without it the user manager would kill the VM at your last logout)
+  and a probe scope really gets `memory.swap.max` 0; otherwise the VM starts as before and apply
+  warns why. New `host_swap: true` keeps the old start without the warning. A running VM gets the
+  limit at its next start (`lever stop`, then `lever up`). The guest crash-recovery GRUB drop-in
+  adds `no-kvmapf` on x86_64 guests, so a fault on swapped-out memory stalls the vCPU instead of
+  parking a task for good; existing VMs get it on the next apply or up, which reports a reboot
+  pending. New doctor rows: *VM host swap* (the QEMU process's `VmSwap` and cgroup
+  `memory.swap.max`; warns above 1 GiB or while the host may swap the VM) and *guest async page
+  faults* (tasks stuck in that wait, sampled twice 5 s apart, and the kernel's hung-task traces;
+  fix: `lever stop` or `limactl stop -f`, then `lever up`). *guest crash recovery* also warns
+  while an x86_64 guest runs without `no-kvmapf`.
+
 ## [0.42.0] - 2026-10-16
 
 ### Added

@@ -37,11 +37,13 @@ func TestCheckVMHostSwap(t *testing.T) {
 		{"scoped", lim, "linux", scoped, nil, true, "qemu pid 42 has 0.0 GiB in host swap; cgroup /user.slice/x.scope, memory.swap.max=0", ""},
 		{"unscoped", lim, "linux", session, nil, false, "the host can swap the VM's memory out", "loginctl enable-linger"},
 		{"swapped out", lim, "linux", swapped, nil, false, "19.0 GiB in host swap", "`lever stop`, then `lever up`"},
+		{"unscoped, host without swap", lim, "linux", session, nil, true, "(the host has no swap device)", ""},
 		{"opted in, low", opted, "linux", session, nil, true, "(host_swap: true)", ""},
 		{"opted in, swapped out", opted, "linux", swapped, nil, false, "stalls", "remove host_swap: true"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			r := checkVMHostSwap(c.app, c.goos, c.s, c.err)
+			hostHasSwap := !strings.Contains(c.name, "without swap")
+			r := checkVMHostSwap(c.app, c.goos, c.s, hostHasSwap, c.err)
 			if r.name != "VM host swap" || !r.ok {
 				t.Fatalf("a warning at worst: %+v", r)
 			}
@@ -119,17 +121,23 @@ func TestAsyncPFProbeScriptFindsStuckTasks(t *testing.T) {
 	s := newAsyncPFSandbox(t)
 	s.task("101", "claude", "D", asyncPFWait, "40")
 	s.task("102", "qemu-system-x86", "D", asyncPFWait, "7")
-	s.task("103", "sshd", "S", asyncPFWait, "9")      // asleep, not D
-	s.task("104", "kworker", "D", "io_schedule", "1") // D, other wait
-	s.task("105", "a) D (x", "D", asyncPFWait, "2")   // name tries to fake the state field
-	s.task("106", "woke", "D", asyncPFWait, "5")      // switches between the samples
+	s.task("103", "sshd", "S", asyncPFWait, "9")        // asleep, not D
+	s.task("104", "kworker", "D", "io_schedule", "1")   // D, other wait
+	s.task("105", "a) D (x", "D", asyncPFWait, "2")     // name tries to fake the state field
+	s.task("107", `a\nroot=7\c`, "D", asyncPFWait, "2") // dash's echo would expand it
+	s.task("106", "woke", "D", asyncPFWait, "5")        // switches between the samples
 	s.between("sed -i 's/^voluntary_ctxt_switches:.*/voluntary_ctxt_switches:\t6/' " + filepath.Join(s.proc, "106", "status"))
+	s.task("108", "gone", "D", asyncPFWait, "1")
+	os.Remove(filepath.Join(s.proc, "108", "status")) // as when the task exits mid-scan
 	p, out := s.run()
+	if strings.Contains(out, "\nroot=7") || strings.Contains(out, "cannot open") || strings.Contains(out, "No such file") {
+		t.Errorf("forged or noisy output:\n%s", out)
+	}
 	got := map[int]string{}
 	for _, st := range p.stuck {
 		got[st.pid] = st.comm
 	}
-	if len(got) != 3 || got[101] != "claude" || got[102] != "qemu-system-x86" || got[105] != "?" {
+	if len(got) != 5 || got[101] != "claude" || got[102] != "qemu-system-x86" || got[105] != "?" || got[107] != "?" {
 		t.Errorf("stuck = %+v\n%s", p.stuck, out)
 	}
 	if p.root || p.hung != -1 || p.noKVMAPF {

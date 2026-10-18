@@ -20,8 +20,20 @@ import (
 func TestMain(m *testing.M) {
 	hostGOOS = "other"
 	hostUID = func() int { return 1000 }
-	os.Exit(m.Run())
+	dir, err := os.MkdirTemp("", "lever-lima-proc-")
+	if err != nil {
+		panic(err)
+	}
+	procRoot = dir
+	if err := os.WriteFile(filepath.Join(dir, "swaps"), []byte(swapsWithZram), 0o644); err != nil {
+		panic(err)
+	}
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
 }
+
+const swapsWithZram = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n/dev/zram0                              partition\t25165820\t19300000\t100\n"
 
 func onLinux(t *testing.T) {
 	t.Helper()
@@ -79,6 +91,38 @@ func TestNoSwapScope(t *testing.T) {
 				t.Errorf("must not probe a scope: %+v", f.Calls)
 			}
 		})
+	}
+}
+
+func TestNoSwapScopeHostWithoutSwapSaysNothing(t *testing.T) {
+	onLinux(t)
+	dir := t.TempDir()
+	was := procRoot
+	procRoot = dir
+	t.Cleanup(func() { procRoot = was })
+	if err := os.WriteFile(filepath.Join(dir, "swaps"), []byte("Filename\tType\tSize\tUsed\tPriority\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f := proc.NewFakeRunner()
+	if ok, why := noSwapScope(context.Background(), f); ok || why != "" || len(f.Calls) != 0 {
+		t.Errorf("ok=%v why=%q calls=%+v", ok, why, f.Calls)
+	}
+	if HostHasSwap() {
+		t.Error("a header-only /proc/swaps is no swap")
+	}
+}
+
+func TestScopeNotStarted(t *testing.T) {
+	for stderr, want := range map[string]bool{
+		"Failed to start transient scope unit: Unit run-r1.scope already exists.\n": true,
+		"Failed to connect to bus: No medium found\n":                               true,
+		"time=x level=info msg=\"Failed to connect to bus\"\n":                      false,
+		"level=fatal msg=boom\nFailed to start transient scope unit\n":              false,
+		"": false,
+	} {
+		if got := scopeNotStarted(proc.Result{Stderr: stderr}); got != want {
+			t.Errorf("%q: got %v, want %v", stderr, got, want)
+		}
 	}
 }
 

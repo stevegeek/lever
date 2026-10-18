@@ -1778,7 +1778,8 @@ does. The scope is used only when both hold:
 Otherwise, or when `systemd-run` cannot start the scope, the VM starts the old way and apply
 warns why; the limit is never a reason not to start the VM. A running VM is not moved: restart it
 (`lever stop`, then `lever up`) to get the limit. `host_swap: true` in `lever.yaml` starts it the
-old way without the warning. On macOS nothing changes.
+old way without the warning. A host with no swap device (`/proc/swaps` lists none) starts it the
+old way silently, and doctor does not warn there. On macOS nothing changes.
 
 **The trade-off:** memory the host may not swap must stay resident, so a host that runs short
 reclaims other memory first and, when nothing else is left, its OOM killer can pick the VM's QEMU

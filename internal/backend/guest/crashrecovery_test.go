@@ -64,9 +64,14 @@ func (s *crashSandbox) stub(name, body string) {
 	}
 }
 
-// setArch makes the guest's uname -m print arch.
+// setArch fakes the guest architecture: the sandbox host's own would
+// decide the drop-in otherwise. "" makes uname -m fail.
 func (s *crashSandbox) setArch(arch string) {
 	s.t.Helper()
+	if arch == "" {
+		s.stub("uname", "exit 1")
+		return
+	}
 	s.stub("uname", `if [ "$1" = -m ]; then echo `+shellSingleQuote(arch)+`; else exit 1; fi`)
 }
 
@@ -280,6 +285,21 @@ func TestCrashRecoveryScriptAddsNoKVMAPFToConvergedGuest(t *testing.T) {
 	}
 	if len(rep.Reboot) != 1 || rep.Reboot[0] != "the kernel command line gets no-kvmapf at the next boot" {
 		t.Errorf("reboot = %q", rep.Reboot)
+	}
+}
+
+func TestCrashRecoveryScriptUnknownArchKeepsDropIn(t *testing.T) {
+	s := newCrashSandbox(t)
+	s.run()
+	before, _ := os.ReadFile(s.paths.GrubDropIn)
+	s.setArch("")
+	rep, _ := s.run()
+	after, _ := os.ReadFile(s.paths.GrubDropIn)
+	if string(before) != string(after) || !strings.Contains(string(after), "no-kvmapf") {
+		t.Errorf("drop-in changed:\n%s\n->\n%s", before, after)
+	}
+	if len(rep.Warn) != 1 || !strings.Contains(rep.Warn[0], "guest architecture") {
+		t.Errorf("warn = %q", rep.Warn)
 	}
 }
 

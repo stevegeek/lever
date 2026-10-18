@@ -221,7 +221,7 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 				}
 				s, err = readVMHostSwap(machine)
 			}
-			return checkVMHostSwap(app, runtime.GOOS, s, err)
+			return checkVMHostSwap(app, runtime.GOOS, s, lima.HostHasSwap(), err)
 		},
 		func() checkResult {
 			var p asyncPFProbe

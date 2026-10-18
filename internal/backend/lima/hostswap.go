@@ -24,9 +24,10 @@ import (
 // and the scope lives on while any of its processes does.
 //
 // The scope belongs to the user's systemd manager, which stops, and kills
-// what it holds, at the user's last logout unless the user lingers. A
-// session-started VM survives that logout today, so without lingering the
-// VM is started the old way. Any doubt starts it the old way with a
+// what it holds, at the user's last logout unless the user lingers, while an
+// unscoped VM stays in the login session's scope and survives logout
+// (logind's default KillUserProcesses=no). So without lingering the VM is
+// started the old way. Any doubt starts it the old way with a
 // warning: the swap limit is never a reason not to start the VM.
 
 // hostGOOS, hostUID and the roots below are test seams.
@@ -58,7 +59,7 @@ const lingerAdvice = "loginctl enable-linger"
 // NoSwapScopePrefix. why is "" when the host has no such scope to offer
 // (not Linux) and the caller should say nothing.
 func noSwapScope(ctx context.Context, r proc.Runner) (ok bool, why string) {
-	if hostGOOS != "linux" {
+	if hostGOOS != "linux" || !HostHasSwap() {
 		return false, ""
 	}
 	ctx, cancel := context.WithTimeout(ctx, swapScopeProbeTimeout)
@@ -101,11 +102,27 @@ func briefErr(err error, res proc.Result) string {
 }
 
 // scopeNotStarted reports whether systemd-run itself failed, before it ran
-// limactl: its own messages on stderr, which limactl never prints.
+// limactl: a line of its own at the start of stderr. Only the first line
+// counts, so text limactl relays later cannot cause a second start.
 func scopeNotStarted(res proc.Result) bool {
-	e := res.Stderr
-	return strings.Contains(e, "transient scope unit") ||
-		(strings.Contains(e, "Failed to") && strings.Contains(e, " bus"))
+	first, _, _ := strings.Cut(strings.TrimSpace(res.Stderr), "\n")
+	for _, p := range []string{"Failed to start transient scope unit", "Failed to connect to bus", "Failed to create bus connection", "Failed to connect to user scope bus"} {
+		if strings.HasPrefix(first, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// HostHasSwap reports whether the host has an active swap device. Unknown
+// reads as yes.
+func HostHasSwap() bool {
+	b, err := readHostFile(filepath.Join(procRoot, "swaps"))
+	if err != nil {
+		return true
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	return len(lines) > 1
 }
 
 // startVM runs limactl start, in a no-swap scope unless hostSwap or the

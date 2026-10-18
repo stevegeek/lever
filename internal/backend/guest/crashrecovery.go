@@ -181,10 +181,18 @@ func crashRecoveryScript(p crashPaths) string {
 	}
 	fmt.Fprintf(&b, "converge %s %s || true\n", q(p.Modprobe), q(crashModprobeFile))
 	fmt.Fprintf(&b, "if [ -e %s ]; then modprobe -r efi_pstore >/dev/null 2>&1 || true; fi\n", q(p.SysModule+"/efi_pstore/initstate"))
-	// The guest's own uname decides, not the host's architecture.
-	fmt.Fprintf(&b, "case \"$(uname -m 2>/dev/null || true)\" in\n  %s) grub_file=%s; params=%s ;;\n  *) grub_file=%s; params=%s ;;\nesac\n",
+	// The guest's own uname decides, not the host's architecture. An
+	// unreadable one keeps the drop-in, which may carry no-kvmapf, as it is.
+	fmt.Fprintf(&b, `case "$(uname -m 2>/dev/null || true)" in
+  %[1]s) grub_file=%[2]s; params=%[3]s ;;
+  "") grub_file=$(cat %[6]s 2>/dev/null || true); [ -n "$grub_file" ] || grub_file=%[4]s; params=%[5]s
+      echo %[7]s ;;
+  *) grub_file=%[4]s; params=%[5]s ;;
+esac
+`,
 		q(NoKVMAPFArch), q(crashGrubFile(NoKVMAPFArch)), q(strings.Join(crashCmdline(NoKVMAPFArch), " ")),
-		q(crashGrubFile("")), q(strings.Join(crashCmdline(""), " ")))
+		q(crashGrubFile("")), q(strings.Join(crashCmdline(""), " ")), q(p.GrubDropIn),
+		q("warn: could not read the guest architecture (uname -m); the GRUB drop-in is left as it is"))
 	fmt.Fprintf(&b, "grub_changed=0\nconverge %s \"$grub_file\" && grub_changed=1\n", q(p.GrubDropIn))
 	fmt.Fprintf(&b, `grub_stale=0
 for p in $params; do grep -qwF -- "$p" %[1]s 2>/dev/null || grub_stale=1; done

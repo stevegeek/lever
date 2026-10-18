@@ -26,7 +26,7 @@ func gib(n int64) string { return fmt.Sprintf("%.1f GiB", float64(n)/(1<<30)) }
 // checkVMHostSwap reports how much of the Lima VM's qemu process the host
 // has swapped out, and whether its cgroup lets the host swap it at all. A
 // warning only.
-func checkVMHostSwap(app *config.App, goos string, s lima.HostSwap, err error) checkResult {
+func checkVMHostSwap(app *config.App, goos string, s lima.HostSwap, hostHasSwap bool, err error) checkResult {
 	const name = "VM host swap"
 	switch {
 	case app.Backend != config.BackendLima:
@@ -52,6 +52,9 @@ func checkVMHostSwap(app *config.App, goos string, s lima.HostSwap, err error) c
 		return warnResult(name, detail+": the guest stalls on memory the host swapped out", hostSwapRestartFix)
 	}
 	if !s.NoSwap() {
+		if !hostHasSwap {
+			return checkResult{name, true, detail + " (the host has no swap device)", ""}
+		}
 		return warnResult(name, detail+": the host can swap the VM's memory out", hostSwapRestartFix)
 	}
 	return checkResult{name, true, detail, ""}
@@ -80,7 +83,9 @@ const asyncPFProbeTimeout = 45 * time.Second
 // asyncPFScanScript prints "pid switches comm" for every task in D state in
 // asyncPFWait, read with shell builtins so a healthy guest costs no forks
 // per process. The wait shows in wchan, or, for a task wchan does not name,
-// in the stack root can read.
+// in the stack root can read. A task name is the guest's: it goes through
+// printf %s only, since dash's echo expands backslashes and could forge
+// output lines.
 const asyncPFScanScript = `scan() {
   for d in "$P"/[0-9]*; do
     { read -r line < "$d/stat"; } 2>/dev/null || continue
@@ -94,9 +99,9 @@ const asyncPFScanScript = `scan() {
     sw=0
     while read -r k v; do
       case "$k" in voluntary_ctxt_switches:|nonvoluntary_ctxt_switches:) sw=$((sw + v)) ;; esac
-    done < "$d/status" 2>/dev/null
+    done 2>/dev/null < "$d/status"
     { read -r c < "$d/comm"; } 2>/dev/null || c=?
-    echo "${d##*/} $sw $c"
+    printf '%s %s %s\n' "${d##*/}" "$sw" "$c"
   done
 }
 `
@@ -117,7 +122,7 @@ if [ -n "$first" ]; then
   second=$(scan)
   printf '%%s\n' "$second" | while read -r pid sw c; do
     [ -n "$pid" ] || continue
-    printf '%%s\n' "$first" | grep -qxF -- "$pid $sw $c" && echo "stuck=$pid $c"
+    printf '%%s\n' "$first" | grep -qxF -- "$pid $sw $c" && printf 'stuck=%%s %%s\n' "$pid" "$c"
   done
 fi
 if [ "$(id -u)" = 0 ]; then

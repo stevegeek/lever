@@ -433,12 +433,83 @@ func TestReenrolReleasesTheLockBeforeTheGate(t *testing.T) {
 	d.ManagerVerbs = spy
 	gb := &fakeGuestBoot{current: bootB}
 	d.GuestBoot = gb
+	d.StaleContainer = &fakeJanitor{states: []jail.ContainerState{runningAs(staleID)}}
 	if _, err := EnsureManager(context.Background(), app, d, q); err != nil {
 		t.Fatal(err)
 	}
 	if spy.resumed != 1 || !spy.heldAtResume || spy.listsAfterResume == 0 || spy.heldAtLast || held || len(gb.records) != 1 {
 		t.Fatalf("resumes %d held at resume %v lists after %d held at the last %v held at the end %v boots %v",
 			spy.resumed, spy.heldAtResume, spy.listsAfterResume, spy.heldAtLast, held, gb.records)
+	}
+
+	// Without podman's id of the resumed container the lock is held through
+	// the gate.
+	for _, j := range []StaleContainerOps{nil, &fakeJanitor{stateErr: errors.New("podman: no answer")}} {
+		r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "stopped"}
+		d, q := reenrolDeps(r, &staged)
+		d.ManagerLock = func(string) (func(), error) {
+			held = true
+			return func() { held = false }, nil
+		}
+		spy := &heldSpy{ManagerScion: d.Scion, held: &held}
+		d.ManagerVerbs = spy
+		d.StaleContainer = j
+		if _, err := EnsureManager(context.Background(), app, d, q); err != nil {
+			t.Fatal(err)
+		}
+		if spy.listsAfterResume == 0 || !spy.heldAtLast || held {
+			t.Fatalf("%T: lists after %d held at the last %v held at the end %v, want the lock held through the gate", j, spy.listsAfterResume, spy.heldAtLast, held)
+		}
+	}
+}
+
+func runningAs(id string) jail.ContainerState {
+	return jail.ContainerState{ID: id, Name: "proj--hello", Status: "running", Running: true}
+}
+
+// TestReenrolLeavesAReplacedContainerAlone: once the heal released the lock,
+// a command that took it may have replaced the manager's container. The
+// heal then stops without acting on the new one: here the mount check after
+// the gate, which would suspend it.
+func TestReenrolLeavesAReplacedContainerAlone(t *testing.T) {
+	for _, replaced := range []bool{true, false} {
+		app, f := newObserveFirstApp(t)
+		r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "stopped"}
+		staged := 0
+		d, q := reenrolDeps(r, &staged)
+		held := false
+		d.ManagerLock = func(string) (func(), error) {
+			held = true
+			return func() { held = false }, nil
+		}
+		jp := JailPath(app.Tree, app.Tree, d.JailMount)
+		// Under the lock the mounts cannot be read, so the check runs again
+		// after the gate, where it finds a writable read-only mount.
+		d.InspectContainerMounts = func(context.Context, string) ([]jail.Mount, error) {
+			if held {
+				return nil, errors.New("not yet")
+			}
+			return []jail.Mount{{Source: jp + "/kb", Destination: scion.ContainerWorkspace + "/kb"}}, nil
+		}
+		d.CheckLiveMounts = func(context.Context, string, []jail.LiveMount) ([]jail.LiveMountProblem, error) {
+			return []jail.LiveMountProblem{{Target: scion.ContainerWorkspace + "/kb", Reason: jail.LiveMountWritable}}, nil
+		}
+		after := staleID
+		if replaced {
+			after = otherID
+		}
+		d.StaleContainer = &fakeJanitor{states: []jail.ContainerState{runningAs(staleID), runningAs(after)}}
+		_, err := EnsureManager(context.Background(), app, d, q)
+		if replaced {
+			testutil.WantErrContaining(t, err, "was replaced while lever waited for claude")
+			if r.suspendCalls != 0 {
+				t.Fatalf("suspends %d: the heal acted on the container that replaced the one it resumed", r.suspendCalls)
+			}
+			continue
+		}
+		if err == nil || r.suspendCalls != 1 {
+			t.Fatalf("same container: err %v suspends %d, want the mismatch to suspend it", err, r.suspendCalls)
+		}
 	}
 }
 

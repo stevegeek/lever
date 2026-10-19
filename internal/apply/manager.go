@@ -983,8 +983,10 @@ func (r *run) park(ctx context.Context, jp string, q ManagerRequest) (ManagerRes
 // The lock is released once the resumed container's mounts were read back,
 // before the liveness gate, which can wait minutes on claude: the broker's
 // heal must not keep the operator's commands out that long. What runs after
-// it only reads the manager, and suspends it on a mount mismatch, which is
-// right whoever holds the lock by then.
+// it only reads the manager, and suspends it on a mount mismatch, and only
+// while podman shows the container the heal resumed: a command that took the
+// lock since may have replaced it. Without podman's id of that container the
+// lock is held to the end.
 func (r *run) reenrol(ctx context.Context, jp string, q ManagerRequest, release func()) (res ManagerResult, err error) {
 	sc := r.d.managerScion()
 	agents, err := sc.List(ctx, jp)
@@ -1027,15 +1029,50 @@ func (r *run) reenrol(ctx context.Context, jp string, q ManagerRequest, release 
 	}
 	// The container runs in this boot; the record is written under the lock.
 	recordGuestBoot(ctx, r.d)
-	release()
-	if err := r.gateResumed(ctx, jp); err != nil {
-		return res, guard.AfterFailure(ctx, err)
+	ref := jail.ContainerName(path.Base(jp), r.app.Name)
+	id := r.containerID(ctx, ref)
+	if id != "" {
+		release()
+	}
+	gerr := r.gateResumed(ctx, jp)
+	if id != "" {
+		if err := r.stillContainer(ctx, ref, id); err != nil {
+			return res, errors.Join(gerr, err)
+		}
+	}
+	if gerr != nil {
+		return res, guard.AfterFailure(ctx, gerr)
 	}
 	if err := guard.Live(ctx); err != nil {
 		return res, refused(err)
 	}
 	res.MountsUnverified = !guard.Verified()
 	return res, nil
+}
+
+// containerID is podman's id of the container ref, or "" when podman cannot
+// say.
+func (r *run) containerID(ctx context.Context, ref string) string {
+	if r.d.StaleContainer == nil {
+		return ""
+	}
+	st, err := r.d.StaleContainer.State(ctx, ref)
+	if err != nil {
+		return ""
+	}
+	return st.ID
+}
+
+// stillContainer fails unless podman shows ref as the container id.
+func (r *run) stillContainer(ctx context.Context, ref, id string) error {
+	switch got := r.containerID(ctx, ref); got {
+	case id:
+		return nil
+	case "":
+		return fmt.Errorf("podman could not show manager %q's container after the wait for claude, so lever does not act on it: another command may have replaced it since the lock was released", r.app.Name)
+	default:
+		return fmt.Errorf("manager %q's container was replaced while lever waited for claude (another command took the lock), so lever leaves the new one alone", r.app.Name)
+	}
 }
 
 // resetToken is ManagerTokenReset. The hub mints the new token from the

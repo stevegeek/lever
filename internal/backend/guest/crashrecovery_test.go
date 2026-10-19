@@ -402,6 +402,10 @@ func TestSafeLineShortLineUnchanged(t *testing.T) {
 	if got := SafeLine("  the guest runs kernel 6.8.0-146-generic  ", 300); got != "the guest runs kernel 6.8.0-146-generic" {
 		t.Errorf("SafeLine = %q", got)
 	}
+	// Cut by the byte bound alone: 1200 bytes are exactly 300 runes here.
+	if got := SafeLine(strings.Repeat("\U0001f600", 400), 300); !strings.HasSuffix(got, "…") || len([]rune(got)) != 301 {
+		t.Errorf("SafeLine of 400 emoji = %d runes, want 300 and a cut mark", len([]rune(got)))
+	}
 	if got := SafeLine("abc", 0); got != "" {
 		t.Errorf("SafeLine(max 0) = %q", got)
 	}

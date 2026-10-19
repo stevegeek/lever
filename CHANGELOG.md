@@ -20,12 +20,13 @@ version bump moves the block under the new version heading.
   and still reports the reboot pending. A stop that fails while the VM still runs leaves it running
   with the pending line; any other failure fails the bring-up, and the next `lever up` starts the
   VM with the parameters.
-- **What the guest hardening scripts report prints inert and bounded.** The `jail: warning:` and
-  `jail: reboot pending:` lines quote text from the guest, such as a kernel version. Each quoted
-  line now has escape sequences, control characters and bidi or other invisible characters
-  removed or replaced, and is cut to 300 characters. A report shows at most 16 lines of each
-  kind and says how many more it left out. The `limactl` error a bring-up warning quotes is
-  treated the same way.
+- **What the guest hardening scripts report is bounded.** The `jail: warning:` and `jail: reboot
+  pending:` lines quote text from the guest, such as a kernel version. Each quoted line is now made
+  safe to print where it is read (escape sequences, control characters and bidi or other invisible
+  characters removed or replaced), not only when it is printed, and is cut to 300 characters. A
+  report shows at most 16 lines of each kind and says how many more it left out. The first line of
+  `limactl`, `loginctl` or `systemd-run` errors that bring-up messages quote is bounded the same
+  way.
 
 ### Changed
 

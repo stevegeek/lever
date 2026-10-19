@@ -102,8 +102,8 @@ func parseGuestReport(out string) GuestReport {
 			r.Warn = append(r.Warn, SafeLine(strings.TrimPrefix(line, "warn: "), reportLineMax))
 		}
 	}
-	r.Reboot = capReport(r.Reboot, "reboot-pending lines")
-	r.Warn = capReport(r.Warn, "warnings")
+	r.Reboot = CapReport(r.Reboot, "reboot-pending lines")
+	r.Warn = CapReport(r.Warn, "warnings")
 	return r
 }
 
@@ -122,17 +122,23 @@ func SafeLine(s string, max int) string {
 	if max <= 0 {
 		return ""
 	}
-	if len(s) > 4*max {
+	cut := len(s) > 4*max
+	if cut {
 		s = s[:4*max]
 	}
 	s = strings.TrimSpace(termsafe.Sanitize(strings.ToValidUTF8(s, "\uFFFD")))
 	if utf8.RuneCountInString(s) > max {
-		s = string([]rune(s)[:max]) + "…"
+		s, cut = string([]rune(s)[:max]), true
+	}
+	if cut {
+		s += "…"
 	}
 	return s
 }
 
-func capReport(lines []string, what string) []string {
+// CapReport keeps at most reportLinesMax of lines and says how many more
+// there were.
+func CapReport(lines []string, what string) []string {
 	if len(lines) <= reportLinesMax {
 		return lines
 	}

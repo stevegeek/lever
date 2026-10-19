@@ -584,6 +584,7 @@ func (l *Lima) hardenGuest(ctx context.Context, cfg backend.Config, boot vmBoot)
 					crash.Warn = append(crash.Warn, w)
 				}
 			}
+			crash.Warn = guest.CapReport(crash.Warn, "warnings")
 			// Report only: the install, if any, ran before the reboot.
 			after, err := l.Guest().EnsureGuestKernel(ctx, "", guest.KernelOpts{})
 			if err != nil {

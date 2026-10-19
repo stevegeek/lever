@@ -28,6 +28,11 @@ func ToolPath(name string) string { return "/mcp/" + name }
 // maxRequestBody matches the broker gateway's bound on one message.
 const maxRequestBody = 1 << 20
 
+// maxInFlight bounds the calls one tool holds open at once, so a flood
+// from the paired broker cannot pile up without limit in front of one
+// server.
+const maxInFlight = 64
+
 // Info is the InfoPath answer.
 type Info struct {
 	Tools []InfoTool `json:"tools"`
@@ -51,6 +56,7 @@ type Server struct {
 	log      *slog.Logger
 	stdio    map[string]*stdioServer
 	upstream map[string]*upstreamServer
+	inFlight map[string]chan struct{}
 }
 
 // NewServer builds the handler state for cfg. version is reported to stdio
@@ -60,8 +66,9 @@ func NewServer(cfg *Config, log *slog.Logger, version string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{cfg: cfg, pin: pin, log: log, stdio: map[string]*stdioServer{}, upstream: map[string]*upstreamServer{}}
+	s := &Server{cfg: cfg, pin: pin, log: log, stdio: map[string]*stdioServer{}, upstream: map[string]*upstreamServer{}, inFlight: map[string]chan struct{}{}}
 	for _, t := range cfg.Tools {
+		s.inFlight[t.Name] = make(chan struct{}, maxInFlight)
 		if len(t.Command) > 0 {
 			s.stdio[t.Name] = &stdioServer{tool: t, defDir: cfg.dir, log: log, version: version}
 		} else {
@@ -182,6 +189,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	canon, err := json.Marshal(msg)
 	if err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	select {
+	case s.inFlight[t.Name] <- struct{}{}:
+		defer func() { <-s.inFlight[t.Name] }()
+	default:
+		s.log.Warn("servicehost.busy", "tool", t.Name, "in_flight", maxInFlight)
+		http.Error(w, "tool "+t.Name+": busy; try again later", http.StatusServiceUnavailable)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.callTimeout())

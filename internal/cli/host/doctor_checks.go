@@ -1883,9 +1883,8 @@ func brokerStartTime(pidPath string) (time.Time, bool) {
 }
 
 // scanBrokerLogCertExpiry returns the time of the latest expired or bad
-// certificate handshake error in the broker log's tail. It reads lever's
-// daemon log line ("time=<RFC3339, UTC> ...") and the Go-stdlog prefix ("2006/01/02
-// 15:04:05 ...", local time) an older log file may hold.
+// certificate handshake error in the broker log's tail, from lever's daemon
+// log lines ("time=<RFC3339, UTC> ...").
 func scanBrokerLogCertExpiry(path string) (time.Time, bool, error) {
 	data, err := readFileTail(path, brokerLogTailBytes)
 	if err != nil {
@@ -1916,11 +1915,7 @@ func brokerLogLineTime(line string) (time.Time, bool) {
 		ts, err := time.Parse(logging.TimeFormat, rest)
 		return ts, err == nil
 	}
-	if len(line) < 19 {
-		return time.Time{}, false
-	}
-	ts, err := time.ParseInLocation("2006/01/02 15:04:05", line[:19], time.Local)
-	return ts, err == nil
+	return time.Time{}, false
 }
 
 // Labels image/lever-claude/Dockerfile bakes from build args: the pinned Claude

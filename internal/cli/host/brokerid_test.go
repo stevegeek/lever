@@ -34,28 +34,25 @@ func answer(id, version, hash string) broker.EpochAnswer {
 }
 
 // judgeRunningBroker: reuse or restart only this instance's broker; another
-// instance's is refused; one without an id is restarted only when this
-// instance's pid file names a live process.
+// instance's, and one without an id, are refused.
 func TestJudgeRunningBroker(t *testing.T) {
 	cases := []struct {
-		name  string
-		got   broker.EpochAnswer
-		ours  string
-		alive bool
-		want  brokerAction
+		name string
+		got  broker.EpochAnswer
+		ours string
+		want brokerAction
 	}{
-		{"ours, same binary and config", answer(idOurs, "v", "h"), idOurs, true, brokerReuse},
-		{"ours, other binary", answer(idOurs, "v0", "h"), idOurs, true, brokerRestart},
-		{"ours, other config", answer(idOurs, "v", "h0"), idOurs, true, brokerRestart},
-		{"another instance, identical version and config", answer(idOther, "v", "h"), idOurs, true, brokerRefuse},
-		{"another instance, our pid file dead", answer(idOther, "v", "h"), idOurs, false, brokerRefuse},
-		{"predates ids, our broker alive", answer("", "v0", ""), idOurs, true, brokerRestart},
-		{"predates ids, nothing of ours runs", answer("", "v0", ""), idOurs, false, brokerRefuse},
-		{"predates ids even with matching fields, nothing of ours runs", answer("", "v", "h"), idOurs, false, brokerRefuse},
-		{"no id of our own", answer(idOther, "v", "h"), "", true, brokerRefuse},
+		{"ours, same binary and config", answer(idOurs, "v", "h"), idOurs, brokerReuse},
+		{"ours, other binary", answer(idOurs, "v0", "h"), idOurs, brokerRestart},
+		{"ours, other config", answer(idOurs, "v", "h0"), idOurs, brokerRestart},
+		{"another instance, identical version and config", answer(idOther, "v", "h"), idOurs, brokerRefuse},
+		{"predates ids", answer("", "v0", ""), idOurs, brokerRefuse},
+		{"predates ids even with matching fields", answer("", "v", "h"), idOurs, brokerRefuse},
+		{"no id of our own", answer(idOther, "v", "h"), "", brokerRefuse},
+		{"neither has an id", answer("", "v", "h"), "", brokerRefuse},
 	}
 	for _, c := range cases {
-		if got := judgeRunningBroker(c.got, c.ours, "v", "h", c.alive); got != c.want {
+		if got := judgeRunningBroker(c.got, c.ours, "v", "h"); got != c.want {
 			t.Errorf("%s: %v, want %v", c.name, got, c.want)
 		}
 	}
@@ -115,7 +112,7 @@ func TestBrokerStartRefusesAnUnownedOldBroker(t *testing.T) {
 	app := &config.App{Name: "a"}
 	app.Broker.AdminPort = port
 	bc := &brokerController{app: app, state: st, adminURL: url, admin: http.DefaultClient}
-	if err := bc.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "no instance id") || !strings.Contains(err.Error(), "names no live process") {
+	if err := bc.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "no instance id") {
 		t.Fatalf("Start = %v, want the no-instance-id refusal", err)
 	}
 }
@@ -235,17 +232,14 @@ func TestBrokerStartTreatsAReusedPIDAsStale(t *testing.T) {
 		t.Fatal(err)
 	}
 	bc := &brokerController{app: app, state: st, adminURL: url, admin: http.DefaultClient}
-	if err := bc.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "no instance id") || !strings.Contains(err.Error(), "names no live process") {
+	if err := bc.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "no instance id") {
 		t.Fatalf("Start = %v, want the no-instance-id refusal", err)
 	}
 }
 
 // The same old broker with broker.pid naming this instance's `lever broker
-// serve`: apply stops it. (The fake /epoch keeps answering, so Start then
-// refuses; the stop is what is tested.)
-func TestBrokerStartStopsItsOwnOldBroker(t *testing.T) {
-	defer func(w time.Duration) { brokerQuietWait = w }(brokerQuietWait)
-	brokerQuietWait = 300 * time.Millisecond
+// serve`: refused too, and nothing is stopped.
+func TestBrokerStartRefusesItsOwnOldBroker(t *testing.T) {
 	st, cfg := instanceState(t)
 	url, port := epochServer(t, answer("", "v0.35.0", "h"))
 	app := &config.App{Name: "a"}
@@ -255,13 +249,13 @@ func TestBrokerStartStopsItsOwnOldBroker(t *testing.T) {
 		t.Fatal(err)
 	}
 	bc := &brokerController{app: app, state: st, adminURL: url, admin: http.DefaultClient}
-	if err := bc.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "still answers") {
-		t.Fatalf("Start = %v, want the still-answers refusal", err)
+	if err := bc.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "no instance id") {
+		t.Fatalf("Start = %v, want the no-instance-id refusal", err)
 	}
 	select {
 	case <-oldDone:
-	case <-time.After(10 * time.Second):
-		t.Fatal("this instance's old broker was not stopped")
+		t.Fatal("an id-less broker was stopped")
+	case <-time.After(200 * time.Millisecond):
 	}
 }
 

@@ -294,13 +294,14 @@ func TestContactSessionSurvivesAStampOnlyRelease(t *testing.T) {
 	if err := contactSession(app, st, "scratch"); err != nil {
 		t.Fatalf("a stamp-only release made the session stale: %v", err)
 	}
-	// A record holding the full-file hash of the current file.
+	// A record holding the full-file hash, as releases before 0.33.1 wrote,
+	// is stale.
 	r := sessionrec.Record{Agent: "scratch", SkillHash: skills.Hash(want), Version: "0.33.0", Started: time.Now().UTC()}
 	if err := sessionrec.Append(st.Sessions(), r); err != nil {
 		t.Fatal(err)
 	}
-	if err := contactSession(app, st, "scratch"); err != nil {
-		t.Fatalf("a full-hash record for the current file: %v", err)
+	if err := contactSession(app, st, "scratch"); err == nil {
+		t.Fatal("a full-hash record must read as stale")
 	}
 	// A record of different skill text is still stale.
 	r.SkillHash = skills.ContentHash([]byte("---\nname: lever-agent\nlever-version: 0.0.1\n---\nOther text.\n"))
@@ -461,9 +462,9 @@ func TestUnattendedSessionKeepsTheSkillBaseline(t *testing.T) {
 	}
 }
 
-// A full-hash record over the same skill is accepted and recorded as its
-// content hash.
-func TestUnattendedSessionAcceptsAFullHashRecord(t *testing.T) {
+// A full-hash record over the same skill is not the skill's content hash:
+// the unattended start refuses, and contacts stay out until a fresh start.
+func TestUnattendedSessionRefusesAFullHashRecord(t *testing.T) {
 	app, tree, st := scaffoldFixture(t)
 	app.Name = "hello"
 	withContact(app)
@@ -478,11 +479,11 @@ func TestUnattendedSessionAcceptsAFullHashRecord(t *testing.T) {
 	if err := sessionrec.Append(st.Sessions(), sessionrec.Record{Agent: "hello", SkillHash: skills.Hash(b), Version: "0.33.0", Started: time.Now().UTC().Add(-time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
-	if refused, cerr := unattendedStart(t, app, st, "hello", nil); refused != nil || cerr != nil {
-		t.Fatalf("refused=%v commit=%v", refused, cerr)
+	if refused, _ := unattendedStart(t, app, st, "hello", nil); refused == nil {
+		t.Fatal("a full-hash record was taken as the skill's")
 	}
 	recs, err := sessionrec.Latest(st.Sessions())
-	if err != nil || recs["hello"].SkillHash != skills.ContentHash(b) {
+	if err != nil || recs["hello"].SkillHash != brokerctl.UncheckedSkill {
 		t.Fatalf("latest = %+v, %v", recs["hello"], err)
 	}
 }

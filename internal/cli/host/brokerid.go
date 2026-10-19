@@ -23,42 +23,29 @@ type brokerAction int
 
 const (
 	brokerReuse   brokerAction = iota // this instance's, same binary and config
-	brokerRestart                     // this instance's (or, predating ids, very likely ours): stop it, then start
+	brokerRestart                     // this instance's: stop it, then start
 	brokerRefuse                      // not this instance's: touch nothing and fail
 )
 
-// judgeRunningBroker decides what to do with a broker that answered /epoch.
-// ownPIDAlive is whether broker.pid names a live `lever broker serve` of this
-// instance (state.State.BrokerStatus; a reused pid does not count).
-//
-//   - Same id: reuse it when version and config hash match, else restart it.
-//   - Another id: another instance's broker. Refuse and stop nothing.
-//   - No id: a broker from before instance ids. Restart it only when this
-//     instance's pid file names a live process, which is what StopBroker
-//     stops; the caller then checks the port fell silent, so a broker that
-//     was not the one stopped is never adopted. Otherwise refuse.
-func judgeRunningBroker(got broker.EpochAnswer, ours, wantVersion, wantHash string, ownPIDAlive bool) brokerAction {
-	switch {
-	case ours != "" && got.InstanceID == ours:
-		if brokerReusable(got.EpochResponse, wantVersion, wantHash) {
-			return brokerReuse
-		}
-		return brokerRestart
-	case got.InstanceID != "":
-		return brokerRefuse
-	case ownPIDAlive:
-		return brokerRestart
-	default:
+// judgeRunningBroker decides what to do with a broker that answered /epoch:
+// this instance's id is reused when version and config hash match, else
+// restarted; any other answer, one with no id included, is refused and
+// nothing is stopped.
+func judgeRunningBroker(got broker.EpochAnswer, ours, wantVersion, wantHash string) brokerAction {
+	if ours == "" || got.InstanceID != ours {
 		return brokerRefuse
 	}
+	if brokerReusable(got.EpochResponse, wantVersion, wantHash) {
+		return brokerReuse
+	}
+	return brokerRestart
 }
 
 // heldBrokerErr is nil only when got is the broker this apply runs: this
 // instance's id, version and config hash. It shares judgeRunningBroker with
-// the reuse decision; ownPIDAlive is false on purpose, since a broker without
-// an id is never the one this binary started.
+// the reuse decision.
 func heldBrokerErr(got broker.EpochAnswer, ours, wantVersion, wantHash string, adminPort int) error {
-	switch judgeRunningBroker(got, ours, wantVersion, wantHash, false) {
+	switch judgeRunningBroker(got, ours, wantVersion, wantHash) {
 	case brokerReuse:
 		return nil
 	case brokerRestart: // this instance's id, another binary or config
@@ -82,8 +69,8 @@ func shortID(id string) string {
 
 func foreignBrokerError(adminPort int, got broker.EpochAnswer, ours string) error {
 	if got.InstanceID == "" {
-		return fmt.Errorf("a lever broker that reports no instance id (version %q, an older lever) is serving on 127.0.0.1:%d, "+
-			"and nothing shows it is this instance's broker; lever leaves it running. "+
+		return fmt.Errorf("a lever broker that reports no instance id (version %q, an older lever) is serving on 127.0.0.1:%d; "+
+			"lever leaves it running. "+
 			"If it is another instance's, give this instance its own broker.jail_port and broker.admin_port; if it is this instance's, stop that process, then run this again",
 			got.Version, adminPort)
 	}
@@ -123,7 +110,7 @@ func requireOwnBroker(ctx context.Context, client *http.Client, adminPort int, s
 		return err
 	}
 	if got.InstanceID == "" {
-		return fmt.Errorf("the broker on 127.0.0.1:%d reports no instance id (an older lever started it): run `lever apply` to restart it with this binary first", adminPort)
+		return fmt.Errorf("the broker on 127.0.0.1:%d reports no instance id (an older lever started it): run `lever stop`, then `lever up`, which starts it with this binary", adminPort)
 	}
 	if ours == "" || got.InstanceID != ours {
 		return foreignBrokerError(adminPort, got, ours)

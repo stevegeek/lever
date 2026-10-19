@@ -1377,38 +1377,11 @@ func TestRemoteDefaults(t *testing.T) {
 	if got := app.EffectiveRemotePort(); got != 8445 {
 		t.Fatalf("EffectiveRemotePort() = %d, want 8445", got)
 	}
-	if w := app.Warnings(); len(w) != 0 {
-		t.Fatalf("Warnings() = %v", w)
-	}
 }
 
-// remote.login_port still loads, whatever its value and whether remote is
-// on, but binds and grants nothing, and is named in Warnings.
-func TestRemoteLoginPortIsIgnoredWithAWarning(t *testing.T) {
+// 8446 was the guest login forwarder's port; nothing reserves it now.
+func TestRemotePort8446IsFree(t *testing.T) {
 	base := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n"
-	for _, body := range []string{
-		base + "  login_port: 8444\n",
-		base + "  login_port: 8445\n",
-		base + "  login_port: 8446\n",
-		base + "  login_port: 9500\n",
-		"name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  login_port: 9500\n",
-	} {
-		app, err := LoadNoHostChecks(writeConfig(t, body))
-		if err != nil {
-			t.Fatalf("%q must load: %v", body, err)
-		}
-		if slices.Contains(app.EffectiveAllowedPorts(), app.Remote.LoginPort) {
-			t.Errorf("login_port %d granted to the jail", app.Remote.LoginPort)
-		}
-		w := app.Warnings()
-		if len(w) != 1 || w[0] != "remote.login_port is no longer used (the hub login needs no port); remove it" {
-			t.Errorf("Warnings() = %v", w)
-		}
-		if slices.ContainsFunc(app.RemoteWarnings(), func(s string) bool { return strings.Contains(s, "login_port") }) {
-			t.Errorf("RemoteWarnings() names login_port: %v", app.RemoteWarnings())
-		}
-	}
-	// 8446 was the guest login forwarder's port; nothing reserves it now.
 	if _, err := LoadNoHostChecks(writeConfig(t, base+"  port: 8446\n")); err != nil {
 		t.Fatalf("remote.port 8446 must load now that no forwarder is mirrored onto it: %v", err)
 	}

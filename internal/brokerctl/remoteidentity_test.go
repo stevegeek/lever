@@ -83,10 +83,6 @@ func TestRemoteIdentityMirrorsConfigRemote(t *testing.T) {
 	identity := reflect.TypeFor[state.RemoteIdentity]()
 	for i := range remote.NumField() {
 		f := remote.Field(i)
-		// login_port is parsed only so an old lever.yaml loads; nothing reads it.
-		if f.Name == "LoginPort" {
-			continue
-		}
 		g, ok := identity.FieldByName(f.Name)
 		if !ok {
 			t.Errorf("config.Remote.%s has no state.RemoteIdentity counterpart — add it to RemoteConfigHash", f.Name)
@@ -121,11 +117,10 @@ func TestRemoteIdentityMirrorsConfigRemote(t *testing.T) {
 			t.Errorf("state.RemoteIdentity.%s is %s, config.Remote.%s is %s", f.Name, g.Type, f.Name, f.Type)
 		}
 	}
-	// Name, Backend, Workers, Tree, and the hub identity (HubUsers, HubKey);
-	// minus LoginPort, which has no counterpart.
-	const appExtras = 4 + 2 - 1
+	// Name, Backend, Workers, Tree, and the hub identity (HubUsers, HubKey).
+	const appExtras = 4 + 2
 	if got, want := identity.NumField(), remote.NumField()+appExtras; got != want {
-		t.Errorf("state.RemoteIdentity has %d fields, want %d (config.Remote - LoginPort + Name + Backend + Workers + Tree + HubUsers + HubKey)", got, want)
+		t.Errorf("state.RemoteIdentity has %d fields, want %d (config.Remote + Name + Backend + Workers + Tree + HubUsers + HubKey)", got, want)
 	}
 }
 
@@ -219,7 +214,7 @@ func TestRemoteConfigHashPush(t *testing.T) {
 
 // TestRemoteConfigHashTracksTheHubIdentity: the proxy signs in with the key
 // and checks each login's recorded hub user id, both read once at startup, so
-// a change to either must restart it; remote.login_port no longer does.
+// a change to either must restart it.
 func TestRemoteConfigHashTracksTheHubIdentity(t *testing.T) {
 	app := &config.App{Name: "x", Backend: "lima"}
 	app.Remote.Enabled = true
@@ -244,10 +239,5 @@ func TestRemoteConfigHashTracksTheHubIdentity(t *testing.T) {
 	_ = st.SaveHubIdentity(rec)
 	if RemoteConfigHash(app, st) == h2 {
 		t.Fatal("a new key did not change the proxy hash")
-	}
-	h3 := RemoteConfigHash(app, st)
-	app.Remote.LoginPort = 8449
-	if RemoteConfigHash(app, st) != h3 {
-		t.Fatal("remote.login_port is ignored and must not restart the proxy")
 	}
 }

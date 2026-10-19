@@ -54,8 +54,8 @@ const UncheckedSkill = "unchecked (fresh start lever made on its own)"
 // must not re-baseline the session on a skill the agent wrote.
 //
 // It is called before the record is deleted. When the skill on disk is not
-// the one the last recorded session started with (content hash, or full
-// hash in older records), cannot be read, or that record names no skill, it
+// the one the last recorded session started with (its content hash), cannot
+// be read, or that record names no skill, it
 // records a session matching no skill (UncheckedSkill) at once and says why
 // in Refused: contacts stay refused, even if the old skill text is put back,
 // until a fresh start at the operator's word. Begin runs after the delete,
@@ -94,7 +94,7 @@ func BeginUnattendedSession(app *config.App, st state.State, version, agent stri
 		if err != nil {
 			return "", errors.New("its lever skill cannot be read")
 		}
-		if prev.SkillHash != skills.ContentHash(b) && prev.SkillHash != skills.Hash(b) {
+		if prev.SkillHash != skills.ContentHash(b) {
 			return "", errors.New("its lever skill on disk is not the one its last recorded session started with")
 		}
 		return skills.ContentHash(b), nil

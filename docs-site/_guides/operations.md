@@ -1360,7 +1360,7 @@ Two effects to know:
   `user:lever-controller@lever.local`. A message delivered before the migration but checked with
   `message_verify` after it answers `unknown_sender`. Agents verify on receipt, so this touches
   only messages in flight across the upgrade.
-- `remote.login_port` is ignored; `lever apply` warns until you remove it.
+- `remote.login_port` is ignored; remove it.
 
 ### Downgrading
 
@@ -1777,8 +1777,7 @@ the manager. Earlier releases' `lever up` refused ("record says running, but its
 \"created\" — the harness died; `lever stop` then `lever up` resumes it").
 
 lever now records the guest's boot id (`/proc/sys/kernel/random/boot_id`, new on every boot) in
-`.lever-state/lifecycle.json` each time it sees the manager live (lever 0.42 and earlier kept it in
-`guest-boot.json`, which the first write takes over and removes). When `lever apply` or
+`.lever-state/lifecycle.json` each time it sees the manager live. When `lever apply` or
 `lever up` finds the record "running", the boot id changed since, and the manager's container is
 not running (podman's own answer in the guest; when podman cannot be asked, lever does nothing,
 because the hub briefly reports `created` for a container that is starting), it logs

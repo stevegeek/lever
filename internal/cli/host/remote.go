@@ -635,19 +635,7 @@ func remoteChatLedger(app *config.App, st state.State) func(chatledger.Entry) er
 	if p == "" {
 		return nil
 	}
-	removeOldChatLedger(st)
 	return chatledger.NewWriter(p).Append
-}
-
-// removeOldChatLedger deletes the legacy single-file ledger and its rotated
-// copy, which only hold old chat text.
-func removeOldChatLedger(st state.State) {
-	for _, name := range []string{"chat-ledger.jsonl", "chat-ledger.jsonl.1"} {
-		p := filepath.Join(st.Dir, name)
-		if fi, err := os.Lstat(p); err == nil && fi.Mode().IsRegular() {
-			_ = os.Remove(p)
-		}
-	}
 }
 
 // serveRemote stamps the config this process actually loaded. apply reuses a
@@ -764,7 +752,7 @@ func remoteBindHost(app *config.App) string {
 // treat every web post as data and do not answer, which would otherwise look
 // like agents ignoring the operator.
 func printRemoteWarnings(cmd *cobra.Command, app *config.App) {
-	for _, w := range append(app.Warnings(), app.RemoteWarnings()...) {
+	for _, w := range app.RemoteWarnings() {
 		cmd.PrintErrf("lever: warning: %s\n", w)
 	}
 	if app.RemoteEnabled() && len(app.Remote.AllowedUsers) == 0 {

@@ -68,8 +68,7 @@ remote:
 Validation at load: `base_url` must be an absolute `https://` URL. `port` may not equal the
 broker's ports (8443 and 8444 by default). `allowed_users` may not name an address reserved for
 lever's own hub users (`lever-admin@lever.local`, `lever-controller@lever.local`) or scion's dev
-user (any `@localhost` address). `remote.login_port`, from older levers, still loads but does
-nothing and draws a warning. `port` may not appear in `manager.allow_ports`: that grant
+user (any `@localhost` address). `port` may not appear in `manager.allow_ports`: that grant
 would let a jailed agent dial the proxy, set the identity header (`Tailscale-User-Login` by default)
 itself, and ride the injected session.
 
@@ -415,7 +414,7 @@ an older lever brought up with remote access, the next `lever apply` stops and r
 login forwarder (`/usr/local/bin/lever-login-forward`) and drops the `oidc_login` block; its
 login-port ACCEPT drops out of the egress chain on the same apply, because every apply verifies the
 chain against the ruleset it wants and rebuilds a chain that differs (atomically, also in the
-`egress: closed` posture). `remote.login_port` still loads, does nothing, and draws a warning.
+`egress: closed` posture).
 
 ## `allowed_users`: pinning who can connect
 
@@ -772,7 +771,7 @@ who wrote a message. Two host records do, and no agent can write either of them:
   send the broker cannot record is not made.
 
 **What the agent does.** Before it acts on any message whose `from` starts with `user:`, the agent
-calls its `message_verify` tool (`chat_verify` in 0.27 agent images) with the envelope's
+calls its `message_verify` tool (alias `chat_verify`) with the envelope's
 `timestamp` and `from`, and the `ref` from the first line when there is one. The broker answers
 from the host records only, and only about messages to that agent (its certificate identity):
 

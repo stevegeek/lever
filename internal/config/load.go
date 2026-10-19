@@ -19,10 +19,6 @@ import (
 // `lever.yaml` planted in a parent directory is never picked up.
 const CanonicalName = "lever.yaml"
 
-// ManifestName is a legacy runtime manifest in the mount that `lever down`
-// removes when it finds one.
-const ManifestName = ".lever-manifest.yaml"
-
 // confinedRel reports whether p is a relative path strictly inside its base.
 // It does not keep a file out of the mounted tree; insideTree does that.
 func confinedRel(p string) bool {

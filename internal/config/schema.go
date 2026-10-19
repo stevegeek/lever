@@ -360,9 +360,6 @@ type Remote struct {
 	// refused. Off by default: anything that reaches the listener directly
 	// can set that header.
 	TrustForwardedHost bool `yaml:"trust_forwarded_host"`
-	// LoginPort is parsed so an old lever.yaml still loads, and otherwise
-	// ignored (App.Warnings names it).
-	LoginPort int `yaml:"login_port"`
 	// Landing is what the remote origin opens on: the hub's web UI
 	// (RemoteLandingConsole, the default) or lever's chat page
 	// (RemoteLandingChat). Chat needs an operator-tier allowed_users entry:

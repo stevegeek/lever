@@ -69,6 +69,17 @@ version bump moves the block under the new version heading.
   worker, a stopped one only for the operator's login, never the manager). The worker is named
   only inside `for`, so a broker that predates it refuses the request instead of running the
   operator's wider resume. The old route answers 404.
+- **Compatibility code for instances older than 0.51.0.** The broker's `/chat/verify` route for
+  0.27 agent images, which matched a lever message by its timestamp when the image could not pass
+  a `ref` (the in-image `chat_verify` tool already asks `/message/verify`), and with it the
+  timestamp match in the sent ledger; the reading of `guest-boot.json` into `lifecycle.json`
+  (0.50.0); the `remote.login_port` key and its warning (0.39.0); the clean-up of the single-file
+  chat ledger (`chat-ledger.jsonl`) and of the `.lever-manifest.yaml` runtime manifest; session
+  records that hold a skill's full-file hash (before 0.33.1), which now read as stale; the
+  expired-certificate check's reading of the Go stdlog lines `broker.out.log` held before 0.36.0;
+  and the restart of a broker without an instance id (before 0.36.0), which is now refused like
+  any broker that is not this instance's. `lever doctor`'s *guest clock* row now only warns when
+  the guest's clock is off, unless agent messages are on: no verification depends on it any more.
 
 ### Upgrade
 
@@ -76,6 +87,13 @@ version bump moves the block under the new version heading.
   `/operator/worker/resume` without `for`). Run `lever reload` after upgrading: a broker of the
   last release refuses the chat page's new wake request (it names no worker it knows), so the wake
   fails until the broker runs this release.
+- **Remove `remote.login_port` from `lever.yaml`** if it is still there: it is now ignored without a
+  warning. A leftover `.lever-state/chat-ledger.jsonl`, `chat-ledger.jsonl.1`, `guest-boot.json`
+  or `<tree>/.lever-manifest.yaml` holds nothing lever reads and can be deleted.
+- **An agent whose session record predates 0.33.1 refuses contacts** until it starts fresh
+  (`lever up --fresh` for the manager, `lever worker new-session` or a recycle for a worker).
+- **A broker started by a lever older than 0.36.0** is refused by `lever up` and `lever apply`:
+  run `lever stop`, then `lever up`.
 
 ## [0.51.0] - 2026-10-19
 

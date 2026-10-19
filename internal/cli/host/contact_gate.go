@@ -155,9 +155,9 @@ func contactSession(app *config.App, st state.State, agent string) error {
 		return errors.New("its conversation was restored from a backup that does not say which skill it started with")
 	case r.SkillHash == brokerctl.UncheckedSkill:
 		return errors.New("lever started it fresh on its own while its skill differed from its last session's")
-	case r.SkillHash != skills.ContentHash(onDisk) && r.SkillHash != hash:
+	case r.SkillHash != skills.ContentHash(onDisk):
 		// ContentHash leaves out the release stamp, so a release that renders the same
-		// skill text keeps the session fresh; older records hold the full hash.
+		// skill text keeps the session fresh.
 		return staleSessionError{fmt.Sprintf("at %s, lever %s", r.Started.UTC().Format(time.RFC3339), r.Version)}
 	}
 	return nil

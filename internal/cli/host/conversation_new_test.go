@@ -309,10 +309,10 @@ func TestLockWait(t *testing.T) {
 	if len(notices) != 1 || !strings.Contains(notices[0], "`lever up`") || !strings.Contains(notices[0], "--wait") {
 		t.Fatalf("notices = %q", notices)
 	}
-	go func() {
+	go func(release func()) {
 		time.Sleep(30 * time.Millisecond)
-		held()
-	}()
+		release()
+	}(held)
 	unlock, err := lockConversation(context.Background(), app, st, "lever conversation new", " for the daily reset", 5*time.Second, nil)
 	if err != nil {
 		t.Fatalf("the lock was let go: %v", err)

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/wait"
 )
 
@@ -103,6 +104,9 @@ func waitLiveOnce(ctx context.Context, list func(context.Context) ([]Agent, erro
 	}
 	err := wait.For(ctx, wait.Attempts(wait.ManagerRunning.Name, attempts, interval), func(ctx context.Context) wait.Result {
 		agents, err := list(ctx)
+		if errors.Is(err, ErrAgentListTooLarge) {
+			return wait.Fatal(err)
+		}
 		if err != nil {
 			lastErr = err
 			return wait.NotYetErr(err)
@@ -161,6 +165,9 @@ func holdLive(ctx context.Context, list func(context.Context) ([]Agent, error), 
 		case <-clk.after(interval):
 		}
 		agents, err := list(ctx)
+		if errors.Is(err, ErrAgentListTooLarge) {
+			return err
+		}
 		if err != nil {
 			lastErr = err
 		} else {
@@ -250,6 +257,9 @@ func ObserveAgent(ctx context.Context, list func(context.Context) ([]Agent, erro
 	var found *Agent
 	err := wait.For(ctx, wait.Attempts("the agent listing", attempts, interval), func(ctx context.Context) wait.Result {
 		agents, err := list(ctx)
+		if errors.Is(err, ErrAgentListTooLarge) {
+			return wait.Fatal(err)
+		}
 		if err != nil {
 			lastErr = err
 			return wait.NotYetErr(err)
@@ -487,13 +497,27 @@ func (c *Client) List(ctx context.Context, project string) ([]Agent, error) {
 	// runValue: stderr warnings after the JSON would break the parse.
 	out, err := c.runValue(ctx, "", args...)
 	if err != nil {
-		return nil, err
+		return nil, listErr(err)
 	}
 	var agents []Agent
 	if err := parseJSON(out, &agents); err != nil {
 		return nil, err
 	}
 	return agents, nil
+}
+
+// ErrAgentListTooLarge is wrapped by List, and by the hub readiness wait,
+// when scion's agent list passed lever's output cap. Every agent can write
+// its own record's status and activity, so a hostile one can grow the list
+// past the cap; a retry reads the same list, so the error is final.
+var ErrAgentListTooLarge = errors.New("the hub's agent list is too large for lever to read (scion's output passed lever's size limit), most likely because an agent's record carries an oversized status or activity; " +
+	"find that agent through the hub API (GET /api/v1/agents) and delete its record: `lever worker purge NAME --force` for a worker, `lever up --fresh` for the manager")
+
+func listErr(err error) error {
+	if errors.Is(err, proc.ErrOutputLimit) && !errors.Is(err, ErrAgentListTooLarge) {
+		return fmt.Errorf("%w: %w", ErrAgentListTooLarge, err)
+	}
+	return err
 }
 
 // ErrDeleteUnconfirmed is wrapped by Delete when scion exits 0 for a delete the

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/progress"
 	"github.com/stevegeek/lever/internal/scion/layout"
 	"github.com/stevegeek/lever/internal/termsafe"
@@ -170,6 +171,9 @@ var errServerGone = errors.New("no scion server is running in the jail any more 
 // refused the credential, which happens whenever lever holds no working token
 // yet. Whoever needs the credential fails on it next, with the real error.
 //
+// A list stopped at lever's output cap ends the wait at once with
+// ErrAgentListTooLarge: the hub answered, and every retry reads the same list.
+//
 // Every hubAliveEvery it runs serverPIDProbe, and stops with errServerGone
 // once no scion server is alive, so the long budget costs nothing when the
 // start failed. A probe that cannot run says nothing. notify, when non-nil,
@@ -209,6 +213,9 @@ func (c *Client) waitHubReady(ctx context.Context, notify func(format string, ar
 		_, lastErr = c.run(ctx, "", "list", "--all", "--format", "json", nonInteractive)
 		if lastErr == nil || isHubAuthRefusal(lastErr) {
 			return wait.Ready()
+		}
+		if errors.Is(lastErr, proc.ErrOutputLimit) {
+			return wait.Fatal(listErr(lastErr))
 		}
 		if now := time.Now(); now.Sub(lastAlive) >= c.hubAliveEvery {
 			lastAlive = now

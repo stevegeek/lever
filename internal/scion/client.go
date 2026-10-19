@@ -123,7 +123,7 @@ func projectFlag(project string) []string {
 func (c *Client) runValue(ctx context.Context, dir string, args ...string) (string, error) {
 	res, err := c.r.RunIn(ctx, dir, c.env(), c.bin, args...)
 	if err != nil {
-		return "", fmt.Errorf("scion %s: %s", redactArgs(args), cleanErr(c.filterOutput(res.Stdout)+c.filterOutput(res.Stderr)))
+		return "", runErr(args, c.filterOutput(res.Stdout)+c.filterOutput(res.Stderr), err)
 	}
 	c.filterOutput(res.Stderr) // logged, never part of the value
 	return strings.TrimSpace(res.Stdout), nil
@@ -146,7 +146,7 @@ func (c *Client) runEnv(ctx context.Context, dir string, extra map[string]string
 	res, err := c.r.RunIn(ctx, dir, env, c.bin, args...)
 	out := c.filterOutput(res.Stdout) + c.filterOutput(res.Stderr)
 	if err != nil {
-		return "", fmt.Errorf("scion %s: %s", redactArgs(args), cleanErr(out))
+		return "", runErr(args, out, err)
 	}
 	return strings.TrimSpace(out), nil
 }
@@ -159,9 +159,19 @@ func (c *Client) runStdin(ctx context.Context, stdin io.Reader, args ...string) 
 	res, err := c.r.RunStdin(ctx, stdin, c.env(), c.bin, args...)
 	out := c.filterOutput(res.Stdout) + c.filterOutput(res.Stderr)
 	if err != nil {
-		return "", fmt.Errorf("scion %s: %s", redactArgs(args), cleanErr(out))
+		return "", runErr(args, out, err)
 	}
 	return strings.TrimSpace(out), nil
+}
+
+// runErr quotes scion's output, not err, which is only the exit status. An
+// output-limit kill is wrapped as well, so callers can tell a reply too large
+// to read from a hub that did not answer.
+func runErr(args []string, out string, err error) error {
+	if errors.Is(err, proc.ErrOutputLimit) {
+		return fmt.Errorf("scion %s: %s: %w", redactArgs(args), cleanErr(out), proc.ErrOutputLimit)
+	}
+	return fmt.Errorf("scion %s: %s", redactArgs(args), cleanErr(out))
 }
 
 // runSecret is run for a command whose argv carries a credential. It scrubs

@@ -2,6 +2,7 @@ package apply
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"time"
@@ -87,6 +88,9 @@ func HealAgentSession(ctx context.Context, h SessionHealer, project string, rec 
 	b := sessionHealSettle
 	_ = wait.For(ctx, b.spec(wait.SessionHealed.Name), func(ctx context.Context) wait.Result {
 		agents, err := sc.List(ctx, project)
+		if errors.Is(err, scion.ErrAgentListTooLarge) {
+			return wait.Fatal(err)
+		}
 		if err != nil {
 			return wait.NotYetErr(err)
 		}

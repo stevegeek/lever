@@ -764,6 +764,9 @@ func (r *run) waitPhase(ctx context.Context, jp, phase string) (last string, err
 	}
 	err = wait.For(ctx, s, func(ctx context.Context) wait.Result {
 		agents, err := r.d.managerScion().List(ctx, jp)
+		if errors.Is(err, scion.ErrAgentListTooLarge) {
+			return wait.Fatal(err)
+		}
 		if err != nil {
 			return wait.NotYetErr(err)
 		}

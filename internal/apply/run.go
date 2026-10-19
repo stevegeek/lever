@@ -1940,6 +1940,9 @@ func (r *run) settleManagerPhase(ctx context.Context, jp string, rec *scion.Agen
 	var listErr error
 	err := wait.For(ctx, b.spec(wait.ManagerPhaseSettle.Name), func(ctx context.Context) wait.Result {
 		agents, err := r.d.managerScion().List(ctx, jp)
+		if errors.Is(err, scion.ErrAgentListTooLarge) {
+			return wait.Fatal(err)
+		}
 		if err != nil {
 			listErr = err
 			return wait.NotYetErr(err)

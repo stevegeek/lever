@@ -109,6 +109,49 @@ func TestEnsureUpReportsRebootAndWarnings(t *testing.T) {
 	}
 }
 
+// What the guest scripts report reaches the operator's terminal, so each
+// line must be inert and bounded however hostile the guest is.
+func TestEnsureUpGuestReportPrintsInert(t *testing.T) {
+	f := proc.NewFakeRunner()
+	scriptedVM(f)
+	hostile := "6.8.0\x1b[2J\x1b]0;lever: all ok\x07\r✓ verified\x07 \u202egnp.exe \u009b2J" + strings.Repeat("y", 5000)
+	r := fakeGuestRunner{FakeRunner: f,
+		crash:  proc.Result{Stdout: "warn: " + hostile + "\n"},
+		kernel: proc.Result{Stdout: "reboot: the guest runs kernel " + hostile + "\n"},
+	}
+	l := New(r, vm, common.Options{})
+	var lines []string
+	warn := func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }
+	if err := l.EnsureUp(context.Background(), backend.Config{MachineName: vm, ProjectTree: tree, GuestKernel: guest.GuestKernelHWE, Warn: warn}); err != nil {
+		t.Fatalf("EnsureUp: %v", err)
+	}
+	var seen int
+	for _, line := range lines {
+		if !strings.Contains(line, "6.8.0") {
+			continue
+		}
+		seen++
+		for _, c := range line {
+			if c < 0x20 || c == 0x7f || (c >= 0x80 && c <= 0x9f) || c == 0x202e {
+				t.Errorf("%q holds %U", line, c)
+			}
+		}
+		if len(line) > 1000 {
+			t.Errorf("line of %d bytes: %q", len(line), line)
+		}
+	}
+	if seen != 2 {
+		t.Errorf("want the warning and the reboot line, got:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+func TestBriefErrInertAndBounded(t *testing.T) {
+	s := briefErr(fmt.Errorf("exit 1"), proc.Result{Stderr: "level=fatal \x1b]0;t\x07\r\u202e" + strings.Repeat("z", 5000) + "\nsecond"})
+	if strings.ContainsAny(s, "\x1b\x07\r\n\u202e") || len([]rune(s)) > briefErrMax+1 || !strings.HasPrefix(s, "level=fatal") {
+		t.Errorf("briefErr = %q", s)
+	}
+}
+
 func TestEnsureUpCrashRecoveryFailureFails(t *testing.T) {
 	f := proc.NewFakeRunner()
 	scriptedVM(f)

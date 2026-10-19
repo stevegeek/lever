@@ -6,8 +6,10 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/stevegeek/lever/internal/egress"
+	"github.com/stevegeek/lever/internal/termsafe"
 )
 
 const egressChain = egress.Chain
@@ -95,12 +97,47 @@ func parseGuestReport(out string) GuestReport {
 				}
 			}
 		case strings.HasPrefix(line, "reboot: "):
-			r.Reboot = append(r.Reboot, strings.TrimPrefix(line, "reboot: "))
+			r.Reboot = append(r.Reboot, SafeLine(strings.TrimPrefix(line, "reboot: "), reportLineMax))
 		case strings.HasPrefix(line, "warn: "):
-			r.Warn = append(r.Warn, strings.TrimPrefix(line, "warn: "))
+			r.Warn = append(r.Warn, SafeLine(strings.TrimPrefix(line, "warn: "), reportLineMax))
 		}
 	}
+	r.Reboot = capReport(r.Reboot, "reboot-pending lines")
+	r.Warn = capReport(r.Warn, "warnings")
 	return r
+}
+
+// The guest writes Reboot and Warn, and the host prints each one, so both
+// the length of a line and the number of lines are bounded.
+const (
+	reportLineMax  = 300
+	reportLinesMax = 16
+)
+
+// SafeLine is one line of guest output made safe to print (termsafe.Sanitize),
+// trimmed and cut to at most max runes, "…" marking a cut. Only the first
+// 4*max bytes are read, so a guest cannot make the host scan an unbounded
+// line. It is not in termsafe because that package is in-jail code.
+func SafeLine(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	if len(s) > 4*max {
+		s = s[:4*max]
+	}
+	s = strings.TrimSpace(termsafe.Sanitize(strings.ToValidUTF8(s, "\uFFFD")))
+	if utf8.RuneCountInString(s) > max {
+		s = string([]rune(s)[:max]) + "…"
+	}
+	return s
+}
+
+func capReport(lines []string, what string) []string {
+	if len(lines) <= reportLinesMax {
+		return lines
+	}
+	n := len(lines) - reportLinesMax
+	return append(lines[:reportLinesMax:reportLinesMax], fmt.Sprintf("and %d more guest %s not shown", n, what))
 }
 
 // crashPaths is a test seam.

@@ -351,6 +351,62 @@ func TestParseGuestReportCmdlineKnownParamsOnly(t *testing.T) {
 	}
 }
 
+// hostileGuestValue is a value a compromised guest could put in a report
+// line: a clear screen, an OSC title, a CR overdraw, a BEL, a bidi override
+// and a C1 CSI, then far more text than a line may print.
+const hostileGuestValue = "6.8.0\x1b[2J\x1b]0;lever: all ok\x07\r✓ verified\x07 \u202egnp.exe \u009b2J"
+
+// inert fails the test unless s holds no control or format character a
+// terminal acts on and is at most max runes plus the cut mark.
+func inert(t *testing.T, s string, max int) {
+	t.Helper()
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) || r == 0x202e {
+			t.Errorf("%q holds %U", s, r)
+		}
+	}
+	if n := len([]rune(s)); n > max+1 {
+		t.Errorf("%d runes, want at most %d", n, max+1)
+	}
+}
+
+func TestParseGuestReportLinesPrintInert(t *testing.T) {
+	long := hostileGuestValue + strings.Repeat("y", 10_000)
+	rep := parseGuestReport("reboot: " + long + "\nwarn: " + long + "\nhwe: " + long + "\n")
+	if len(rep.Reboot) != 1 || len(rep.Warn) != 1 {
+		t.Fatalf("report = %q", rep)
+	}
+	for _, l := range slices.Concat(rep.Reboot, rep.Warn) {
+		inert(t, l, reportLineMax)
+		if !strings.HasPrefix(l, "6.8.0") || !strings.Contains(l, "✓ verified") || !strings.HasSuffix(l, "…") {
+			t.Errorf("line = %q, want the plain text kept and a cut mark", l)
+		}
+	}
+}
+
+func TestParseGuestReportBoundsLineCount(t *testing.T) {
+	var b strings.Builder
+	for i := range reportLinesMax + 5 {
+		fmt.Fprintf(&b, "warn: w%d\nreboot: r%d\n", i, i)
+	}
+	rep := parseGuestReport(b.String())
+	if len(rep.Warn) != reportLinesMax+1 || rep.Warn[reportLinesMax] != "and 5 more guest warnings not shown" {
+		t.Errorf("warn = %q", rep.Warn)
+	}
+	if len(rep.Reboot) != reportLinesMax+1 || rep.Reboot[reportLinesMax-1] != fmt.Sprintf("r%d", reportLinesMax-1) {
+		t.Errorf("reboot = %q", rep.Reboot)
+	}
+}
+
+func TestSafeLineShortLineUnchanged(t *testing.T) {
+	if got := SafeLine("  the guest runs kernel 6.8.0-146-generic  ", 300); got != "the guest runs kernel 6.8.0-146-generic" {
+		t.Errorf("SafeLine = %q", got)
+	}
+	if got := SafeLine("abc", 0); got != "" {
+		t.Errorf("SafeLine(max 0) = %q", got)
+	}
+}
+
 func TestEnsureCrashRecoveryUsesRootAndParses(t *testing.T) {
 	shape := prefixShapes("lever-x")[1]
 	f := proc.NewFakeRunner()

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/proc"
 )
 
@@ -98,8 +99,12 @@ func briefErr(err error, res proc.Result) string {
 		s = err.Error()
 	}
 	s, _, _ = strings.Cut(s, "\n")
-	return s
+	return guest.SafeLine(s, briefErrMax)
 }
+
+// briefErrMax bounds the stderr line a warning quotes: limactl relays text
+// from the guest.
+const briefErrMax = 300
 
 // scopeNotStarted reports whether systemd-run itself failed, before it ran
 // limactl: a line of its own at the start of stderr. Only the first line

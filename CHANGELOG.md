@@ -253,9 +253,10 @@ version bump moves the block under the new version heading.
   apply` or `lever up` restarts the broker when its version changes.
 
 - **Service hosts are optional:** nothing changes until `broker.service_hosts` is set. To add
-  one, run `lever service-host init` on the other machine, declare it in `broker.service_hosts`,
-  run `lever service-host pair <name>` on the lever host, then `lever reload` (see the service
-  hosts guide).
+  one, run `lever service-host init <config>` on the other machine and put the fingerprint it
+  prints in a `broker.service_hosts` entry; run `lever service-host pair <name>` on the lever host
+  and put that fingerprint in the service host's `client_fingerprint`; start `lever service-host
+  serve <config>` there, then run `lever reload` (see the service hosts guide).
 
 - **Host programs that called `/operator/wake` must run `lever worker resume NAME`** (or POST
   `/operator/worker/resume` without `for`). Run `lever reload` after upgrading: a broker of the

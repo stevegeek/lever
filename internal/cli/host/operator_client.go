@@ -44,6 +44,19 @@ func operatorPost(ctx context.Context, sock, path string, in, out any) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	return operatorDo(sock, path, req, out)
+}
+
+// operatorGet is operatorPost for a read-only route.
+func operatorGet(ctx context.Context, sock, path string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, udsURL+path, nil)
+	if err != nil {
+		return err
+	}
+	return operatorDo(sock, path, req, out)
+}
+
+func operatorDo(sock, path string, req *http.Request, out any) error {
 	resp, err := udsClient(sock).Do(req)
 	if err != nil {
 		return err

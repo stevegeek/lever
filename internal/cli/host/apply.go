@@ -1015,7 +1015,10 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 
 		// StopRemoteProxy needs no controller: teardown is by pid file.
 		StartRemoteProxy: rc.Start,
-		StopRemoteProxy:  func(context.Context) error { return brokerctl.StopRemoteProxy(st) },
+		AutostartWorker: func(ctx context.Context, worker string) error {
+			return autostartWorker(ctx, w.app, st, worker)
+		},
+		StopRemoteProxy: func(context.Context) error { return brokerctl.StopRemoteProxy(st) },
 		FenceRemoteLogins: func(context.Context) error {
 			return fenceRemoteLogins(w.app, st, func() error { return brokerctl.StopRemoteProxy(st) })
 		},

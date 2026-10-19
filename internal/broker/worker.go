@@ -932,7 +932,7 @@ func (b *Broker) resumeWorker(ctx context.Context, w http.ResponseWriter, spec W
 		b.audit("worker", actor, "deny", "resume "+spec.Name+": no record")
 		hint := "start it instead: `lever-manager agent start " + spec.Name + " --task \"…\"`"
 		if actor == operatorActor {
-			hint = "ask the manager to start it (`lever-manager agent start " + spec.Name + " --task \"…\"` in the manager's session)"
+			hint = "start it instead: `lever worker start " + spec.Name + "`"
 		}
 		refuse(w, ReasonNoRecord, "worker "+spec.Name+" has no record on the hub (never started, purged, or a new jail); "+hint, http.StatusNotFound)
 		return

@@ -120,18 +120,40 @@ A program on the host (a job runner, a cron script) can drive long-lived workers
 manager. Everything goes through the broker's operator socket, which only the host user can reach,
 so it gives no agent anything new:
 
+- `lever worker list --json` shows each declared worker's phase, activity, container and whether it
+  is idle at its prompt (`idle_at_prompt`: `true`, `false`, or `null` when the record doesn't
+  settle it). The activity comes from hooks inside the worker's own container, so it is the
+  worker's word, not lever's: use it to pace work, never to decide anything that matters for
+  security.
+- `lever worker start NAME [--task-file F]` brings a worker up and waits until it is live: a worker
+  with no record is created with the task in `F`, else its `task_file` from the config; an existing
+  record is resumed; a running worker is left alone.
 - `lever worker resume NAME` brings a worker that is not running back up and waits until it is live.
   Run it after `lever stop` and `lever up` (which resumes the manager, not the workers), or whenever
   a send is refused with exit `9`. It is a no-op for a running worker. It does not start a worker
-  that has no record (exit `8`): the manager starts it.
+  that has no record (exit `8`): `lever worker start` does.
 - `lever msg send "…" --to NAME` gives a running worker its next piece of work. The worker verifies
   it as an `operator-note`. Exit `9` means the worker was not running and nothing was sent.
+- `lever worker recycle NAME [--task-file F]` discards a `recyclable` worker's record and starts it
+  fresh, for a slot that needs a fresh context; the workspace is kept and the conversation is lost.
+  `lever worker suspend NAME` and `lever worker stop NAME` take a worker down.
+
+Each verb is the manager's own (`lever-manager agent start`, `resume`, `recycle`, `suspend`,
+`stop`) run with the operator as the actor: the same per-worker lock, the same checks, the same
+running-worker cap, and one recycle a minute per worker, a count you and the manager share. The
+broker's audit log names the operator (`caller=operator`).
+
+To bring workers up with the instance, set `autostart: true` on them in `lever.yaml`. After the
+manager is up, `lever up` and `lever apply` then resume or start each one (a `worker-autostart NAME`
+step each), as `lever worker start NAME` with no `--task-file` would. A worker that doesn't come up
+is a warning naming it and the command to retry; the bring-up still succeeds. Note that this also
+brings back a worker you stopped with `lever worker stop`.
 
 Branch on exit codes or on `--json`'s `reason`, never on the text
-([the exit codes](/reference/cli/#lever-worker-resume-exit-codes)). A typical loop:
+([the exit codes](/reference/cli/#lever-worker-exit-codes)). A typical loop:
 
 ```sh
-lever worker resume fwK --json || exit $?   # 75: busy, try again later; 8: ask the manager to start it
+lever worker start fwK --json || exit $?    # 75: busy, try again later; 10: fix the cause
 lever msg send "job 42 ready at jobs/42" --to fwK
 ```
 
@@ -146,8 +168,8 @@ Two things to know about sends:
 **`/operator/wake` is deprecated for host programs.** It is the remote chat page's route (it takes
 the chat login and tier, and lets a contact wake only a suspended worker). It keeps working as
 before, and now answers with a `Deprecation: true` header naming `/operator/worker/resume` as its
-successor. A program that called it directly should run `lever worker resume NAME` instead. The
-route may become internal to the remote proxy, with its body changed, no sooner than one release
+successor. A program that called it directly should run `lever worker resume NAME` (or `start`)
+instead. The route may become internal to the remote proxy, with its body changed, no sooner than one release
 after `lever worker resume` ships, and the CHANGELOG will say so.
 
 ## Where the logs are

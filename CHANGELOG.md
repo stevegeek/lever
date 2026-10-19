@@ -7,6 +7,33 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **`lever worker list [--json]`: see the workers from the host (lever#237).** It lists every
+  declared worker as the broker sees it on the hub: phase (`none` with no record), activity, last
+  activity, container status, and `idle_at_prompt`, which is `true` for a running worker waiting
+  for input or done, `false` for a busy or not-running one, and `null` when the record doesn't
+  settle it (the hub's `stalled` covers both an idle worker and one that can't reach the model).
+  The activity is marked `worker-reported`: the hooks inside the worker's own container report it.
+  The broker passes only known labels, and the CLI bounds and sanitizes every string again.
+  `--json` prints one line, `{"ok","workers":[…],"reason","error","exit"}`. Read-only, through
+  the new `GET /operator/worker/list` on the broker's operator socket.
+
+- **`lever worker start`, `recycle`, `suspend` and `stop` from the host, and `autostart`
+  (lever#235).** They run the manager's own verbs through the broker's operator socket with the
+  operator as the actor, with the same per-worker lock, role, workspace and shared-folder checks,
+  running-worker cap and one-a-minute recycle limit, which the manager's recycles share. `start`
+  and `recycle` take the task from `--task-file` (read on the host: a regular file, at most 64 KiB,
+  never through a symbolic link inside the tree) or from the worker's new `task_file` setting, which
+  lives at the instance root like `prompt_file`. A worker with `autostart: true` is resumed or started
+  by `lever up` and `lever apply` once the manager is up; a failure warns, naming the worker, and the
+  bring-up still succeeds. The `--json` line and the exit codes are those of `lever worker resume`,
+  plus `12` (`not-stopped`); new reasons are `task-file`, `bad-task`, `task-too-long`, `task-fixed`,
+  `config-file`, `not-recyclable`, `not-stopped` and `rate-limited`. The manager's own start and
+  recycle refusals keep their status and text, and now carry `X-Lever-Reason` too. Nothing changes
+  inside the jail, and the manager and workers get no new authority. `/operator/wake` is unchanged
+  and stays deprecated for host programs.
+
 ## [0.51.0] - 2026-10-19
 
 ### Changed

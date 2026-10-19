@@ -221,7 +221,7 @@ func (b *Broker) notRunningCheck(ctx context.Context, actor, slug string, toMana
 	case toManager:
 		return "the manager is not running (phase " + phase + "); the operator resumes it with `lever up`", ReasonNotRunning, phase
 	case phase == "" && actor == operatorActor:
-		return "worker " + slug + " has no record on the hub (never started, or purged); ask the manager to start it (`lever-manager agent start " + slug + " --task \"…\"` in the manager's session)", ReasonNoRecord, phase
+		return "worker " + slug + " has no record on the hub (never started, or purged); start it with `lever worker start " + slug + "`", ReasonNoRecord, phase
 	case phase == "":
 		return "worker " + slug + " has no record on the hub (never started, or purged); start it first: `lever-manager agent start " + slug + " --task \"…\"`", ReasonNoRecord, phase
 	case actor == operatorActor:

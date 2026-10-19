@@ -390,6 +390,10 @@ type Deps struct {
 	// StartRemoteProxy starts, or confirms running, the daemonized lever remote
 	// serve proxy. Plan includes its step only when remote access is on.
 	StartRemoteProxy func(ctx context.Context) error
+	// AutostartWorker asks the running broker to resume or start a worker
+	// that sets autostart, and waits until it is live. nil: autostart steps
+	// warn and do nothing.
+	AutostartWorker func(ctx context.Context, worker string) error
 	// StopRemoteProxy stops the remote proxy by pidfile, tolerating an absent or
 	// stale one. Run calls it whenever remote access is off, so a proxy left by a
 	// prior apply stops serving traffic the config no longer authorizes.
@@ -619,7 +623,7 @@ func planHas(steps []Step, kind StepKind) bool {
 
 // stepLabel adds an image step's reference, since the plan can load several.
 func stepLabel(s Step) string {
-	if s.Kind == KindLoadImage && s.Target != "" {
+	if (s.Kind == KindLoadImage || s.Kind == KindWorkerAutostart) && s.Target != "" {
 		return string(s.Kind) + " " + s.Target
 	}
 	return string(s.Kind)
@@ -654,8 +658,33 @@ func (r *run) step(ctx context.Context, s Step) error {
 	case KindRemoteProxy:
 		// Plan includes this step only when remote access is on.
 		return r.d.StartRemoteProxy(ctx)
+	case KindWorkerAutostart:
+		r.autostartWorker(ctx, s)
+		return nil
 	default:
 		return fmt.Errorf("unknown step kind %q", s.Kind)
+	}
+}
+
+// autostartWorkerTimeout bounds one autostart: the broker waits for the
+// worker's lock and then until it is live, and a bring-up must not hang on a
+// worker.
+const autostartWorkerTimeout = 3 * time.Minute
+
+// autostartWorker never fails the bring-up: the manager is up, and a worker
+// that does not start is the operator's to look at, with the command that
+// retries it.
+func (r *run) autostartWorker(ctx context.Context, s Step) {
+	if r.d.AutostartWorker == nil {
+		r.d.Log("lever: warning: worker %q sets autostart, but this run cannot reach the broker's operator socket; start it with `lever worker start %s`", s.Target, s.Target)
+		progress.From(ctx).Note("not started")
+		return
+	}
+	actx, cancel := context.WithTimeout(ctx, autostartWorkerTimeout)
+	defer cancel()
+	if err := r.d.AutostartWorker(actx, s.Target); err != nil {
+		r.d.Log("lever: warning: autostart of worker %q failed: %v; the bring-up continues. Retry with `lever worker start %s`", s.Target, err, s.Target)
+		progress.From(ctx).Note("not started: see the warning")
 	}
 }
 

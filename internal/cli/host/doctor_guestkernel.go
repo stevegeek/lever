@@ -18,6 +18,8 @@ import (
 type guestKernelProbe struct {
 	sysctl         map[string]string // key (kernel.panic) -> value
 	cmdline        bool              // guest.EFIPstoreCmdline is on /proc/cmdline
+	noKVMAPF       bool              // guest.NoKVMAPFCmdline is on /proc/cmdline
+	arch           string            // uname -m
 	efiPstore      bool              // the EFI pstore backend may be registered
 	running, deflt string            // uname -r; the kernel GRUB boots next (guest.BootKernelShell)
 	release        string            // VERSION_ID of /etc/os-release
@@ -34,6 +36,8 @@ func guestKernelProbeScript() string {
 		fmt.Fprintf(&b, "printf 'sysctl.%s=%%s\\n' \"$(cat %s 2>/dev/null)\"\n", s.Key, path)
 	}
 	fmt.Fprintf(&b, "if grep -qw -- '%s' /proc/cmdline 2>/dev/null; then echo cmdline=1; else echo cmdline=0; fi\n", guest.EFIPstoreCmdline)
+	fmt.Fprintf(&b, "if grep -qwF -- '%s' /proc/cmdline 2>/dev/null; then echo nokvmapf=1; else echo nokvmapf=0; fi\n", guest.NoKVMAPFCmdline)
+	b.WriteString("echo \"arch=$(uname -m)\"\n")
 	b.WriteString(guest.EFIPstoreActiveShell)
 	b.WriteString("if efi_pstore_active /sys/module; then echo efi_pstore=active; else echo efi_pstore=off; fi\n")
 	b.WriteString("echo \"running=$(uname -r)\"\n")
@@ -51,6 +55,8 @@ func guestKernelProbeScript() string {
 // releaseRE is the shape of an Ubuntu VERSION_ID; anything else is not shown.
 var releaseRE = regexp.MustCompile(`^[0-9]{2}\.[0-9]{2}$`)
 
+var archRE = regexp.MustCompile(`^[a-z0-9_]{1,16}$`)
+
 func parseGuestKernelProbe(out string) guestKernelProbe {
 	p := guestKernelProbe{sysctl: map[string]string{}}
 	for _, line := range strings.Split(out, "\n") {
@@ -63,6 +69,12 @@ func parseGuestKernelProbe(out string) guestKernelProbe {
 			p.sysctl[strings.TrimPrefix(k, "sysctl.")] = v
 		case k == "cmdline":
 			p.cmdline = v == "1"
+		case k == "nokvmapf":
+			p.noKVMAPF = v == "1"
+		case k == "arch":
+			if archRE.MatchString(v) {
+				p.arch = v
+			}
 		case k == "efi_pstore":
 			p.efiPstore = v == "active"
 		case k == "running":
@@ -129,11 +141,23 @@ func checkGuestCrashRecovery(backendName string, p guestKernelProbe, perr error)
 		return warnResult(name, "the EFI pstore backend is registered: a kernel oops can hang in an EFI runtime call instead of rebooting",
 			crashRecoveryRebootFix)
 	}
+	var missing []string
 	if !p.cmdline {
-		return warnResult(name, "the kernel command line lacks "+guest.EFIPstoreCmdline+" (reboot pending); the EFI pstore backend is off for this boot only",
+		missing = append(missing, guest.EFIPstoreCmdline+" (the EFI pstore backend is off for this boot only)")
+	}
+	asyncPF := p.arch == guest.NoKVMAPFArch
+	if asyncPF && !p.noKVMAPF {
+		missing = append(missing, guest.NoKVMAPFCmdline+" (KVM async page faults are on: a task can hang on guest memory the host swapped out)")
+	}
+	if len(missing) > 0 {
+		return warnResult(name, "the kernel command line lacks "+strings.Join(missing, " and ")+"; reboot pending",
 			crashRecoveryRebootFix)
 	}
-	return checkResult{name, true, "panic on oops and soft lockup, reboot after 10 s; EFI pstore off", ""}
+	detail := "panic on oops and soft lockup, reboot after 10 s; EFI pstore off"
+	if asyncPF {
+		detail += "; KVM async page faults off"
+	}
+	return checkResult{name, true, detail, ""}
 }
 
 // checkGuestKernel reports the running guest kernel and warns when a reboot is

@@ -75,6 +75,10 @@ type Config struct {
 	// NestedVirtUnknown says the caller has no lever.yaml (`lever provision`):
 	// EnsureUp leaves the guest's /dev/kvm setup as it is.
 	NestedVirtUnknown bool
+	// HostSwap lets the host swap the Lima VM's memory out. False starts the
+	// VM in a systemd user scope with MemorySwapMax=0 on a Linux host where
+	// that works (lima.NoSwapScopePrefix). Lima only.
+	HostSwap bool
 	// GuestKernel is the Lima guest kernel flavour to converge on ("hwe" or
 	// "ga"). "" installs nothing and only reports a pending reboot. Lima only.
 	GuestKernel string

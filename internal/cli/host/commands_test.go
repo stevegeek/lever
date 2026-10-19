@@ -156,7 +156,7 @@ func TestFactoryReceivesConfiguredBackendName(t *testing.T) {
 // operator.
 func TestBringUpBackendPassesWarn(t *testing.T) {
 	sb := &stubBackend{}
-	app := &config.App{Name: "x", Backend: config.BackendLima, CPUs: 8, Memory: "24GiB", NestedVirt: true}
+	app := &config.App{Name: "x", Backend: config.BackendLima, CPUs: 8, Memory: "24GiB", NestedVirt: true, HostSwap: true}
 	var got []string
 	warn := func(format string, a ...any) { got = append(got, fmt.Sprintf(format, a...)) }
 	if _, err := bringUpBackend(context.Background(), app, func(string, string) (backend.Backend, error) { return sb, nil }, state.State{Dir: "/state"}, warn); err != nil {
@@ -165,7 +165,7 @@ func TestBringUpBackendPassesWarn(t *testing.T) {
 	if sb.upCfg.HWEFailStamp != "/state/hwe-install-failed.json" {
 		t.Errorf("stamp = %q", sb.upCfg.HWEFailStamp)
 	}
-	if sb.upCfg.Warn == nil || sb.upCfg.CPUs != 8 || sb.upCfg.Memory != "24GiB" || !sb.upCfg.NestedVirt || sb.upCfg.NestedVirtUnknown {
+	if sb.upCfg.Warn == nil || sb.upCfg.CPUs != 8 || sb.upCfg.Memory != "24GiB" || !sb.upCfg.NestedVirt || sb.upCfg.NestedVirtUnknown || !sb.upCfg.HostSwap {
 		t.Fatalf("cfg = %+v", sb.upCfg)
 	}
 	sb.upCfg.Warn("w %d", 1)

@@ -153,7 +153,7 @@ func validateLimaKeys(a *App, goos string) error {
 		for _, k := range []struct {
 			key string
 			set bool
-		}{{"nested_virt", a.NestedVirt}, {"cpus", a.CPUs != 0}, {"memory", a.Memory != ""}, {"guest_kernel", a.GuestKernel != ""}, {"guest_profile", a.GuestProfile != ""}} {
+		}{{"nested_virt", a.NestedVirt}, {"cpus", a.CPUs != 0}, {"memory", a.Memory != ""}, {"guest_kernel", a.GuestKernel != ""}, {"guest_profile", a.GuestProfile != ""}, {"host_swap", a.HostSwap}} {
 			if k.set {
 				return fmt.Errorf("config: %s is Lima-only; OrbStack manages its own machine resources", k.key)
 			}

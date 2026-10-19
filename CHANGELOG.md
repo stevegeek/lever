@@ -35,19 +35,19 @@ version bump moves the block under the new version heading.
 - **`lever worker start`, `recycle`, `suspend` and `stop` from the host, and `autostart`
   (lever#235).** They run the manager's own verbs through the broker's operator socket with the
   operator as the actor, with the same per-worker lock, role, workspace and shared-folder checks,
-  running-worker cap and one-a-minute recycle limit, which the manager's recycles share. `start`
-  and `recycle` take the task from `--task-file` (read on the host: a regular file, at most 64 KiB,
+  running-worker cap and one-a-minute recycle limit, which the manager's recycles share. `start` and
+  `recycle` take the task from `--task-file` (read on the host: a regular file, at most 64 KiB,
   never through a symbolic link inside the tree) or from the worker's new `task_file` setting, which
-  lives at the instance root like `prompt_file`. A worker with `autostart: true` is resumed or started
-  by `lever up` and `lever apply` once the manager is up; a failure warns, naming the worker, and the
-  bring-up still succeeds. The `--json` line and the exit codes are those of `lever worker resume`,
-  plus `12` (`not-stopped`); new reasons are `task-file`, `bad-task`, `task-too-long`, `task-fixed`,
-  `config-file`, `not-stopped` and `rate-limited`. `lever worker recycle` works on any declared
-  worker: `recyclable: true` is the manager's authority to recycle, and the operator owns the
-  instance, so the manager's `/worker/recycle` still needs it and the operator's verb does not.
-  The manager's own start and recycle refusals keep their status and text, and now carry
-  `X-Lever-Reason` too. Nothing changes inside the jail, and the manager and workers get no new
-  authority.
+  lives at the instance root like `prompt_file`. A worker with `autostart: true` is resumed or
+  started by `lever up` and `lever apply` once the manager is up; a failure warns, naming the
+  worker, and the bring-up still succeeds. The `--json` line and the exit codes are those of `lever
+  worker resume`, plus `12` (`not-stopped`); new reasons are `task-file`, `bad-task`,
+  `task-too-long`, `task-fixed`, `config-file`, `not-stopped` and `rate-limited`. `lever worker
+  recycle` works on any declared worker: `recyclable: true` is the manager's authority to recycle,
+  and the operator owns the instance, so the manager's `/worker/recycle` still needs it and the
+  operator's verb does not. The manager's own start and recycle refusals keep their status and text,
+  and now carry `X-Lever-Reason` too. Nothing changes inside the jail, and the manager and workers
+  get no new authority.
 
 - **`lever worker new-session NAME [--task-file F]`: a new conversation for a worker, keeping its
   record and workspace (lever#236).** The broker stops the worker, which ends its session, waits
@@ -99,8 +99,8 @@ version bump moves the block under the new version heading.
   `lever-manager`, `lever-agent` and `lever-tool-db`, and the stamp wins over Go's own VCS stamp,
   which in a worktree nested inside another checkout names that checkout. A `make install` build
   of `lever` in a worktree now shows `X.Y.Z (<commit>)` instead of `X.Y.Z (bin …)`, so doctor's
-  *agent lever version* row can tell it is the build the image came from. lever-tool-db's MCP serverInfo
-  carries the commit too.
+  *agent lever version* row can tell it is the build the image came from. lever-tool-db's MCP
+  serverInfo carries the commit too.
 
 - **The broker bounds a tool's `tools/list` answer to 16 MiB.** The gateway reads it whole to add
   the capability argument; a larger answer is now refused as a backend error (`503`) instead of
@@ -108,10 +108,10 @@ version bump moves the block under the new version heading.
 
 ### Removed
 
-- **Two internal helpers nothing called.** The scion client's runtime broker wait
-  (`RuntimeBrokerReady`; bring-up asks the hub as lever-admin instead) and `wire.Stage` (the host
-  and the broker stage `bootstrap.json` through `fsutil.ReplaceInTreeNoLinks`). No behaviour
-  changes.
+- **Internal code nothing used.** The scion client's runtime broker wait (`RuntimeBrokerReady`;
+  bring-up asks the hub as lever-admin instead), `wire.Stage` (the host and the broker stage
+  `bootstrap.json` through `fsutil.ReplaceInTreeNoLinks`), and the wire path and request type of
+  the removed `/operator/wake` route. No behaviour changes.
 
 - **The broker's `/operator/wake` route.** It was deprecated in 0.50.0. The remote chat page now
   wakes a worker through `/operator/worker/resume`, with a `for` object naming the worker, the
@@ -141,14 +141,15 @@ version bump moves the block under the new version heading.
 
 ### Fixed
 
-- **The broker refuses a tool call with duplicate keys, or keys equal under case folding.** The gateway
-  checks a message's capability, operation and arguments by exact key, and forwards the message
-  re-encoded with every key it holds. An MCP server written in Go decodes into structs, which match
-  keys regardless of case under Unicode folding, so `{"params":{"name":"read"},"paramſ":{"name":
-  "write"}}` passed as a `read` and could run as a `write` there. Likewise a backend whose parser
-  keeps the first of two `method` keys, where Go keeps the last. The gateway now answers a message
-  with a repeated key, or one equal to another under folding, or nested deeper than 256 levels,
-  with `400` and logs a `deny`, for every broker tool.
+- **The broker refuses a tool call with duplicate keys, or keys equal under case folding.** The
+  gateway checks a message's capability, operation and arguments by exact key, and forwards the
+  message re-encoded with every key it holds. An MCP server written in Go decodes into structs,
+  which match keys regardless of case under Unicode folding, so
+  `{"params":{"name":"read"},"paramſ":{"name":"write"}}` passed as a `read` and could run as a
+  `write` there. Likewise a backend whose parser keeps the first of two `method` keys, where Go
+  keeps the last. The gateway now answers a message with a repeated key, or one equal to another
+  under folding, or nested deeper than 256 levels, with `400` and logs a `deny`, for every broker
+  tool.
 
 ### Security
 
@@ -191,8 +192,9 @@ version bump moves the block under the new version heading.
 ### Upgrade
 
 - **Jail ABI 7.** The in-jail code changed: `lever-agent` and `lever-manager` (the version
-  commands), `internal/wire` (the `/version` route, `wire.Stage` removed), `internal/scion` (the
-  broker wait removed, the oversized list) and the new build stamp. Rebuild the agent image
+  commands), `internal/wire` (the `/version` route, `wire.Stage` and the wake types removed),
+  `internal/scion` (the broker wait removed, the oversized list), `internal/mcp` and `captool`
+  (the renamed constraint key) and the new build stamp. Rebuild the agent image
   (`make lever-image` or `make lever-image-slim`, then any instance image built from it) and
   recreate the manager on it with `lever up --fresh --keep-conversation`. Doctor's *agent lever
   version* row says so.
@@ -200,9 +202,10 @@ version bump moves the block under the new version heading.
 - **Rename `scionlocal/<name>` to `lever.local/<name>` in `lever.yaml`:** `manager.image`,
   `workers[].image` and any `security.allowed_image_registries` entry that allowed it. Rebuild the
   image (`make lever-image` or `make lever-image-slim`), and build an instance image `FROM
-  lever.local/lever-claude:<arch>`. An `image_tar` archive must carry the `lever.local/<name>:<arch>`
-  tag: tag the image with it and save the archive again. A manager still running on the old name
-  fails doctor's *manager image* row until `lever up --fresh --keep-conversation` recreates it.
+  lever.local/lever-claude:<arch>`. An `image_tar` archive must carry the
+  `lever.local/<name>:<arch>` tag: tag the image with it and save the archive again. A manager still
+  running on the old name fails doctor's *manager image* row until `lever up --fresh
+  --keep-conversation` recreates it.
 
 - **Host programs that called `/operator/wake` must run `lever worker resume NAME`** (or POST
   `/operator/worker/resume` without `for`). Run `lever reload` after upgrading: a broker of the

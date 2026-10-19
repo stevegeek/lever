@@ -17,13 +17,19 @@
 # ports. An explicitly set port that is in use stops the run before anything
 # starts.
 #
-# Env overrides: NAME, JAIL_PORT, ADMIN_PORT, TOOL_PORT, SUPPRESS_PORT,
-# SCION_VERSION, KEEP=1 (skip teardown for inspection). On failure the end of
+# Env overrides: LIMA_E2E_NAME (default limae2e; must end in e2e), JAIL_PORT,
+# ADMIN_PORT, TOOL_PORT, SUPPRESS_PORT, SCION_VERSION, KEEP=1 (skip teardown for inspection). On failure the end of
 # the broker and tool logs is printed (masked), with or without KEEP=1.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-NAME="${NAME:-limae2e}"
+# Not NAME: an operator's shell may hold a NAME for a real instance, whose VM
+# this run would delete.
+NAME="${LIMA_E2E_NAME:-limae2e}"
+case $NAME in
+*e2e) ;;
+*) echo "LIMA_E2E_NAME=$NAME: the name must end in e2e (this run deletes the VM lever-<name>)"; exit 2 ;;
+esac
 MACHINE="lever-${NAME}"
 LEVER="${LEVER:-$HOME/.local/bin/lever}"
 
@@ -77,6 +83,14 @@ fi
 # Put the real Go toolchain first on PATH: lever runs `go` from the instance
 # dir, where an asdf-style shim finds no .tool-versions and exits 126.
 export PATH="$(cd "$REPO_ROOT" && go env GOROOT)/bin:$PATH"
+
+command -v limactl >/dev/null 2>&1 || { echo "limactl not found (brew install lima)"; exit 1; }
+# Lima's vz VMs run the host's native arch; build the in-guest lever-agent to match.
+case "$(uname -m)" in
+  arm64|aarch64) GUESTARCH=arm64 ;;
+  x86_64|amd64)  GUESTARCH=amd64 ;;
+  *) echo "unsupported host arch $(uname -m)"; exit 1 ;;
+esac
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/lima-e2e.XXXXXX")"
 INST="$WORK/instance"
@@ -142,6 +156,8 @@ show_logs() {
   done
 }
 
+# Set by the clean slate: until then the VM by this name is not this run's.
+slate=0
 cleanup() {
   rc=$?
   if { [ "$rc" != "0" ] || [ "$fail" != "0" ]; } && [ -z "$logs_shown" ]; then
@@ -152,21 +168,13 @@ cleanup() {
     return
   fi
   pkill -f "lever broker serve.*$INST" 2>/dev/null
-  limactl delete --force "$MACHINE" >/dev/null 2>&1
+  [ "$slate" = 1 ] && limactl delete --force "$MACHINE" >/dev/null 2>&1
   rm -rf "$WORK"
 }
 trap cleanup EXIT
 
-command -v limactl >/dev/null 2>&1 || { echo "limactl not found (brew install lima)"; exit 1; }
 say "lima $(limactl --version 2>&1 | head -1)"
 echo "host ports: jail $JAIL_PORT, admin $ADMIN_PORT, db tool $TOOL_PORT, suppression check $SUPPRESS_PORT"
-
-# Lima's vz VMs run the host's native arch; build the in-guest lever-agent to match.
-case "$(uname -m)" in
-  arm64|aarch64) GUESTARCH=arm64 ;;
-  x86_64|amd64)  GUESTARCH=amd64 ;;
-  *) echo "unsupported host arch $(uname -m)"; exit 1 ;;
-esac
 
 # lever-tool-db runs as a host subprocess of the broker, addressed by an
 # absolute path so the broker's minimal PATH is irrelevant. lever-agent is
@@ -244,6 +252,7 @@ EOF
 }
 
 say "clean slate"
+slate=1
 pkill -f "lever broker serve.*$INST" 2>/dev/null
 limactl delete --force "$MACHINE" >/dev/null 2>&1 && echo "deleted stale $MACHINE"
 

@@ -23,13 +23,21 @@
 #
 # Env: SCION_VERSION (default: the release pin), IMAGE_TAR, IMAGE_CACHE, IMAGE
 # (default lever.local/lever-claude-slim), LEVER (default ~/.local/bin/lever),
-# NAME, CHAOS_BUDGET (seconds, default 1800), CHAOS_OFFSET (seconds between
-# the two commands of a race, default 0.3), CHAOS_ONLY (a regex: run only the
-# scenarios whose name matches), KEEP=1 (leave the VM for inspection).
+# CHAOS_NAME (default chaose2e; must end in e2e), CHAOS_BUDGET (seconds,
+# default 1800), CHAOS_OFFSET (seconds between the two commands of a race,
+# default 0.3), CHAOS_ONLY (a regex: run only the scenarios whose name
+# matches), CHAOS_CALL_TIMEOUT (seconds for one command in the guest, default
+# 180), KEEP=1 (leave the VM for inspection).
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-NAME="${NAME:-chaose2e}"
+# Not NAME: an operator's shell may hold a NAME for a real instance, whose VM
+# this run would delete.
+NAME="${CHAOS_NAME:-chaose2e}"
+case $NAME in
+*e2e) ;;
+*) echo "CHAOS_NAME=$NAME: the name must end in e2e (this run deletes the VM lever-<name>)"; exit 2 ;;
+esac
 VM="lever-${NAME}"
 LEVER="${LEVER:-$HOME/.local/bin/lever}"
 IMAGE="${IMAGE:-lever.local/lever-claude-slim}"
@@ -69,25 +77,6 @@ if [ "${CHAOS_SELFTEST:-0}" = 1 ]; then echo "chaos e2e helpers: ok"; exit 0; fi
 skipped=0
 skip() { printf '%s   SKIP: %s\n' "$(ts)" "$*"; skipped=$((skipped + 1)); }
 
-WORK="$(mktemp -d /tmp/lc.XXXXXX)"
-INST="$WORK/i"
-cleanup() {
-	rc=$?
-	# A race or the lock holder may still run when the run is cut short.
-	jobs -p | xargs -r kill 2>/dev/null
-	if [ "${KEEP:-0}" = 1 ]; then echo "KEEP=1: leaving $VM and $WORK"; return; fi
-	pkill -f "(broker|remote) serve .*$INST/" 2>/dev/null
-	limactl delete --force "$VM" >/dev/null 2>&1
-	rm -rf "$WORK"
-	exit $rc
-}
-trap cleanup EXIT
-PATH="$(cd "$REPO_ROOT" && go env GOROOT)/bin:$PATH"
-export PATH LEVER_PROGRESS=plain
-
-JP=$(pick); AP=$(pick)
-while [ "$AP" = "$JP" ]; do AP=$(pick); done
-
 command -v limactl >/dev/null 2>&1 || { echo "limactl not found"; exit 1; }
 [ -x "$LEVER" ] || { echo "$LEVER not found (make install)"; exit 1; }
 case "$(uname -m)" in arm64|aarch64) ARCH=arm64 ;; *) ARCH=amd64 ;; esac
@@ -104,6 +93,32 @@ if [ -z "${IMAGE_TAR:-}" ] && [ -n "${IMAGE_CACHE:-}" ]; then
 	fi
 fi
 [ -n "${IMAGE_TAR:-}" ] || { echo "set IMAGE_TAR or IMAGE_CACHE (see the header)"; exit 1; }
+
+# A hung guest must not outlast the budget: every call into it (X and P
+# too) is bounded. --foreground keeps limactl in the terminal's process
+# group, where ssh may read stdin.
+G() { timeout --foreground "${CHAOS_CALL_TIMEOUT:-180}" limactl shell --workdir / "$VM" -- "$@"; }
+
+WORK="$(mktemp -d /tmp/lc.XXXXXX)"
+INST="$WORK/i"
+# Set by the clean slate: until then the VM by this name is not this run's.
+slate=0
+cleanup() {
+	rc=$?
+	# A race or the lock holder may still run when the run is cut short.
+	jobs -p | xargs -r kill 2>/dev/null
+	if [ "${KEEP:-0}" = 1 ]; then echo "KEEP=1: leaving $VM and $WORK"; return; fi
+	pkill -f "(broker|remote) serve .*$INST/" 2>/dev/null
+	[ "$slate" = 1 ] && limactl delete --force "$VM" >/dev/null 2>&1
+	rm -rf "$WORK"
+	exit $rc
+}
+trap cleanup EXIT
+PATH="$(cd "$REPO_ROOT" && go env GOROOT)/bin:$PATH"
+export PATH LEVER_PROGRESS=plain
+
+JP=$(pick); AP=$(pick)
+while [ "$AP" = "$JP" ]; do AP=$(pick); done
 
 say "build (scion $SCION_VERSION, lever $LEVER_VERSION, jail ABI $JAIL_ABI, $ARCH)"
 echo "lever: $("$LEVER" version 2>&1 | head -1)"
@@ -190,6 +205,7 @@ converged() {
 }
 
 say "clean slate"
+slate=1
 limactl delete --force "$VM" >/dev/null 2>&1 && echo "deleted stale $VM"
 (cd "$INST" && "$LEVER" init >/dev/null 2>&1)
 
@@ -337,7 +353,7 @@ fault() {
 		hub) G sh -c 'p=$(tr -cd 0-9 < ~/.scion/server.pid); [ -n "$p" ] && kill -9 "$p"' || killed=0 ;;
 		broker) pkill -9 -f "broker serve .*$INST/" || killed=0 ;;
 		lever) pkill -9 -P "$pid" || killed=0 ;;
-		guest) limactl stop -f "$VM" >/dev/null 2>&1 || killed=0 ;;
+		guest) timeout 300 limactl stop -f "$VM" >/dev/null 2>&1 || killed=0 ;;
 		esac
 		if [ "$killed" = 1 ]; then ok "$kind@$step: killed the $kind"; else bad "$kind@$step: found no $kind to kill"; fi
 	fi
@@ -375,7 +391,7 @@ printf '%s\n' "$doctor_out" | grep -E '^(✗|!) ' | mask_secrets | sed 's/^/    
 checkx "doctor: no failed row" '! printf "%s\n" "$doctor_out" | grep -q "^✗ "'
 
 say "teardown"
-(cd "$INST" && "$LEVER" destroy 2>&1 | tail -1)
+(cd "$INST" && timeout 900 "$LEVER" destroy 2>&1 | mask_secrets | tail -1)
 if limactl list --format '{{.Name}}' 2>/dev/null | grep -qx "$VM"; then bad "VM $VM still present after destroy"; else ok "VM torn down"; fi
 
 end_phase

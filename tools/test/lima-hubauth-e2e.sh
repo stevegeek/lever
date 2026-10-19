@@ -25,11 +25,18 @@
 # Env: IMAGE_TAR (required), IMAGE (default lever.local/lever-claude-slim),
 # OLD_LEVER | OLD_REF, LEVER (default ~/.local/bin/lever), SCION_VERSION
 # (default: the release pin), OLD_SCION_VERSION (the older lever's pin,
-# default e0f61f2d), NAME, KEEP=1.
+# default e0f61f2d), HUBAUTH_NAME (default hubauthe2e; must end in e2e),
+# KEEP=1.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-NAME="${NAME:-hubauthe2e}"
+# Not NAME: an operator's shell may hold a NAME for a real instance, whose VM
+# this run would delete.
+NAME="${HUBAUTH_NAME:-hubauthe2e}"
+case $NAME in
+*e2e) ;;
+*) echo "HUBAUTH_NAME=$NAME: the name must end in e2e (this run deletes the VM lever-<name>)"; exit 2 ;;
+esac
 VM="lever-${NAME}"
 LEVER="${LEVER:-$HOME/.local/bin/lever}"
 IMAGE="${IMAGE:-lever.local/lever-claude-slim}"
@@ -49,14 +56,18 @@ checkx() { local what=$1; shift; if eval "$*"; then ok "$what"; else bad "$what"
 
 # A short work dir: the broker's operator socket lives under the state dir,
 # and a UNIX socket path is limited to about 100 bytes.
+command -v limactl >/dev/null 2>&1 || { echo "limactl not found"; exit 1; }
+[ -x "$LEVER" ] || { echo "$LEVER not found (make install)"; exit 1; }
 WORK="$(mktemp -d /tmp/lh.XXXXXX)"
 INST="$WORK/i"
+# Set by the clean slate: until then the VM by this name is not this run's.
+slate=0
 cleanup() {
 	rc=$?
 	if [ "${KEEP:-0}" = 1 ]; then echo "KEEP=1: leaving $VM and $WORK"; return; fi
 	pkill -f "lever broker serve.*$INST" 2>/dev/null
 	pkill -f "lever remote serve.*$INST" 2>/dev/null
-	limactl delete --force "$VM" >/dev/null 2>&1
+	[ "$slate" = 1 ] && limactl delete --force "$VM" >/dev/null 2>&1
 	rm -rf "$WORK"
 	exit $rc
 }
@@ -171,6 +182,10 @@ start_worker2() {
 	X exec "lever--$NAME" lever-manager agent start worker2 --task probe2 2>&1 | tail -1 | sed 's/^/      | /'
 	checkx "$1: the manager starts worker2" 'X exec "lever--$NAME" lever-manager agent list 2>&1 | grep -q worker2'
 }
+
+say "clean slate"
+slate=1
+limactl delete --force "$VM" >/dev/null 2>&1 && echo "deleted stale $VM"
 
 say "old lever: apply (dev-auth window flow, scion $OLD_SCION_VERSION)"
 write_config ""

@@ -182,31 +182,45 @@ test-apikey-e2e: install lever-image-bins
 	LEVER_IMAGE_ARCH=$(LEVER_IMAGE_ARCH) LEVER_IMAGE_VERSION="$(LEVER_IMAGE_VERSION)" LEVER_JAIL_ABI="$(LEVER_JAIL_ABI)" bash $(LEVER_IMAGE_CTX)/build-lever-image.sh
 	bash tools/test/apikey-e2e.sh
 
+# The live Lima e2e targets run one at a time on a machine: each holds this
+# lock for its run and refuses at once while another holds it. e2e-lock-free
+# refuses before install replaces the binaries a running e2e uses.
+E2E_LOCK = $${XDG_CACHE_HOME:-$$HOME/.cache}/lever-e2e.lock
+E2E_LOCKED = command -v flock >/dev/null 2>&1 || { echo "flock not found: the live e2e targets need it (util-linux)"; exit 1; }; \
+	mkdir -p "$$(dirname "$(E2E_LOCK)")" && flock -n -E 75 "$(E2E_LOCK)"
+E2E_HELD = { rc=$$?; [ "$$rc" != 75 ] || echo "another live e2e holds $(E2E_LOCK); wait for it to finish"; exit "$$rc"; }
+
+.PHONY: e2e-lock-free
+e2e-lock-free:
+	@$(E2E_LOCKED) true || $(E2E_HELD)
+
 # Live e2e on a real Lima VM (Lima >= 2.0): acceptance checks under both
-# egress postures, port-forward suppression, re-bring-up and teardown.
+# egress postures, port-forward suppression, re-bring-up and teardown. The VM
+# is lever-<LIMA_E2E_NAME> (default lever-limae2e).
 .PHONY: test-lima-e2e
-test-lima-e2e: install
-	bash tools/test/lima-e2e.sh
+test-lima-e2e: e2e-lock-free install
+	@$(E2E_LOCKED) bash tools/test/lima-e2e.sh || $(E2E_HELD)
 
 # The whole stack on the pinned scion (agent image, manager, worker, remote
 # access, the experiment fence); see the script's header for what it needs.
 .PHONY: test-lima-stack-e2e
-test-lima-stack-e2e: install
-	bash tools/test/lima-stack-e2e.sh
+test-lima-stack-e2e: e2e-lock-free install
+	@$(E2E_LOCKED) bash tools/test/lima-stack-e2e.sh || $(E2E_HELD)
 
 # Live e2e of the lifecycle under races and faults on a real Lima VM: pairs of
 # lever commands at once, and the hub, the broker, lever or the guest killed
 # during an up, each followed by an up that must converge. Bounded by
-# CHAOS_BUDGET (default 30 min). Needs IMAGE_TAR or IMAGE_CACHE (an archive
-# the stack e2e saved); see the script's header.
+# CHAOS_BUDGET (default 30 min); a watchdog stops the whole run 90 min past
+# it. Needs IMAGE_TAR or IMAGE_CACHE (an archive the stack e2e saved); see the
+# script's header.
 .PHONY: test-lima-chaos-e2e
-test-lima-chaos-e2e: install
-	bash tools/test/lima-chaos-e2e.sh
+test-lima-chaos-e2e: e2e-lock-free install
+	@$(E2E_LOCKED) timeout -k 300 $$(( $${CHAOS_BUDGET:-1800} + 5400 )) bash tools/test/lima-chaos-e2e.sh </dev/null || $(E2E_HELD)
 
 # Live e2e of the hub's proxy auth on a real Lima VM: migrates an instance an
 # older lever brought up, binds and removes a contact while agents run,
 # rotates the controller PAT, then brings a fresh instance up. Needs
 # IMAGE_TAR (a docker archive of the agent image); see the script's header.
 .PHONY: test-lima-hubauth-e2e
-test-lima-hubauth-e2e: install
-	bash tools/test/lima-hubauth-e2e.sh
+test-lima-hubauth-e2e: e2e-lock-free install
+	@$(E2E_LOCKED) bash tools/test/lima-hubauth-e2e.sh || $(E2E_HELD)

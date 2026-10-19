@@ -25,9 +25,9 @@ version bump moves the block under the new version heading.
 - **Every lever binary reports its exact build commit, in a git worktree too.** `make install`,
   `make lever-image` and the release build stamp the commit and the dirty state into `lever`,
   `lever-manager`, `lever-agent` and `lever-tool-db`, and the stamp wins over Go's own VCS stamp,
-  which in a worktree nested inside another checkout names that checkout. A worktree build of
-  `lever` now shows `X.Y.Z (<commit>)` instead of `X.Y.Z (bin …)`, so doctor's *agent lever
-  version* row can tell it is the build the image came from. lever-tool-db's MCP serverInfo
+  which in a worktree nested inside another checkout names that checkout. A `make install` build
+  of `lever` in a worktree now shows `X.Y.Z (<commit>)` instead of `X.Y.Z (bin …)`, so doctor's
+  *agent lever version* row can tell it is the build the image came from. lever-tool-db's MCP serverInfo
   carries the commit too.
 
 ### Removed

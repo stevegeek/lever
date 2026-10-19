@@ -11,6 +11,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/jailabi"
+	"github.com/stevegeek/lever/internal/opsig"
 )
 
 // versionBroker is a broker whose host-only values are sentinels a /version
@@ -113,6 +114,8 @@ func TestVersionRefusesWithoutALiveIdentity(t *testing.T) {
 // listeners do not serve it.
 func TestVersionOnlyOnTheJailListener(t *testing.T) {
 	b := versionBroker(t)
+	// Without a verifier the directive handler 404s every path.
+	b.directiveVerifier = &opsig.Verifier{}
 	for name, h := range map[string]http.Handler{
 		"admin":     b.AdminHandler(),
 		"operator":  b.OperatorHandler(),

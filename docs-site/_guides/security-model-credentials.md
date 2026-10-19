@@ -100,7 +100,8 @@ The capability model itself — identities, minting, delegation, revocation — 
   `lever-manager version` can tell an agent whether its image matches the host. A request without a
   client certificate, or from a revoked identity, gets 403. The route is on the mTLS jail listener
   only, not the admin port or the unix sockets, and its answer carries no instance id, config hash or
-  path (the loopback `/epoch` keeps those).
+  path (the loopback `/epoch` keeps those). It does tell an agent the host's exact build, and so
+  which fixes the host lever lacks.
 - **`/bootstrap` is single-use.** The first manager-enrolment ticket latches the broker; every later
   `/bootstrap` returns 403 (`internal/broker/bootstrap.go`). `apply` tolerates that 403 so re-apply is
   idempotent, but the latch bounds manager-identity minting to one per broker process.

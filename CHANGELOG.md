@@ -35,9 +35,8 @@ version bump moves the block under the new version heading.
   worker: `recyclable: true` is the manager's authority to recycle, and the operator owns the
   instance, so the manager's `/worker/recycle` still needs it and the operator's verb does not.
   The manager's own start and recycle refusals keep their status and text, and now carry
-  `X-Lever-Reason` too. Nothing changes
-  inside the jail, and the manager and workers get no new authority. `/operator/wake` is unchanged
-  and stays deprecated for host programs.
+  `X-Lever-Reason` too. Nothing changes inside the jail, and the manager and workers get no new
+  authority.
 
 - **`lever worker new-session NAME [--task-file F]`: a new conversation for a worker, keeping its
   record and workspace (lever#236).** The broker stops the worker, which ends its session, waits
@@ -61,6 +60,22 @@ version bump moves the block under the new version heading.
   line. The watch ends on Ctrl-C, after `--idle-timeout`, or with exit `8` when the record is
   purged or replaced, and it rides out a broker restart. Free-text messages from a worker to the
   operator are not part of it.
+
+### Removed
+
+- **The broker's `/operator/wake` route.** It was deprecated in 0.50.0. The remote chat page now
+  wakes a worker through `/operator/worker/resume`, with a `for` object naming the worker, the
+  chat login and its tier, which keeps the chat page's narrower rules (only a suspended or stopped
+  worker, a stopped one only for the operator's login, never the manager). The worker is named
+  only inside `for`, so a broker that predates it refuses the request instead of running the
+  operator's wider resume. The old route answers 404.
+
+### Upgrade
+
+- **Host programs that called `/operator/wake` must run `lever worker resume NAME`** (or POST
+  `/operator/worker/resume` without `for`). Run `lever reload` after upgrading: a broker of the
+  last release refuses the chat page's new wake request (it names no worker it knows), so the wake
+  fails until the broker runs this release.
 
 ## [0.51.0] - 2026-10-19
 

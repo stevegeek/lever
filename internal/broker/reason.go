@@ -35,13 +35,13 @@ const (
 	ReasonNotAWorker         = "not-a-worker"        // 403: not a declared worker (the manager included)
 	ReasonRevoked            = "revoked"             // 403: the worker's identity is revoked
 	ReasonRuntimeUnavailable = "runtime-unavailable" // 502: the broker has no scion runtime
-	ReasonBusy               = "busy"                // 503: another start, resume, stop, wake or heal of the worker is under way
+	ReasonBusy               = "busy"                // 503: another start, resume, stop, remote wake or heal of the worker is under way
 	ReasonWorkerCap          = "worker-cap"          // 409: too many workers are running
 	ReasonRoleMismatch       = "role-mismatch"       // 409: the record's stored role is not the configured one
-	ReasonNoRecord           = "no-record"           // 404 (resume) or 409 (note, wake): the hub has no record of the worker
+	ReasonNoRecord           = "no-record"           // 404 (resume) or 409 (note, a resume for a chat login): the hub has no record of the worker
 	ReasonNotRunning         = "not-running"         // 409 (note): the worker is not running; PhaseHeader names its phase
-	ReasonNotAsleep          = "not-asleep"          // 409 (wake): the worker is neither suspended nor stopped
-	ReasonStoppedByOperator  = "stopped-by-operator" // 409 (wake): a contact may not undo the operator's stop
+	ReasonNotAsleep          = "not-asleep"          // 409 (a resume for a chat login): the worker is neither suspended nor stopped
+	ReasonStoppedByOperator  = "stopped-by-operator" // 409 (a resume for a chat login): a contact may not undo the operator's stop
 	ReasonWorkspaceUnsafe    = "workspace-unsafe"    // 403: the workspace or a shared folder is reached through a link or overlaps a protected dir
 	ReasonWorkspaceMissing   = "workspace-missing"   // 409: the worker's workspace directory no longer exists
 	ReasonSharedAccess       = "shared-access"       // 403: the record holds shared-folder access the config has withdrawn

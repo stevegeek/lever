@@ -175,12 +175,10 @@ Two things to know about sends:
   keeps its own marker and ref, and the worker's verify returns one entry per note, so none is
   lost, but space notes out if each should be its own turn.
 
-**`/operator/wake` is deprecated for host programs.** It is the remote chat page's route (it takes
-the chat login and tier, and lets a contact wake only a suspended worker). It keeps working as
-before, and now answers with a `Deprecation: true` header naming `/operator/worker/resume` as its
-successor. A program that called it directly should run `lever worker resume NAME` (or `start`)
-instead. The route may become internal to the remote proxy, with its body changed, no sooner than one release
-after `lever worker resume` ships, and the CHANGELOG will say so.
+The remote chat page wakes a worker through the same `/operator/worker/resume` route, with a `for`
+object naming the worker, the chat login and its tier: then the narrower rules apply (only a
+suspended or stopped worker, and a stopped one only for the operator's own login). A host program
+never sets `for`.
 
 ## Where the logs are
 

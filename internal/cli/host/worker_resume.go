@@ -178,9 +178,7 @@ func operatorFailure(err error, path string) (*operatorRefusal, bool) {
 }
 
 // newWorkerResumeCmd is `lever worker resume NAME`: the manager's resume verb
-// run by the host operator through the broker's 0600 operator socket. It is
-// the documented replacement for host programs that called the remote page's
-// /operator/wake route directly.
+// run by the host operator through the broker's 0600 operator socket.
 func newWorkerResumeCmd() *cobra.Command {
 	var asJSON bool
 	c := &cobra.Command{

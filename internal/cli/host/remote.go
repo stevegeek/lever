@@ -22,6 +22,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/backend/common"
 	"github.com/stevegeek/lever/internal/backend/registry"
+	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/chatledger"
 	"github.com/stevegeek/lever/internal/cli"
@@ -541,16 +542,18 @@ func agentRecordOf(a hubapi.Agent) remoteproxy.AgentRecord {
 		ContainerDown: scion.RunningContainerDown(phase, a.ContainerStatus)}
 }
 
-// remoteWake POSTs /operator/wake on the broker's 0600 operator socket, the
-// host user's own channel. Nil when the state directory is inside the tree:
-// the broker then binds no operator socket.
+// remoteWake asks the broker's 0600 operator socket, the host user's own
+// channel, to resume a worker for the chat login (its narrower rules: For).
+// Nil when the state directory is inside the tree: the broker then binds no
+// operator socket.
 func remoteWake(app *config.App, st state.State) func(ctx context.Context, login, tier, worker string) error {
 	if brokerctl.StateInsideTree(app, st) {
 		return nil
 	}
 	client := udsClient(st.OperatorSock())
 	return func(ctx context.Context, login, tier, worker string) error {
-		err := httpjson.Post(ctx, client, udsURL+wire.PathOperatorWake, wire.OperatorWakeRequest{Worker: worker, Login: login, Tier: tier}, nil)
+		err := httpjson.Post(ctx, client, udsURL+broker.PathOperatorWorkerResume,
+			broker.WorkerResumeRequest{For: &broker.ResumeFor{Worker: worker, Login: login, Tier: tier}}, nil)
 		if err != nil {
 			return &remoteproxy.WakeError{Status: httpjson.Status(err), Err: err}
 		}

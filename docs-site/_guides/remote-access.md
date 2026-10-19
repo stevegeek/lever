@@ -943,12 +943,14 @@ An operator login has a **New conversation** button in the manager's chat. It do
 manager's conversation up, end its session, and start it again in a new one that runs its boot
 prompt (`manager.prompt_file` as it is now). The page asks first. When the
 manager is in the middle of a turn, it says so and asks again before it interrupts the turn.
-Then it shows "starting &lt;name&gt; on a new conversation…" and reads the list every 3 seconds,
-for up to 3 minutes, until the manager is running again; the boot prompt's reply arrives in the
-same chat. When the manager has not gone down after a minute, the page stops waiting and says
-so: lever's own checks may have refused (and changed nothing), or the run may still be on its
-way; `lever conversation list` and the log below tell which. Text you were typing stays in the box, and the box is off
-while the manager is down. The old conversation stays in its backup on the host
+Then it shows "starting &lt;name&gt; on a new conversation…" and asks the proxy every 3 seconds,
+for up to 7 minutes, how that run is going (lever may first wait up to 3 minutes for another
+change to the manager to finish). When the run is done, the page says the manager is on a new
+conversation and names the old one's backup id; the boot prompt's reply arrives in the same chat.
+When lever refused or the run failed, the page shows why in red. When the proxy restarted
+meanwhile, or the run is still going after 7 minutes, the page says it lost track of it;
+`lever conversation list` and the log below tell how it ended. Text you were typing stays in the
+box, and the box is off while the manager is down. The old conversation stays in its backup on the host
 (`lever conversation list`), and `lever conversation restore` puts it back.
 
 The route (`POST /lever/api/new-conversation`) is accepted only:
@@ -957,7 +959,13 @@ The route (`POST /lever/api/new-conversation`) is accepted only:
 - from the page itself (the same `Origin` and `Sec-Fetch-Site` rule as the wake);
 - while the manager is running or suspended, and not mid-turn unless the page asked for it
   (`{"force": true}`, after your second confirmation);
-- once a minute, across all logins (429 with `Retry-After`).
+- once a minute, across all logins (429 with `Retry-After`), and never while the last one runs
+  (409 `in-progress`).
+
+Its 202 answer carries the run's id. The page reads the run's state with
+`POST /lever/api/new-conversation/status` and `{"id": "<id>"}`, under the same operator and origin
+rules: `running`, `ok` with the backup id (none when the home held no conversation), or `failed`
+with a fixed word. The proxy keeps only the latest run, in memory; any other id gets 404.
 
 The proxy runs `lever conversation new` itself, as the host user it runs as, in its own session
 (a restart of the proxy does not stop it half way), with its output in

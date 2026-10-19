@@ -11,6 +11,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/convbackup"
 	"github.com/stevegeek/lever/internal/hostledger"
 	"github.com/stevegeek/lever/internal/remoteproxy"
 	"github.com/stevegeek/lever/internal/state"
@@ -23,24 +24,45 @@ const conversationNewLog = "conversation-new.log"
 // conversation new --by chat` as the host user, the proxy's own authority.
 // Nil when the state directory is inside the tree: lever keeps no backup
 // there, and makes no reset without one.
-func remoteNewConversation(app *config.App, st state.State, configPath string) func(ctx context.Context, force bool) error {
+func remoteNewConversation(app *config.App, st state.State, configPath string) func(ctx context.Context, force bool) (string, error) {
 	if brokerctl.StateInsideTree(app, st) {
 		return nil
 	}
-	return func(ctx context.Context, force bool) error {
+	return func(ctx context.Context, force bool) (string, error) {
+		start := time.Now()
 		code, err := startConversationNew(ctx, st, configPath, "chat", force)
 		switch {
 		case err != nil:
-			return err
+			return "", err
 		case code == exitConversationBusy:
-			return remoteproxy.ErrConversationBusy
+			return "", remoteproxy.ErrConversationBusy
 		case code == exitConversationLocked:
-			return remoteproxy.ErrConversationLocked
+			return "", remoteproxy.ErrConversationLocked
 		case code != 0:
-			return fmt.Errorf("lever conversation new exited %d (see %s)", code, filepath.Join(st.BringupLogDir(), conversationNewLog))
+			return "", fmt.Errorf("lever conversation new exited %d (see %s)", code, filepath.Join(st.BringupLogDir(), conversationNewLog))
 		}
-		return nil
+		return chatBackup(app, st, start, time.Now()), nil
 	}
+}
+
+// chatBackup finds the backup a chat page run that ran from start to end
+// saved, or "" (a home with no conversation saves none). The run is a
+// separate process that tells its backup only on its output, which goes to
+// the log; the manager lock keeps any other backup from being made inside
+// the window.
+func chatBackup(app *config.App, st state.State, start, end time.Time) string {
+	list, err := convbackup.Store{Dir: filepath.Join(st.Dir, convbackup.DirName)}.List()
+	if err != nil {
+		return ""
+	}
+	// Created is the run's clock in UTC, at a precision that may round.
+	from, to := start.Add(-time.Second), end.Add(time.Second)
+	for _, m := range list {
+		if m.Agent == app.Name && m.Reason == newConvBy["chat"].Reason && !m.Created.Before(from) && !m.Created.After(to) && convbackup.ValidID(m.ID) {
+			return m.ID
+		}
+	}
+	return ""
 }
 
 // unattendedLockWait is how long a new conversation lever starts on its own

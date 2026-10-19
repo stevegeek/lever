@@ -7,6 +7,17 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The chat page's New conversation no longer reports a fast, successful run as an error.** The
+  page watched the list for the manager to go down and come back up, and lever can stop and start
+  it within a second, between two reads: the page then never saw it down and said, in red, that it "has not gone down yet" while the run had finished. The page now follows
+  the run itself: the route's answer carries the run's id, and the page reads the run's state from
+  `POST /lever/api/new-conversation/status` until lever says it ended. On success it names the old
+  conversation's backup id; it shows red text only when lever refused or the run failed. A second
+  New conversation while one runs is refused as `in-progress`. The status route takes the same
+  operator login and page origin as the button; contacts get nothing new (lever#241).
+
 ## [0.50.0] - 2026-10-19
 
 ### Added

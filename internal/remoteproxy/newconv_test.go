@@ -2,6 +2,7 @@ package remoteproxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -14,20 +15,21 @@ import (
 )
 
 type newConvRec struct {
-	mu    sync.Mutex
-	calls []bool // force, per call
-	err   error
-	block chan struct{}
+	mu     sync.Mutex
+	calls  []bool // force, per call
+	err    error
+	backup string
+	block  chan struct{}
 }
 
-func (n *newConvRec) fn(_ context.Context, force bool) error {
+func (n *newConvRec) fn(_ context.Context, force bool) (string, error) {
 	n.mu.Lock()
 	n.calls = append(n.calls, force)
 	n.mu.Unlock()
 	if n.block != nil {
 		<-n.block
 	}
-	return n.err
+	return n.backup, n.err
 }
 
 func (n *newConvRec) got() []bool {
@@ -46,7 +48,11 @@ func newConvConfig(t *testing.T, hub *pageHub, n *newConvRec, activity string) C
 }
 
 func newConvPost(h http.Handler, login, body string, hdr ...string) *httptest.ResponseRecorder {
-	req := proxyRequest("POST", newConvPath, strings.NewReader(body))
+	return newConvPostTo(h, newConvPath, login, body, hdr...)
+}
+
+func newConvPostTo(h http.Handler, path, login, body string, hdr ...string) *httptest.ResponseRecorder {
+	req := proxyRequest("POST", path, strings.NewReader(body))
 	req.Header.Set("Tailscale-User-Login", login)
 	req.Header.Set("Origin", "https://"+testServeHost)
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
@@ -93,7 +99,7 @@ func TestNewConversationOperatorOnly(t *testing.T) {
 	}
 	// None of that spent the minute's change.
 	rw := newConvPost(h, chatOp, "")
-	if rw.Code != http.StatusAccepted || strings.TrimSpace(rw.Body.String()) != `{"state":"starting"}` {
+	if rw.Code != http.StatusAccepted || newConvID(t, rw) == "" {
 		t.Fatalf("operator: %d %s", rw.Code, rw.Body)
 	}
 	if !slices.Equal(n.got(), []bool{false}) {
@@ -111,6 +117,117 @@ func TestNewConversationOperatorOnly(t *testing.T) {
 	// One a minute.
 	if rw := newConvPost(h, chatOp, ""); rw.Code != http.StatusTooManyRequests || rw.Header().Get("Retry-After") == "" {
 		t.Fatalf("second: %d", rw.Code)
+	}
+}
+
+// newConvID reads the id of a 202 answer: state "starting" and nothing else.
+func newConvID(t *testing.T, rw *httptest.ResponseRecorder) string {
+	t.Helper()
+	var ans map[string]string
+	if err := json.Unmarshal(rw.Body.Bytes(), &ans); err != nil || ans["state"] != "starting" || len(ans) != 2 || len(ans["id"]) != 32 {
+		t.Fatalf("answer %s (%v)", rw.Body, err)
+	}
+	return ans["id"]
+}
+
+func newConvStatus(h http.Handler, login, id string, hdr ...string) *httptest.ResponseRecorder {
+	return newConvPostTo(h, newConvStatusPath, login, `{"id":"`+id+`"}`, hdr...)
+}
+
+// waitNewConvStatus reads the status until it is not running.
+func waitNewConvStatus(t *testing.T, h http.Handler, id string) string {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		rw := newConvStatus(h, chatOp, id)
+		body := strings.TrimSpace(rw.Body.String())
+		if rw.Code != http.StatusOK || body != `{"state":"running"}` {
+			return fmt.Sprintf("%d %s", rw.Code, body)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("still running")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestNewConversationStatus: the change is followed by its own result, with
+// the backup on success and a fixed word on failure; one change at a time;
+// the status is the operator's, from the page only.
+func TestNewConversationStatus(t *testing.T) {
+	hub := newPageHub(t)
+	n := &newConvRec{block: make(chan struct{}), backup: "20261019T054104Z"}
+	cfg := newConvConfig(t, hub, n, "")
+	g := NewHandler(cfg).(*gate)
+	g.newConvWaitFor = 10 * time.Millisecond
+	id := newConvID(t, newConvPost(g, chatOp, ""))
+	if rw := newConvStatus(g, chatOp, id); rw.Code != http.StatusOK || strings.TrimSpace(rw.Body.String()) != `{"state":"running"}` {
+		t.Fatalf("running: %d %s", rw.Code, rw.Body)
+	}
+	// A second change while one runs is refused without spending the minute.
+	g.newConvs.give(cfg.ChatAgent)
+	if rw := newConvPost(g, chatOp, ""); rw.Code != http.StatusConflict || !strings.Contains(rw.Body.String(), `"in-progress"`) {
+		t.Fatalf("second while running: %d %s", rw.Code, rw.Body)
+	}
+	if ok, _ := g.newConvs.take(cfg.ChatAgent); !ok {
+		t.Fatal("the refused second spent the minute")
+	}
+	g.newConvs.give(cfg.ChatAgent)
+	for name, rw := range map[string]*httptest.ResponseRecorder{
+		"contact":      newConvStatus(g, "c@x", id),
+		"no origin":    newConvStatus(g, chatOp, id, "Origin", ""),
+		"cross origin": newConvStatus(g, chatOp, id, "Origin", "https://evil.test"),
+		"cross site":   newConvStatus(g, chatOp, id, "Sec-Fetch-Site", "cross-site"),
+	} {
+		if rw.Code != http.StatusForbidden || strings.Contains(rw.Body.String(), "state") {
+			t.Errorf("%s: %d %s", name, rw.Code, rw.Body)
+		}
+	}
+	if rw := chatDo(g, chatOp, "GET", newConvStatusPath, "Origin", "https://"+testServeHost); rw.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET: %d", rw.Code)
+	}
+	for _, body := range []string{"", "{", `{"id":7}`} {
+		if rw := newConvPostTo(g, newConvStatusPath, chatOp, body); rw.Code != http.StatusBadRequest {
+			t.Errorf("body %q: %d", body, rw.Code)
+		}
+	}
+	for _, other := range []string{"", strings.Repeat("0", 32), id[:31]} {
+		if rw := newConvStatus(g, chatOp, other); rw.Code != http.StatusNotFound || strings.TrimSpace(rw.Body.String()) != `{"error":"unknown"}` {
+			t.Errorf("id %q: %d %s", other, rw.Code, rw.Body)
+		}
+	}
+	close(n.block)
+	if got := waitNewConvStatus(t, g, id); got != `200 {"backup":"20261019T054104Z","state":"ok"}` {
+		t.Fatalf("ok: %s", got)
+	}
+
+	// No backup (an empty home), and a failure: fixed words only.
+	for _, tc := range []struct {
+		backup string
+		err    error
+		want   string
+	}{
+		{"", nil, `200 {"state":"ok"}`},
+		{"20261019T054104Z", errors.New("secret detail"), `200 {"error":"failed","state":"failed"}`},
+		{"", fmt.Errorf("wait: %w", context.DeadlineExceeded), `200 {"error":"timeout","state":"failed"}`},
+		{"", ErrConversationLocked, `200 {"error":"in-progress","state":"failed"}`},
+	} {
+		n := &newConvRec{block: make(chan struct{}), backup: tc.backup, err: tc.err}
+		g := NewHandler(newConvConfig(t, hub, n, "")).(*gate)
+		g.newConvWaitFor = 10 * time.Millisecond
+		id := newConvID(t, newConvPost(g, chatOp, ""))
+		close(n.block)
+		if got := waitNewConvStatus(t, g, id); got != tc.want {
+			t.Errorf("%v: %s", tc.err, got)
+		}
+	}
+
+	// A refusal within the answer's wait is the POST's answer, and the
+	// status says the same.
+	n = &newConvRec{err: ErrConversationBusy}
+	g = NewHandler(newConvConfig(t, hub, n, "")).(*gate)
+	if rw := newConvPost(g, chatOp, ""); rw.Code != http.StatusConflict || strings.Contains(rw.Body.String(), "id") {
+		t.Fatalf("busy: %d %s", rw.Code, rw.Body)
 	}
 }
 

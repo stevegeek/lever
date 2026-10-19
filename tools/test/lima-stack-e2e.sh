@@ -592,7 +592,10 @@ print(a[0].get("phase", "") if sys.argv[2] == "phase" else (a[0].get("appliedCon
 cmdlines() { P exec "lever--$NAME" sh -c 'for f in /proc/[0-9]*/cmdline; do tr "\000" " " < "$f"; echo; done' 2>/dev/null; }
 # claude_up: a claude process runs in the manager's container. Claude Code runs as
 # claude, as node with claude-code's cli, or behind scion's shell wrapper.
-claude_up() { cmdlines | grep -qE '(^|[/ ])claude( |$)|@anthropic-ai/claude-code/'; }
+# The list is read whole first: under pipefail, grep -q quitting at the first
+# match (claude starts early) leaves limactl writing to a closed pipe, and its
+# SIGPIPE failed the check with claude running.
+claude_up() { local c; c=$(cmdlines) || :; grep -qE '(^|[/ ])claude( |$)|@anthropic-ai/claude-code/' <<<"$c"; }
 # newest: the newest transcript in the manager's home (its claude session id).
 newest() { P exec --user scion "lever--$NAME" sh -c 'ls -t /home/scion/.claude/projects/*/*.jsonl 2>/dev/null | grep -v stack-e2e-old | head -1' 2>/dev/null; }
 P exec --user scion "lever--$NAME" sh -c 'mkdir -p /home/scion/.claude/projects/-workspace && echo stack-e2e-old > /home/scion/.claude/projects/-workspace/stack-e2e-old.jsonl'

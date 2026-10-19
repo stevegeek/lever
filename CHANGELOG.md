@@ -138,6 +138,14 @@ version bump moves the block under the new version heading.
   can still hold a stale build under the old name, which a `lever.yaml` naming it would have loaded
   and run. Every apply now pins the hub's image registry to `lever.local` (see Security).
 
+### Fixed
+
+- **`lever up` recovers from an empty hub pid file.** A guest killed while the hub started can
+  leave `~/.scion/server.pid` empty. Scion then refuses every later `scion server start` ("invalid
+  PID in file"), so every `lever up` failed. Lever now removes a pid file that holds anything but
+  the digits scion writes (empty, a trailing newline, other bytes), as it already removed one
+  naming a dead or foreign pid. Found by the new chaos e2e.
+
 ### Security
 
 - **Every apply pins the hub's image registry to `lever.local`, and lever refuses to start a

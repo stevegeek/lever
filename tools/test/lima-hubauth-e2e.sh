@@ -233,12 +233,17 @@ X cp /tmp/r1.py "lever--$NAME:/tmp/r1.py"
 checkx "an agent can rename the dev user (the hazard R1 repairs)" '[ "$(X exec -e E2E_EMAIL=lever-admin@lever.local "lever--$NAME" python3 /tmp/r1.py)" = 200 ]'
 
 say "migrate with this lever (scion $SCION_VERSION) while the manager and the worker run"
-# The older lever kept no record of the tokens it minted. The migration
+# A lever from before the token records kept no record of the tokens it minted. The migration
 # re-mints them; the old ones carry the controller's authority, so it must
 # revoke them although it never recorded them. Their values stay in files.
 install -m 600 "$INST/.lever-state/controller.pat" "$WORK/old-controller.pat"
 [ -s "$INST/.lever-state/remote.pat" ] && install -m 600 "$INST/.lever-state/remote.pat" "$WORK/old-remote.pat"
 echo "      | older lever's token records: $(ls "$INST/.lever-state/"*.pat.json 2>/dev/null | wc -l)"
+# The pinned older lever (0.38.0) already records its tokens, so the
+# controller's record is dropped here to stand for a lever from before the
+# records: the migration must revoke that token as unrecorded (lever#229).
+# The remote token keeps its record and goes the recorded re-mint path.
+rm -f "$INST/.lever-state/controller.pat.json"
 # tokcode <file>: the hub's status for /api/v1/auth/me with the token in
 # file (over stdin).
 tokcode() { G sh -c 'read -r t; curl -sS -m 20 -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $t" http://127.0.0.1:8080/api/v1/auth/me' < "$1"; }

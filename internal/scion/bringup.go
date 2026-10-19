@@ -641,10 +641,24 @@ func (c *Client) ServerStop(ctx context.Context) error {
 // replaced the file under it) in the reader's own pid and user namespaces,
 // not a decoy in a container. The cmdline test matches scion's own daemon
 // argv (cmd/server_daemon.go).
+//
+// Scion writes only its pid's digits and reads the file back with Atoi, so
+// a file that holds anything else stops every later server start ("invalid
+// PID in file"): above all an empty one, left by a guest killed between the
+// file's create and its write. Such a file names no server and is removed,
+// with the same re-read. The size test catches a trailing newline, which the
+// command substitution drops but Atoi refuses.
 const serverPIDProbeScript = `f="$HOME/$1"
 [ -f "$f" ] || exit 0
-pid=$(tr -cd '0-9' < "$f")
-[ -n "$pid" ] || exit 0
+pid=$(head -c 32 -- "$f")
+case "$pid" in
+''|*[!0-9]*) bad=1 ;;
+*) [ "$(wc -c < "$f")" -eq "${#pid}" ] && bad= || bad=1 ;;
+esac
+if [ -n "$bad" ]; then
+  [ "$(head -c 32 -- "$f")" = "$pid" ] && rm -f -- "$f"
+  exit 0
+fi
 if [ ! -r "/proc/$pid/cmdline" ]; then
   [ "$(tr -cd '0-9' < "$f")" = "$pid" ] && rm -f -- "$f"
   exit 0

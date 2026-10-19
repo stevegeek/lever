@@ -2,7 +2,7 @@
 # After changing in-jail code: bump JailABI in jailabi.go, then run
 #   go test ./internal/jailabi -run TestJailFingerprint -update
 jail_abi 7
-sha256 8035b8bc0316768df92c1355cb34c8a612406e720e03ee11a0882e8449a745da
+sha256 dbaaf7786c32d8770449364a92f3036f6204c5358136a6d0e47377d42c5c9723
 # hashed: go.mod's go 1.26.9, the files cmd/lever-agent/scionhook/pre-start, image/lever-claude/Dockerfile,
 # the external modules
 #   github.com/dustin/go-humanize@v1.0.1

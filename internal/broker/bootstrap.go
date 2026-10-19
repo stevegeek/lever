@@ -22,6 +22,10 @@ func (b *Broker) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	// Sole: a heal earlier in this broker's life may have staged a manager
 	// ticket that a discarded container copied before it went; the ticket
 	// staged now must be the only one that still enrols as the manager.
+	// Staging is serialized by the lifecycle lock but redemption is not: a
+	// healed manager that has not yet enrolled when this runs fails that
+	// enrolment. Only a /bootstrap that is the broker's first, seconds after
+	// a heal, can do that; it costs an enrolment, not containment.
 	ticket, err := b.tickets.IssueSole(b.manager, b.ticketTTL)
 	if err != nil {
 		b.audit("bootstrap", b.manager, "error", err.Error())

@@ -379,7 +379,11 @@ func ReplaceInTreeNoLinks(tree, rel string, data []byte, dirPerm, perm os.FileMo
 	renamed = true
 	// The temp name sits in an agent-writable directory: an entry swapped in
 	// for it before the rename is now at leaf instead of the data written.
-	if now, err := r.Lstat(leaf); err != nil || !now.Mode().IsRegular() || !os.SameFile(now, st) {
+	now, err := r.Lstat(leaf)
+	if err != nil {
+		return fmt.Errorf("%s after the replace: %w", filepath.Join(tree, rel), err)
+	}
+	if !now.Mode().IsRegular() || !os.SameFile(now, st) {
 		return fmt.Errorf("%s changed while it was replaced: %w", filepath.Join(tree, rel), ErrSymlink)
 	}
 	if err := f.Close(); err != nil {

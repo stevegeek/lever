@@ -108,12 +108,12 @@ func (a *App) VoiceTool() (WhisperTool, bool) {
 	return WhisperTool{}, false
 }
 
+const removedFizzyProgram = "lever-tool-fizzy"
+
 // validateWhisperTools: whisper-server has no authentication of its own and
 // is safe only because the jail's egress rules drop every host-loopback port
 // that is not allowlisted, so -whisper-port must never be a port the jail
 // may reach (EffectiveAllowedPorts).
-const removedFizzyProgram = "lever-tool-fizzy"
-
 func (a *App) validateWhisperTools() error {
 	for _, t := range a.Broker.Tools {
 		if form := envFormUnread(t.Command); form != "" {

@@ -7,6 +7,19 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A tool call whose backend is down gets a clear 503, and the broker logs it (lever#234).** A
+  tool server that refused or dropped the connection gave the agent a `502` with an empty body,
+  and the error went only to `broker.out.log`. The gateway now answers `503` with
+  `tool <name>: backend unavailable; try again later`, which names the tool but never the backend
+  address. Claude Code keeps the server connected, so the next call works once the backend is back;
+  a restarted backend's own `404` for an unknown session still reaches the client, which opens a
+  new session. `broker.log` gets one `decision=error detail=gateway.backend_unavailable` line per
+  tool per minute, with the backend's `host:port`, the error and a `suppressed` count. `GET`,
+  `DELETE` and any other method but `POST` now get `405` with `Allow: POST` instead of `400`, which the MCP client treats
+  as "no SSE stream" rather than an error. Authorization is unchanged and still runs first.
+
 ## [0.50.0] - 2026-10-19
 
 ### Added

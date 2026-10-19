@@ -30,6 +30,32 @@ version bump moves the block under the new version heading.
   New conversation while one runs is refused as `in-progress`. The status route takes the same
   operator login and page origin as the button; contacts get nothing new (lever#241).
 
+- **A tool call whose backend is down gets a clear 503, and the broker logs it (lever#234).** A tool
+  server that refused or dropped the connection gave the agent a `502` with an empty body, and the
+  error went only to `broker.out.log`. The gateway now answers `503` with `tool <name>: backend
+  unavailable; try again later`, which names the tool but never the backend address. Claude Code
+  keeps the server connected, so the next call works once the backend is back; a restarted backend's
+  own `404` for an unknown session still reaches the client, which opens a new session. `broker.log`
+  gets one `decision=error detail=gateway.backend_unavailable` line per tool per minute, with the
+  backend's `host:port`, the error and a `suppressed` count. `GET`, `DELETE` and any other method
+  but `POST` now get `405` with `Allow: POST` instead of `400`, which the MCP client treats as "no
+  SSE stream" rather than an error. The gateway also drops an `Upgrade` header, so an allowed
+  message can no longer open a raw tunnel to a backend that accepts upgrades. The client-cert
+  identity check still runs first, and a `POST` still passes the capability check before anything
+  reaches the backend.
+
+- **A tool call reaches only its backend's MCP path (security).** The gateway forwarded whatever
+  path an agent put after `/mcp/<tool>/` to the tool's backend, so an allowed MCP message could
+  reach any other route on that `host:port`, such as an admin or metrics endpoint. Every request
+  now goes to the backend's configured path and query (`/` for a `backend` without a path, as
+  before); the agent's query string is dropped, and so are headers that some servers read as the
+  real path or method (`X-Original-URL`, `X-Rewrite-URL`, `X-HTTP-Method-Override` and the like,
+  and every `X-Forwarded-*` but `X-Forwarded-For`). Any other path under `/mcp/<tool>/` gets `404`
+  and is logged as `decision=deny detail="path not allowed"`; it never reaches the backend. A
+  caller without a valid client certificate still gets `403` on every path under the tool route.
+  Agents already use `/mcp/<tool>/`, so nothing
+  changes for them.
+
 ### Upgrade
 
 - **Drop the fizzy tool before you upgrade.** Remove its `broker.tools` entry and its `fizzy`

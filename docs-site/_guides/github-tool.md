@@ -225,8 +225,8 @@ A refusal returns to the agent as `{"ok": false, "error": "..."}`. The tool writ
 | Another push to the same repository holds the mirror for more than 30 seconds | Refusal: retry shortly. |
 | Non-fast-forward | GitHub rejects the push. The tool reports that the branch moved and to use a new branch name. |
 | Token mint, GitHub or network error, or git timeout (5 minutes for one git call, 10 minutes for the whole call) | Redacted error text. Host paths show as `<state>`, `<tree>` or `<tmp>`. The tool does not retry. |
-| git older than 2.46.0 | The tool refuses to start. The broker reports it down, and calls fail with 502. |
-| App key file has the wrong mode or owner, or the key or `-state` is inside `-tree` | The tool refuses to start. The broker reports it down, and calls fail with 502. |
+| git older than 2.46.0 | The tool refuses to start. The broker reports it down, and calls fail with 503. |
+| App key file has the wrong mode or owner, or the key or `-state` is inside `-tree` | The tool refuses to start. The broker reports it down, and calls fail with 503. |
 
 ## 6. PRs, merges and releases (opt-in)
 

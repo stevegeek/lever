@@ -437,7 +437,9 @@ running as your own user-session process (launchd, a terminal, however you run i
 what keeps macOS Automation/TCC grants intact for AppleScript-driven servers. The broker
 registers it from config at boot, exposes it at `/mcp/<name>/` on its mTLS listener, and
 proxies to `backend`. Jailed agents therefore reach it **only through a capability** — no
-`manager.allow_ports` hole, no hand-authored `.mcp.json`.
+`manager.allow_ports` hole, no hand-authored `.mcp.json`. Every request goes to `backend`'s own
+path (`/` when `backend` has none) with the agent's query string dropped; any other path under
+`/mcp/<name>/` gets `404` and never reaches the server, so its other routes stay out of reach.
 
 Per-tool capability grain, `gate`:
 
@@ -481,8 +483,17 @@ the broker proxies host-side, so a non-loopback backend would let a jailed agent
 another host *through the broker*, bypassing the jail's LAN-drop egress. If you truly need
 that, set `allow_non_loopback: true` on the tool — an explicit, per-tool opt-in.
 
-Liveness is yours: the broker does not restart an external server; if it is down, calls to
-the tool return 502.
+Liveness is yours: the broker does not restart an external server. While it is down, every
+call to the tool gets `503` with the plain body `tool <name>: backend unavailable; try again
+later`. The body names only the tool, never the backend address. Claude Code keeps the server
+connected on an HTTP error, so only that call fails, and the next call works once your server is
+back. If the restarted server no longer knows the client's session, its own `404` reaches the
+client unchanged, and the client opens a new session. The broker writes one audit line per tool
+per minute while the backend is down (`decision=error detail=gateway.backend_unavailable`, with
+`backend=<host:port>`, the error, and `suppressed=<n>` for the failures it left out since the
+last line). The *tool backends* row of `lever doctor` dials the server. The gateway answers every
+method but `POST` (an MCP client's `GET` and `DELETE`) with `405` and `Allow: POST`: it offers no
+SSE stream and no session teardown, which the MCP client accepts.
 
 ### `operator`
 

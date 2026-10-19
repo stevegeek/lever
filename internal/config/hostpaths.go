@@ -45,13 +45,13 @@ type hostPath struct {
 	dotDot bool
 }
 
-// toolPathFlags are the path flags of the tools lever ships, read in every
-// supervised tool's command. lever cannot know what an unknown flag's value
+// toolPathFlags are the path flags of the tools lever ships, plus -token-file
+// kept as a generic secret flag, read in every supervised tool's command. lever cannot know what an unknown flag's value
 // is, so no other flag is checked.
 var toolPathFlags = map[string]hostPathKind{
 	"app-key":    hostSecret,    // github: the GitHub App private key
 	"token-file": hostSecret,    // a tool's API token
-	"state":      hostSecret,    // github and others: the tool's private state dir
+	"state":      hostSecret,    // github, and any tool's own state dir
 	"tree":       hostUnchecked, // github, whisper: the tree, to refuse paths inside it
 	"dsn":        hostUnchecked, // db: its sqlite data
 	"csv":        hostUnchecked, // todo (example): the agent-editable todo list

@@ -11,7 +11,14 @@ version bump moves the block under the new version heading.
 
 - **The `lever-tool-fizzy` broker tool.** It is no longer built or released. An instance config
   that names it must drop the tool and its grants; a ticket board can be wired in as an external
-  broker tool instead.
+  broker tool instead. Config load now refuses a `broker.tools` entry that runs `lever-tool-fizzy`.
+
+### Upgrade
+
+- **Drop the fizzy tool before you upgrade.** Remove its `broker.tools` entry and its `fizzy`
+  grants (in `manager.obtain` and any worker's), or config load refuses the instance. If you
+  installed with `make install`, delete `lever-tool-fizzy` from `$PREFIX` (default
+  `~/.local/bin`); the Homebrew cask removes it on upgrade.
 
 ## [0.50.0] - 2026-10-19
 

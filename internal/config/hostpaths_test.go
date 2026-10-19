@@ -477,3 +477,22 @@ func TestNonWhisperToolGenericFlagsLoad(t *testing.T) {
 		t.Fatalf("a third-party tool read as whisper: %+v", ws)
 	}
 }
+
+// A lever-tool-fizzy left behind by make install is refused at load, plain
+// or behind env, so its unchecked path flags never run.
+func TestRemovedFizzyToolRefused(t *testing.T) {
+	for _, cmd := range []string{
+		"[/home/u/.local/bin/lever-tool-fizzy, -fizzy, ROOT/ws/bin]",
+		"[env, X=1, /opt/lever-tool-fizzy]",
+	} {
+		root := shortTemp(t)
+		p := filepath.Join(root, "lever.yaml")
+		hostPathsTree(t, root)
+		body := "name: demo\nbackend: orbstack\ntree: ws\nmanager: {}\n" + strings.ReplaceAll(supervisedTool(cmd), "ROOT", root)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := LoadNoHostChecks(p)
+		testutil.WantErrContaining(t, err, "broker.tools[t]", "lever-tool-fizzy", "no longer ships")
+	}
+}

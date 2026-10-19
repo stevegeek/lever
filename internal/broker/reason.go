@@ -52,7 +52,7 @@ const (
 	ReasonTaskTooLong        = "task-too-long"       // 413: the task is over scion's command-line budget
 	ReasonTaskFixed          = "task-fixed"          // 409 (start): a task was given, but the record exists and its task is fixed
 	ReasonConfigFile         = "config-file"         // 500: the worker's instructions_file or task_file cannot be read or is invalid
-	ReasonNotRecyclable      = "not-recyclable"      // 403 (recycle): the worker does not set recyclable
+	ReasonNotRecyclable      = "not-recyclable"      // 403 (the manager's /worker/recycle): the worker does not set recyclable
 	ReasonNotStopped         = "not-stopped"         // 409 (recycle): the record is not suspended, stopped or error, or its container is live
 	ReasonRateLimited        = "rate-limited"        // 429 (recycle): the worker was recycled less than a minute ago
 	ReasonImageUnqualified   = "image-unqualified"   // 409: the worker's record runs an image name the hub rewrites to its image registry (unqualified, or none)

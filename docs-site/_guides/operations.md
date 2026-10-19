@@ -111,7 +111,8 @@ when it is created again:
   logged by size and its first 60 bytes only.
 
 Leave `recyclable` off for a worker whose conversation is worth keeping: without it, only you can
-discard a record (`lever worker purge NAME --force`). `lever doctor`'s *worker recycle* row lists
+discard a record (`lever worker purge NAME --force`, or `lever worker recycle NAME`, which does not
+need `recyclable`). `lever doctor`'s *worker recycle* row lists
 the recyclable workers.
 
 ## Driving workers from a host program
@@ -134,8 +135,8 @@ so it gives no agent anything new:
   that has no record (exit `8`): `lever worker start` does.
 - `lever msg send "…" --to NAME` gives a running worker its next piece of work. The worker verifies
   it as an `operator-note`. Exit `9` means the worker was not running and nothing was sent.
-- `lever worker recycle NAME [--task-file F]` discards a `recyclable` worker's record and starts it
-  fresh, for a slot that needs a fresh context; the workspace is kept and the conversation is lost.
+- `lever worker recycle NAME [--task-file F]` discards a worker's record and starts it fresh (any
+  declared worker: `recyclable: true` is only the manager's authority), for a slot that needs a fresh context; the workspace is kept and the conversation is lost.
   `lever worker suspend NAME` and `lever worker stop NAME` take a worker down.
 
 Each verb is the manager's own (`lever-manager agent start`, `resume`, `recycle`, `suspend`,

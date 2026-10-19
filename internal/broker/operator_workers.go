@@ -148,8 +148,8 @@ func (b *Broker) handleOperatorWorkerStart(w http.ResponseWriter, r *http.Reques
 }
 
 // handleOperatorWorkerRecycle is `lever worker recycle NAME`: the manager's
-// recycle verb, for a worker the config marks recyclable. With no task in the
-// request, the fresh start takes the worker's task_file.
+// recycle verb, for any declared worker (recyclable gates only the manager).
+// With no task in the request, the fresh start takes the worker's task_file.
 func (b *Broker) handleOperatorWorkerRecycle(w http.ResponseWriter, r *http.Request) {
 	var req wire.WorkerStartRequest
 	spec, ok := b.operatorWorker(w, r, "recycle", &req, func() string { return req.Worker })

@@ -66,15 +66,13 @@ func (b *Broker) recycleWorker(ctx context.Context, w http.ResponseWriter, spec 
 		refuse(w, ReasonNotAWorker, "forbidden", http.StatusForbidden)
 		return
 	}
-	if !spec.Recyclable {
+	// recyclable is the manager's authority to discard a record. The
+	// operator owns the instance and may discard any worker's record anyway
+	// (`lever worker purge`), so the operator's recycle does not need it.
+	if !op && !spec.Recyclable {
 		b.audit("worker", actor, "deny", verb+": not recyclable")
-		msg := "worker " + spec.Name + " is not recyclable: the operator must set `recyclable: true` on it under `workers:` in lever.yaml " +
-			"(then `lever reload`). Until then, ask the operator to run `lever worker purge " + spec.Name + " --force`."
-		if op {
-			msg = "worker " + spec.Name + " is not recyclable: set `recyclable: true` on it under `workers:` in lever.yaml (then `lever reload`), " +
-				"or run `lever worker purge " + spec.Name + " --force` and then `lever worker start " + spec.Name + "`. Nothing was deleted."
-		}
-		refuse(w, ReasonNotRecyclable, msg, http.StatusForbidden)
+		refuse(w, ReasonNotRecyclable, "worker "+spec.Name+" is not recyclable: the operator must set `recyclable: true` on it under `workers:` in lever.yaml "+
+			"(then `lever reload`). Until then, ask the operator to run `lever worker purge "+spec.Name+" --force`.", http.StatusForbidden)
 		return
 	}
 	if !b.taskOK(w, actor, verb, task, "") {

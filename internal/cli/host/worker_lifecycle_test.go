@@ -151,7 +151,6 @@ func TestWorkerVerbExitCodes(t *testing.T) {
 	}{
 		{"recycle", broker.PathOperatorWorkerRecycle, http.StatusTooManyRequests, broker.ReasonRateLimited, 75},
 		{"recycle", broker.PathOperatorWorkerRecycle, http.StatusConflict, broker.ReasonNotStopped, 12},
-		{"recycle", broker.PathOperatorWorkerRecycle, http.StatusForbidden, broker.ReasonNotRecyclable, 10},
 		{"recycle", broker.PathOperatorWorkerRecycle, http.StatusServiceUnavailable, broker.ReasonBusy, 75},
 		{"start", broker.PathOperatorWorkerStart, http.StatusConflict, broker.ReasonTaskFixed, 10},
 		{"start", broker.PathOperatorWorkerStart, http.StatusInternalServerError, broker.ReasonConfigFile, 10},

@@ -72,7 +72,7 @@ type WorkerSpec struct {
 	TaskPath string
 	APIKey   bool // true ⇒ api-key LLM mode for this worker
 	// Recyclable lets the manager discard this worker's record and start it
-	// fresh.
+	// fresh. The operator's recycle does not need it.
 	Recyclable bool
 	// Claude is staged in the worker's envelope before every start and
 	// resume. nil = none.
@@ -570,10 +570,7 @@ func (b *Broker) resumeExistingWorker(ctx context.Context, w http.ResponseWriter
 		}
 		again := ", or dispatch with no task to resume."
 		if actor == operatorActor {
-			fresh = "Run `lever worker purge " + spec.Name + " --force`, then start it, to start it fresh with a new task"
-			if spec.Recyclable {
-				fresh = "Run `lever worker recycle " + spec.Name + " --task-file F` to start it fresh with a new task (its old conversation is discarded)"
-			}
+			fresh = "Run `lever worker recycle " + spec.Name + " --task-file F` to start it fresh with a new task (its old conversation is discarded)"
 			again = ", or start it with no --task-file to resume it."
 		}
 		refusePhase(w, ReasonTaskFixed, phase, "worker "+spec.Name+" already exists (phase "+phase+"); its task is fixed at creation. "+fresh+again, http.StatusConflict)

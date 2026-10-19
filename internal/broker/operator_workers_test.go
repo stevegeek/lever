@@ -271,8 +271,8 @@ func TestOperatorWorkerStartRevokedUnderTheLock(t *testing.T) {
 	}
 }
 
-// The operator's recycle is the manager's: recyclable only, a stopped
-// record, and one recycle a minute per worker, counted across both callers.
+// The operator's recycle is the manager's: a stopped record, and one recycle
+// a minute per worker, counted across both callers.
 func TestOperatorWorkerRecycle(t *testing.T) {
 	b, rt, audit := operatorStartBroker(t, "suspended", true, "from the file")
 	rec := callOperator(t, b, http.MethodPost, PathOperatorWorkerRecycle, `{"worker":"worker"}`)
@@ -291,6 +291,23 @@ func TestOperatorWorkerRecycle(t *testing.T) {
 	}
 }
 
+// recyclable is the manager's authority only: the operator recycles a worker
+// without it, and the manager is still refused.
+func TestOperatorWorkerRecycleNeedsNoRecyclable(t *testing.T) {
+	b, rt, audit := operatorStartBroker(t, "stopped", false, "from the file")
+	rec := callWorker(t, b, "/worker/recycle", recycleBody, "test-manager")
+	if rec.Code != http.StatusForbidden || rec.Header().Get(ReasonHeader) != ReasonNotRecyclable || len(rt.purged) != 0 {
+		t.Fatalf("manager: %d %q purged=%v", rec.Code, rec.Header().Get(ReasonHeader), rt.purged)
+	}
+	rec = callOperator(t, b, http.MethodPost, PathOperatorWorkerRecycle, `{"worker":"worker"}`)
+	if rec.Code != http.StatusOK || len(rt.purged) != 1 || len(rt.started) != 1 || rt.started[0].Task != "from the file" {
+		t.Fatalf("operator: %d %s purged=%v started=%+v", rec.Code, rec.Body, rt.purged, rt.started)
+	}
+	if !strings.Contains(audit.String(), "record deleted") {
+		t.Fatalf("audit:\n%s", audit)
+	}
+}
+
 func TestOperatorWorkerRecycleRefusals(t *testing.T) {
 	for name, tc := range map[string]struct {
 		phase      string
@@ -300,10 +317,9 @@ func TestOperatorWorkerRecycleRefusals(t *testing.T) {
 		code       int
 		reason     string
 	}{
-		"unknown":        {"stopped", true, `{"worker":"zz"}`, nil, http.StatusForbidden, ReasonNotAWorker},
-		"not recyclable": {"stopped", false, `{"worker":"worker"}`, nil, http.StatusForbidden, ReasonNotRecyclable},
-		"running":        {"running", true, `{"worker":"worker"}`, nil, http.StatusConflict, ReasonNotStopped},
-		"revoked":        {"stopped", true, `{"worker":"worker"}`, func(b *Broker, _ *fakeRuntime) { b.Revoke("worker") }, http.StatusForbidden, ReasonRevoked},
+		"unknown": {"stopped", true, `{"worker":"zz"}`, nil, http.StatusForbidden, ReasonNotAWorker},
+		"running": {"running", true, `{"worker":"worker"}`, nil, http.StatusConflict, ReasonNotStopped},
+		"revoked": {"stopped", true, `{"worker":"worker"}`, func(b *Broker, _ *fakeRuntime) { b.Revoke("worker") }, http.StatusForbidden, ReasonRevoked},
 		"busy": {"stopped", true, `{"worker":"worker"}`, func(b *Broker, _ *fakeRuntime) {
 			_, _ = b.tryLockWorker("worker")
 		}, http.StatusServiceUnavailable, ReasonBusy},

@@ -218,7 +218,8 @@ type Worker struct {
 	Delegate         []DelegateGrant `yaml:"delegate"`
 	// Recyclable lets the manager discard this worker's record and start it
 	// fresh with a new task; its workspace is kept. Without it only the
-	// operator's `lever worker purge` discards a record. The json tag keeps
+	// operator discards a record (`lever worker purge` or `recycle`, which
+	// never need it). The json tag keeps
 	// it out of brokerctl.ConfigHash while false.
 	Recyclable bool `yaml:"recyclable" json:",omitempty"`
 	// TaskFile is the task of a fresh start by the operator (`lever worker

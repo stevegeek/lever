@@ -86,9 +86,10 @@ func newWorkerRecycleCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "recycle NAME",
 		Args:  cobra.ExactArgs(1),
-		Short: "Discard a recyclable worker's record and start it fresh (keeps its workspace)",
-		Long: "Discard a worker's record and start it fresh through the broker, as the manager's `agent recycle` does:\n" +
-			"only for a worker with recyclable: true, only when it is suspended, stopped or in phase error, and at most\n" +
+		Short: "Discard a worker's record and start it fresh (keeps its workspace)",
+		Long: "Discard a worker's record and start it fresh through the broker, as the manager's `agent recycle` does,\n" +
+			"for any declared worker (recyclable: true gates only the manager): only when it is suspended, stopped or\n" +
+			"in phase error, and at most\n" +
 			"once a minute per worker (the manager's recycles count too). Its old conversation is lost; its workspace\n" +
 			"is kept. The task is --task-file's, else the worker's task_file. Exit codes and --json reasons: see the CLI reference.",
 		RunE: func(cmd *cobra.Command, args []string) error {

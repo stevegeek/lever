@@ -31,8 +31,11 @@ version bump moves the block under the new version heading.
   by `lever up` and `lever apply` once the manager is up; a failure warns, naming the worker, and the
   bring-up still succeeds. The `--json` line and the exit codes are those of `lever worker resume`,
   plus `12` (`not-stopped`); new reasons are `task-file`, `bad-task`, `task-too-long`, `task-fixed`,
-  `config-file`, `not-recyclable`, `not-stopped` and `rate-limited`. The manager's own start and
-  recycle refusals keep their status and text, and now carry `X-Lever-Reason` too. Nothing changes
+  `config-file`, `not-stopped` and `rate-limited`. `lever worker recycle` works on any declared
+  worker: `recyclable: true` is the manager's authority to recycle, and the operator owns the
+  instance, so the manager's `/worker/recycle` still needs it and the operator's verb does not.
+  The manager's own start and recycle refusals keep their status and text, and now carry
+  `X-Lever-Reason` too. Nothing changes
   inside the jail, and the manager and workers get no new authority. `/operator/wake` is unchanged
   and stays deprecated for host programs.
 

@@ -174,7 +174,8 @@ func TestJailRunnerOutputLimitStopsAFlood(t *testing.T) {
 }
 
 // The scion client quotes a failed command's output in its error; past the
-// default cap that is one line naming the cap, not the guest's flood.
+// default cap that is one line naming the cap, not the guest's flood. The
+// agent list keeps none of it and names the cause instead.
 func TestScionClientErrorAtTheOutputLimitIsShort(t *testing.T) {
 	if _, err := exec.LookPath("yes"); err != nil {
 		t.Skip("no yes(1)")
@@ -182,8 +183,15 @@ func TestScionClientErrorAtTheOutputLimitIsShort(t *testing.T) {
 	jr := New(Config{Host: proc.RealRunner{}, Prefix: []string{"sh", "-c", "yes '[{}]'", "_"}, UID: "501", OutputLimit: 64 << 10})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_, err := scion.New(jr, scion.Options{}).List(ctx, "")
-	if err == nil || !strings.Contains(err.Error(), "65536-byte limit") || len(err.Error()) > 1000 {
+	c := scion.New(jr, scion.Options{})
+	err := c.Stop(ctx, "w", "")
+	if err == nil || !errors.Is(err, proc.ErrOutputLimit) || !strings.Contains(err.Error(), "65536-byte limit") ||
+		strings.Contains(err.Error(), "[{}]") || len(err.Error()) > 1000 {
+		t.Fatalf("Stop = %d bytes: %.300q", len(fmt.Sprint(err)), fmt.Sprint(err))
+	}
+	_, err = c.List(ctx, "")
+	if !errors.Is(err, scion.ErrAgentListTooLarge) || !errors.Is(err, proc.ErrOutputLimit) ||
+		strings.Contains(err.Error(), "[{}]") || len(err.Error()) > 1000 {
 		t.Fatalf("List = %d bytes: %.300q", len(fmt.Sprint(err)), fmt.Sprint(err))
 	}
 }

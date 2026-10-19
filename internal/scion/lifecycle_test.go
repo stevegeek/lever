@@ -1066,7 +1066,7 @@ func TestListOversizedIsAgentListTooLarge(t *testing.T) {
 	if !errors.Is(err, ErrAgentListTooLarge) || !errors.Is(err, proc.ErrOutputLimit) {
 		t.Fatalf("err = %v, want ErrAgentListTooLarge wrapping proc.ErrOutputLimit", err)
 	}
-	for _, want := range []string{"agent list is too large", "lever up --fresh --keep-conversation", "lever worker purge NAME --force", "cannot read the list to tell which"} {
+	for _, want := range []string{"agent list is too large", "lever up --fresh --keep-conversation", "lever worker purge NAME --force", "troubleshooting quick table"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error lacks %q: %v", want, err)
 		}

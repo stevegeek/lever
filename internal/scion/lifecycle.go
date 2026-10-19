@@ -513,10 +513,9 @@ func (c *Client) List(ctx context.Context, project string) ([]Agent, error) {
 // activity, so a hostile one can grow the list past the cap; a retry reads the
 // same list, so the error is final. scion delete and suspend name one agent and
 // never list, which is what both recoveries rely on.
-var ErrAgentListTooLarge = errors.New("the hub's agent list is too large for lever to read (scion's output passed lever's size limit), most likely because an agent's record carries an oversized status or activity. " +
-	"If it is the manager's record, `lever up --fresh --keep-conversation` backs up its conversation, deletes the record by name and brings the manager back on that conversation. " +
-	"If it is a worker's, `lever worker purge NAME --force` deletes that worker's record (its work product is kept). " +
-	"lever cannot read the list to tell which agent it is: `lever up --fresh` says so when the list is still too large once the manager's record is gone, and then purge each worker that may be the one")
+var ErrAgentListTooLarge = errors.New("the hub's agent list is too large for lever to read: an agent's record most likely carries an oversized status or activity. " +
+	"Run lever up --fresh --keep-conversation for the manager's record, or lever worker purge NAME --force for a worker's; " +
+	"see the troubleshooting quick table in the operations guide")
 
 // listErr keeps none of the capped output: it is agent-written, up to the cap
 // in size, and text matches such as IsBrokerUnavailable run on the error.

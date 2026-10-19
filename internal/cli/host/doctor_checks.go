@@ -1150,10 +1150,11 @@ func activityAge(a *scionpkg.Agent, now time.Time) string {
 // else. Podman may qualify the ref (docker.io/, localhost/), so refs are
 // compared normalised.
 //
-// A record on an unqualified name fails for the manager, which lever refuses
-// to keep or resume, and is a warning for a worker:
-// scion rewrites that name to the hub's image registry at every start, and
-// any agent can set the registry between applies.
+// A record on an unqualified name, or with no image, fails, for the manager
+// and for a worker, which lever and the broker refuse to keep or resume:
+// scion rewrites that name, or the default a record with none runs, to the
+// hub's image registry at every start, and any agent can set the registry
+// between applies.
 func checkManagerImage(ctx context.Context, project, name, configured string, list agentLister) checkResult {
 	const check = "manager image"
 	if list == nil || configured == "" {
@@ -1166,15 +1167,18 @@ func checkManagerImage(ctx context.Context, project, name, configured string, li
 	}
 	var bare []string
 	for _, ag := range agents {
-		if ag.Image != "" && !strings.Contains(ag.Image, "@") && !imageref.Qualified(ag.Image) {
+		switch {
+		case ag.Image == "":
+			bare = append(bare, ag.Slug+" (no image)")
+		case !imageref.Fixed(ag.Image):
 			bare = append(bare, fmt.Sprintf("%s (%s)", ag.Slug, ag.Image))
 		}
 	}
 	bareDetail := ""
 	if len(bare) > 0 {
-		bareDetail = fmt.Sprintf("%s created on an unqualified image name, which scion rewrites to the hub's image registry at every start; an agent can point that registry at its own between applies", strings.Join(bare, ", "))
+		bareDetail = fmt.Sprintf("%s created on an unqualified image name or none, which scion rewrites to the hub's image registry at every start; an agent can point that registry at its own between applies, so lever refuses to start these records", strings.Join(bare, ", "))
 	}
-	const bareFix = "recreate them on " + imageref.Registry + "/ names: the manager with `lever up --fresh --keep-conversation`, a worker by recycling or deleting it from the manager"
+	const bareFix = "recreate them on " + imageref.Registry + "/ names: the manager with `lever up --fresh --keep-conversation`, a worker with `lever worker recycle NAME` (or `lever worker purge NAME --force`, then `lever worker start NAME`)"
 	a := scionpkg.FindAgent(agents, name)
 	switch {
 	case a != nil && a.Image != "" && !jail.SameImageRef(a.Image, want) && !jail.SameImageRef(a.Image, configured):
@@ -1184,14 +1188,10 @@ func checkManagerImage(ctx context.Context, project, name, configured string, li
 		}
 		return checkResult{check, false, detail,
 			"run `lever up --fresh --keep-conversation` to recreate the manager on the configured image and keep its conversation (plain `--fresh` starts a new one; both back the old one up first)"}
-	case bareDetail != "" && a != nil && a.Image != "" && !strings.Contains(a.Image, "@") && !imageref.Qualified(a.Image):
-		return checkResult{check, false, bareDetail, bareFix}
 	case bareDetail != "":
-		return warnResult(check, bareDetail, bareFix)
+		return checkResult{check, false, bareDetail, bareFix}
 	case a == nil:
 		return checkResult{check, true, "not checked (no manager record)", ""}
-	case a.Image == "":
-		return checkResult{check, true, "not checked (the record reports no image)", ""}
 	}
 	return checkResult{check, true, fmt.Sprintf("%q runs %s, as configured", name, a.Image), ""}
 }

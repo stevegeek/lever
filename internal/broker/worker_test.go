@@ -2,6 +2,7 @@ package broker
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -76,6 +78,9 @@ type fakeRuntime struct {
 	purged    []string
 	purgeErr  error
 	ticketErr error
+	// keepEmptyImage lists a record with no image as it is; otherwise List
+	// gives it fakeRecordImage.
+	keepEmptyImage bool
 }
 
 // PurgeWorker satisfies WorkerPurger: it drops the worker's record from
@@ -124,7 +129,23 @@ func (f *fakeRuntime) lastStaged(t *testing.T, worker string) wire.Bootstrap {
 	return bs
 }
 
-func (f *fakeRuntime) List(_ context.Context, project string) ([]scion.Agent, error) {
+// fakeRecordImage is the image every listed record carries unless it names
+// its own or the fake sets keepEmptyImage.
+const fakeRecordImage = "lever.local/img:1"
+
+func (f *fakeRuntime) List(ctx context.Context, project string) ([]scion.Agent, error) {
+	agents, err := f.list(ctx, project)
+	if f.keepEmptyImage || len(agents) == 0 {
+		return agents, err
+	}
+	out := slices.Clone(agents)
+	for i := range out {
+		out[i].Image = cmp.Or(out[i].Image, fakeRecordImage)
+	}
+	return out, err
+}
+
+func (f *fakeRuntime) list(_ context.Context, project string) ([]scion.Agent, error) {
 	f.listCalls++
 	f.listProjects = append(f.listProjects, project)
 	if f.listErr != nil {
@@ -1137,9 +1158,10 @@ func TestWorkerResumeVerbWaitsUntilRunning(t *testing.T) {
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"phase":"running"`) {
 		t.Fatalf("status = %d (%s), want 200 running", rec.Code, rec.Body.String())
 	}
-	// One observe-first read, two "resumed" readings, then the running one.
-	if rt.listCalls != 4 {
-		t.Fatalf("List calls = %d, want 4 (the verb must poll past the interim phase)", rt.listCalls)
+	// One observe-first read, the image check, two "resumed" readings, then
+	// the running one.
+	if rt.listCalls != 5 {
+		t.Fatalf("List calls = %d, want 5 (the verb must poll past the interim phase)", rt.listCalls)
 	}
 
 	// A worker that never leaves the interim phase is an error that names it.

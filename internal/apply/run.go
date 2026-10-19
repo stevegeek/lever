@@ -688,7 +688,7 @@ func (r *run) autostartWorker(ctx context.Context, s Step) {
 	actx, cancel := context.WithTimeout(ctx, autostartWorkerTimeout)
 	defer cancel()
 	if err := r.d.AutostartWorker(actx, s.Target); err != nil {
-		r.d.Log("lever: warning: autostart of worker %q failed: %v; the bring-up continues. Retry with `lever worker start %s`", s.Target, err, s.Target)
+		r.d.Log("lever: warning: autostart of worker %q failed: %v; the bring-up continues. Fix what the error names, then retry with `lever worker start %s`", s.Target, err, s.Target)
 		progress.From(ctx).Note("not started: see the warning")
 	}
 }

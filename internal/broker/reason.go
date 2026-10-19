@@ -55,6 +55,7 @@ const (
 	ReasonNotRecyclable      = "not-recyclable"      // 403 (recycle): the worker does not set recyclable
 	ReasonNotStopped         = "not-stopped"         // 409 (recycle): the record is not suspended, stopped or error, or its container is live
 	ReasonRateLimited        = "rate-limited"        // 429 (recycle): the worker was recycled less than a minute ago
+	ReasonImageUnqualified   = "image-unqualified"   // 409: the worker's record runs an image name the hub rewrites to its image registry (unqualified, or none)
 )
 
 // refuse writes an error answer with its machine-readable reason. The text is

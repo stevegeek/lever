@@ -22,9 +22,12 @@ func newSessionBroker(t *testing.T, phase, taskFile string) (*Broker, *fakeRunti
 	t.Helper()
 	b, rt, audit := operatorStartBroker(t, phase, false, taskFile)
 	b.liveInterval = time.Millisecond
-	// The phase read, the stop wait, and the read just before the resume.
+	// The phase read, the image check before the stop, the stop wait, the
+	// resume's image check, and the read just before the resume.
 	rt.listFirst = [][]scion.Agent{
 		{{Slug: "worker", Phase: phase, ContainerStatus: "Up 1 minute"}},
+		{{Slug: "worker", Phase: phase, ContainerStatus: "Up 1 minute"}},
+		{{Slug: "worker", Phase: scion.PhaseStopped, ContainerStatus: stoppedDown}},
 		{{Slug: "worker", Phase: scion.PhaseStopped, ContainerStatus: stoppedDown}},
 		{{Slug: "worker", Phase: scion.PhaseStopped, ContainerStatus: stoppedDown}},
 	}
@@ -109,9 +112,14 @@ func TestOperatorWorkerNewSessionRefusesBeforeTheStop(t *testing.T) {
 			b.workers["other"] = WorkerSpec{Name: "other"}
 			rt.listFirst = [][]scion.Agent{
 				{{Slug: "worker", Phase: "running", ContainerStatus: "Up 1 minute"}},
+				{{Slug: "worker", Phase: "running", ContainerStatus: "Up 1 minute"}},
 				{{Slug: "other", Phase: "running", ContainerStatus: "Up 1 minute"}},
 			}
 		}, http.StatusConflict, ReasonWorkerCap},
+		"unqualified image": {`{"worker":"worker"}`, func(_ *Broker, rt *fakeRuntime) {
+			rt.listFirst[1][0].Image = "scionlocal/lever-claude:1"
+		}, http.StatusConflict, ReasonImageUnqualified},
+		"no image": {`{"worker":"worker"}`, func(_ *Broker, rt *fakeRuntime) { rt.keepEmptyImage = true }, http.StatusConflict, ReasonImageUnqualified},
 	} {
 		b, rt, _, sessions := newSessionBroker(t, scion.PhaseRunning, "from the file")
 		if tc.setup != nil {

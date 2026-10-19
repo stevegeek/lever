@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/fsutil"
+	"github.com/stevegeek/lever/internal/imageref"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/wire"
 )
@@ -603,6 +604,9 @@ type newSession struct {
 }
 
 func (b *Broker) resumeRecordAs(ctx context.Context, w http.ResponseWriter, spec WorkerSpec, phase, actor string, fresh *newSession) {
+	if !b.recordImageOK(ctx, w, spec, actor, "resume") {
+		return
+	}
 	if comingUp(phase) {
 		// Already coming up: a fresh ticket would replace the one the booting
 		// worker is about to spend. Only wait.
@@ -698,6 +702,57 @@ func (b *Broker) resumeRecordAs(ctx context.Context, w http.ResponseWriter, spec
 	b.resetReenrolTries(spec.Name)
 	b.audit("worker", actor, "allow", "resume "+spec.Name)
 	writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
+}
+
+// rewritableImage reports a worker record that runs an image name the hub
+// rewrites to its image registry. scion keeps a record's image for life and
+// rewrites an unqualified one at every start, and a record with no image runs
+// the template's or harness's default, rewritten the same way. The registry is
+// a hub setting any agent can change, to one it controls, which scion then
+// pulls from. Only a new record moves the worker to a qualified name.
+func rewritableImage(a *scion.Agent) bool {
+	return a != nil && !imageref.Fixed(a.Image)
+}
+
+// rewritableImageHint names the operator's way out, after "run". Every caller
+// gets it: the manager and a chat login have no way out of their own.
+func rewritableImageHint(spec WorkerSpec) string {
+	return "`lever worker recycle " + spec.Name + "` to start it fresh on " + spec.Image +
+		" (its workspace is kept, its conversation is not), or `lever worker purge " + spec.Name + " --force` and then `lever worker start " + spec.Name + "`"
+}
+
+// rewritableImageRefusal is the audit line's refusal, naming the record's
+// image, which is hub text, bounded.
+func rewritableImageRefusal(spec WorkerSpec, a *scion.Agent) string {
+	img := "no image"
+	if a.Image != "" {
+		img = "the image name " + scion.BoundedQuote(a.Image)
+	}
+	return "refusing to start " + spec.Name + ": its record runs " + img + ", which the hub rewrites to its image registry; run " + rewritableImageHint(spec)
+}
+
+// recordImageOK refuses, changing nothing, to bring up a worker record on a
+// rewritable image (rewritableImage). An unreadable list refuses too.
+func (b *Broker) recordImageOK(ctx context.Context, w http.ResponseWriter, spec WorkerSpec, actor, verb string) bool {
+	agents, err := b.runtime.List(ctx, b.instanceProject)
+	if err != nil {
+		b.audit("worker", actor, "error", verb+" "+spec.Name+": list: "+err.Error())
+		refuse(w, ReasonRuntimeError, "runtime error", http.StatusBadGateway)
+		return false
+	}
+	a := scion.FindAgent(agents, spec.Name)
+	if !rewritableImage(a) {
+		return true
+	}
+	b.audit("worker", actor, "deny", verb+" "+spec.Name+": "+rewritableImageRefusal(spec, a))
+	who := "The operator must run "
+	if actor == operatorActor {
+		who = "Run "
+	}
+	// The record's image is hub text: it stays in the audit line.
+	refuse(w, ReasonImageUnqualified, "worker "+spec.Name+"'s record is on an image name the hub rewrites to its image registry at every start (an unqualified name, or none), a setting any agent can change; nothing was changed. "+
+		who+rewritableImageHint(spec)+".", http.StatusConflict)
+	return false
 }
 
 // resumeChecks refuses a resume the workspace, shared-folder or record checks

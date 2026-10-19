@@ -88,6 +88,10 @@ func (b *Broker) handleOperatorWorkerNewSession(w http.ResponseWriter, r *http.R
 		refuse(w, ReasonRoleMismatch, err.Error(), http.StatusConflict)
 		return
 	}
+	// Before the stop: the resume after it would refuse the record.
+	if !b.recordImageOK(ctx, w, spec, operatorActor, "new-session") {
+		return
+	}
 	release, ok := b.admitOrRefuse(ctx, w, operatorActor, "new-session", spec.Name)
 	if !ok {
 		return

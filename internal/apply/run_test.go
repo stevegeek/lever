@@ -4316,6 +4316,9 @@ func TestRefuseUnqualifiedRecord(t *testing.T) {
 	if err := (&run{app: &config.App{Name: "m"}}).refuseUnqualifiedRecord(nil); err != nil {
 		t.Errorf("no record: %v", err)
 	}
+	// With no manager.image, a fresh create would make the same record.
+	err := (&run{app: &config.App{Name: "m"}}).refuseUnqualifiedRecord(&scion.Agent{Slug: "m"})
+	testutil.WantErrContaining(t, err, "Set manager.image in lever.yaml")
 }
 
 // Restore, new session and the broker's re-enrol resume the record too: each

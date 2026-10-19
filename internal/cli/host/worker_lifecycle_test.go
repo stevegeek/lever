@@ -163,6 +163,9 @@ func TestWorkerVerbExitCodes(t *testing.T) {
 		{"new-session", broker.PathOperatorWorkerNewSession, http.StatusNotFound, broker.ReasonNoRecord, 8},
 		{"new-session", broker.PathOperatorWorkerNewSession, http.StatusBadGateway, broker.ReasonRuntimeError, 3},
 		{"new-session", broker.PathOperatorWorkerNewSession, http.StatusConflict, broker.ReasonRoleMismatch, 10},
+		{"resume", broker.PathOperatorWorkerResume, http.StatusConflict, broker.ReasonImageUnqualified, 10},
+		{"start", broker.PathOperatorWorkerStart, http.StatusConflict, broker.ReasonImageUnqualified, 10},
+		{"new-session", broker.PathOperatorWorkerNewSession, http.StatusConflict, broker.ReasonImageUnqualified, 10},
 	} {
 		dir := msgDir(t)
 		t.Chdir(dir)
@@ -301,6 +304,23 @@ func TestAutostartWorkerRefusal(t *testing.T) {
 	startResumeUDS(t, dir, map[string]canned{broker.PathOperatorWorkerStart: {status: http.StatusConflict, body: "too many workers",
 		header: map[string]string{broker.ReasonHeader: broker.ReasonWorkerCap}}})
 	if err := autostartWorker(t.Context(), app, st, "scratch"); err == nil || !strings.Contains(err.Error(), "worker-cap") {
+		t.Fatalf("%v", err)
+	}
+}
+
+// An autostart over a record the hub would rewrite fails with the broker's
+// way out, for up to warn with.
+func TestAutostartWorkerRewritableImage(t *testing.T) {
+	dir := msgDir(t)
+	t.Chdir(dir)
+	app, st, err := loadAppAndState(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startResumeUDS(t, dir, map[string]canned{broker.PathOperatorWorkerStart: {status: http.StatusConflict, body: "nothing was changed. Run `lever worker recycle scratch`",
+		header: map[string]string{broker.ReasonHeader: broker.ReasonImageUnqualified}}})
+	err = autostartWorker(t.Context(), app, st, "scratch")
+	if err == nil || !strings.Contains(err.Error(), broker.ReasonImageUnqualified) || !strings.Contains(err.Error(), "lever worker recycle scratch") {
 		t.Fatalf("%v", err)
 	}
 }

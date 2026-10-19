@@ -650,8 +650,12 @@ func (r *run) refuseUnqualifiedRecord(rec *scion.Agent) error {
 	if rec.Image == "" {
 		what = "has no image on its record (it was created without one), so it runs a default image name"
 	}
-	return fmt.Errorf("%s: manager %q %s, which the hub rewrites to its image registry at every start, a setting any agent can change; nothing was changed. Run `lever up --fresh --keep-conversation` to recreate it on %s and keep its conversation",
-		r.subjectName(), r.app.Name, what, termsafe.Sanitize(r.app.ManagerAgentImage()))
+	fix := "Run `lever up --fresh --keep-conversation` to recreate it on " + termsafe.Sanitize(r.app.ManagerAgentImage()) + " and keep its conversation"
+	if r.app.ManagerAgentImage() == "" {
+		fix = "Set manager.image in " + config.CanonicalName + ", then run `lever up --fresh --keep-conversation` to recreate it on that image and keep its conversation"
+	}
+	return fmt.Errorf("%s: manager %q %s, which the hub rewrites to its image registry at every start, a setting any agent can change; nothing was changed. %s",
+		r.subjectName(), r.app.Name, what, fix)
 }
 
 // actUp makes the plan's change to the record; the gate after it confirms

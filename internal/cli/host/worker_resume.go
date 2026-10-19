@@ -60,7 +60,7 @@ func workerVerbExit(reason string) int {
 	case broker.ReasonNotAWorker, broker.ReasonRevoked, broker.ReasonRoleMismatch,
 		broker.ReasonWorkspaceUnsafe, broker.ReasonWorkspaceMissing, broker.ReasonSharedAccess,
 		broker.ReasonBadTask, broker.ReasonTaskTooLong, broker.ReasonTaskFixed,
-		broker.ReasonConfigFile, reasonTaskFile:
+		broker.ReasonConfigFile, broker.ReasonImageUnqualified, reasonTaskFile:
 		return exitWorkerRefused
 	}
 	return 1

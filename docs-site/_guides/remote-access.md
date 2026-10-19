@@ -964,8 +964,8 @@ The route (`POST /lever/api/new-conversation`) is accepted only:
 
 Its 202 answer carries the run's id. The page reads the run's state with
 `POST /lever/api/new-conversation/status` and `{"id": "<id>"}`, under the same operator and origin
-rules: `running`, `ok` with the backup id (none when the home held no conversation), or `failed`
-with a fixed word. The proxy keeps only the latest run, in memory; any other id gets 404.
+rules: `running`, `ok` with the backup id (none when the home held no conversation, or lever cannot
+tell which backup the run saved), or `failed` with a fixed word. The proxy keeps only the latest run, in memory; any other id gets 404.
 
 The proxy runs `lever conversation new` itself, as the host user it runs as, in its own session
 (a restart of the proxy does not stop it half way), with its output in
@@ -976,7 +976,7 @@ words only. The action exists only while the state directory is outside the tree
 backup can be kept; otherwise the page offers no button and the route answers 503. Each request is
 a line in the [audit log](#audit-log) (`remote-new-conversation` or `deny-new-conversation` with a
 reason word; `remote-new-conversation-result` for the outcome when it comes after the page's
-answer).
+answer; `remote-new-conversation-status` for each read of the run's state).
 
 ### Recent activity
 

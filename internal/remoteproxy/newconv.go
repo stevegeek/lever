@@ -32,6 +32,7 @@ const (
 	DecisionNewConversation       Decision = "remote-new-conversation"
 	DecisionDenyNewConversation   Decision = "deny-new-conversation"
 	DecisionNewConversationResult Decision = "remote-new-conversation-result" // the late answer, one more line
+	DecisionNewConversationStatus Decision = "remote-new-conversation-status" // a read of the run's state
 )
 
 // Config.NewConversation's refusals that changed nothing.
@@ -227,10 +228,12 @@ func (g *gate) serveNewConversationStatus(w http.ResponseWriter, r *http.Request
 	}
 	ans, found := g.newConv.status(req.ID)
 	if !found {
-		refuse(http.StatusNotFound, "unknown", nil)
+		line.Reason = "unknown"
+		g.answerWakeJSON(w, r, line, DecisionNewConversationStatus, http.StatusNotFound, map[string]string{"error": "unknown"})
 		return
 	}
-	g.answerWakeJSON(w, r, line, DecisionAllow, http.StatusOK, ans)
+	line.Reason = ans["state"]
+	g.answerWakeJSON(w, r, line, DecisionNewConversationStatus, http.StatusOK, ans)
 }
 
 func newConvFailure(err error) (int, string) {

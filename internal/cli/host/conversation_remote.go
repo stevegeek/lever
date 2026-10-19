@@ -46,10 +46,11 @@ func remoteNewConversation(app *config.App, st state.State, configPath string) f
 }
 
 // chatBackup finds the backup a chat page run that ran from start to end
-// saved, or "" (a home with no conversation saves none). The run is a
+// saved, or "" when it saved none or lever cannot tell. The run is a
 // separate process that tells its backup only on its output, which goes to
-// the log; the manager lock keeps any other backup from being made inside
-// the window.
+// the log. Other commands can back up inside the window while the run waits
+// for the lock, but under another reason; the proxy starts no second chat
+// run while one runs.
 func chatBackup(app *config.App, st state.State, start, end time.Time) string {
 	list, err := convbackup.Store{Dir: filepath.Join(st.Dir, convbackup.DirName)}.List()
 	if err != nil {

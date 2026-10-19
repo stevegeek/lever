@@ -181,7 +181,7 @@ let activityOpen = false; // the Recent activity panel is open
 let activitySeq = 0; // counts its reads and closes
 let waking = ''; // the agent a send is waking ('' = none)
 let renewing = ''; // the agent a new conversation is starting ('' = none)
-let renewed = null; // {name, text}: how the last one ended, until a send or another chat
+let renewed = null; // {name, text, error}: how the last one ended, until a send
 let held = false; // Send rests after a note (see hold)
 let stream = null;
 let streamFailed = false;
@@ -1607,7 +1607,11 @@ function openChat(name) {
   closeActivity();
   syncActivity();
   showError('');
-  renewed = null;
+  // A failure that ended while another chat was open is shown once here.
+  if (renewed && renewed.name === a.name && renewed.error) {
+    showError(renewed.error);
+    renewed = null;
+  }
   renderRows();
   if (a.access !== 'message') {
     chat = null;
@@ -1938,10 +1942,10 @@ async function newConversation() {
       out = newConversationOutcome(s.status, s.body, name);
     }
     if (!out) out = { note: newConversationLostText(name) };
-    if (out.error) {
-      if (chat && chat.name === name) showError(out.error);
+    if (out.error && chat && chat.name === name) {
+      showError(out.error);
     } else {
-      renewed = { name, text: out.note };
+      renewed = { name, text: out.note || '', error: out.error || '' };
     }
   } finally {
     renewing = '';

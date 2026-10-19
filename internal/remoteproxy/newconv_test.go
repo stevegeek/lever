@@ -157,12 +157,17 @@ func waitNewConvStatus(t *testing.T, h http.Handler, id string) string {
 func TestNewConversationStatus(t *testing.T) {
 	hub := newPageHub(t)
 	n := &newConvRec{block: make(chan struct{}), backup: "20261019T054104Z"}
+	var lines lockedLines
 	cfg := newConvConfig(t, hub, n, "")
+	cfg.Audit = lines.add
 	g := NewHandler(cfg).(*gate)
 	g.newConvWaitFor = 10 * time.Millisecond
 	id := newConvID(t, newConvPost(g, chatOp, ""))
 	if rw := newConvStatus(g, chatOp, id); rw.Code != http.StatusOK || strings.TrimSpace(rw.Body.String()) != `{"state":"running"}` {
 		t.Fatalf("running: %d %s", rw.Code, rw.Body)
+	}
+	if all := lines.all(); all[len(all)-1].Decision != DecisionNewConversationStatus || all[len(all)-1].Reason != "running" {
+		t.Fatalf("status audit %+v", all[len(all)-1])
 	}
 	// A second change while one runs is refused without spending the minute.
 	g.newConvs.give(cfg.ChatAgent)

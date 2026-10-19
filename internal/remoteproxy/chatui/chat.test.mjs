@@ -2580,6 +2580,23 @@ test('new conversation: a failure after the answer shows its fixed text', async 
   assert.equal(env.els.newconv.disabled, false);
 });
 
+test('new conversation: a failure that ends while another chat is open shows when the manager\'s opens again', async () => {
+  const env = await loadChat(hubWith({
+    agents: () => roster([BOSS({ activity: '' }), A('w1')], { newConversation: true }),
+    newConversationStatus: () => ({ status: 200, body: { state: 'failed', error: 'failed' } }),
+  }));
+  env.els.newconv.dispatch('click');
+  await tick(5);
+  env.els.agents.children[1].children[0].dispatch('click');
+  await tick(5);
+  await env.runTimers(3000);
+  await tick(5);
+  assert.equal(env.els.error.hidden, true, 'not on the worker\'s chat');
+  env.els.agents.children[0].children[0].dispatch('click');
+  await tick(5);
+  assert.match(env.els.error.textContent, /could not start the new conversation/);
+});
+
 test('new conversation: a status read that fails is read again; a lost change is a note, not an error', async () => {
   const answers = [{ status: 0, body: 'cannot reach the server' }, { status: 502, body: 'bad gateway' }, { status: 404, body: { error: 'unknown' } }];
   const env = await loadChat(hubWith({

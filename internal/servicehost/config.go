@@ -257,6 +257,9 @@ func validHeaderName(s string) bool {
 	return true
 }
 
+// maxConfigFile bounds a config, certificate, key or secret file.
+const maxConfigFile = 1 << 20
+
 // readChecked reads a file that only its owner, who must be this user or
 // root, can change; with private, that only the owner can read either. The
 // checks are made on the opened file, so a swap after them changes nothing.
@@ -283,7 +286,14 @@ func readChecked(path string, private bool) ([]byte, error) {
 	if perm&0o022 != 0 {
 		return nil, fmt.Errorf("%s is writable by group or others (mode %04o); chmod go-w it", path, perm)
 	}
-	return io.ReadAll(io.LimitReader(f, 1<<20))
+	b, err := io.ReadAll(io.LimitReader(f, maxConfigFile+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxConfigFile {
+		return nil, fmt.Errorf("%s is larger than %d bytes", path, maxConfigFile)
+	}
+	return b, nil
 }
 
 // readPrivate reads a key or secret file that only its owner may read.

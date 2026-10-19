@@ -221,6 +221,12 @@ func TestGatewayRefusesKeysEqualUnderCaseFolding(t *testing.T) {
 	if w := g.post("worker", body); w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", w.Code)
 	}
+	// An exact duplicate too: a backend that keeps the first "method" would
+	// run a tools/call the broker read as tools/list.
+	dup := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write"},"method":"tools/list"}`
+	if w := g.post("worker", dup); w.Code != http.StatusBadRequest {
+		t.Fatalf("duplicate method: status = %d, want 400", w.Code)
+	}
 	if len(*r.upBodies) != 0 {
 		t.Fatal("SECURITY: a folded-key message reached the backend")
 	}

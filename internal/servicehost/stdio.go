@@ -71,6 +71,7 @@ type stdioProc struct {
 	done       chan struct{}
 	doneOnce   sync.Once
 	exited     chan struct{}
+	started    time.Time
 	initResult json.RawMessage
 }
 
@@ -110,6 +111,11 @@ func (s *stdioServer) running(ctx context.Context, protocolVersion string) (*std
 	if p := s.proc; p != nil {
 		select {
 		case <-p.done:
+			// One that dies soon after it started is not restarted at once.
+			if time.Since(p.started) < restartBackoff {
+				s.failedAt = time.Now()
+			}
+			s.proc = nil
 		default:
 			return p, nil
 		}
@@ -165,7 +171,7 @@ func (s *stdioServer) start() (*stdioProc, error) {
 	}
 	s.log.Info("servicehost.stdio_started", "tool", s.tool.Name, "pid", cmd.Process.Pid)
 	p := &stdioProc{cmd: cmd, stdin: stdin, pending: map[int64]chan []byte{},
-		done: make(chan struct{}), exited: make(chan struct{})}
+		done: make(chan struct{}), exited: make(chan struct{}), started: time.Now()}
 	go s.logStderr(stderr)
 	go func() {
 		p.read(stdout)
@@ -213,9 +219,9 @@ func (p *stdioProc) markDone() { p.doneOnce.Do(func() { close(p.done) }) }
 // stop closes stdin, which ends a well-behaved server, and kills its process
 // group after stopGrace. It returns once the server is reaped.
 func (p *stdioProc) stop() {
-	p.writeMu.Lock()
+	// Not under writeMu: a server that stopped reading holds a write
+	// blocked, and closing the pipe is what wakes it.
 	_ = p.stdin.Close()
-	p.writeMu.Unlock()
 	select {
 	case <-p.exited:
 	case <-time.After(stopGrace):
@@ -295,6 +301,21 @@ func (p *stdioProc) write(b []byte) error {
 	return nil
 }
 
+// writeCtx is write bounded by ctx. A server that does not take a message
+// within the call's time is stopped: its blocked write would hold every
+// later call.
+func (p *stdioProc) writeCtx(ctx context.Context, b []byte) error {
+	errc := make(chan error, 1)
+	go func() { errc <- p.write(b) }()
+	select {
+	case err := <-errc:
+		return err
+	case <-ctx.Done():
+		go p.stop()
+		return errTimeout
+	}
+}
+
 // roundTrip sends msg under a fresh id and returns the server's response
 // with the caller's id put back.
 func (p *stdioProc) roundTrip(ctx context.Context, msg map[string]any) ([]byte, error) {
@@ -318,7 +339,7 @@ func (p *stdioProc) roundTrip(ctx context.Context, msg map[string]any) ([]byte, 
 		delete(p.pending, id)
 		p.pendMu.Unlock()
 	}()
-	if err := p.write(b); err != nil {
+	if err := p.writeCtx(ctx, b); err != nil {
 		return nil, err
 	}
 	select {

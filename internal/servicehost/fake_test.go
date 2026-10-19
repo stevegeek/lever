@@ -54,6 +54,9 @@ func fakeMCP() {
 		case "initialize":
 			reply(map[string]any{"protocolVersion": "2025-06-18", "capabilities": map[string]any{"tools": map[string]any{}},
 				"serverInfo": map[string]any{"name": "fake", "version": "1"}})
+			if os.Getenv("FAKE_STALL") == "1" {
+				time.Sleep(15 * time.Second)
+			}
 		case "tools/list":
 			var tools []any
 			for _, n := range []string{"echo", "env", "crash", "slow", "forbidden"} {

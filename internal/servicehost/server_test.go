@@ -239,10 +239,10 @@ func TestBridgeCeilingRefusesBeforeTheServer(t *testing.T) {
 	if strings.Contains(string(logged), `"other"`) || strings.Contains(string(logged), `"extra"`) {
 		t.Fatalf("SECURITY: unchecked fields reached the server:\n%s", logged)
 	}
-	// A duplicate name key is decided on the value that is forwarded.
+	// A duplicate key is refused: parsers disagree on which one wins.
 	resp, _ = r.post("/mcp/fake", `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo","name":"forbidden","arguments":{}}}`)
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("duplicate name key: %d, want 403", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("duplicate name key: %d, want 400", resp.StatusCode)
 	}
 }
 
@@ -269,7 +269,9 @@ func TestBridgeRestartsAfterTheServerExits(t *testing.T) {
 		t.Fatalf("crash: %d %s, want 503", resp.StatusCode, body)
 	}
 	var second string
-	for i := 0; i < 50; i++ {
+	// A server that dies right after it started is held back for
+	// restartBackoff before it is started again.
+	for i := 0; i < 200; i++ {
 		resp, body = r.post("/mcp/fake", call("3", "echo", `"msg":"b"`))
 		if resp.StatusCode == 200 {
 			second = resultText(t, body)
@@ -461,4 +463,23 @@ func TestBridgeStopsWhatTheServerStarted(t *testing.T) {
 		t.Skip("no /proc")
 	}
 	t.Fatalf("the server's background child %s outlived it", pid)
+}
+
+func TestCloseDoesNotHangOnAServerThatStoppedReading(t *testing.T) {
+	tool := fakeTool(t, filepath.Join(t.TempDir(), "fake.log"), "echo")
+	tool.Env["FAKE_STALL"] = "1"
+	r := newRig(t, time.Second, tool)
+	big := strings.Repeat("x", 3<<20)
+	resp, _ := r.post("/mcp/fake", call("1", "echo", `"msg":"`+big+`"`))
+	if resp.StatusCode != http.StatusGatewayTimeout {
+		t.Fatalf("stalled server: %d, want 504", resp.StatusCode)
+	}
+	srv := r.ts.Config.Handler.(*Server)
+	done := make(chan struct{})
+	go func() { srv.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close hung on a server blocked in a write")
+	}
 }

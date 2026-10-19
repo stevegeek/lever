@@ -24,8 +24,9 @@ const InfoPath = "/lever/v1/info"
 // ToolPath is where tool name is served.
 func ToolPath(name string) string { return "/mcp/" + name }
 
-// maxRequestBody matches the broker gateway's bound on one message.
-const maxRequestBody = 1 << 20
+// maxRequestBody matches the broker gateway's bound on one message
+// (gatewayBodyLimit).
+const maxRequestBody = 4 << 20
 
 // maxInFlight bounds the calls one tool holds open at once, so a flood
 // from the paired broker cannot pile up without limit in front of one

@@ -18,7 +18,8 @@ import (
 // are the same for both callers.
 
 // WorkerActivitySource marks WorkerListEntry.Activity as the worker's own
-// word: scion's harness hooks inside the worker's container report it.
+// word: scion's harness hooks inside the worker's container report it. Phase
+// and Container are hub text the worker can set too.
 const WorkerActivitySource = "worker-reported"
 
 // PhaseNone is WorkerListEntry.Phase for a declared worker the hub has no
@@ -167,22 +168,24 @@ func (b *Broker) handleOperatorWorkerRecycle(w http.ResponseWriter, r *http.Requ
 }
 
 func (b *Broker) handleOperatorWorkerSuspend(w http.ResponseWriter, r *http.Request) {
-	b.operatorWorkerHalt(w, r, "suspend", scion.PhaseSuspended, func(ctx context.Context, name string) error {
+	b.operatorWorkerHalt(w, r, "suspend", func(ctx context.Context, name string) error {
 		return b.runtime.Suspend(ctx, name, b.instanceProject)
 	})
 }
 
 func (b *Broker) handleOperatorWorkerStop(w http.ResponseWriter, r *http.Request) {
-	b.operatorWorkerHalt(w, r, "stop", scion.PhaseStopped, func(ctx context.Context, name string) error {
+	b.operatorWorkerHalt(w, r, "stop", func(ctx context.Context, name string) error {
 		return b.runtime.Stop(ctx, name, b.instanceProject)
 	})
 }
 
 // operatorWorkerHalt is the manager's stop or suspend verb (workerVerb) for
-// the operator, under the worker's lock. A worker already in phase target is
-// left alone; one with no record is refused, since scion has nothing to act
-// on. Neither verb checks revocation: both take authority away.
-func (b *Broker) operatorWorkerHalt(w http.ResponseWriter, r *http.Request, verb, target string, do func(context.Context, string) error) {
+// the operator, under the worker's lock: scion is always asked, since the
+// phase is hub text a worker can set and a worker that claims to be stopped
+// must not escape a stop. A worker with no record is refused, since scion
+// has nothing to act on. Neither verb checks revocation: both take authority
+// away.
+func (b *Broker) operatorWorkerHalt(w http.ResponseWriter, r *http.Request, verb string, do func(context.Context, string) error) {
 	var req wire.WorkerRequest
 	spec, ok := b.operatorWorker(w, r, verb, &req, func() string { return req.Worker })
 	if !ok {
@@ -197,27 +200,22 @@ func (b *Broker) operatorWorkerHalt(w http.ResponseWriter, r *http.Request, verb
 		return
 	}
 	defer unlock()
-	phase, err := b.phaseOf(ctx, spec)
+	agents, err := b.runtime.List(ctx, b.instanceProject)
 	if err != nil {
-		b.audit("worker", operatorActor, "error", verb+" "+spec.Name+": phase: "+err.Error())
+		b.audit("worker", operatorActor, "error", verb+" "+spec.Name+": list: "+err.Error())
 		refuse(w, ReasonRuntimeError, "runtime error", http.StatusBadGateway)
 		return
 	}
-	switch phase {
-	case "":
+	if !slices.ContainsFunc(agents, func(a scion.Agent) bool { return a.Slug == spec.Name }) {
 		b.audit("worker", operatorActor, "deny", verb+" "+spec.Name+": no record")
 		refuse(w, ReasonNoRecord, "worker "+spec.Name+" has no record on the hub (never started, purged, or a new jail); there is nothing to "+verb, http.StatusNotFound)
-		return
-	case target:
-		b.audit("worker", operatorActor, "allow", verb+" "+spec.Name+": already "+target)
-		writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: target})
 		return
 	}
 	if err := do(ctx, spec.Name); err != nil {
 		// The detail stays in the audit log: scion's text can echo the
 		// container env.
-		b.audit("worker", operatorActor, "error", verb+" "+spec.Name+" (phase "+phase+"): "+err.Error())
-		refusePhase(w, ReasonRuntimeError, phase, "runtime error: worker "+spec.Name+" (phase "+phase+") did not "+verb+"; see the broker log", http.StatusBadGateway)
+		b.audit("worker", operatorActor, "error", verb+" "+spec.Name+": "+err.Error())
+		refuse(w, ReasonRuntimeError, "runtime error: worker "+spec.Name+" did not "+verb+"; see the broker log", http.StatusBadGateway)
 		return
 	}
 	after, err := b.phaseOf(ctx, spec)

@@ -15,17 +15,13 @@ import (
 	"github.com/stevegeek/lever/internal/wire"
 )
 
-// maxTaskFileBytes bounds what is read of --task-file. scion.CheckTask then
-// holds the task to scion's much smaller command-line budget.
-const maxTaskFileBytes = 64 << 10
-
 // readTaskFile reads --task-file on the host. The operator may name a file in
 // the tree, which agents write, so a symbolic link there is refused: it
 // could point the read at any file the operator can read, and the task is
 // handed to a worker. It must be a regular file (a FIFO would hang the
 // read), non-empty, and a task scion can start.
 func readTaskFile(app *config.App, path string) (string, error) {
-	raw, err := fsutil.ReadFileNoTreeLinks(path, app.Tree, maxTaskFileBytes)
+	raw, err := fsutil.ReadFileNoTreeLinks(path, app.Tree, broker.MaxTaskFileBytes)
 	if err != nil {
 		return "", &reasonError{reasonTaskFile, fmt.Errorf("--task-file %s: %w", path, err)}
 	}

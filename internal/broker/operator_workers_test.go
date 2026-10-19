@@ -224,7 +224,7 @@ func TestOperatorWorkerStartRefusals(t *testing.T) {
 		"crash loop":   {`{"worker":"worker"}`, func(_ *Broker, rt *fakeRuntime) { rt.exitedAfterStart = true }, http.StatusBadGateway, ReasonNotLive},
 		"task_file":    {`{"worker":"worker"}`, func(b *Broker, _ *fakeRuntime) { setTaskPath(b, "/nonexistent/task.md") }, http.StatusInternalServerError, ReasonConfigFile},
 		"fifo":         {`{"worker":"worker"}`, func(b *Broker, _ *fakeRuntime) { setTaskPath(b, mkfifo(t)) }, http.StatusInternalServerError, ReasonConfigFile},
-		"huge file":    {`{"worker":"worker"}`, func(b *Broker, _ *fakeRuntime) { setTaskPath(b, writeTemp(t, strings.Repeat("y", maxTaskFileBytes+1))) }, http.StatusInternalServerError, ReasonConfigFile},
+		"huge file":    {`{"worker":"worker"}`, func(b *Broker, _ *fakeRuntime) { setTaskPath(b, writeTemp(t, strings.Repeat("y", MaxTaskFileBytes+1))) }, http.StatusInternalServerError, ReasonConfigFile},
 		"long in file": {`{"worker":"worker"}`, func(b *Broker, _ *fakeRuntime) { setTaskPath(b, writeTemp(t, big)) }, http.StatusInternalServerError, ReasonConfigFile},
 	} {
 		b, rt, _ := operatorStartBroker(t, "", false, "")
@@ -338,12 +338,15 @@ func TestOperatorWorkerSuspendAndStop(t *testing.T) {
 		{PathOperatorWorkerSuspend, "running", func(rt *fakeRuntime) []string { return rt.suspend }, 1, http.StatusOK, ""},
 		{PathOperatorWorkerStop, "running", func(rt *fakeRuntime) []string { return rt.stopped }, 1, http.StatusOK, ""},
 		{PathOperatorWorkerStop, "suspended", func(rt *fakeRuntime) []string { return rt.stopped }, 1, http.StatusOK, ""},
-		{PathOperatorWorkerSuspend, "suspended", func(rt *fakeRuntime) []string { return rt.suspend }, 0, http.StatusOK, ""},
-		{PathOperatorWorkerStop, "stopped", func(rt *fakeRuntime) []string { return rt.stopped }, 0, http.StatusOK, ""},
-		{PathOperatorWorkerStop, "", func(rt *fakeRuntime) []string { return rt.stopped }, 0, http.StatusNotFound, ReasonNoRecord},
+		// The phase is the worker's to write: one that claims to be down is
+		// still stopped.
+		{PathOperatorWorkerSuspend, "suspended", func(rt *fakeRuntime) []string { return rt.suspend }, 1, http.StatusOK, ""},
+		{PathOperatorWorkerStop, "stopped", func(rt *fakeRuntime) []string { return rt.stopped }, 1, http.StatusOK, ""},
+		{PathOperatorWorkerStop, "", func(rt *fakeRuntime) []string { return rt.stopped }, 1, http.StatusOK, ""},
+		{PathOperatorWorkerStop, "absent", func(rt *fakeRuntime) []string { return rt.stopped }, 0, http.StatusNotFound, ReasonNoRecord},
 	} {
 		rt := &fakeRuntime{agents: map[string][]scion.Agent{}}
-		if tc.phase != "" {
+		if tc.phase != "absent" {
 			rt.agents[testInstanceProject] = []scion.Agent{{Slug: "worker", Phase: tc.phase}}
 		}
 		b := newTestBroker(t, rt, wakeSpec)

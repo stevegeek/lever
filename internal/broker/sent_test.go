@@ -236,11 +236,10 @@ func TestDirectiveForAnAgentThatIsNotRunningIsNotStored(t *testing.T) {
 			t.Fatalf("phase %q: the refusal does not name the phase: %s", phase, body)
 		}
 		// The operator has no lever-manager on the host: the text names the
-		// host's own resume, or sends them to the manager to start a worker
-		// with no record.
+		// host's own resume, or its own start for a worker with no record.
 		want := "lever worker resume worker"
 		if phase == "" {
-			want = "ask the manager to"
+			want = "lever worker start worker"
 		}
 		if !strings.Contains(string(body), want) {
 			t.Fatalf("phase %q: the refusal is not worded for the operator: %s", phase, body)

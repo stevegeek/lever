@@ -32,8 +32,8 @@ const (
 	KindRemoteProxy StepKind = "remote-proxy"
 	// KindWorkerAutostart resumes or starts one worker that sets autostart,
 	// through the broker's operator socket (see Deps.AutostartWorker). Plan
-	// emits one per such worker, after start-manager. A failure warns and
-	// never fails the run.
+	// emits one per such worker, last. A failure warns and never fails the
+	// run.
 	KindWorkerAutostart StepKind = "worker-autostart"
 )
 
@@ -121,13 +121,14 @@ func Plan(a *config.App, opts PlanOpts) []Step {
 	// The enrol ticket is minted just before spawn so its TTL cannot run out.
 	steps = append(steps, Step{Kind: KindMintManagerBootstrap, Target: a.Tree})
 	steps = append(steps, Step{Kind: KindStartManager, Target: a.Name})
+	if a.RemoteEnabled() {
+		steps = append(steps, Step{Kind: KindRemoteProxy})
+	}
+	// Last: each can wait minutes for a worker, and nothing waits on them.
 	for _, g := range a.Workers {
 		if g.Autostart {
 			steps = append(steps, Step{Kind: KindWorkerAutostart, Target: g.Name})
 		}
-	}
-	if a.RemoteEnabled() {
-		steps = append(steps, Step{Kind: KindRemoteProxy})
 	}
 	if opts.BrokerOnly {
 		filtered := steps[:0:0]

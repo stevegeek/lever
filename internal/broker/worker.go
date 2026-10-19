@@ -717,7 +717,7 @@ func (b *Broker) startFreshWorker(ctx context.Context, w http.ResponseWriter, sp
 		refuse(w, ReasonConfigFile, "instructions error", http.StatusInternalServerError)
 		return
 	}
-	if configTask && task == "" {
+	if configTask && strings.TrimSpace(task) == "" {
 		if task, err = readWorkerTask(spec); err != nil {
 			b.audit("worker", actor, "error", "start "+spec.Name+": "+err.Error())
 			refuse(w, ReasonConfigFile, "task_file error: "+err.Error(), http.StatusInternalServerError)
@@ -810,9 +810,10 @@ func readWorkerInstructions(spec WorkerSpec) (string, error) {
 	return string(b), nil
 }
 
-// maxTaskFileBytes bounds what is read of a task file. scion.CheckTask then
-// holds the task to scion's much smaller command-line budget.
-const maxTaskFileBytes = 64 << 10
+// MaxTaskFileBytes bounds what is read of a task file (task_file, and the
+// CLI's --task-file). scion.CheckTask then holds the task to scion's much
+// smaller command-line budget.
+const MaxTaskFileBytes = 64 << 10
 
 // readWorkerTask reads the worker's task_file host-side, trimmed. Config load
 // has placed it outside the mounted tree; it must still be a regular file, so
@@ -821,7 +822,7 @@ func readWorkerTask(spec WorkerSpec) (string, error) {
 	if spec.TaskPath == "" {
 		return "", nil
 	}
-	raw, err := fsutil.ReadRegularFile(spec.TaskPath, maxTaskFileBytes)
+	raw, err := fsutil.ReadRegularFile(spec.TaskPath, MaxTaskFileBytes)
 	if err != nil {
 		return "", fmt.Errorf("reading task_file %s: %w", spec.TaskPath, err)
 	}

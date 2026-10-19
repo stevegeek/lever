@@ -56,8 +56,8 @@ func newWorkerListCmd() *cobra.Command {
 		Use:   "list",
 		Args:  cobra.NoArgs,
 		Short: "List the declared workers: phase, activity (worker-reported), container, idle at prompt",
-		Long: "List each declared worker as the broker sees it on the hub. The activity, and idle_at_prompt, which\n" +
-			"derives from it, are reported by hooks inside the worker's own container: treat them as the worker's word.\n" +
+		Long: "List each declared worker as the broker sees it on the hub. The worker can write every field but its\n" +
+			"name (its hooks report the activity, which idle_at_prompt derives from): treat them as the worker's word.\n" +
 			"--json prints one JSON object on stdout: ok, workers, reason, error, exit.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			fail := func(err error, reason string, code int) error {
@@ -108,11 +108,13 @@ func printWorkerTable(cmd *cobra.Command, workers []broker.WorkerListEntry, now 
 		return
 	}
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tPHASE\tACTIVITY*\tLAST ACTIVITY\tCONTAINER\tIDLE AT PROMPT*")
+	fmt.Fprintln(tw, "NAME\tPHASE*\tACTIVITY*\tLAST ACTIVITY*\tCONTAINER*\tIDLE AT PROMPT*")
 	for _, e := range workers {
 		last := "-"
 		if e.LastActivity != nil {
-			last = ago(now.Sub(*e.LastActivity))
+			if d := now.Sub(*e.LastActivity); d >= 0 {
+				last = ago(d) + " ago"
+			}
 		}
 		idle := "unknown"
 		if e.IdleAtPrompt != nil {
@@ -121,7 +123,7 @@ func printWorkerTable(cmd *cobra.Command, workers []broker.WorkerListEntry, now 
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", e.Name, e.Phase, dash(e.Activity), last, dash(e.Container), idle)
 	}
 	_ = tw.Flush()
-	fmt.Fprintln(out, "* reported by the worker's own hooks: the worker's word, not lever's.")
+	fmt.Fprintln(out, "* hub record fields the worker can write itself: the worker's word, not lever's.")
 }
 
 func dash(s string) string {
@@ -129,19 +131,4 @@ func dash(s string) string {
 		return "-"
 	}
 	return s
-}
-
-// ago renders an age for the table; --json carries the timestamp itself.
-func ago(d time.Duration) string {
-	switch {
-	case d < 0:
-		return "in the future"
-	case d < time.Minute:
-		return fmt.Sprintf("%ds ago", int(d/time.Second))
-	case d < time.Hour:
-		return fmt.Sprintf("%dm ago", int(d/time.Minute))
-	case d < 48*time.Hour:
-		return fmt.Sprintf("%dh ago", int(d/time.Hour))
-	}
-	return fmt.Sprintf("%dd ago", int(d/(24*time.Hour)))
 }

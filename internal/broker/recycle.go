@@ -143,7 +143,7 @@ func (b *Broker) recycleWorker(ctx context.Context, w http.ResponseWriter, spec 
 		refuse(w, ReasonConfigFile, "instructions error; nothing was deleted", http.StatusInternalServerError)
 		return
 	}
-	if configTask && task == "" {
+	if configTask && strings.TrimSpace(task) == "" {
 		if task, err = readWorkerTask(spec); err != nil {
 			b.audit("worker", actor, "error", verb+": "+err.Error())
 			refuse(w, ReasonConfigFile, "task_file error: "+err.Error()+"; nothing was deleted", http.StatusInternalServerError)

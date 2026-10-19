@@ -109,7 +109,7 @@ func TestWorkerStartTaskFileRefusals(t *testing.T) {
 			return p
 		}, reasonTaskFile},
 		"huge": {func(t *testing.T, dir string) string {
-			return writeFile(t, filepath.Join(dir, "huge.md"), strings.Repeat("x", maxTaskFileBytes+1))
+			return writeFile(t, filepath.Join(dir, "huge.md"), strings.Repeat("x", broker.MaxTaskFileBytes+1))
 		}, reasonTaskFile},
 		"over the budget": {func(t *testing.T, dir string) string {
 			return writeFile(t, filepath.Join(dir, "long.md"), strings.Repeat("x", 16<<10))
@@ -120,7 +120,7 @@ func TestWorkerStartTaskFileRefusals(t *testing.T) {
 		"empty": {func(t *testing.T, dir string) string {
 			return writeFile(t, filepath.Join(dir, "empty.md"), " \n")
 		}, reasonTaskFile},
-		"missing": {func(t *testing.T, dir string) string { return filepath.Join(dir, "nope.md") }, reasonTaskFile},
+		"missing":   {func(t *testing.T, dir string) string { return filepath.Join(dir, "nope.md") }, reasonTaskFile},
 		"directory": {func(t *testing.T, dir string) string { return dir }, reasonTaskFile},
 	} {
 		dir := msgDir(t)
@@ -245,7 +245,7 @@ func TestWorkerListTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"NAME", "ACTIVITY*", "IDLE AT PROMPT*", "scratch", "waiting_for_input", "Up 3 minutes", "yes", "unknown", "worker's own hooks"} {
+	for _, want := range []string{"NAME", "ACTIVITY*", "IDLE AT PROMPT*", "scratch", "waiting_for_input", "Up 3 minutes", "yes", "unknown", "the worker's word"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("table lacks %q:\n%s", want, out)
 		}
@@ -283,7 +283,7 @@ func TestAutostartWorker(t *testing.T) {
 	if err := autostartWorker(t.Context(), app, st, "scratch"); err != nil {
 		t.Fatal(err)
 	}
-	if reqs := rec.all(); len(reqs) != 1 || reqs[0].body != `{"worker":"scratch"}` {
+	if reqs := rec.all(); len(reqs) != 1 || reqs[0].body != `{"worker":"scratch","task":""}` {
 		t.Fatalf("%+v", reqs)
 	}
 }

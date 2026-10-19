@@ -630,26 +630,21 @@ func relComponents(p string) []string {
 // does not block, so a FIFO or a device is refused by its mode instead of
 // hanging the read; a file over max is ErrFileTooLarge.
 func ReadRegularFile(path string, max int64) ([]byte, error) {
-	return readRegular(path, max, nil)
-}
-
-// readRegular is ReadRegularFile that, with want set, also refuses a file
-// other than the one want describes (os.SameFile).
-func readRegular(path string, max int64, want fs.FileInfo) ([]byte, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
+	return readOpenRegular(f, path, max)
+}
+
+func readOpenRegular(f *os.File, path string, max int64) ([]byte, error) {
 	st, err := f.Stat()
 	if err != nil {
 		return nil, err
 	}
 	if !st.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s: %s: %w", path, st.Mode().Type(), ErrNotRegularFile)
-	}
-	if want != nil && !os.SameFile(st, want) {
-		return nil, fmt.Errorf("%s changed while it was read: %w", path, ErrSymlink)
 	}
 	if st.Size() > max {
 		return nil, fmt.Errorf("%s: %d bytes: %w", path, st.Size(), ErrFileTooLarge)
@@ -662,82 +657,4 @@ func readRegular(path string, max int64, want fs.FileInfo) ([]byte, error) {
 		return nil, fmt.Errorf("%s: %w", path, ErrFileTooLarge)
 	}
 	return b, nil
-}
-
-// maxPathLinks bounds the symbolic links ReadFileNoTreeLinks follows, as the
-// kernel bounds its own.
-const maxPathLinks = 40
-
-// ReadFileNoTreeLinks is ReadRegularFile for a path the host user names that
-// may lead through a directory an agent can write (tree). A symbolic link is
-// followed only when it sits outside tree: one inside it is ErrSymlink,
-// since an agent could aim it at any host file the user can read. The path
-// is resolved one component at a time, and the open must land on the file
-// that walk found, so a component swapped for a link after the walk is
-// refused too. A directory whose place lever cannot tell counts as inside.
-func ReadFileNoTreeLinks(path, tree string, max int64) ([]byte, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return nil, err
-	}
-	real, err := resolveOutsideLinks(abs, tree)
-	if err != nil {
-		return nil, err
-	}
-	leaf, err := os.Lstat(real)
-	if err != nil {
-		return nil, err
-	}
-	if !leaf.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s: %s: %w", path, leaf.Mode().Type(), ErrNotRegularFile)
-	}
-	if afterNoLinkWalk != nil {
-		afterNoLinkWalk()
-	}
-	return readRegular(real, max, leaf)
-}
-
-// resolveOutsideLinks resolves every symbolic link on abs (absolute and
-// clean), refusing one whose directory lies in tree. The answer names no
-// link.
-func resolveOutsideLinks(abs, tree string) (string, error) {
-	todo := strings.Split(strings.TrimPrefix(filepath.ToSlash(abs), "/"), "/")
-	cur := string(filepath.Separator)
-	links := 0
-	for len(todo) > 0 {
-		p := todo[0]
-		todo = todo[1:]
-		switch p {
-		case "", ".":
-			continue
-		case "..":
-			cur = filepath.Dir(cur)
-			continue
-		}
-		next := filepath.Join(cur, p)
-		fi, err := os.Lstat(next)
-		if err != nil {
-			return "", err
-		}
-		if fi.Mode()&fs.ModeSymlink == 0 {
-			cur = next
-			continue
-		}
-		if links++; links > maxPathLinks {
-			return "", fmt.Errorf("%s: too many symbolic links", abs)
-		}
-		inside, err := InsideByIdentity(cur, tree)
-		if err != nil || inside {
-			return "", fmt.Errorf("%s: a symbolic link in a directory agents can write: %w", next, ErrSymlink)
-		}
-		target, err := os.Readlink(next)
-		if err != nil {
-			return "", err
-		}
-		if filepath.IsAbs(target) {
-			cur = string(filepath.Separator)
-		}
-		todo = append(strings.Split(filepath.ToSlash(target), "/"), todo...)
-	}
-	return cur, nil
 }

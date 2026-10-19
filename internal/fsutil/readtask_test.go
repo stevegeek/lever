@@ -96,25 +96,69 @@ func TestReadFileNoTreeLinksRefusesNonFilesAndSize(t *testing.T) {
 	}
 }
 
-// A component swapped for a link between the walk and the open is refused:
-// the open must land on the file the walk found.
-func TestReadFileNoTreeLinksSwapAfterWalk(t *testing.T) {
+// A component swapped for a link after its lstat, the directory or the leaf,
+// is refused: each open is O_NOFOLLOW and must land on what the lstat saw.
+func TestReadFileNoTreeLinksSwapAfterLstat(t *testing.T) {
+	for _, at := range []string{"jobs", "42.md"} {
+		root, tree, _ := noTreeLinksFixture(t)
+		jobs := filepath.Join(tree, "jobs")
+		if err := os.WriteFile(filepath.Join(root, "42.md"), []byte("PRIVATE"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		afterNoTreeLinkStep = func(name string) {
+			if name != at {
+				return
+			}
+			victim, target := jobs, root
+			if at == "42.md" {
+				victim, target = filepath.Join(jobs, "42.md"), filepath.Join(root, "42.md")
+			}
+			if err := os.Rename(victim, victim+".old"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, victim); err != nil {
+				t.Fatal(err)
+			}
+		}
+		b, err := ReadFileNoTreeLinks(filepath.Join(jobs, "42.md"), tree, 1<<10)
+		afterNoTreeLinkStep = nil
+		if !errors.Is(err, ErrSymlink) || strings.Contains(string(b), "PRIVATE") {
+			t.Fatalf("%s swapped: %q, %v", at, b, err)
+		}
+	}
+}
+
+// Swapped back and forth while it is read, an in-tree directory never
+// yields the file behind the link.
+func TestReadFileNoTreeLinksRace(t *testing.T) {
 	root, tree, _ := noTreeLinksFixture(t)
 	jobs := filepath.Join(tree, "jobs")
 	if err := os.WriteFile(filepath.Join(root, "42.md"), []byte("PRIVATE"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	afterNoLinkWalk = func() {
-		if err := os.Rename(jobs, jobs+".old"); err != nil {
-			t.Fatal(err)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = os.Rename(jobs, jobs+".old")
+			_ = os.Symlink(root, jobs)
+			_ = os.Remove(jobs)
+			_ = os.Rename(jobs+".old", jobs)
 		}
-		if err := os.Symlink(root, jobs); err != nil {
-			t.Fatal(err)
+	}()
+	for i := 0; i < 20000; i++ {
+		if b, _ := ReadFileNoTreeLinks(filepath.Join(jobs, "42.md"), tree, 1<<10); strings.Contains(string(b), "PRIVATE") {
+			close(stop)
+			<-done
+			t.Fatalf("read %d leaked the file behind the link", i)
 		}
 	}
-	t.Cleanup(func() { afterNoLinkWalk = nil })
-	b, err := ReadFileNoTreeLinks(filepath.Join(jobs, "42.md"), tree, 1<<10)
-	if !errors.Is(err, ErrSymlink) || strings.Contains(string(b), "PRIVATE") {
-		t.Fatalf("%q, %v", b, err)
-	}
+	close(stop)
+	<-done
 }

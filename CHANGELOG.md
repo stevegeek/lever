@@ -14,7 +14,9 @@ version bump moves the block under the new version heading.
   activity, container status, and `idle_at_prompt`, which is `true` for a running worker waiting
   for input or done, `false` for a busy or not-running one, and `null` when the record doesn't
   settle it (the hub's `stalled` covers both an idle worker and one that can't reach the model).
-  The activity is marked `worker-reported`: the hooks inside the worker's own container report it.
+  The activity is marked `worker-reported`: the hooks inside the worker's own container report it,
+  and the worker can set its phase and container status on the hub too, so the list is the worker's
+  word.
   The broker passes only known labels, and the CLI bounds and sanitizes every string again.
   `--json` prints one line, `{"ok","workers":[…],"reason","error","exit"}`. Read-only, through
   the new `GET /operator/worker/list` on the broker's operator socket.

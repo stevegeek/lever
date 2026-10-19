@@ -122,9 +122,9 @@ so it gives no agent anything new:
 
 - `lever worker list --json` shows each declared worker's phase, activity, container and whether it
   is idle at its prompt (`idle_at_prompt`: `true`, `false`, or `null` when the record doesn't
-  settle it). The activity comes from hooks inside the worker's own container, so it is the
-  worker's word, not lever's: use it to pace work, never to decide anything that matters for
-  security.
+  settle it). The worker can write all of it (its hooks report the activity, and it can set its
+  phase and container status on the hub), so it is the worker's word, not lever's: use it to pace
+  work, never to decide anything that matters for security.
 - `lever worker start NAME [--task-file F]` brings a worker up and waits until it is live: a worker
   with no record is created with the task in `F`, else its `task_file` from the config; an existing
   record is resumed; a running worker is left alone.

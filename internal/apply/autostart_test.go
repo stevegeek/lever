@@ -11,8 +11,8 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 )
 
-// One autostart step per worker that sets autostart, after start-manager and
-// before the remote proxy; none in a broker-only plan.
+// One autostart step per worker that sets autostart, last; none in a
+// broker-only plan.
 func TestPlanAutostartSteps(t *testing.T) {
 	app := &config.App{
 		Name: "demo", Backend: "orbstack", Tree: "/t",
@@ -22,12 +22,12 @@ func TestPlanAutostartSteps(t *testing.T) {
 	}
 	steps := Plan(app, PlanOpts{})
 	got := planStepNames(steps)
-	want := []string{"broker-up", "load-image", "init-machine", "config-registry", "scion-server", "hub-identity", "register-project", "agent-template", "mint-manager-bootstrap", "start-manager", "worker-autostart", "worker-autostart", "remote-proxy"}
+	want := []string{"broker-up", "load-image", "init-machine", "config-registry", "scion-server", "hub-identity", "register-project", "agent-template", "mint-manager-bootstrap", "start-manager", "remote-proxy", "worker-autostart", "worker-autostart"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("plan = %v\nwant   %v", got, want)
 	}
-	if steps[10].Target != "a" || steps[11].Target != "c" || stepLabel(steps[10]) != "worker-autostart a" {
-		t.Fatalf("targets %q %q label %q", steps[10].Target, steps[11].Target, stepLabel(steps[10]))
+	if steps[11].Target != "a" || steps[12].Target != "c" || stepLabel(steps[11]) != "worker-autostart a" {
+		t.Fatalf("targets %q %q label %q", steps[11].Target, steps[12].Target, stepLabel(steps[11]))
 	}
 	if contains(planStepNames(Plan(app, PlanOpts{BrokerOnly: true})), "worker-autostart") {
 		t.Fatal("a broker-only plan starts no worker")

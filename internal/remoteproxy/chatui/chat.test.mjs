@@ -22,7 +22,8 @@ function hubWith(parts = {}) {
     post: (body) => ({ status: 201, body: { id: 'sent1', content: body.content, senderId: 'u1', type: 'instruction', createdAt: new Date(1.8e12).toISOString(), dispatchState: 'dispatched' } }),
     read: () => ({ status: 200, body: { status: 'ok' } }),
     wake: () => ({ status: 202, body: { state: 'starting' } }),
-    newConversation: () => ({ status: 202, body: { state: 'starting' } }),
+    newConversation: () => ({ status: 202, body: { state: 'starting', id: 'op1' } }),
+    newConversationStatus: () => ({ status: 200, body: { state: 'ok', backup: '20261019T054104Z' } }),
     contacts: () => ({ status: 200, body: { contacts: [] } }),
     transcript: () => ({ status: 200, body: { contact: 'c@x', agent: 'w1', matched: true, messages: [] } }),
     upload: () => ({ status: 201, body: { id: 'f'.repeat(32), name: 'report.pdf', size: 3, sha256: '0'.repeat(64) }, progress: [50, 100] }),
@@ -41,6 +42,7 @@ function hubWith(parts = {}) {
     if (path.startsWith('/lever/api/agents/') && path.endsWith('/wake')) return h.wake(path);
     if (path.startsWith('/lever/api/agents/') && path.endsWith('/activity')) return h.activity(path, method);
     if (path === '/lever/api/new-conversation') return h.newConversation(body);
+    if (path === '/lever/api/new-conversation/status') return h.newConversationStatus(body);
     if (path.startsWith('/lever/api/files/')) return method === 'POST' ? h.upload(body, path) : h.files(path);
     if (path === '/lever/api/voice/transcribe') return h.transcribe(body, path);
     if (path === '/lever/api/voice/speak') return h.speak(body, path);
@@ -2464,13 +2466,19 @@ test('new conversation: offered on the operator\'s manager chat only', async () 
   assert.equal(env.els.newconv.hidden, true, 'not offered by the server');
 });
 
-test('new conversation: asked, posted, followed until it runs again; the draft stays', async () => {
+test('new conversation: asked, posted, followed by its status until it ends; the draft stays', async () => {
   let state = 'running';
+  let status = { state: 'running' };
+  const statusBodies = [];
   const env = await loadChat(hubWith({
     agents: () => roster([BOSS({ state, activity: '' }), A('w1')], { newConversation: true }),
     newConversation: () => {
       state = 'suspended';
-      return { status: 202, body: { state: 'starting' } };
+      return { status: 202, body: { state: 'starting', id: 'op1' } };
+    },
+    newConversationStatus: (body) => {
+      statusBodies.push(body);
+      return { status: 200, body: status };
     },
   }));
   await type(env, 'half typed');
@@ -2486,14 +2494,37 @@ test('new conversation: asked, posted, followed until it runs again; the draft s
   state = 'stopped';
   await env.runTimers(3000);
   state = 'running';
+  status = { state: 'ok', backup: '20261019T054104Z' };
   await env.runTimers(3000);
   await tick(5);
+  assert.deepEqual(statusBodies, [{ id: 'op1' }, { id: 'op1' }, { id: 'op1' }]);
   assert.equal(env.els.newconv.disabled, false);
-  assert.equal(env.els.note.hidden, true);
   assert.equal(env.els.error.hidden, true);
+  assert.equal(env.els.note.textContent, 'boss is on a new conversation. The old one is backup 20261019T054104Z: `lever conversation restore 20261019T054104Z` on the host puts it back.');
   assert.equal(env.els.text.value, 'half typed');
   assert.equal(env.store['lever-chat-draft:boss'], 'half typed');
   assert.equal(sends(env).length, 0);
+  // The note stays through list reads, and goes with the next send.
+  await env.poll();
+  assert.match(env.els.note.textContent, /backup 20261019T054104Z/);
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  assert.equal(sends(env).length, 1);
+  assert.ok(!env.els.note.textContent.includes('backup'), env.els.note.textContent);
+});
+
+test('new conversation: a stop and start between two list reads is a success, not an error', async () => {
+  // The list never shows the manager down: lever stopped and started it in
+  // about a second, between two reads.
+  const env = await loadChat(hubWith({ agents: () => roster([BOSS({ activity: '' })], { newConversation: true }) }));
+  env.els.newconv.dispatch('click');
+  await tick(5);
+  for (let i = 0; i < 25; i++) await env.runTimers(3000);
+  await tick(5);
+  assert.equal(env.els.error.hidden, true, env.els.error.textContent);
+  assert.match(env.els.note.textContent, /^boss is on a new conversation\. The old one is backup 20261019T054104Z/);
+  assert.equal(env.count('POST', '/lever/api/new-conversation/status'), 1, 'one read once it ended');
+  assert.equal(env.els.newconv.disabled, false);
 });
 
 test('new conversation: declined, nothing is posted', async () => {
@@ -2535,15 +2566,65 @@ test('new conversation: a refusal shows fixed text', async () => {
   assert.equal(env.els.newconv.disabled, false);
 });
 
-test('new conversation: a manager that never goes down is reported after a minute', async () => {
-  const env = await loadChat(hubWith({ agents: () => roster([BOSS({ activity: '' })], { newConversation: true }) }));
+test('new conversation: a failure after the answer shows its fixed text', async () => {
+  const env = await loadChat(hubWith({
+    agents: () => roster([BOSS({ activity: '' })], { newConversation: true }),
+    newConversationStatus: () => ({ status: 200, body: { state: 'failed', error: 'failed', backup: '20261019T054104Z' } }),
+  }));
   env.els.newconv.dispatch('click');
   await tick(5);
-  for (let i = 0; i < 19; i++) await env.runTimers(3000);
-  assert.equal(env.els.error.hidden, true, 'not before a minute');
   await env.runTimers(3000);
   await tick(5);
-  assert.match(env.els.error.textContent, /has not gone down yet/);
+  assert.equal(env.els.error.textContent, 'lever could not start the new conversation; `lever doctor` on the host shows why.');
+  assert.ok(!env.els.note.textContent.includes('backup'));
+  assert.equal(env.els.newconv.disabled, false);
+});
+
+test('new conversation: a failure that ends while another chat is open shows when the manager\'s opens again', async () => {
+  const env = await loadChat(hubWith({
+    agents: () => roster([BOSS({ activity: '' }), A('w1')], { newConversation: true }),
+    newConversationStatus: () => ({ status: 200, body: { state: 'failed', error: 'failed' } }),
+  }));
+  env.els.newconv.dispatch('click');
+  await tick(5);
+  env.els.agents.children[1].children[0].dispatch('click');
+  await tick(5);
+  await env.runTimers(3000);
+  await tick(5);
+  assert.equal(env.els.error.hidden, true, 'not on the worker\'s chat');
+  env.els.agents.children[0].children[0].dispatch('click');
+  await tick(5);
+  assert.match(env.els.error.textContent, /could not start the new conversation/);
+});
+
+test('new conversation: a status read that fails is read again; a lost change is a note, not an error', async () => {
+  const answers = [{ status: 0, body: 'cannot reach the server' }, { status: 502, body: 'bad gateway' }, { status: 404, body: { error: 'unknown' } }];
+  const env = await loadChat(hubWith({
+    agents: () => roster([BOSS({ activity: '' })], { newConversation: true }),
+    newConversationStatus: () => answers.shift(),
+  }));
+  env.els.newconv.dispatch('click');
+  await tick(5);
+  for (let i = 0; i < 3; i++) await env.runTimers(3000);
+  await tick(5);
+  assert.equal(env.count('POST', '/lever/api/new-conversation/status'), 3);
+  assert.equal(env.els.error.hidden, true);
+  assert.match(env.els.note.textContent, /lost track of boss's new conversation/);
+});
+
+test('new conversation: a change that never ends is a note after the wait', async () => {
+  const env = await loadChat(hubWith({
+    agents: () => roster([BOSS({ activity: '' })], { newConversation: true }),
+    newConversationStatus: () => ({ status: 200, body: { state: 'running' } }),
+  }));
+  env.els.newconv.dispatch('click');
+  await tick(5);
+  for (let i = 0; i < 139; i++) await env.runTimers(3000);
+  assert.equal(env.els.note.textContent, 'starting boss on a new conversation…', 'not before 7 min');
+  await env.runTimers(3000);
+  await tick(5);
+  assert.equal(env.els.error.hidden, true);
+  assert.match(env.els.note.textContent, /lost track/);
   assert.equal(env.els.newconv.disabled, false);
 });
 

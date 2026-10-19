@@ -30,6 +30,9 @@ const (
 	PathFilesList = "/files/list"
 	// PathFilesShare records one file an agent shares with a login.
 	PathFilesShare = "/files/share"
+	// PathVersion answers the host lever's version and Jail ABI to any live
+	// agent, and nothing else.
+	PathVersion = "/version"
 )
 
 // Admin (loopback) listener routes.

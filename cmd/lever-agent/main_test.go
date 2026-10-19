@@ -478,3 +478,38 @@ func TestClaudeReadyOutsideAPaneIsANoOp(t *testing.T) {
 		t.Fatal("arguments were accepted")
 	}
 }
+
+// TestVersionVerbs: --version prints the local build line only; version
+// prints it, then the host's answer to GET /version and the verdict.
+func TestVersionVerbs(t *testing.T) {
+	local := agent.BuildLine("lever-agent", agent.Version)
+	out := captureStdout(t, func() {
+		if err := run([]string{"lever-agent", "--version"}); err != nil {
+			t.Error(err)
+		}
+	})
+	if out != local+"\n" {
+		t.Fatalf("--version printed %q, want %q", out, local+"\n")
+	}
+
+	t.Setenv("LEVER_BOOTSTRAP", "")
+	var method, path string
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method, path = r.Method, r.URL.Path
+		w.Write([]byte(`{"version":"0.0.1","jail_abi":-1}`))
+	}))
+	defer stub.Close()
+	var err error
+	out = captureStdout(t, func() {
+		err = cmdVersion(context.Background(), []string{"-id-dir", callVerbWorkerID(t), "-broker-url", stub.URL}, os.Stdout)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if method != http.MethodGet || path != "/version" {
+		t.Fatalf("asked %s %s, want GET /version", method, path)
+	}
+	if !strings.HasPrefix(out, local+"\nhost lever 0.0.1, jail ABI -1\nmismatch: ") {
+		t.Fatalf("version printed %q", out)
+	}
+}

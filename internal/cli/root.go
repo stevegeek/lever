@@ -19,7 +19,7 @@ import (
 
 const Version = "0.51.0"
 
-// VersionCmd returns the `version` command both binaries register.
+// VersionCmd returns the host `version` command.
 func VersionCmd() *cobra.Command {
 	return &cobra.Command{Use: "version", Run: func(c *cobra.Command, _ []string) { c.Println(VersionString()) }}
 }

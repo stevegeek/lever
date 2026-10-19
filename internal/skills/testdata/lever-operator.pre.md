@@ -325,6 +325,8 @@ arrive meanwhile wait in your inbox and the events file.
   filesystem beyond your mounted tree.
 - If a tool backend seems down, report it once rather than thrashing —
   diagnosis is host-side.
+- `lever-manager version` prints your image's lever build and Jail ABI, then
+  the host lever's; on a mismatch it names the fix to ask the operator for.
 - Do not run the `claude` CLI in your container (`claude mcp list`, `claude
   -p`, …). Every claude process there shares your session hooks, and when it
   exits the hub marks YOUR session stopped. If your replies start failing

@@ -94,6 +94,13 @@ The capability model itself — identities, minting, delegation, revocation — 
   the admin port at all: they sit on a 0600 unix
   socket (`.lever-state/operator.sock`), and `ServeListeners` refuses any other listener type
   for it.
+- **The jail listener's `GET /version` answers the host lever's version and nothing else.** Any live
+  agent identity (the manager or a worker, no capability) gets `{"version", "jail_abi"}`: what
+  `lever version` prints (the release and the build's commit) and the host's Jail ABI, so
+  `lever-manager version` can tell an agent whether its image matches the host. A request without a
+  client certificate, or from a revoked identity, gets 403. The route is on the mTLS jail listener
+  only, not the admin port or the unix sockets, and its answer carries no instance id, config hash or
+  path (the loopback `/epoch` keeps those).
 - **`/bootstrap` is single-use.** The first manager-enrolment ticket latches the broker; every later
   `/bootstrap` returns 403 (`internal/broker/bootstrap.go`). `apply` tolerates that 403 so re-apply is
   idempotent, but the latch bounds manager-identity minting to one per broker process.

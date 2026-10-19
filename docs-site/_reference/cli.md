@@ -77,7 +77,7 @@ commands that write the store (`snapshot`, `gc`, `delete`, `verify --fix`, `lock
 | `lever broker revoke <agent> [config]` / `lever revoke <agent>` | Revoke one agent on the running broker: its capability tokens stop verifying immediately. |
 | `lever broker bump-epoch [config]` | Revoke **all** outstanding tokens at once by raising the epoch floor. |
 | `lever acceptance [config]` | Bring up a real jail and drive the six live capability/egress acceptance checks — delegated-read, three scope-envelope denials (a disallowed table, a dropped narrowing filter, a worker self-minting an un-granted cap), egress-refused (allowlisted broker port reachable, admin port blocked, the metadata address `169.254.169.254` rejected and a neighbouring link-local address dropped), and revocation (a token stops working after `bump-epoch`) — the merge gate for capability-layer changes. Before the checks it waits up to 30 s for each supervised tool to listen (not one held back by `manager.read_only`), and fails naming a tool that never does, with its log. It takes the lifecycle lock (exit `6`, or `--wait <duration>`). |
-| `lever version` / `lever --version` | Print the version: the release (`X.Y.Z`), plus the build's provenance in parentheses when there is one: the commit (first 12 hex digits, `-dirty` for an uncommitted tree) for a local build, the module version for a `go install …@vX` build. A build with no VCS stamp (a build in a git worktree, where Go records none) and a dirty build add `bin <hash>`, the first 12 hex digits of the binary's SHA-256, e.g. `X.Y.Z (bin 3f2a91c04e7b)`. `apply` restarts the broker and the remote proxy when this string changes. |
+| `lever version` / `lever --version` | Print the version: the release (`X.Y.Z`), plus the build's provenance in parentheses when there is one: the commit (first 12 hex digits, `-dirty` for an uncommitted tree) for a local build, the module version for a `go install …@vX` build. `make install` and the release build stamp the commit themselves, so a build in a git worktree reports its own commit too. A build with no commit (a plain `go build` in a git worktree, where Go records none) and a dirty build add `bin <hash>`, the first 12 hex digits of the binary's SHA-256, e.g. `X.Y.Z (bin 3f2a91c04e7b)`. `apply` restarts the broker and the remote proxy when this string changes. |
 
 ### Exit codes
 
@@ -181,7 +181,7 @@ can only reach workers the operator declared.
 | `lever-manager msg recipients` | List the addresses the calling agent may pass to `msg send --to`, one per line, as the broker's policy has them: the manager sees itself and every declared worker; a worker sees `user:manager`, itself, and the other workers only when `messaging.worker_to_worker` allows them. Read-only. |
 | `lever-manager msg list` | Read the typed agent-event inbox; `--worker <name>` reads a worker's inbox (manager only). `--all` includes already-read events. Each event's message starts with `worker-reported:` (the worker's own text, sanitized and cut to 1 KiB); a status the hub does not produce shows as `UNRECOGNISED`. |
 | `lever-manager watch --events-file PATH` | Bridge scion agent events (state changes, `input-needed`) into a file, appending as they arrive (`--interval` seconds between polls, default 5). The manager tails this to get live worker notifications. A poll the broker does not answer, or answers with 5xx, 408 or 429, is logged to stderr and retried with backoff up to a minute; any other error ends the command. |
-| `lever-manager version` | Print the version. |
+| `lever-manager version` / `lever-manager --version` | `--version` prints this binary's build, as `lever version` does, and the Jail ABI it was built with: `lever-manager X.Y.Z (<commit>), jail ABI N`. `version` prints that line, then asks the broker (`GET /version`) for the host lever's and prints `host lever X.Y.Z (<commit>), jail ABI N` and a verdict: `match` (the same build), `compatible` (the same Jail ABI, so no rebuild is needed) or `mismatch` with the fix, e.g. `mismatch: image 0.50.0 (ABI 6), host 0.51.0 (ABI 7): rebuild the agent image, then lever up --fresh --keep-conversation` (a worker is told to ask the operator for it). A host lever that predates the route is a mismatch. Fails when the broker does not answer. Workers run it too. |
 
 ## Inside agent containers
 
@@ -192,4 +192,5 @@ Two more surfaces exist inside every agent container, wired up automatically at 
   gated tool calls; `delegate` mints a token bound to another agent. The scaffolded operator
   skills ([`lever init`](#setup-and-diagnosis)) teach agents this flow.
 - **`lever-agent`** — the boot/enrolment binary the pre-start hook runs (key generation, broker
-  enrolment, MCP registration, token renewal). Not for interactive use.
+  enrolment, MCP registration, token renewal). Not for interactive use, except `lever-agent
+  --version` and `lever-agent version`, which print what the `lever-manager` forms do.

@@ -255,3 +255,48 @@ func TestFreshRearmsASpentLatchAfterTheContainerIsGone(t *testing.T) {
 		t.Fatalf("rearmed=%v starts=%d", rearmed, r.startCalls)
 	}
 }
+
+// --fresh over no record still checks podman: a container the hub lost the
+// record of is the old manager all the same.
+func TestFreshWithNoRecordRefusesAnOrphanContainer(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	pm := &oldManagerPodman{t: t, tree: app.Tree, answers: []podmanAnswer{oldRunning}}
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello"}
+	mints := 0
+	d := Deps{
+		Scion:                scion.New(r, scion.Options{}),
+		Log:                  func(string, ...any) {},
+		StaleContainer:       pm,
+		ContainerGoneRetry:   RetryBudget{Attempts: 3, Interval: time.Millisecond},
+		MintManagerBootstrap: func(context.Context) (BootstrapMaterial, error) { mints++; return BootstrapMaterial{Ticket: "t"}, nil },
+	}
+	err := Run(context.Background(), app, fillDeps(d), PlanOpts{Fresh: true})
+	testutil.WantErrContaining(t, err, "staged no enrolment ticket")
+	if pm.exposed || stagedTicket(t, app) != "" || mints != 0 || r.startCalls != 0 {
+		t.Fatalf("exposed=%v mints=%d starts=%d, want no ticket and no create", pm.exposed, mints, r.startCalls)
+	}
+}
+
+// The fresh start lever makes on its own for a manager with no conversation
+// re-arms only once podman shows the deleted manager's container gone.
+func TestFreshWithoutConversationWaitsForTheOldContainer(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	pm := &oldManagerPodman{t: t, tree: app.Tree, answers: []podmanAnswer{oldRunning}}
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "error", initContainerStatus: "Exited (1)", dieAfterLiveLists: 2}
+	rearms := 0
+	err := Run(context.Background(), app, fillDeps(Deps{
+		Scion:              scion.New(r, scion.Options{}),
+		StaleContainer:     pm,
+		ContainerGoneRetry: RetryBudget{Attempts: 3, Interval: time.Millisecond},
+		ManagerLiveRetry:   RetryBudget{Attempts: 3, Interval: time.Millisecond, Settle: 10 * time.Second},
+		HarnessLogTail:     func(context.Context, string) (string, error) { return noConvLog, nil },
+		RearmBootstrap:     func(context.Context) error { rearms++; return nil },
+		ManagerConversationEmpty: func(context.Context) error {
+			return nil
+		},
+	}), PlanOpts{FreshWithoutConversation: true})
+	testutil.WantErrContaining(t, err, "staged no enrolment ticket")
+	if r.deleteCalls != 1 || r.startCalls != 0 || rearms != 0 {
+		t.Fatalf("deletes=%d starts=%d rearms=%d, want the delete and nothing after it", r.deleteCalls, r.startCalls, rearms)
+	}
+}

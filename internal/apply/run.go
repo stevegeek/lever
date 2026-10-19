@@ -2296,7 +2296,7 @@ func (r *run) ensureFreshBootstrap(ctx context.Context) error {
 		}
 	}
 	if err := r.d.RearmBootstrap(ctx); err != nil {
-		return fmt.Errorf("start-manager: re-arming the broker's spent bootstrap latch: %w", err)
+		return fmt.Errorf("%s: re-arming the broker's spent bootstrap latch: %w", r.subjectName(), err)
 	}
 	r.minted = true
 	return nil
@@ -2341,7 +2341,7 @@ func (r *run) confirmManagerContainerGone(ctx context.Context) error {
 	})
 	if err != nil {
 		return fmt.Errorf("%s: lever could not confirm that the previous manager's container %s is gone (podman: %s), so it staged no enrolment ticket and created no manager: that container mounts the tree and could redeem the ticket. "+
-			"Run `lever up --fresh` again once podman no longer lists it: %w", r.subjectName(), ref, termsafe.Sanitize(last), err)
+			"The manager record is already gone (any conversation was backed up before the delete). Once podman no longer lists the container (`podman rm -f %s` in the jail removes one that keeps running), run `lever up --fresh` again: %w", r.subjectName(), ref, termsafe.Sanitize(last), ref, err)
 	}
 	return nil
 }

@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.50.0] - 2026-10-19
+
 ### Added
 
 - **`--wait <duration>` on every command that changes an instance.** While another lever command

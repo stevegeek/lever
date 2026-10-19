@@ -18,6 +18,7 @@ import (
 	"github.com/stevegeek/lever/internal/jailabi"
 	"github.com/stevegeek/lever/internal/proc"
 	scionpkg "github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/servicehost"
 	"github.com/stevegeek/lever/internal/state"
 	"github.com/stevegeek/lever/internal/termsafe"
 	"github.com/stevegeek/lever/internal/wire"
@@ -309,7 +310,7 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 			out = append(out, r)
 		}
 	}
-	return out
+	return append(out, checkServiceHosts(ctx, app, state, servicehost.Probe)...)
 }
 
 // checkScionProjectInJail reports a read error as the jail not being up

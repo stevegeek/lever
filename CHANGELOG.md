@@ -73,6 +73,25 @@ version bump moves the block under the new version heading.
   purged or replaced, and it rides out a broker restart. Free-text messages from a worker to the
   operator are not part of it.
 
+- **Service hosts: an instance's MCP servers, and their credentials, can run on other machines
+  on the tailnet (lever#234).** `lever service-host serve` runs on the other machine, from the
+  same `lever` binary, and serves the tools in its own config: stdio MCP servers it starts as
+  children, each with only its own environment and secret files, or streamable-HTTP servers it
+  forwards to with their credential headers. Declare the machine in `broker.service_hosts` and
+  give a tool `host: <name>` instead of `command` or `backend`; it is an external tool that may
+  leave loopback. The broker reaches the service host over TLS 1.3 with both keys pinned: `lever
+  service-host init` makes the service host's key, `lever service-host pair <name>` makes the
+  broker's client key in `.lever-state`, and only the two fingerprints are copied between the
+  machines. The service host refuses any other client during the handshake and enforces its own
+  ceiling (`allow`, the operations this instance may call there) whatever the broker allowed, so a
+  compromised lever host gets no more than that ceiling; it never sees a capability token, and
+  nothing on the lever host accepts a connection from it. It keeps no MCP sessions. While one
+  service host is down only its tools answer `503`, and the next call after it is back works.
+  Both sides log each decision; a refusal there is also a `service_host.refused` line in
+  `broker.log`. `lever doctor` adds a row per service host: reachable, pins and pairing, the tools
+  it serves against the config, and operations outside its ceiling. The VM, the jail, the broker,
+  its keys and the LLM key stay on the lever host. See the new service hosts guide.
+
 ### Changed
 
 - **Every lever binary reports its exact build commit, in a git worktree too.** `make install`,
@@ -82,6 +101,10 @@ version bump moves the block under the new version heading.
   of `lever` in a worktree now shows `X.Y.Z (<commit>)` instead of `X.Y.Z (bin …)`, so doctor's
   *agent lever version* row can tell it is the build the image came from. lever-tool-db's MCP serverInfo
   carries the commit too.
+
+- **The broker bounds a tool's `tools/list` answer to 16 MiB.** The gateway reads it whole to add
+  the capability argument; a larger answer is now refused as a backend error (`503`) instead of
+  being read into memory without a limit.
 
 ### Removed
 
@@ -108,6 +131,17 @@ version bump moves the block under the new version heading.
   and the restart of a broker without an instance id (before 0.36.0), which is now refused like
   any broker that is not this instance's. `lever doctor`'s *guest clock* row now only warns when
   the guest's clock is off, unless agent messages are on: no verification depends on it any more.
+
+### Fixed
+
+- **The broker refuses a tool call with duplicate keys, or keys equal under case folding.** The gateway
+  checks a message's capability, operation and arguments by exact key, and forwards the message
+  re-encoded with every key it holds. An MCP server written in Go decodes into structs, which match
+  keys regardless of case under Unicode folding, so `{"params":{"name":"read"},"paramſ":{"name":
+  "write"}}` passed as a `read` and could run as a `write` there. Likewise a backend whose parser
+  keeps the first of two `method` keys, where Go keeps the last. The gateway now answers a message
+  with a repeated key, or one equal to another under folding, or nested deeper than 256 levels,
+  with `400` and logs a `deny`, for every broker tool.
 
 ### Security
 

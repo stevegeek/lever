@@ -40,6 +40,19 @@ func (t Tool) validate() error {
 			return fmt.Errorf("config: broker tool %q declares operation %q, which is reserved for gate: coarse", t.Name, wire.WildcardOp)
 		}
 	}
+	if t.Host != "" {
+		switch {
+		case !t.External:
+			return fmt.Errorf("config: broker tool %q sets host but not external (a service-host tool is external; config load sets it)", t.Name)
+		case len(t.Command) != 0:
+			return fmt.Errorf("config: broker tool %q sets both host and command (a service-host tool runs on that host, not here)", t.Name)
+		case t.Backend != "":
+			return fmt.Errorf("config: broker tool %q sets both host and backend (the broker derives a service-host tool's address from broker.service_hosts)", t.Name)
+		case t.AllowNonLoopback:
+			return fmt.Errorf("config: broker tool %q sets allow_non_loopback, which host implies; remove it", t.Name)
+		}
+		return t.validateGate()
+	}
 	if !t.External {
 		if t.Gate != "" {
 			return fmt.Errorf("config: broker tool %q sets gate but is not external (gate applies to external tools only)", t.Name)
@@ -61,6 +74,11 @@ func (t Tool) validate() error {
 	if err := t.validateExternalBackend(); err != nil {
 		return err
 	}
+	return t.validateGate()
+}
+
+// validateGate checks an external tool's operations against its gate.
+func (t Tool) validateGate() error {
 	if t.EffectiveGate() == GateCoarse {
 		if len(t.Operations) != 0 {
 			return fmt.Errorf("config: external broker tool %q is gate: coarse and must not declare operations (coarse admits the whole surface; use gate: fine to enumerate)", t.Name)
@@ -1023,6 +1041,9 @@ func (a *App) validateBroker() error {
 		if a.Broker.APIKeyFile == "" {
 			return fmt.Errorf("config: broker.api_key_file is required when llm_auth is api-key")
 		}
+	}
+	if err := a.validateServiceHosts(); err != nil {
+		return err
 	}
 	return a.validateBrokerGrants()
 }

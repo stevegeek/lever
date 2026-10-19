@@ -44,3 +44,5 @@ tool for writing your own.
 To register any MCP server as a broker tool, including third-party servers that are already
 running, and to choose between a brokered and an ambient setup, see
 [give agents MCP tools](/getting-started/mcp-tools/).
+To run an MCP server, and the credential it needs, on another machine on your tailnet, see
+[service hosts](/service-hosts/).

@@ -221,6 +221,9 @@ func decorateConfig(cfg *broker.Config, app *config.App, st state.State, be back
 	}
 	cfg.Persistence = pe
 	cfg.Dispatch = d
+	if cfg.ServiceHosts, err = ServiceHostRoutes(app, st); err != nil {
+		return err
+	}
 	if app.DirectivesEnabled() {
 		cfg.Directives = broker.DirectiveConfig{
 			Verifier:   &opsig.Verifier{AllowedSigners: app.OperatorAllowedSignersPath(), Principal: app.OperatorPrincipal()},

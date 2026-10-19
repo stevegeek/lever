@@ -54,6 +54,24 @@ type Tool struct {
 	// jailed agent a path to another host through the broker, bypassing the
 	// jail's LAN-drop egress.
 	AllowNonLoopback bool `yaml:"allow_non_loopback"`
+	// Host names the broker.service_hosts entry that runs this tool. It
+	// implies External and a non-loopback backend, and replaces Command and
+	// Backend. The json tag keeps it out of brokerctl.ConfigHash while unset.
+	Host string `yaml:"host" json:",omitempty"`
+}
+
+// ServiceHost is another machine that runs some of the instance's MCP
+// servers and their credentials (`lever service-host serve`). The broker
+// reaches it over mutual TLS, presenting the client key `lever service-host
+// pair` made and accepting only the server key Fingerprint names.
+type ServiceHost struct {
+	Name string `yaml:"name"`
+	// Address is host:port. DNS is not trusted: the pin authenticates the
+	// machine.
+	Address string `yaml:"address"`
+	// Fingerprint is "sha256:" and the hex SHA-256 of the service host's
+	// server key (its SubjectPublicKeyInfo).
+	Fingerprint string `yaml:"fingerprint"`
 }
 
 // EffectiveGate is the declared gate, or GateFine when unset.
@@ -131,6 +149,9 @@ type Broker struct {
 	LLMUpstream string    `yaml:"llm_upstream"`
 	Tools       []Tool    `yaml:"tools"`
 	Messaging   Messaging `yaml:"messaging"`
+	// ServiceHosts are the machines `host:` tools run on. The json tag keeps
+	// it out of brokerctl.ConfigHash while unset.
+	ServiceHosts []ServiceHost `yaml:"service_hosts" json:",omitempty"`
 	// AutoReenrol selects which agents the broker re-enrols after an mTLS
 	// leaf merely expires (never a revoked or epoch-stale identity).
 	AutoReenrol AutoReenrolMode `yaml:"auto_reenrol"`

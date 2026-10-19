@@ -49,6 +49,7 @@ Developer notes for working on lever itself. For using lever, start at the
 | `internal/hubauth` | lever's hub assertion key and ES256 signer: the identities lever asserts to the hub (admin, controller, remote sign-ins) and the reserved addresses. |
 | `internal/remoteproxy` | `lever remote serve`: the authenticating reverse proxy, the assertion sign-in, chat page, file exchange and web push. |
 | `internal/scion` | Client for the scion CLI (bring-up, lifecycle, hub tokens) and every predicate over scion's output wording. `layout` (pure: scion's `~/.scion` paths, settings.yaml keys and YAML edit helpers). |
+| `internal/servicehost` | `lever service-host`: the service host's config, its stdio bridge and upstream proxy behind pinned mutual TLS with a per-tool ceiling, and the pairing, transport and probe the broker and `lever doctor` use. |
 | `internal/sentledger` | Host record of every message lever itself sends to an agent. |
 | `internal/sessionrec` | Host record of when each agent's session last started fresh, and with which skill text. |
 | `internal/skills` | Framework-authored SKILL.md files scaffolded into instances. |

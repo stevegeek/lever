@@ -220,6 +220,7 @@ func LoadNoHostChecks(path string) (*App, error) {
 	app.Broker.APIKeyFile = resolvePath(app.Broker.APIKeyFile, app.dir)
 	app.Operator.SigningKey = resolvePath(app.Operator.SigningKey, app.dir)
 	app.injectLLMGrants()
+	app.markServiceHostTools()
 	if err := app.Validate(); err != nil {
 		return nil, err
 	}

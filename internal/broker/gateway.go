@@ -21,6 +21,7 @@ import (
 	"github.com/stevegeek/lever/internal/cap/token"
 	"github.com/stevegeek/lever/internal/logging"
 	"github.com/stevegeek/lever/internal/mcp"
+	"github.com/stevegeek/lever/internal/servicehost"
 )
 
 // toolSecretHeader must equal captool.ToolSecretHeader; the captool e2e test
@@ -53,6 +54,27 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 		return nil, fmt.Errorf("broker: tool %q bad backend %q: %w", toolName, t.Backend, err)
 	}
 	rp := newToolProxy(target)
+	sh, onServiceHost := b.serviceHosts[toolName]
+	if onServiceHost {
+		rp.Transport = sh.Transport
+		// Set on the outbound request, after hop-by-hop removal, so an agent's
+		// Connection header cannot drop it. For the service host's audit log
+		// only; it grants nothing there.
+		rewrite := rp.Rewrite
+		rp.Rewrite = func(pr *httputil.ProxyRequest) {
+			rewrite(pr)
+			pr.Out.Header.Set("X-Lever-Caller", callerFrom(pr.In.Context()))
+		}
+		augment := rp.ModifyResponse
+		rp.ModifyResponse = func(resp *http.Response) error {
+			// The service host's own ceiling refused a call the broker
+			// allowed: the broker's log must show it too.
+			if resp.StatusCode == http.StatusForbidden && resp.Request != nil {
+				b.audit(toolName, callerFrom(resp.Request.Context()), "deny", "service_host.refused", "host", sh.Host)
+			}
+			return augment(resp)
+		}
+	}
 	rp.ErrorLog = slog.NewLogLogger(b.log.With("op", toolName).Handler(), slog.LevelWarn)
 	v, _ := b.backendErrs.LoadOrStore(toolName, &backendErrLimit{every: backendErrEvery})
 	limit := v.(*backendErrLimit)
@@ -109,6 +131,14 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, gatewayBodyLimit))
 		if err != nil {
 			b.audit(toolName, caller, "deny", "bad body")
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		// The token check reads exact map keys; a backend decoding into Go
+		// structs matches keys case-insensitively and would read another
+		// call out of the same bytes.
+		if servicehost.FoldedKeyCollision(body) {
+			b.audit(toolName, caller, "deny", "keys equal under case folding")
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
@@ -171,6 +201,11 @@ func backendURL(backend string) (*url.URL, error) {
 	return url.Parse(backend)
 }
 
+// maxToolsListBytes bounds the tools/list answer the gateway reads whole to
+// add the capability argument: a backend, a remote one above all, must not
+// be able to exhaust the broker's memory.
+const maxToolsListBytes = 16 << 20
+
 // maxAuditPath bounds the agent-chosen path an audit line carries.
 const maxAuditPath = 256
 
@@ -219,10 +254,13 @@ func newToolProxy(target *url.URL) *httputil.ReverseProxy {
 		if resp.Request == nil || resp.Request.Header.Get("X-Lever-Method") != "tools/list" {
 			return nil
 		}
-		body, err := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxToolsListBytes+1))
 		resp.Body.Close()
 		if err != nil {
 			return err
+		}
+		if len(body) > maxToolsListBytes {
+			return errors.New("tools/list answer too large")
 		}
 		out := mcp.AugmentToolsListSchema(body)
 		resp.Body = io.NopCloser(bytes.NewReader(out))

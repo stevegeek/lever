@@ -68,11 +68,21 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 		// goes to the log only.
 		http.Error(w, "tool "+toolName+": backend unavailable; try again later", http.StatusServiceUnavailable)
 	}
+	route := "/mcp/" + toolName + "/"
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		caller, err := ca.RequireAgent(r)
 		if err != nil {
 			b.audit(toolName, "", "deny", err.Error())
 			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		// Refused only after RequireAgent, so a caller without a leaf gets the
+		// same 403 for every path. The outbound path is pinned regardless
+		// (newToolProxy); this keeps a probe of other backend routes from
+		// looking like a call.
+		if r.URL.Path != route {
+			b.audit(toolName, caller, "deny", "path not allowed", "path", truncate(r.URL.EscapedPath(), maxAuditPath))
+			http.NotFound(w, r)
 			return
 		}
 		// Scrub inbound X-Lever-* so an agent cannot forge broker-internal
@@ -160,18 +170,32 @@ func backendURL(backend string) (*url.URL, error) {
 	return url.Parse(backend)
 }
 
+// maxAuditPath bounds the agent-chosen path an audit line carries.
+const maxAuditPath = 256
+
+func truncate(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
+}
+
+// newToolProxy sends every request to the backend's configured path and
+// query, whatever the inbound URL: the backend host may serve other routes
+// (admin, metrics) that a capability for its MCP endpoint must not reach.
+// The inbound query is dropped because it is agent-chosen and streamable
+// HTTP carries nothing in it.
 func newToolProxy(target *url.URL) *httputil.ReverseProxy {
+	path, rawPath := target.Path, target.RawPath
+	if path == "" {
+		path, rawPath = "/", ""
+	}
 	rp := &httputil.ReverseProxy{}
 	rp.Rewrite = func(pr *httputil.ProxyRequest) {
-		remainder := pr.In.URL.Path
 		rewriteUpstream(pr, target)
-		// The default join turns "/mcp"+"/" into "/mcp/", which a strict
-		// streamable-HTTP endpoint 404s: send a bare-root request to the
-		// backend path exactly.
-		if (remainder == "" || remainder == "/") && target.Path != "" && target.Path != "/" {
-			pr.Out.URL.Path = target.Path
-			pr.Out.URL.RawPath = ""
-		}
+		pr.Out.URL.Path = path
+		pr.Out.URL.RawPath = rawPath
+		pr.Out.URL.RawQuery = target.RawQuery
 	}
 	rp.ModifyResponse = func(resp *http.Response) error {
 		if resp.Request == nil || resp.Request.Header.Get("X-Lever-Method") != "tools/list" {

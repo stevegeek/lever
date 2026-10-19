@@ -7,6 +7,26 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **One `lever stop`, then `lever up`, is enough to apply `no-kvmapf` after the upgrade.** The
+  crash-recovery step writes the kernel command line only once the VM is up, so the first start
+  after 0.50.0 booted without it and reported a reboot pending: the setting took a second restart.
+  Now, when the bring-up started the VM itself (it was stopped, or new) and `grub.cfg` already
+  holds parameters the running kernel lacks, lever reboots the guest once before anything else runs
+  in it (`limactl stop`, then the same start, in the no-swap scope where it applies) and prints
+  `jail: rebooted the guest once to apply no-kvmapf`. A new `guest_kernel: hwe` kernel boots in the
+  same reboot. At most one reboot per bring-up; a VM that was already running is never rebooted
+  and still reports the reboot pending. A failed stop leaves the VM running with the pending line;
+  a failed start fails the bring-up, and the next `lever up` starts the VM with the parameters.
+
+### Changed
+
+- **The sizing guide says what fixes the async page fault panic.** "Host injected async #PF in
+  kernel mode" comes from the host swapping the VM out, which 0.50.0's no-swap start and
+  `no-kvmapf` address; `manager.resources` is still recommended on a nested-virt dev instance so
+  that a guest out-of-memory kill stays inside the manager's container.
+
 ## [0.50.0] - 2026-10-19
 
 ### Added

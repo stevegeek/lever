@@ -28,8 +28,8 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:3211", "listen address")
 	flag.Parse()
 
-	// Serve on "/", not "/mcp": the gateway strips its /mcp/<tool> prefix and
-	// forwards a trailing-slash path, which an exact "/mcp" pattern would 404.
+	// Serve on "/", which matches whatever path the backend in lever.yaml
+	// names: the gateway sends every call to exactly that path.
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		var msg map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&msg)

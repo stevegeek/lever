@@ -108,6 +108,8 @@ func (a *App) VoiceTool() (WhisperTool, bool) {
 	return WhisperTool{}, false
 }
 
+const removedFizzyProgram = "lever-tool-fizzy"
+
 // validateWhisperTools: whisper-server has no authentication of its own and
 // is safe only because the jail's egress rules drop every host-loopback port
 // that is not allowlisted, so -whisper-port must never be a port the jail
@@ -116,6 +118,11 @@ func (a *App) validateWhisperTools() error {
 	for _, t := range a.Broker.Tools {
 		if form := envFormUnread(t.Command); form != "" {
 			return fmt.Errorf("config: broker.tools[%s] command uses %s, which lever cannot read the way env or the wrapper does, so its program and flags would escape the host-path checks; write the command as separate words with options lever reads (env NAME=value program -flag value), or run the program directly", t.Name, form)
+		}
+		// make install leaves an old binary in place, and its path flags
+		// are no longer checked, so it must not run at all.
+		if argv, _ := unwrapEnv(t.Command); !t.External && len(argv) > 0 && baseName(argv[0]) == removedFizzyProgram {
+			return fmt.Errorf("config: broker.tools[%s] runs %s, which lever no longer ships: remove this tool and its grants (and the old binary, if make install put it there)", t.Name, removedFizzyProgram)
 		}
 	}
 	tools := a.WhisperTools()

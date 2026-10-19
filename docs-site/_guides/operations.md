@@ -157,7 +157,7 @@ All host-side state lives in `.lever-state/` at the instance root:
 | File | What's in it | When to read it |
 |---|---|---|
 | `broker.log` | every capability decision — `allow`/`deny` with caller, tool, op, and the deny reason. Mint allows are a ledger line: the token `id`, the matched policy `rule` (`obtain:…`/`delegate:…`), `exp`, `epoch`, and any baked `constraints`. Gateway and LLM lines carry the same `id`, so a mint correlates with every later use — and denied use — of that token: `grep id=<id> .lever-state/broker.log`. (On deny lines the id is the token's *claimed* id — the signature was not necessarily valid.) | **first stop for any 403**: it names the difference between "no token attached", "not granted", and "revoked" |
-| `broker.out.log` | the broker process's own stdout and stderr (startup, proxy errors) | broker won't start, or brokered tool calls 502 (backend refused) |
+| `broker.out.log` | the broker process's own stdout and stderr (startup, and Go's own lines) | broker won't start |
 | `tool-logs/<tool>.log` | one file per supervised tool (its own stdout/stderr, not shared with the others, and the broker's lines about that tool: held back, or failed to start) | a specific tool misbehaves (never registered, crashed, or returned bad output) and you need forensics without other tools' output in the way |
 | `broker.pid` | the daemonized broker's pid | `lever doctor` reads it for the alive check |
 | `logs/bringup-<command>-<time>.jsonl` | one record per `lever apply`, `lever up` and `lever acceptance`: each step with its time and outcome, and for a failed step the log lines shown with it; the last 10 runs are kept | a bring-up was slow or failed and the terminal output is gone; `lever doctor`'s *last bring-up* row summarises the newest |
@@ -209,7 +209,7 @@ captool masks its decision lines' `detail` whatever logger the tool passes.
 **Audit lines** are records that you and your scripts parse, so their form does not change: the
 `broker.decision` lines in `broker.log` (fields `op`, `caller`, `decision` and `detail`, in that
 order, then the decision's own fields such as `id`, `rule` and `reason`), a tool's decision
-lines (`captool.decision`, `github.push`, `github.<op>`, `fizzy.<op>`) in its tool log, the
+lines (`captool.decision`, `github.push`, `github.<op>`) in its tool log, the
 JSON-lines audits (`remote-audit.jsonl`, `directives.log`) and the ledgers.
 
 What a person reads is not a log line but a message. `lever` prints on your terminal in one
@@ -1368,7 +1368,7 @@ Both open the hub database directly; `recover-authz` refuses while a hub runs. T
 | Tool call denied `missing capability` | agent didn't mint/attach | the agent should follow its skill (`lever-operator` for the manager, `lever-agent` for a worker): mint via `lever-capability`, pass `_capability`; if the skill is missing, run `lever init` |
 | Denied *with* a token attached | not granted, expired, or revoked | `tail .lever-state/broker.log` — the deny line names the reason; fix grants in `lever.yaml`, then `lever reload` |
 | "unknown recipient" / new worker invisible | broker still running on the old config | `lever reload` |
-| 502 on an external tool call | the host-side server isn't listening | `lever doctor` (`tool backends` row), start your server |
+| 503 `tool <name>: backend unavailable` on a tool call | the tool's server isn't listening | `grep backend_unavailable .lever-state/broker.log` names the backend and the error; `lever doctor` (`tool backends` row); start your server |
 | `lever apply` fails: "the broker on 127.0.0.1:8444 belongs to another lever instance" | another instance on this host uses the same broker ports | give this instance its own `broker.jail_port` and `broker.admin_port`; see [two instances on one host](#two-instances-on-one-host) |
 | `lever up` fails: "resolve go toolchain … exit status 126" | version-manager shim, no real Go on PATH | `export PATH="$HOME/.asdf/installs/golang/<ver>/go/bin:$PATH"` (doctor prints the exact line) |
 | `lever apply`/`up` fails at `scion-server`: "hub not ready after …" | a hub start spends about 15 s before it serves (most of it a GCP metadata lookup that times out off GCP), and a cold start after a reboot or a scion pin change takes longer. lever waits up to 2 minutes and prints a line after 15 s; before 0.30.0 it gave up after 30 probes (about 30 s), and a retry seconds later found the hub up | run the command again; if it fails again, read `~/.scion/server.log` in the guest (`orb -m lever-<name>` or `limactl shell lever-<name>`). "no scion server is running in the jail any more" means the server exited during start-up: its log says why |
@@ -1378,6 +1378,7 @@ Both open the hub database directly; `recover-authz` refuses while a hub runs. T
 | `lever up` exits **3**: "resume (or resume --force) of the manager failed. lever did NOT delete the manager …" | scion could not resume the manager record (a late runtime broker, a container whose state the VM lost, a wedged harness). lever keeps the record and the conversation; it never starts a fresh manager on its own after a failed resume | run `lever up` again — a transient failure clears; `lever doctor` (manager row) for the cause. To give the session up, run `lever up --fresh` (it backs the conversation up first; `--keep-conversation` resumes the new manager on it). In a script, test the exit code (3), not the text: the message ends with the hub's own words after "Cause:" |
 | `lever up` exits **3**: "… the hub holds a stop claim on the manager …" | the hub refuses every resume while a stopped container from an interrupted start exists, and lever could not clear it (a container still running or changing between lever's two looks, a failed removal, or a claim the hub kept past the wait) | running `lever up` again does not help until the cause the message names is gone: see [a stop claim the hub never releases](#a-stop-claim-the-hub-never-releases) |
 | `lever up`/`apply` fails at `start-manager`: "did not come up … the harness is not live — cause: no conversation to continue" | the manager was never sent a message, so its home holds no transcript, and the resume's `claude --continue` found nothing to continue. `lever up` starts such a manager fresh on its own once it has checked the home from the guest, when the resume ran in its bring-up (on a terminal too: a resumed manager is attached only after claude reports its session start); this message means it could not prove the home empty (the line before it says why), the resume was `up`'s own (the hub was still running), or the command was `lever apply` | `lever stop && lever up` (the resume then runs in the bring-up, which makes the fresh start when the line before did not give a reason), or `lever up --fresh`: it backs up any transcript first, so nothing is lost ([the manager's conversation across `--fresh`](#the-managers-conversation-across---fresh)) |
+| `lever up --fresh` fails: "start-manager: lever could not confirm that the previous manager's container <project>--<manager> is gone (podman: …), so it staged no enrolment ticket and created no manager" | the old manager's container mounts the tree and could redeem the new manager's enrolment ticket, so lever stages the ticket only once podman lists no container by the manager's name. A container with no process in it is removed by id; one still running, one that starts again, or a podman that cannot answer leaves the wait to run out after 30 s. The manager record is already deleted, and any conversation was backed up before the delete | in the guest, as the jail user: `podman ps -a --filter name='^<project>--<manager>$'`; if it is still listed, `podman rm -f <project>--<manager>`; then `lever up --fresh` again. The same message after lever's own fresh start of a manager with no conversation is fixed the same way |
 | `lever up` exits **4**: "the hub refused resume of the manager. lever kept the manager …" | the hub refused the call: a controller token without `agent:lifecycle`, or a phase that cannot be resumed now | `lever apply` (it re-mints a token whose scopes changed, while agents run), or wait and retry. Do **not** answer exit 4 with `--fresh` |
 | Changed `manager.image` (or rebuilt under a new tag) but the manager still runs the old image; doctor's `manager image` row fails | a manager record keeps the image it was created with — `lever up` resumes it unchanged, and a `stop && up` is a resume too | `lever up --fresh` — the bring-up deletes the record once the hub is up and creates the manager on the configured image (add `--keep-conversation` to keep the conversation; plain `--fresh` starts a new one after backing the old one up; before 0.21 the flag was silently dropped after `stop`) |
 | Doctor's `agent lever version` row fails | the agent image's in-jail code does not match the host `lever`: its `lever_jail_abi` label differs from the host's jail ABI (or, on an image without that label, its `lever_version` release differs). The tag names only the arch, so any `make lever-image` on the host (a throwaway instance, another checkout) replaces it. A release that changed no in-jail code keeps the jail ABI, so the row passes and shows the release difference as information | rebuild from the host lever's source: `make lever-image LEVER_IMAGE_FORCE=1`, then any instance image built `FROM` it; `lever apply`; `lever up --fresh` to recreate the manager on it (the conversation is discarded) |
@@ -1619,7 +1620,8 @@ The same step sets up the guest's capture of tmux server cores (see [tmux server
 crashes](#tmux-server-crashes)); a failure there is a warning and does not stop the bring-up.
 
 Each file is written only when its content differs, and `update-grub` runs only when the drop-in
-changed or `grub.cfg` lacks one of the parameters. lever never reboots the guest.
+changed or `grub.cfg` lacks one of the parameters. lever reboots the guest only as described under
+[what needs a reboot](#what-needs-a-reboot) below.
 
 **What a panic does to the VM.** The guest kernel asks for a reboot 10 s after a panic. What the
 VM then does depends on Lima's driver: under **qemu** the guest reboots, unless Lima starts QEMU
@@ -1653,12 +1655,27 @@ kernel again. `sudo sysctl -w kernel.softlockup_panic=0` in the guest turns it o
 apply or up. If it bites repeatedly, give the VM fewer vCPUs than the host has free, keep the host
 awake while agents run, and open an issue: a switch would be the fix.
 
-**What needs a reboot:** the kernel command line (always, the first time, and once more on a VM
-converged before `no-kvmapf` was added: the reboot-pending line names only what is missing), and the EFI pstore
-backend when it could not be unloaded (built in, or in use). The sysctls and the unload take
-effect at once. Apply prints `jail: reboot pending: …` for each; `lever stop`, then `lever up`,
-reboots the VM and keeps the manager conversation. Doctor's *guest crash recovery* row reads
-`/proc/sys/kernel/*`, `/proc/cmdline` and `/sys/module` and warns until all of it is in place.
+#### What needs a reboot
+
+The kernel command line (always, the first time, and once more on a VM converged before
+`no-kvmapf` was added), and the EFI pstore backend when it could not be unloaded (built in, or in
+use). The sysctls and the unload take effect at once.
+
+When the bring-up started the VM itself (it was stopped, or new) and `grub.cfg` already holds
+parameters the running kernel lacks, lever reboots the guest once, before it provisions anything in
+it: `limactl stop`, then the same start (in the no-swap scope where it applies), then the check
+again. It prints `jail: rebooted the guest once to apply no-kvmapf` (the parameters it applied).
+A new kernel from `guest_kernel: hwe` boots in the same reboot. So after an upgrade one `lever
+stop`, then `lever up`, is enough. There is at most one such reboot per bring-up, and a VM that
+was already running is never rebooted, since agents may be working in it.
+
+What is still pending after that, or on a running VM, prints `jail: reboot pending: …` (the line
+names only what is missing); `lever stop`, then `lever up`, reboots the VM and keeps the manager
+conversation. A reboot whose `limactl stop` fails while the VM still runs leaves it running with
+the line printed; any other failure fails the bring-up, and the next `lever up` starts the VM with
+the parameters.
+Doctor's *guest crash recovery* row reads `/proc/sys/kernel/*`, `/proc/cmdline` and `/sys/module`
+and warns until all of it is in place.
 
 On **OrbStack** none of this applies: an OrbStack machine shares OrbStack's one kernel with every
 other machine and container on the Mac, `kernel.*` sysctls are not namespaced, and that kernel is
@@ -1845,7 +1862,9 @@ does. The scope is used only when both hold:
 Otherwise, or when `systemd-run` cannot start the scope, the VM starts the old way and apply
 warns why; the limit is never a reason not to start the VM. A running VM is not moved: restart it
 (`lever stop`, then `lever up`) to get the limit; until then each bring-up warns that the running
-VM's QEMU is outside such a scope. `lever provision` does not read `lever.yaml`, so a VM it
+VM's QEMU is outside such a scope. After an upgrade that one restart also brings `no-kvmapf`: the
+bring-up reboots the guest once more by itself to apply it (see [what needs a
+reboot](#what-needs-a-reboot)). `lever provision` does not read `lever.yaml`, so a VM it
 starts always gets the scope when the host can give one. `host_swap: true` in `lever.yaml` starts it the
 old way without the warning. A host with no swap device (`/proc/swaps` lists none) starts it the
 old way silently, and doctor does not warn there. On macOS nothing changes.
@@ -1919,7 +1938,7 @@ driver).
 ## Upgrading lever
 
 1. Pull and rebuild: `cd lever_to && make all` (the host `lever`, `lever-tool-github`,
-   `lever-tool-fizzy`, `lever-tool-whisper` and `lever-tool-tts`), and if the agent-side binaries changed, rebuild the agent image
+   `lever-tool-whisper` and `lever-tool-tts`), and if the agent-side binaries changed, rebuild the agent image
    (`make lever-image`, or `make lever-image-bins` + your instance's own image build), then
    `lever apply` to load it (or re-save it over the `image_tar` archive on a Docker-less host,
    then `lever apply`). The manager runs a new image only after

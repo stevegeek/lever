@@ -40,18 +40,6 @@ builds:
     goos: [darwin, linux]
     goarch: [amd64, arm64]
 
-  - id: lever-tool-fizzy
-    main: ./cmd/lever-tool-fizzy
-    binary: lever-tool-fizzy
-    env:
-      - CGO_ENABLED=0
-    flags:
-      - -trimpath
-    ldflags:
-      - -s -w -X main.Version={{ .Version }}
-    goos: [darwin, linux]
-    goarch: [amd64, arm64]
-
   - id: lever-tool-whisper
     main: ./cmd/lever-tool-whisper
     binary: lever-tool-whisper
@@ -126,7 +114,6 @@ homebrew_casks:
     binaries:
       - lever
       - lever-tool-github
-      - lever-tool-fizzy
       - lever-tool-whisper
       - lever-tool-tts
     caveats: |
@@ -140,7 +127,7 @@ homebrew_casks:
         # to run the quarantined copies Homebrew downloads on macOS.
         install: |
           if OS.mac?
-            %w[lever lever-tool-github lever-tool-fizzy lever-tool-whisper lever-tool-tts].each do |bin|
+            %w[lever lever-tool-github lever-tool-whisper lever-tool-tts].each do |bin|
               system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/#{bin}"]
             end
           end

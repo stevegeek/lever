@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -806,7 +807,9 @@ func TestRemoteAwaitStampTimesOut(t *testing.T) {
 	}
 	rc := &remoteController{state: st, version: "v-test", cfgHash: func() string { return "hash-test" },
 		startTimeout: 50 * time.Millisecond, startInterval: 5 * time.Millisecond}
-	testutil.WantErrContaining(t, rc.awaitStamp(context.Background(), 4242, "hash-test"), "remote.pid")
+	err := rc.awaitStamp(context.Background(), 4242, "hash-test")
+	testutil.WantErrContaining(t, err, "remote.pid")
+	testutil.WantErrIs(t, err, errRemoteProxyNotRecorded)
 	if _, serr := os.Stat(st.RemoteStamp()); serr == nil {
 		t.Fatal("apply wrote a stamp for a proxy that never wrote its pid file")
 	}
@@ -816,9 +819,53 @@ func TestRemoteAwaitStampTimesOut(t *testing.T) {
 	if err := st.WriteRemoteStamp("v-test", "hash-edited"); err != nil {
 		t.Fatal(err)
 	}
-	testutil.WantErrContaining(t, rc.awaitStamp(context.Background(), 4242, "hash-test"), "has not stamped")
+	err = rc.awaitStamp(context.Background(), 4242, "hash-test")
+	testutil.WantErrContaining(t, err, "has not stamped")
+	if errors.Is(err, errRemoteProxyNotRecorded) {
+		t.Fatal("a proxy that recorded itself but stamped another config is only a warning")
+	}
 	if !st.RemoteStampMatches("v-test", "hash-edited") {
 		t.Fatal("apply overwrote the proxy's own stamp")
+	}
+}
+
+// TestRemoteControllerStartFailsWhenAnotherProcessServes: the dial can reach
+// a process other than the new proxy (one an older run leaked) before the
+// child fails its bind. A child that never records itself in remote.pid
+// fails the step, and is ended, instead of a warning over a proxy that may
+// enforce another config.
+func TestRemoteControllerStartFailsWhenAnotherProcessServes(t *testing.T) {
+	dir := t.TempDir()
+	st := state.ForConfig(dir)
+	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pidFile := filepath.Join(dir, "child.pid")
+	self := filepath.Join(dir, "stand-in")
+	if err := os.WriteFile(self, []byte("#!/bin/sh\necho $$ > "+pidFile+"\nexec sleep 30\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	rc := shortenRemoteProxyStartWait(&remoteController{state: st, configPath: filepath.Join(dir, "lever.yaml"),
+		port: ln.Addr().(*net.TCPAddr).Port, version: "v-test", cfgHash: func() string { return "hash-test" }, selfExe: self, stateInTree: outsideTree})
+	rc.startTimeout = 500 * time.Millisecond
+	err = rc.Start(context.Background())
+	testutil.WantErrIs(t, err, errRemoteProxyNotRecorded)
+	raw, rerr := os.ReadFile(pidFile)
+	if rerr != nil {
+		t.Fatalf("the stand-in never ran: %v", rerr)
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if pid <= 0 {
+		t.Fatalf("stand-in pid %q", raw)
+	}
+	if kerr := syscall.Kill(pid, 0); !errors.Is(kerr, syscall.ESRCH) {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+		t.Fatalf("the child that never recorded itself was left running (kill 0: %v)", kerr)
 	}
 }
 

@@ -270,7 +270,7 @@ func (g *gate) serveChatPage(w http.ResponseWriter, r *http.Request, line *Audit
 		g.serveOperatorView(w, r, line, v)
 		return true
 	}
-	if p == newConvPath {
+	if p == newConvPath || p == newConvStatusPath {
 		g.serveNewConversation(w, r, line, v)
 		return true
 	}

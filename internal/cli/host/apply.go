@@ -219,13 +219,24 @@ func (rc *remoteController) Start(ctx context.Context) error {
 	if err := rc.awaitListening(ctx, cmd); err != nil {
 		return err
 	}
-	// Best-effort: a proxy with no matching stamp costs the next bring-up a
-	// restart, never a stale process kept alive.
+	// A proxy with no matching stamp costs the next bring-up a restart, never
+	// a stale process kept alive, so only a warning. A child that never wrote
+	// remote.pid never bound the port: what answered the dial is another
+	// process, which may enforce another config. With the state directory
+	// inside the tree remote.pid is the agents' to write, so it decides
+	// nothing there.
 	if err := rc.awaitStamp(ctx, cmd.Process.Pid, hash); err != nil {
+		if errors.Is(err, errRemoteProxyNotRecorded) && !rc.inTree() {
+			_ = cmd.Process.Kill()
+			_, _ = cmd.Process.Wait()
+			return fmt.Errorf("lever remote serve: %w; another process may hold %s (see `lever doctor`)", err, rc.addr())
+		}
 		rc.log.printf("lever: the remote proxy runs, but it did not stamp this config (%v) — the next bring-up restarts it", err)
 	}
 	return nil
 }
+
+var errRemoteProxyNotRecorded = errors.New("the new proxy never recorded itself in remote.pid, so it is not the one serving the port")
 
 // awaitStamp waits until remote.pid names pid and the proxy has stamped the
 // config apply converged. The proxy is the stamp's only writer: it records
@@ -235,6 +246,7 @@ func (rc *remoteController) awaitStamp(ctx context.Context, pid int, hash string
 	timeout := cmp.Or(rc.startTimeout, remoteProxyStartTimeout)
 	interval := cmp.Or(rc.startInterval, remoteProxyStartInterval)
 	var last error
+	recorded := false
 	err := retry.Until(ctx, int(timeout/interval)+1, interval, func() (bool, error) {
 		got, err := state.ReadPID(rc.state.RemotePID())
 		switch {
@@ -243,6 +255,7 @@ func (rc *remoteController) awaitStamp(ctx context.Context, pid int, hash string
 		case got != pid:
 			last = fmt.Errorf("%s names pid %d, not the new proxy %d", rc.state.RemotePID(), got, pid)
 		case !rc.state.RemoteStampMatches(rc.version, hash):
+			recorded = true
 			last = errors.New("the proxy has not stamped the remote config this apply converged")
 		default:
 			return true, nil
@@ -250,6 +263,9 @@ func (rc *remoteController) awaitStamp(ctx context.Context, pid int, hash string
 		return false, nil
 	})
 	if errors.Is(err, retry.ErrExhausted) {
+		if !recorded {
+			return fmt.Errorf("after %s: %w: %w", timeout, errRemoteProxyNotRecorded, last)
+		}
 		return fmt.Errorf("after %s: %w", timeout, last)
 	}
 	return err

@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/stevegeek/lever/internal/egress"
+	"github.com/stevegeek/lever/internal/termsafe"
 )
 
 const egressChain = egress.Chain
@@ -34,7 +37,7 @@ const egressChain = egress.Chain
 //
 // Lima only: kernel.* sysctls are not namespaced, and an OrbStack machine
 // shares OrbStack's one kernel (the caller gates). Nothing here reboots the
-// guest; the caller reports what waits for a reboot.
+// guest; the caller decides what to do about what waits for a reboot.
 
 const (
 	CrashSysctlPath   = "/etc/sysctl.d/99-lever-crash-recovery.conf"
@@ -75,6 +78,11 @@ var CrashSysctls = []struct{ Key, Value string }{
 type GuestReport struct {
 	Reboot []string
 	Warn   []string
+	// Cmdline lists the kernel command-line parameters that the guest's
+	// grub.cfg already carries but its running kernel does not: one reboot
+	// applies them. Only lever's own parameters are accepted, so a guest
+	// cannot put anything else in a host message.
+	Cmdline []string
 }
 
 func parseGuestReport(out string) GuestReport {
@@ -82,13 +90,60 @@ func parseGuestReport(out string) GuestReport {
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
 		switch {
+		case strings.HasPrefix(line, "cmdline-staged: "):
+			for _, p := range strings.Fields(strings.TrimPrefix(line, "cmdline-staged: ")) {
+				if slices.Contains(crashCmdline(NoKVMAPFArch), p) && !slices.Contains(r.Cmdline, p) {
+					r.Cmdline = append(r.Cmdline, p)
+				}
+			}
 		case strings.HasPrefix(line, "reboot: "):
-			r.Reboot = append(r.Reboot, strings.TrimPrefix(line, "reboot: "))
+			r.Reboot = append(r.Reboot, SafeLine(strings.TrimPrefix(line, "reboot: "), reportLineMax))
 		case strings.HasPrefix(line, "warn: "):
-			r.Warn = append(r.Warn, strings.TrimPrefix(line, "warn: "))
+			r.Warn = append(r.Warn, SafeLine(strings.TrimPrefix(line, "warn: "), reportLineMax))
 		}
 	}
+	r.Reboot = CapReport(r.Reboot, "reboot-pending lines")
+	r.Warn = CapReport(r.Warn, "warnings")
 	return r
+}
+
+// The guest writes Reboot and Warn, and the host prints each one, so both
+// the length of a line and the number of lines are bounded.
+const (
+	reportLineMax  = 300
+	reportLinesMax = 16
+)
+
+// SafeLine is one line of guest output made safe to print (termsafe.Sanitize),
+// trimmed and cut to at most max runes, "…" marking a cut. Only the first
+// 4*max bytes are read, so a guest cannot make the host scan an unbounded
+// line. It is not in termsafe because that package is in-jail code.
+func SafeLine(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	cut := len(s) > 4*max
+	if cut {
+		s = s[:4*max]
+	}
+	s = strings.TrimSpace(termsafe.Sanitize(strings.ToValidUTF8(s, "\uFFFD")))
+	if utf8.RuneCountInString(s) > max {
+		s, cut = string([]rune(s)[:max]), true
+	}
+	if cut {
+		s += "…"
+	}
+	return s
+}
+
+// CapReport keeps at most reportLinesMax of lines and says how many more
+// there were.
+func CapReport(lines []string, what string) []string {
+	if len(lines) <= reportLinesMax {
+		return lines
+	}
+	n := len(lines) - reportLinesMax
+	return append(lines[:reportLinesMax:reportLinesMax], fmt.Sprintf("and %d more guest %s not shown", n, what))
 }
 
 // crashPaths is a test seam.
@@ -206,6 +261,9 @@ fi
 missing=
 for p in $params; do grep -qwF -- "$p" %[2]s 2>/dev/null || missing="${missing:+$missing }$p"; done
 if [ -n "$missing" ]; then echo "reboot: the kernel command line gets $missing at the next boot"; fi
+staged=
+for p in $missing; do grep -qwF -- "$p" %[1]s 2>/dev/null && staged="${staged:+$staged }$p"; done
+if [ -n "$staged" ]; then echo "cmdline-staged: $staged"; fi
 `, q(p.GrubCfg), q(p.Cmdline))
 	fmt.Fprintf(&b, "if efi_pstore_active %s; then echo %s; fi\n", q(p.SysModule),
 		q("reboot: the EFI pstore backend is still registered (built in, or efi_pstore could not be unloaded); it is off from the next boot"))
@@ -222,7 +280,7 @@ func (g Guest) EnsureCrashRecovery(ctx context.Context) (GuestReport, error) {
 	res, err := g.RootRun(ctx, "bash", "-c", crashRecoveryScript(realCrashPaths))
 	if err != nil || res.Code != 0 {
 		if err == nil {
-			err = fmt.Errorf("exit %d: %s", res.Code, strings.TrimSpace(res.Stderr))
+			err = fmt.Errorf("exit %d: %s", res.Code, quoteStderr(res))
 		}
 		return GuestReport{}, fmt.Errorf("guest crash recovery (sysctls, EFI pstore off): %w", err)
 	}
@@ -404,7 +462,7 @@ func (g Guest) EnsureGuestKernel(ctx context.Context, kernel string, opts Kernel
 	res, err := g.RootRun(ctx, "bash", "-c", guestKernelScript(kernel, opts, realKernelPaths))
 	if err != nil || res.Code != 0 {
 		if err == nil {
-			err = fmt.Errorf("exit %d: %s", res.Code, strings.TrimSpace(res.Stderr))
+			err = fmt.Errorf("exit %d: %s", res.Code, quoteStderr(res))
 		}
 		return KernelReport{}, fmt.Errorf("guest kernel (%s): %w", kernel, err)
 	}

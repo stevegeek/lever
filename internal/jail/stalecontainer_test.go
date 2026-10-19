@@ -3,6 +3,8 @@ package jail
 import (
 	"context"
 	"errors"
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/stevegeek/lever/internal/proc"
@@ -78,5 +80,44 @@ func TestRemoveArgs(t *testing.T) {
 	}
 	if err := RemoveStoppedContainer(context.Background(), failRunner{"Error: cannot remove container as it is running"}, testID); err == nil {
 		t.Fatal("podman's refusal must come back")
+	}
+}
+
+// bigErrRunner fails every call with stderr of the given size and records the
+// output cap each call was given.
+type bigErrRunner struct {
+	stderr string
+	limits []int
+}
+
+func (b *bigErrRunner) Run(ctx context.Context, _ map[string]string, _ string, _ ...string) (proc.Result, error) {
+	n, _ := proc.OutputLimit(ctx)
+	b.limits = append(b.limits, n)
+	return proc.Result{Code: 125, Stderr: b.stderr}, errors.New("exit status 125")
+}
+func (b *bigErrRunner) RunIn(ctx context.Context, _ string, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return b.Run(ctx, env, name, args...)
+}
+func (b *bigErrRunner) RunStdin(ctx context.Context, _ io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return b.Run(ctx, env, name, args...)
+}
+
+func TestContainerStateErrorsAreBounded(t *testing.T) {
+	b := &bigErrRunner{stderr: strings.Repeat("Error: \x1b[31mboom\x1b[0m "+strings.Repeat("x", 1000)+"\n", 200)}
+	_, ierr := InspectContainerState(context.Background(), b, "proj--m")
+	rerr := RemoveStoppedContainer(context.Background(), b, testID)
+	for _, err := range []error{ierr, rerr} {
+		if err == nil {
+			t.Fatal("podman's failure must come back")
+		}
+		if len(err.Error()) > podmanErrTailMax+200 {
+			t.Errorf("error is %d bytes, want it bounded", len(err.Error()))
+		}
+		if strings.ContainsRune(err.Error(), '\x1b') {
+			t.Errorf("error keeps an escape sequence: %q", err.Error()[:80])
+		}
+	}
+	if len(b.limits) != 2 || b.limits[0] != containerStateOutputLimit || b.limits[1] != containerStateOutputLimit {
+		t.Fatalf("output caps %v, want %d on each call", b.limits, containerStateOutputLimit)
 	}
 }

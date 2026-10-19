@@ -2,6 +2,7 @@ package apply
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/fsutil"
 	"github.com/stevegeek/lever/internal/hubauth"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/progress"
@@ -117,6 +119,9 @@ type run struct {
 	// than tolerating a spent latch (ErrBootstrapLatched); start-manager's create
 	// path depends on it.
 	minted bool
+	// deferMint: the mint step left the ticket to the create, which mints and
+	// stages it once podman shows the discarded manager's container gone.
+	deferMint bool
 	// progress is the start-manager progress line; nil outside that window.
 	progress *Progress
 	// fresh is PlanOpts.Fresh: discard any present manager record at
@@ -160,10 +165,18 @@ func (r *run) subjectName() string {
 // treeDir/.lever/bootstrap.json (0600), where lever-agent boot reads it. It is
 // the only staging path, shared by the mint step and Deps.RearmBootstrap.
 func StageBootstrapMaterial(treeDir string, m BootstrapMaterial) error {
+	raw, err := json.Marshal(m)
+	if err != nil {
+		return fmt.Errorf("stage bootstrap: marshal: %w", err)
+	}
 	// treeDir is the mount point, the one component the agent cannot replace.
-	// Everything below it is agent-writable, so wire.Stage refuses to follow a
-	// symlink planted at .lever.
-	return wire.Stage(treeDir, ".lever", m)
+	// Everything below it is agent-writable, so the write refuses a symlink at
+	// .lever and replaces bootstrap.json by rename rather than opening
+	// whatever the agent left there.
+	if err := fsutil.ReplaceInTreeNoLinks(treeDir, ".lever/bootstrap.json", raw, 0o700, 0o600); err != nil {
+		return fmt.Errorf("stage bootstrap: %w", err)
+	}
+	return nil
 }
 
 // Deps are the executor's collaborators, injected so Run is testable offline.
@@ -462,7 +475,9 @@ type Deps struct {
 	// only a container removal releases (resumeClearingStopClaim), and for
 	// telling a running record whose container is gone or exited
 	// (containerGoneUnder). nil: lever removes nothing and names the manual
-	// fix, and keeps such a record for the gate to refuse.
+	// fix, and keeps such a record for the gate to refuse. The fresh start of
+	// a discarded manager needs it (confirmManagerContainerGone) and refuses
+	// without it.
 	StaleContainer StaleContainerOps
 	// StopClaimRetry bounds the wait for the hub to release that claim; the
 	// interval doubles up to stopClaimMaxInterval. Zero takes the default.
@@ -476,6 +491,10 @@ type Deps struct {
 	// ManagerPhaseWait bounds the wait for a suspend or stop of the manager to
 	// read in the hub. Zero takes the default.
 	ManagerPhaseWait RetryBudget
+	// ContainerGoneRetry bounds the wait for podman to show a discarded
+	// manager's container gone (confirmManagerContainerGone). Zero takes the
+	// default.
+	ContainerGoneRetry RetryBudget
 }
 
 func (d Deps) check() error {
@@ -1144,11 +1163,19 @@ func (r *run) settleProject(ctx context.Context, jp string) error {
 //
 // The ticket lands in the tree, which a running manager reads, so a record
 // start-manager would refuse to keep (Deps.VerifyAgentRole) is refused here,
-// before a ticket exists for it to enrol with. Under --fresh the record is
-// discarded, so its role does not matter; a broker-only plan has no hub to
-// ask and starts no manager.
+// before a ticket exists for it to enrol with. A broker-only plan has no hub
+// to ask and starts no manager.
+//
+// Under --fresh nothing is minted here: the manager being discarded may still
+// run, and it shares the new manager's CN, so a ticket in the tree now could
+// be redeemed by it. The create mints and stages the ticket once podman shows
+// that container gone (ensureFreshBootstrap).
 func (r *run) mintManagerBootstrap(ctx context.Context, s Step) error {
-	if !r.fresh && !r.brokerOnly {
+	if r.fresh && !r.brokerOnly {
+		r.deferMint = true
+		return nil
+	}
+	if !r.brokerOnly {
 		jp := JailPath(r.app.Tree, r.app.Tree, r.d.JailMount)
 		if err := r.d.VerifyAgentRole(ctx, path.Base(jp), r.app.Name); err != nil {
 			return fmt.Errorf("mint-manager-bootstrap: no enrolment ticket was staged: %w", err)
@@ -1184,7 +1211,7 @@ func (r *run) startManager(ctx context.Context, _ Step) error {
 	_, err := EnsureManager(ctx, r.app, r.d, ManagerRequest{
 		Intent: intent, Subject: "start-manager",
 		Attach: r.attach, FreshWithoutConversation: r.freshNoConv,
-		TicketStaged: r.minted, BrokerOnline: r.brokerOnline,
+		TicketStaged: r.minted, TicketDeferred: r.deferMint, BrokerOnline: r.brokerOnline,
 	})
 	return err
 }
@@ -2251,14 +2278,81 @@ func (r *run) recoverDeleteAndCreate(ctx context.Context, jp string, opts scion.
 // before a manager start or resume: a no-op when this run minted it, otherwise
 // RearmBootstrap re-arms the latch and stages it, once per run. A failed re-arm
 // is a hard error: a manager without enrolable bootstrap would only crash-loop.
+//
+// After a discard (--fresh, or the fresh start of a manager with no
+// conversation) nothing is staged until podman shows the old container gone.
+// A deferred mint is tried on the live latch first, so a latch this run's
+// broker start armed is not spent on a needless restart.
 func (r *run) ensureFreshBootstrap(ctx context.Context) error {
 	if r.minted {
 		return nil
 	}
+	if r.fresh || r.unattended {
+		if err := r.confirmManagerContainerGone(ctx); err != nil {
+			return err
+		}
+	}
+	if r.deferMint {
+		m, err := r.d.MintManagerBootstrap(ctx)
+		switch {
+		case err == nil:
+			if err := StageBootstrapMaterial(r.app.Tree, m); err != nil {
+				return fmt.Errorf("%s: staging the enrolment ticket: %w", r.subjectName(), err)
+			}
+			r.minted = true
+			return nil
+		case !errors.Is(err, ErrBootstrapLatched):
+			return fmt.Errorf("%s: minting the enrolment ticket: %w", r.subjectName(), err)
+		}
+	}
 	if err := r.d.RearmBootstrap(ctx); err != nil {
-		return fmt.Errorf("start-manager: re-arming the broker's spent bootstrap latch: %w", err)
+		return fmt.Errorf("%s: re-arming the broker's spent bootstrap latch: %w", r.subjectName(), err)
 	}
 	r.minted = true
+	return nil
+}
+
+// defaultContainerGoneRetry bounds the wait for a discarded manager's
+// container to go. scion removes it before its delete returns, so this only
+// waits out a removal still under way.
+var defaultContainerGoneRetry = RetryBudget{Attempts: 30, Interval: time.Second}
+
+// confirmManagerContainerGone waits until podman knows no container by the
+// manager's name, and fails closed when it cannot tell. Only podman's answer
+// counts: the hub can finalize a delete whose container its broker never
+// removed (a forced delete, a broker that could not find it). A container
+// with no process in it is removed by the id inspected, never forced, so one
+// that starts again is left alone and the wait runs out.
+func (r *run) confirmManagerContainerGone(ctx context.Context) error {
+	ops := r.d.StaleContainer
+	if ops == nil {
+		return fmt.Errorf("%s: internal error: podman in the jail is not wired, so lever cannot confirm the previous manager's container is gone; no enrolment ticket was staged and no manager was created", r.subjectName())
+	}
+	jp := JailPath(r.app.Tree, r.app.Tree, r.d.JailMount)
+	ref := jail.ContainerName(path.Base(jp), r.app.Name)
+	last := "not read"
+	b := r.d.ContainerGoneRetry.or(defaultContainerGoneRetry)
+	err := wait.For(ctx, b.spec("the previous manager's container to be removed"), func(ctx context.Context) wait.Result {
+		st, err := ops.State(ctx, ref)
+		switch {
+		case errors.Is(err, jail.ErrNoContainer):
+			return wait.Ready()
+		case err != nil:
+			last = "unreadable: " + err.Error()
+			return wait.NotYetErr(err)
+		}
+		last = "state " + st.Status
+		if st.Removable() {
+			if rerr := ops.Remove(ctx, st.ID); rerr != nil {
+				last += ", removal failed: " + rerr.Error()
+			}
+		}
+		return wait.NotYet(last)
+	})
+	if err != nil {
+		return fmt.Errorf("%s: lever could not confirm that the previous manager's container %s is gone (podman: %s), so it staged no enrolment ticket and created no manager: that container mounts the tree and could redeem the ticket. "+
+			"The manager record is already gone (any conversation was backed up before the delete). Once podman no longer lists the container (`podman rm -f %s` in the jail removes one that keeps running), run `lever up --fresh` again: %w", r.subjectName(), ref, termsafe.Sanitize(last), ref, err)
+	}
 	return nil
 }
 

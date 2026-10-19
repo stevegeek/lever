@@ -135,6 +135,15 @@ The limits are set when the manager is created: a change reaches it at the next
 `lever up --fresh --keep-conversation` (it backs the conversation up and resumes the new manager
 on it).
 
+A guest panic that reads "Host injected async #PF in kernel mode", or guest tasks stuck in
+`kvm_async_pf_task_wait_schedule`, has another cause: the host swapped the VM's memory out, and no
+limit inside the guest prevents that. Since 0.50.0 lever addresses it on its own: it starts the VM
+outside host swap on a Linux host and boots x86_64 guests with `no-kvmapf` (see [keeping the VM
+out of host swap](/operations/#keeping-the-vm-out-of-host-swap)). From 0.51.0 one `lever stop`,
+then `lever up`, applies `no-kvmapf` to a guest that does not have it yet: that bring-up reboots
+the guest once. Keep `manager.resources` set anyway on a nested-virt dev instance: it is what keeps
+a guest out-of-memory kill inside the manager's container.
+
 ## A small-machine profile
 
 For a 2-core host with 8 GB of RAM and an SSD, running a manager and one or two workers (Lima):

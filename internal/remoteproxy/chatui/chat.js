@@ -39,8 +39,8 @@ import {
   LIST_MS,
   MAX_MESSAGE,
   NEW_CONVERSATION_PATH,
-  NEW_CONVERSATION_DOWN_POLLS,
   NEW_CONVERSATION_POLLS,
+  NEW_CONVERSATION_STATUS_PATH,
   NOT_SHOWN,
   NOT_YET,
   WAKE_POLLS,
@@ -63,7 +63,9 @@ import {
   messageText,
   newConversationAsk,
   newConversationForceAsk,
+  newConversationLostText,
   newConversationOffered,
+  newConversationOutcome,
   newConversationText,
   nextCursor,
   oneLine,
@@ -179,6 +181,7 @@ let activityOpen = false; // the Recent activity panel is open
 let activitySeq = 0; // counts its reads and closes
 let waking = ''; // the agent a send is waking ('' = none)
 let renewing = ''; // the agent a new conversation is starting ('' = none)
+let renewed = null; // {name, text, error}: how the last one ended, until a send
 let held = false; // Send rests after a note (see hold)
 let stream = null;
 let streamFailed = false;
@@ -762,7 +765,8 @@ function applyView(a) {
   showState(chipText(a), v.input);
   el.text.disabled = !v.input;
   syncSend();
-  showNote(waking === a.name ? `waking ${a.name}…` : renewing === a.name ? `starting ${a.name} on a new conversation…` : v.note);
+  const after = renewed && renewed.name === a.name ? renewed.text : '';
+  showNote(waking === a.name ? `waking ${a.name}…` : renewing === a.name ? `starting ${a.name} on a new conversation…` : v.note || after);
   syncNewConversation(a);
   el.ask.hidden = !v.ask;
   setText(el.ask, v.ask ? `Ask the manager to start ${a.name}` : '');
@@ -1603,6 +1607,11 @@ function openChat(name) {
   closeActivity();
   syncActivity();
   showError('');
+  // A failure that ended while another chat was open is shown once here.
+  if (renewed && renewed.name === a.name && renewed.error) {
+    showError(renewed.error);
+    renewed = null;
+  }
   renderRows();
   if (a.access !== 'message') {
     chat = null;
@@ -1752,6 +1761,7 @@ async function send() {
   sending = true;
   syncSend();
   showError('');
+  renewed = null;
   const out = await deliver(c, text);
   sending = false;
   syncSend();
@@ -1901,14 +1911,16 @@ function syncNewConversation(a) {
   el.newconv.disabled = !!renewing;
 }
 
-// The manager's new conversation: asked twice when it is mid-turn, then the
-// list is read until it runs again. The draft stays in the box throughout.
+// The manager's new conversation: asked twice when it is mid-turn, then
+// followed by its own status until lever says how it ended. The draft stays
+// in the box throughout.
 async function newConversation() {
   const c = chat;
   if (!c || renewing) return;
   const name = c.name;
   if (!window.confirm(newConversationAsk(name))) return;
   showError('');
+  renewed = null;
   renewing = name;
   showWakeView();
   try {
@@ -1922,22 +1934,18 @@ async function newConversation() {
       showError(newConversationText(res.status, res.body, name));
       return;
     }
-    let down = false;
-    for (let i = 0; i < NEW_CONVERSATION_POLLS; i++) {
+    const id = res.body && typeof res.body === 'object' && typeof res.body.id === 'string' ? res.body.id : '';
+    let out = null;
+    for (let i = 0; i < NEW_CONVERSATION_POLLS && !out; i++) {
       await sleep(WAKE_POLL_MS);
-      const l = await readList();
-      if (l.error) continue;
-      applyRoster(l);
-      const a = l.agents.find((x) => x.name === name);
-      if (!a) return;
-      if (a.state !== 'running' && a.state !== 'unknown') down = true;
-      if (down && a.state === 'running') return;
-      // lever's own checks refuse after the page was answered (a turn that
-      // started, a failed backup): the manager then never goes down.
-      if (!down && i + 1 >= NEW_CONVERSATION_DOWN_POLLS) break;
+      const s = await api(NEW_CONVERSATION_STATUS_PATH, { method: 'POST', body: JSON.stringify({ id }) });
+      out = newConversationOutcome(s.status, s.body, name);
     }
-    if (chat && chat.name === name) {
-      showError(down ? `${name} is not running again yet; \`lever doctor\` on the host shows why.` : `${name} has not gone down yet: lever may have refused, or may still be on its way. \`lever conversation list\` and .lever-state/logs/conversation-new.log on the host say which.`);
+    if (!out) out = { note: newConversationLostText(name) };
+    if (out.error && chat && chat.name === name) {
+      showError(out.error);
+    } else {
+      renewed = { name, text: out.note || '', error: out.error || '' };
     }
   } finally {
     renewing = '';

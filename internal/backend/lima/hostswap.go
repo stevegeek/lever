@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/proc"
 )
 
@@ -98,8 +99,12 @@ func briefErr(err error, res proc.Result) string {
 		s = err.Error()
 	}
 	s, _, _ = strings.Cut(s, "\n")
-	return s
+	return guest.SafeLine(s, briefErrMax)
 }
+
+// briefErrMax bounds the stderr line a warning quotes: limactl relays text
+// from the guest.
+const briefErrMax = 300
 
 // scopeNotStarted reports whether systemd-run itself failed, before it ran
 // limactl: a line of its own at the start of stderr. Only the first line
@@ -140,15 +145,15 @@ func (l *Lima) startVM(ctx context.Context, hostSwap bool, instDir string, warn 
 		}
 	}
 	if !scoped {
-		res, err := l.Runner().Run(ctx, nil, start[0], start[1:]...)
+		res, err := l.Runner().Run(guest.LimitOutput(ctx), nil, start[0], start[1:]...)
 		return exitErr(err, res)
 	}
 	argv := append(NoSwapScopePrefix(l.Machine()), start...)
-	res, err := l.Runner().Run(ctx, nil, argv[0], argv[1:]...)
+	res, err := l.Runner().Run(guest.LimitOutput(ctx), nil, argv[0], argv[1:]...)
 	err = exitErr(err, res)
 	if err != nil && scopeNotStarted(res) {
 		warn("jail: warning: starting the VM without the host swap limit: systemd-run could not start the scope (%s); the host can swap the VM's memory out", briefErr(err, res))
-		res, err = l.Runner().Run(ctx, nil, start[0], start[1:]...)
+		res, err = l.Runner().Run(guest.LimitOutput(ctx), nil, start[0], start[1:]...)
 		return exitErr(err, res)
 	}
 	if err == nil {

@@ -118,9 +118,10 @@ type Config struct {
 	Wake func(ctx context.Context, login, tier, worker string) error
 	// NewConversation backs the manager's conversation up and starts it again
 	// in a fresh session, for an operator login (newconv.go); force interrupts
-	// a turn. A refusal that changed nothing is ErrConversationBusy or
+	// a turn. It returns the backup's id, "" when the home held no
+	// conversation. A refusal that changed nothing is ErrConversationBusy or
 	// ErrConversationLocked. Nil answers 503 and the page offers no action.
-	NewConversation func(ctx context.Context, force bool) error
+	NewConversation func(ctx context.Context, force bool) (backup string, err error)
 	// MatchAgentMessages reports which agent rows of a contact's DM the
 	// broker's agent ledger recorded. A contact sees only those agent rows;
 	// any error hides every agent row. Nil: no contact answer is rewritten.
@@ -696,6 +697,7 @@ type gate struct {
 	// revokeEvery overrides revokePoll (tests).
 	revokeEvery time.Duration
 	newConvs    wakeLimiter
+	newConv     newConvOp
 	// newConvWaitFor overrides newConvAnswerWait (tests).
 	newConvWaitFor time.Duration
 }

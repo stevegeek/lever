@@ -62,8 +62,7 @@ func (b *Broker) JailHandler() http.Handler {
 			b.audit("gateway", "", "error", err.Error())
 			continue
 		}
-		prefix := "/mcp/" + name
-		mux.Handle(prefix+"/", http.StripPrefix(prefix, withBodyDeadline(b.timeouts.Body, handler)))
+		mux.Handle("/mcp/"+name+"/", withBodyDeadline(b.timeouts.Body, handler))
 	}
 	if b.apiKey != nil {
 		mux.Handle("/llm/", http.StripPrefix("/llm", withBodyDeadline(b.timeouts.Body, b.llmProxyHandler())))

@@ -14,7 +14,10 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/stevegeek/lever/internal/imageref"
@@ -44,7 +47,51 @@ func (g Guest) UserRun(ctx context.Context, args ...string) (proc.Result, error)
 // alias each other's argv through a shared backing array.
 func (g Guest) prefixRun(ctx context.Context, prefix []string, args ...string) (proc.Result, error) {
 	argv := append(append([]string{}, prefix[1:]...), args...)
-	return g.Host.Run(ctx, nil, prefix[0], argv...)
+	return g.Host.Run(LimitOutput(ctx), nil, prefix[0], argv...)
+}
+
+// OutputLimit caps each of stdout and stderr of a guest command. Guest root
+// writes that output, and the host holds all of it in memory, so a hostile
+// guest could otherwise stream without end. Real output is far below it.
+const OutputLimit = 8 << 20
+
+// LimitOutput returns ctx with OutputLimit on every command run under it,
+// keeping a smaller cap ctx already carries. A command past it is killed and
+// fails with proc.ErrOutputLimit.
+func LimitOutput(ctx context.Context) context.Context {
+	if n, ok := proc.OutputLimit(ctx); ok && n <= OutputLimit {
+		return ctx
+	}
+	return proc.WithOutputLimit(ctx, OutputLimit)
+}
+
+const stderrMax = 500
+
+func quoteStderr(res proc.Result) string {
+	return SafeLine(strings.TrimSpace(res.Stderr), stderrMax)
+}
+
+// runUserRE admits the names a Lima or OrbStack guest user can have (a
+// lowercase POSIX name, or a macOS short name with capitals or dots) and
+// nothing a shell, a path or /etc/subuid treats specially: the run user is
+// written into root scripts, file names and transport argv.
+var runUserRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9._-]{0,31}$`)
+
+// ValidRunUser refuses a run user name or uid the guest reported in any form
+// other than a plain user name and a canonical decimal uid, and uid 0: the
+// rootless runtimes and their user namespaces assume an unprivileged user.
+func ValidRunUser(user, uid string) error {
+	if !runUserRE.MatchString(user) {
+		return fmt.Errorf("the guest reported run user %q, which is not a plain user name", SafeLine(user, 64))
+	}
+	n, err := strconv.ParseUint(uid, 10, 32)
+	if err != nil || strconv.FormatUint(n, 10) != uid || n == math.MaxUint32 {
+		return fmt.Errorf("the guest reported run uid %q, which is not a decimal uid", SafeLine(uid, 64))
+	}
+	if n == 0 {
+		return fmt.Errorf("the guest reported run user %s with uid 0; lever does not run the jail as root", user)
+	}
+	return nil
 }
 
 // pipeInto streams stdin into `<prefix> bash -c <script>`. Every host→guest
@@ -53,7 +100,7 @@ func (g Guest) prefixRun(ctx context.Context, prefix []string, args ...string) (
 // no run user can write to).
 func (g Guest) pipeInto(ctx context.Context, prefix []string, stdin io.Reader, script string) error {
 	argv := append(append([]string{}, prefix[1:]...), "bash", "-c", script)
-	_, err := g.Host.RunStdin(ctx, stdin, nil, prefix[0], argv...)
+	_, err := g.Host.RunStdin(LimitOutput(ctx), stdin, nil, prefix[0], argv...)
 	return err
 }
 
@@ -92,8 +139,10 @@ func (g Guest) EnsureRuntimes(ctx context.Context, runUser string) error {
 	// D-Bus interface intermittently hangs, so loginctl gets a short timeout
 	// and the fallback writes /var/lib/systemd/linger/<user> directly, the
 	// documented equivalent.
+	// A dot in the user name is a regexp wildcard to grep.
+	pat := strings.ReplaceAll(runUser, ".", `\.`)
 	if err := root(fmt.Sprintf(`grep -q '^%s:' /etc/subuid || echo '%s:100000:65536' >> /etc/subuid; grep -q '^%s:' /etc/subgid || echo '%s:100000:65536' >> /etc/subgid; timeout 8 loginctl enable-linger %s 2>/dev/null || { mkdir -p /var/lib/systemd/linger && : > /var/lib/systemd/linger/%s; }`,
-		runUser, runUser, runUser, runUser, runUser, runUser)); err != nil {
+		pat, runUser, pat, runUser, runUser, runUser)); err != nil {
 		return fmt.Errorf("subid/linger: %w", err)
 	}
 	// A guest may still run an unused rootless dockerd; stop and disable it.
@@ -156,7 +205,7 @@ func goarchOf(uname string) (string, error) {
 	case "x86_64", "amd64":
 		return "amd64", nil
 	default:
-		return "", fmt.Errorf("unrecognized guest architecture %q", u)
+		return "", fmt.Errorf("unrecognized guest architecture %q", SafeLine(u, 64))
 	}
 }
 

@@ -74,9 +74,9 @@ func (g Guest) EnsureHubAuth(ctx context.Context, spec types.HubAuth) (string, e
 		return "", fmt.Errorf("guest: remove the old login forwarder: %w", err)
 	}
 	argv := append(append([]string{}, g.RootPrefix[1:]...), "bash", "-c", installHubAuthKeyScript)
-	res, err := g.Host.RunStdin(ctx, bytes.NewReader(spec.PublicKeyPEM), nil, g.RootPrefix[0], argv...)
+	res, err := g.Host.RunStdin(LimitOutput(ctx), bytes.NewReader(spec.PublicKeyPEM), nil, g.RootPrefix[0], argv...)
 	if err != nil {
-		return "", fmt.Errorf("guest: install %s: %w: %s", HubAuthKeyPath, err, strings.TrimSpace(res.Stderr))
+		return "", fmt.Errorf("guest: install %s: %w: %s", HubAuthKeyPath, err, quoteStderr(res))
 	}
 	var restart []string
 	if strings.TrimSpace(res.Stdout) == "CHANGED" {

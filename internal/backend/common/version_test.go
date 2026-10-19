@@ -52,3 +52,12 @@ func TestVersionAtLeastErrors(t *testing.T) {
 		t.Fatalf("run failure: %v", err)
 	}
 }
+
+func TestVersionAtLeastBoundsTheOutputItQuotes(t *testing.T) {
+	f := proc.NewFakeRunner()
+	f.Script("tool version", proc.Result{Stdout: "\x1b]0;owned\x07" + strings.Repeat("v", 1<<20)})
+	_, got, err := VersionAtLeast(context.Background(), f, []string{"tool", "version"}, testVersionRe, 1, 0, 0)
+	if err == nil || len(err.Error()) > 4*versionOutMax+100 || len(got) > 4*versionOutMax || strings.ContainsAny(err.Error()+got, "\x1b\x07") {
+		t.Fatalf("got %d bytes, error %d bytes, or escapes kept", len(got), len(err.Error()))
+	}
+}

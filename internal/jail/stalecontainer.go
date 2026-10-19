@@ -34,6 +34,11 @@ func (s ContainerState) Removable() bool {
 
 var containerIDRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
+// containerStateOutputLimit caps podman's output for one inspect or rm. A
+// caller may poll these many times while the agent's container still exists,
+// and podman's real answer is one short line.
+const containerStateOutputLimit = 64 << 10
+
 // InspectContainerState reads ref's state from podman. It returns
 // ErrNoContainer when podman knows no such container, and refuses an answer
 // whose name is not ref, so a reference podman resolved some other way (an id
@@ -42,14 +47,14 @@ func InspectContainerState(ctx context.Context, r proc.Runner, ref string) (Cont
 	if err := checkRef(ref); err != nil {
 		return ContainerState{}, fmt.Errorf("inspecting container state: %w", err)
 	}
-	ctx, cancel := context.WithTimeout(ctx, containerStateTimeout)
+	ctx, cancel := context.WithTimeout(proc.WithOutputLimit(ctx, containerStateOutputLimit), containerStateTimeout)
 	defer cancel()
 	res, err := r.Run(ctx, nil, "podman", "inspect", "--type", "container", "--format", "{{.Id}} {{.Name}} {{.State.Status}} {{.State.Running}} {{.State.Paused}}", ref)
 	if err != nil {
 		if noSuchContainer(res.Stderr) {
 			return ContainerState{}, fmt.Errorf("inspecting container %s: %w", ref, ErrNoContainer)
 		}
-		return ContainerState{}, fmt.Errorf("inspecting container %s state: %w: %s", ref, err, strings.TrimSpace(res.Stderr))
+		return ContainerState{}, fmt.Errorf("inspecting container %s state: %w: %s", ref, err, podmanErrTail(res.Stderr))
 	}
 	f := strings.Fields(res.Stdout)
 	if len(f) != 5 || !containerIDRE.MatchString(f[0]) || f[1] != ref {
@@ -71,7 +76,7 @@ func RemoveStoppedContainer(ctx context.Context, r proc.Runner, id string) error
 	if !containerIDRE.MatchString(id) {
 		return fmt.Errorf("removing container: invalid container id %q", id)
 	}
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	ctx, cancel := context.WithTimeout(proc.WithOutputLimit(ctx, containerStateOutputLimit), 2*time.Minute)
 	defer cancel()
 	res, err := r.Run(ctx, nil, "podman", "rm", id)
 	if err != nil {

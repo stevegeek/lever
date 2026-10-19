@@ -206,7 +206,7 @@ func (g Guest) EnsureGuestProfile(ctx context.Context, profile string) (GuestRep
 	res, err := g.RootRun(ctx, "bash", "-c", guestProfileScript(profile, realProfilePaths))
 	if err != nil || res.Code != 0 {
 		if err == nil {
-			err = fmt.Errorf("exit %d: %s", res.Code, strings.TrimSpace(res.Stderr))
+			err = fmt.Errorf("exit %d: %s", res.Code, quoteStderr(res))
 		}
 		return GuestReport{}, fmt.Errorf("guest profile %s: %w", profile, err)
 	}

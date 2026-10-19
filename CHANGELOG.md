@@ -7,6 +7,164 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.51.0] - 2026-10-19
+
+### Changed
+
+- **The sizing guide says what fixes the async page fault panic.** "Host injected async #PF in
+  kernel mode" comes from the host swapping the VM out, which 0.50.0's no-swap start and
+  `no-kvmapf` address; `manager.resources` is still recommended on a nested-virt dev instance so
+  that a guest out-of-memory kill stays inside the manager's container.
+
+### Removed
+
+- **The `lever-tool-fizzy` broker tool.** It is no longer built or released. An instance config
+  that names it must drop the tool and its grants; a ticket board can be wired in as an external
+  broker tool instead. Config load now refuses a `broker.tools` entry that runs `lever-tool-fizzy`.
+
+### Fixed
+
+- **`lever --version` no longer names a wrong commit when built in a git worktree.** Go's own VCS
+  stamping looks for the first `.git` directory above the source, so `make install` in a worktree
+  inside another checkout stamped that checkout's commit, dirty state and last tag. In a worktree
+  `make install` now builds `lever` without VCS stamping, so `--version` shows the binary's hash
+  (`0.51.0 (bin …)`) instead. Builds from an ordinary checkout and release builds are unchanged.
+
+- **The chat page's New conversation no longer reports a fast, successful run as an error.** The
+  page watched the list for the manager to go down and come back up, and lever can stop and start
+  it within a second, between two reads: the page then never saw it down and said, in red, that
+  it "has not gone down yet" while the run had finished. The page now follows the run itself: the
+  route's answer carries the run's id, and the page reads the run's state from
+  `POST /lever/api/new-conversation/status` until lever says it ended. On success it names the old
+  conversation's backup id; it shows red text only when lever refused or the run failed. A second
+  New conversation while one runs is refused as `in-progress`. The status route takes the same
+  operator login and page origin as the button; contacts get nothing new (lever#241).
+
+- **A tool call whose backend is down gets a clear 503, and the broker logs it (lever#234).** A tool
+  server that refused or dropped the connection gave the agent a `502` with an empty body, and the
+  error went only to `broker.out.log`. The gateway now answers `503` with `tool <name>: backend
+  unavailable; try again later`, which names the tool but never the backend address. Claude Code
+  keeps the server connected, so the next call works once the backend is back; a restarted backend's
+  own `404` for an unknown session still reaches the client, which opens a new session. `broker.log`
+  gets one `decision=error detail=gateway.backend_unavailable` line per tool per minute, with the
+  backend's `host:port`, the error and a `suppressed` count. `GET`, `DELETE` and any other method
+  but `POST` now get `405` with `Allow: POST` instead of `400`, which the MCP client treats as "no
+  SSE stream" rather than an error. The gateway also drops an `Upgrade` header, so an allowed
+  message can no longer open a raw tunnel to a backend that accepts upgrades. The client-cert
+  identity check still runs first, and a `POST` still passes the capability check before anything
+  reaches the backend.
+
+- **One `lever stop`, then `lever up`, is enough to apply `no-kvmapf` after the upgrade.** The
+  crash-recovery step writes the kernel command line only once the VM is up, so the first start
+  after 0.50.0 booted without it and reported a reboot pending: the setting took a second restart.
+  Now, when the bring-up started the VM itself (it was stopped, or new) and `grub.cfg` already
+  holds parameters the running kernel lacks, lever reboots the guest once before it provisions
+  anything in it (`limactl stop`, then the same start, in the no-swap scope where it applies) and
+  prints `jail: rebooted the guest once to apply no-kvmapf`. A new `guest_kernel: hwe` kernel
+  boots in the same reboot. At most one reboot per bring-up; a VM that was already running is
+  never rebooted and still reports the reboot pending. A stop that fails while the VM still runs
+  leaves it running with the pending line; any other failure fails the bring-up, and the next
+  `lever up` starts the VM with the parameters.
+
+- **What the guest hardening scripts report is bounded.** The `jail: warning:` and `jail: reboot
+  pending:` lines quote text from the guest, such as a kernel version. Each quoted line is now made
+  safe to print where it is read (escape sequences, control characters and bidi or other invisible
+  characters removed or replaced), not only when it is printed, and is cut to 300 characters. A
+  report shows at most 16 lines of each kind and says how many more it left out. The first line of
+  `limactl`, `loginctl` or `systemd-run` errors that bring-up messages quote is bounded the same
+  way.
+
+- **Guest output and the guest's run user can no longer be used against the host.** A compromised
+  guest root could stream output without end into `lever up`, which held all of it in memory. The
+  guest commands that provision and harden the VM (the guest hardening scripts, the provisioning
+  steps, the warm-path probe, the hub key install, the host alias lookup, `limactl start` and
+  `stop`, and the jail image commands) now stop at 8 MiB on stdout or stderr: the command is killed
+  and its step fails with an error that says the output passed its limit. The run user and uid the
+  guest reports are checked before use: a user name must be letters, digits, `_`, `-` or `.` (up to
+  32, starting with a letter or `_`), and the uid a plain decimal number other than 0; anything
+  else stops the bring-up. Guest stderr quoted in a bring-up error, an unrecognised `uname -m`,
+  unparsable `limactl --version` output, the Lima start progress lines and the guest firewall
+  listing an egress error quotes are made safe to print and cut to a few hundred characters.
+
+- **The broker's certificate heal of the manager acts only on the container it resumed.** The heal
+  lets go of the lifecycle lock before it waits for claude, and another command can replace the
+  manager's container in that time. It now notes podman's id of the container it resumed, and
+  after the wait does nothing more (no mount check, no suspend) unless podman still shows that
+  container; when podman cannot give the id, it keeps the lock to the end.
+
+- **The remote proxy step fails when the new proxy never starts serving.** Another process holding
+  the remote port (a proxy an older run leaked) could answer the bring-up's check before the new
+  proxy failed to bind, and apply only warned. A new proxy that never records itself in
+  `remote.pid` now fails the step and is stopped. A proxy that runs but stamped a config edited
+  during the apply stays a warning, as before.
+
+### Security
+
+- **A tool call reaches only its backend's MCP path.** The gateway forwarded whatever path an agent
+  put after `/mcp/<tool>/` to the tool's backend, so an allowed MCP message could reach any other
+  route on that `host:port`, such as an admin or metrics endpoint. Every request now goes to the
+  backend's configured path and query (`/` for a `backend` without a path, as before); the agent's
+  query string is dropped, and so are headers that some servers read as the real path or method
+  (`X-Original-URL`, `X-Rewrite-URL`, `X-HTTP-Method-Override` and the like, and every
+  `X-Forwarded-*` but `X-Forwarded-For`). Any other path under `/mcp/<tool>/` gets `404` and is
+  logged as `decision=deny detail="path not allowed"`; it never reaches the backend. A caller
+  without a valid client certificate still gets `403` on every path under the tool route. Agents
+  already use `/mcp/<tool>/`, so nothing changes for them.
+
+- **`lever up --fresh` no longer stages the new manager's enrolment ticket while the old manager's
+  container can read it.** The mint step wrote the single-use ticket into the tree before the old
+  record was deleted. The tree is the old manager's mount and the ticket is bound to the manager
+  identity both share, so the manager being discarded, still running, could redeem it first and
+  enrol as the new one. Under `--fresh` the ticket is now minted and staged only after the record
+  is gone and podman shows no container by the manager's name; a container with no process in it
+  is removed first (by id, never forced). If podman still shows the container after 30 seconds, or
+  cannot say, `lever up --fresh` fails with no ticket staged and no manager created: run it again
+  once the container is gone. The fresh start lever makes on its own for a manager with no
+  conversation waits the same way before it re-arms the broker. Podman's output in this check is
+  capped and its error text bounded.
+
+- **Staging an enrolment ticket no longer writes through whatever the manager left at
+  `.lever/bootstrap.json`.** The host and the broker rewrote the file in place, and the tree is the
+  manager's to write. A hard link there to a file in a worker's directory put the manager's next
+  ticket into that file, a FIFO made the staging hang for ever while lever held the lifecycle lock,
+  and a directory broke it. The ticket is now written to a new temporary file in `.lever` and
+  renamed over `bootstrap.json`, which replaces the entry without opening it; a symbolic link at
+  `.lever` or above it in the tree is refused, as is a directory at `bootstrap.json`. The minted
+  ticket is also now the only manager ticket that still enrols: one a certificate heal staged
+  earlier in the broker's life no longer does.
+
+### Upgrade
+
+- **Drop the fizzy tool before you upgrade.** Remove its `broker.tools` entry and its `fizzy`
+  grants (in `manager.obtain` and any worker's), or config load refuses the instance. If you
+  installed with `make install`, delete `lever-tool-fizzy` from `$PREFIX` (default
+  `~/.local/bin`); the Homebrew cask removes it on upgrade.
+
+- **The first `lever up` on a stopped Lima VM after the upgrade reboots the guest once.** On an
+  x86_64 guest whose `grub.cfg` holds `no-kvmapf` but whose running kernel lacks it, the bring-up
+  runs `limactl stop` and starts the VM again before it provisions anything, so that start takes
+  longer. It prints `jail: rebooted the guest once to apply no-kvmapf`. A VM that is already
+  running is not rebooted and keeps reporting the reboot pending: run `lever stop`, then
+  `lever up`.
+
+- **External tool backends get every call on the path in `backend`.** The gateway sends each call
+  to the path and query configured in the tool's `backend` (`/` when it has none) and drops the
+  agent's query string. Any other path under `/mcp/<tool>/` gets `404`, and any method but `POST`
+  gets `405`. A server whose MCP endpoint is on a subpath (such as `/mcp`) must name that path in
+  `backend`, for example `http://127.0.0.1:8080/mcp`.
+
+- **A down tool backend now answers 503, not 502.** The error is logged in `broker.log` as
+  `decision=error detail=gateway.backend_unavailable`, not in `broker.out.log`. Update monitoring
+  or scripts that look for `502` or read `broker.out.log` for these failures.
+
+- **`lever up --fresh` can now fail closed.** When podman still lists the old manager's container
+  30 seconds after the delete, or cannot say, the command stops with "lever could not confirm that
+  the previous manager's container … is gone": no ticket is staged and no manager is created, and
+  the manager record is already gone (any conversation was backed up first). In the guest, as the
+  jail user, check `podman ps -a --filter name='^<project>--<manager>$'`; once podman no longer
+  lists it (`podman rm -f <project>--<manager>` removes one that keeps running), run
+  `lever up --fresh` again.
+
 ## [0.50.0] - 2026-10-19
 
 ### Added

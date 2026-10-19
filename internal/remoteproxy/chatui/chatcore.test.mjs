@@ -38,6 +38,7 @@ import {
   askDraft,
   wakeText,
   newConversationOffered,
+  newConversationOutcome,
   newConversationText,
   WAKE_POLL_MS,
   WAKE_POLLS,
@@ -659,6 +660,22 @@ test('new conversation: the operator\'s manager only, and fixed text', () => {
   assert.equal(newConversationText(500, { error: '<b>own</b>' }, 'boss'), "boss's new conversation could not be started (HTTP 500).");
   assert.equal(newConversationText(500, { error: 'constructor' }, 'boss'), "boss's new conversation could not be started (HTTP 500).");
   assert.match(newConversationText(0, null, 'boss'), /may have started/);
+  assert.ok(!newConversationText(200, { error: 'timeout' }, 'boss').includes('HTTP'));
+});
+
+test('newConversationOutcome: the change\'s own result, the backup only when it is one', () => {
+  assert.equal(newConversationOutcome(200, { state: 'running' }, 'boss'), null);
+  assert.equal(newConversationOutcome(0, 'cannot reach the server', 'boss'), null);
+  assert.equal(newConversationOutcome(502, 'bad gateway', 'boss'), null);
+  assert.equal(newConversationOutcome(200, null, 'boss'), null);
+  assert.deepEqual(newConversationOutcome(200, { state: 'ok', backup: '20261019T054104Z-2' }, 'boss'),
+    { note: 'boss is on a new conversation. The old one is backup 20261019T054104Z-2: `lever conversation restore 20261019T054104Z-2` on the host puts it back.' });
+  for (const backup of [undefined, '', 7, '../x', '20261019T054104Z; rm', '<b>x</b>']) {
+    assert.deepEqual(newConversationOutcome(200, { state: 'ok', backup }, 'boss'), { note: 'boss is on a new conversation.' }, String(backup));
+  }
+  assert.deepEqual(newConversationOutcome(200, { state: 'failed', error: 'failed' }, 'boss'), { error: newConversationText(200, { error: 'failed' }, 'boss') });
+  assert.deepEqual(newConversationOutcome(200, { state: 'failed', error: 'in-progress' }, 'boss'), { error: newConversationText(409, { error: 'in-progress' }, 'boss') });
+  assert.match(newConversationOutcome(404, { error: 'unknown' }, 'boss').note, /lost track/);
 });
 
 test('activityText: text only, controls and bidi gone, the tail kept', () => {

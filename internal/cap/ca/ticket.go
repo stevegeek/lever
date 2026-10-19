@@ -26,6 +26,16 @@ func NewTicketStore() *TicketStore {
 
 // Issue mints a random opaque ticket bound to worker, valid for ttl.
 func (s *TicketStore) Issue(worker string, ttl time.Duration) (string, error) {
+	return s.issue(worker, ttl, false)
+}
+
+// IssueSole is Issue that also drops every other unspent ticket for worker,
+// so the one returned is the only one that still redeems.
+func (s *TicketStore) IssueSole(worker string, ttl time.Duration) (string, error) {
+	return s.issue(worker, ttl, true)
+}
+
+func (s *TicketStore) issue(worker string, ttl time.Duration, sole bool) (string, error) {
 	if worker == "" {
 		return "", fmt.Errorf("ca: ticket for empty worker")
 	}
@@ -38,7 +48,7 @@ func (s *TicketStore) Issue(worker string, ttl time.Duration) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for k, t := range s.tickets {
-		if now.After(t.expires) {
+		if now.After(t.expires) || (sole && t.worker == worker) {
 			delete(s.tickets, k)
 		}
 	}

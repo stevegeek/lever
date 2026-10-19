@@ -6,8 +6,8 @@ package voice
 // itself 0600: only the operator's processes reach it, and the jail never
 // does (it reaches no host Unix socket, and config load refuses a path
 // inside the tree). Dictation deliberately avoids the broker gateway and the
-// tool's TCP backend: the gateway forwards every path under /mcp/<tool>/, so
-// a host-only route there would be one step from agents.
+// tool's TCP backend: a host-only route on a port agents reach through the
+// broker would rest on the gateway's path pin alone.
 //
 // Routes:
 //

@@ -134,15 +134,13 @@ boundaries:
   process can still hit the server's `127.0.0.1` port directly — host processes are already
   inside the host trust boundary; the broker does not claim to sandbox them from each other.
 
-**Host-side tool credentials (`github`, `fizzy`).** The two first-party host tools hold their
-credential on the host and never project it. `lever-tool-github` reads a GitHub App private key
+**Host-side tool credentials (`github`).** The github tool holds its
+credential on the host and never projects it. `lever-tool-github` reads a GitHub App private key
 (regular file, mode exactly 0600, owned by the broker user) and mints 1 h installation tokens, each
 narrowed to one repository and the permissions of one operation; it refuses to start when the key
-or its `-state` directory is inside `-tree`. `lever-tool-fizzy`
-reads a Fizzy personal access token from a 0600 file owned by the broker user and passes it to the
-fizzy CLI only in its environment. Both are first-party broker tools: the agent holds only a
-capability token, which the broker verifies and forwards and the tool verifies again. See the [github tool](/github-tool/) and
-[fizzy tool](/fizzy-tool/) guides. `lever-tool-whisper` holds no credential, but it is a
+or its `-state` directory is inside `-tree`. It is a first-party broker tool: the agent holds only a
+capability token, which the broker verifies and forwards and the tool verifies again. See the
+[github tool](/github-tool/) guide. `lever-tool-whisper` holds no credential, but it is a
 first-party host tool on the same terms: its `transcribe` operation reads WAV files from the tree
 root's `.lever-files/whisper/` (which only the manager can write) for any agent holding the
 capability. See the [whisper tool](/whisper-tool/) guide. `lever-tool-tts` holds no credential

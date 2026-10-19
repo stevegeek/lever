@@ -255,11 +255,14 @@ export function wakeText(status, body, name) {
 // A new conversation for the manager (POST /lever/api/new-conversation):
 // the operator's only.
 export const NEW_CONVERSATION_PATH = '/lever/api/new-conversation';
-// After it is accepted the list is read every WAKE_POLL_MS for up to 3 min:
-// the manager is suspended, backed up, stopped and started.
-export const NEW_CONVERSATION_POLLS = 60;
-// After this many reads with the manager still up the page stops waiting.
-export const NEW_CONVERSATION_DOWN_POLLS = 20;
+// The accepted change's own state, by the id the POST answered with. The
+// manager can stop and start again between two reads of the list, so the
+// list cannot tell a change that ended from one that never began.
+export const NEW_CONVERSATION_STATUS_PATH = '/lever/api/new-conversation/status';
+// The status is read every WAKE_POLL_MS for up to 7 min: lever waits up to
+// 3 min for another change to the manager, then suspends, backs up, stops and
+// starts it.
+export const NEW_CONVERSATION_POLLS = 140;
 
 // newConversationOffered: the open chat is the manager's, and the list offers
 // the action.
@@ -283,8 +286,31 @@ const NEW_CONVERSATION_TEXT = {
   'not-allowed': 'Only the operator can start a new conversation.',
   unavailable: 'A new conversation is not available on this instance.',
   failed: 'lever could not start the new conversation; `lever doctor` on the host shows why.',
+  timeout: 'lever did not finish the new conversation in time; `lever conversation list` and .lever-state/logs/conversation-new.log on the host say how it ended.',
   origin: 'The request was refused.',
 };
+
+const BACKUP_ID = /^[0-9]{8}T[0-9]{6}Z(-[0-9]{1,3})?$/;
+
+// newConversationOutcome reads a status answer: null while the change runs
+// (or the read failed), else {error} for a refusal or failure, or {note}.
+export function newConversationOutcome(status, body, name) {
+  const b = body && typeof body === 'object' ? body : {};
+  if (status === 200 && b.state === 'ok') {
+    const backup = str(b.backup);
+    if (BACKUP_ID.test(backup)) return { note: `${name} is on a new conversation. The old one is backup ${backup}: \`lever conversation restore ${backup}\` on the host puts it back.` };
+    return { note: `${name} is on a new conversation.` };
+  }
+  if (status === 200 && b.state === 'failed') return { error: newConversationText(status, b, name) };
+  if (status === 404) return { note: newConversationLostText(name) };
+  return null;
+}
+
+// The server no longer holds the change (it restarted), or the page stopped
+// waiting for it: neither says it failed.
+export function newConversationLostText(name) {
+  return `The page lost track of ${name}'s new conversation; \`lever conversation list\` on the host says how it ended.`;
+}
 
 // One fixed sentence per reason word, never the answer's text.
 export function newConversationText(status, body, name) {

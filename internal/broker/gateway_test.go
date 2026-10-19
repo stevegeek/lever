@@ -165,12 +165,11 @@ func TestGatewayPathlessBackendRootUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := http.StripPrefix("/mcp/db", h)
 	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`
 	r := httptest.NewRequest("POST", "/mcp/db/", bytes.NewReader([]byte(body)))
 	r.TLS = leafFor(t, b, "worker")
 	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, r)
+	h.ServeHTTP(w, r)
 	if gotPath != "/" {
 		t.Fatalf("path-less backend path = %q, want %q (unchanged)", gotPath, "/")
 	}
@@ -438,8 +437,7 @@ func TestGatewayComposesBackendPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Serve exactly as JailHandler does: prefix-stripped.
-	http.StripPrefix("/mcp/notes", h).ServeHTTP(w, r)
+	h.ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}

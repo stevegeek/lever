@@ -2,19 +2,24 @@ package broker
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/stevegeek/lever/internal/broker/registry"
 	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/cap/token"
+	"github.com/stevegeek/lever/internal/logging"
 	"github.com/stevegeek/lever/internal/mcp"
 )
 
@@ -24,7 +29,8 @@ const toolSecretHeader = "X-Lever-Tool-Secret"
 
 // rewriteUpstream routes to target, pins the outbound Host and drops
 // client-supplied forwarding/identity headers. Rewrite's Out request already
-// lacks inbound X-Forwarded-*, so only Cookie is scrubbed, and X-Forwarded-For
+// lacks inbound Forwarded and X-Forwarded-For/-Host/-Proto (other
+// X-Forwarded-* pass), so only Cookie is scrubbed here, and X-Forwarded-For
 // is set to the immediate client IP without the inbound chain. Credential
 // headers are not touched here: the llm proxy injects the real key after this
 // runs.
@@ -47,11 +53,37 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 		return nil, fmt.Errorf("broker: tool %q bad backend %q: %w", toolName, t.Backend, err)
 	}
 	rp := newToolProxy(target)
+	rp.ErrorLog = slog.NewLogLogger(b.log.With("op", toolName).Handler(), slog.LevelWarn)
+	v, _ := b.backendErrs.LoadOrStore(toolName, &backendErrLimit{every: backendErrEvery})
+	limit := v.(*backendErrLimit)
+	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		if errors.Is(err, context.Canceled) && r.Context().Err() != nil {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		if ok, suppressed := limit.allow(time.Now()); ok {
+			b.audit(toolName, callerFrom(r.Context()), "error", "gateway.backend_unavailable",
+				"backend", target.Host, "err", logging.Redact(err.Error()), "suppressed", suppressed)
+		}
+		// The backend host is operator topology the agent has no use for: it
+		// goes to the log only.
+		http.Error(w, "tool "+toolName+": backend unavailable; try again later", http.StatusServiceUnavailable)
+	}
+	route := "/mcp/" + toolName + "/"
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		caller, err := ca.RequireAgent(r)
 		if err != nil {
 			b.audit(toolName, "", "deny", err.Error())
 			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		// Refused only after RequireAgent, so a caller without a leaf gets the
+		// same 403 for every path. The outbound path is pinned regardless
+		// (newToolProxy); this keeps a probe of other backend routes from
+		// looking like a call.
+		if r.URL.Path != route {
+			b.audit(toolName, caller, "deny", "path not allowed", "path", truncate(r.URL.EscapedPath(), maxAuditPath))
+			http.NotFound(w, r)
 			return
 		}
 		// Scrub inbound X-Lever-* so an agent cannot forge broker-internal
@@ -60,6 +92,19 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 			if strings.HasPrefix(http.CanonicalHeaderKey(name), "X-Lever-") {
 				r.Header.Del(name)
 			}
+		}
+		// Streamable HTTP lets a server without an SSE stream or session
+		// teardown answer GET and DELETE with 405, which the client treats as
+		// non-fatal. Only POST carries a message the gateway can authorize.
+		if r.Method != http.MethodPost {
+			if b.isRevoked(caller) {
+				b.audit(toolName, caller, "deny", "revoked: "+r.Method)
+			} else {
+				b.log.Debug("broker.unsupported", "op", toolName, "caller", caller, "method", r.Method)
+			}
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
 		}
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, gatewayBodyLimit))
 		if err != nil {
@@ -76,8 +121,45 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 		if t.FirstParty && b.toolSecret != "" {
 			r.Header.Set(toolSecretHeader, b.toolSecret)
 		}
-		rp.ServeHTTP(w, r)
+		// ReverseProxy turns an Upgrade request into a raw tunnel that later
+		// messages would cross unauthorized, and fails a malformed one with
+		// agent-chosen text before dialing. MCP never upgrades.
+		r.Header.Del("Upgrade")
+		rp.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), callerKey{}, caller)))
 	}), nil
+}
+
+type callerKey struct{}
+
+func callerFrom(ctx context.Context) string {
+	s, _ := ctx.Value(callerKey{}).(string)
+	return s
+}
+
+// backendErrEvery bounds the audit lines a down backend writes: an agent
+// retrying in a loop must not flood the log.
+const backendErrEvery = time.Minute
+
+// backendErrLimit lets one failure through per interval and counts the rest.
+type backendErrLimit struct {
+	every      time.Duration
+	mu         sync.Mutex
+	last       time.Time
+	suppressed int
+}
+
+// allow reports whether to log a failure at now, and how many were
+// suppressed since the last one logged.
+func (l *backendErrLimit) allow(now time.Time) (bool, int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.last.IsZero() && now.Sub(l.last) < l.every {
+		l.suppressed++
+		return false, 0
+	}
+	n := l.suppressed
+	l.last, l.suppressed = now, 0
+	return true, n
 }
 
 // backendURL adds http:// to a bare host:port backend, which url.Parse would
@@ -89,17 +171,48 @@ func backendURL(backend string) (*url.URL, error) {
 	return url.Parse(backend)
 }
 
+// maxAuditPath bounds the agent-chosen path an audit line carries.
+const maxAuditPath = 256
+
+func truncate(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
+}
+
+// routingHeaders are honoured by some frameworks and front ends as the
+// request's real path or method, which would undo the path pin.
+var routingHeaders = []string{
+	"X-Original-Url", "X-Rewrite-Url", "X-Original-Method",
+	"X-Http-Method-Override", "X-Http-Method", "X-Method-Override",
+}
+
+// newToolProxy sends every request to the backend's configured path and
+// query, whatever the inbound URL: the backend host may serve other routes
+// (admin, metrics) that a capability for its MCP endpoint must not reach.
+// The inbound query is dropped because it is agent-chosen and streamable
+// HTTP carries nothing in it.
 func newToolProxy(target *url.URL) *httputil.ReverseProxy {
+	path, rawPath := target.Path, target.RawPath
+	if path == "" {
+		path, rawPath = "/", ""
+	}
 	rp := &httputil.ReverseProxy{}
 	rp.Rewrite = func(pr *httputil.ProxyRequest) {
-		remainder := pr.In.URL.Path
 		rewriteUpstream(pr, target)
-		// The default join turns "/mcp"+"/" into "/mcp/", which a strict
-		// streamable-HTTP endpoint 404s: send a bare-root request to the
-		// backend path exactly.
-		if (remainder == "" || remainder == "/") && target.Path != "" && target.Path != "/" {
-			pr.Out.URL.Path = target.Path
-			pr.Out.URL.RawPath = ""
+		pr.Out.URL.Path = path
+		pr.Out.URL.RawPath = rawPath
+		pr.Out.URL.RawQuery = target.RawQuery
+		pr.Out.URL.ForceQuery = false
+		pr.Out.URL.Fragment, pr.Out.URL.RawFragment = "", ""
+		for _, h := range routingHeaders {
+			pr.Out.Header.Del(h)
+		}
+		for name := range pr.Out.Header {
+			if strings.HasPrefix(name, "X-Forwarded-") && name != "X-Forwarded-For" {
+				pr.Out.Header.Del(name)
+			}
 		}
 	}
 	rp.ModifyResponse = func(resp *http.Response) error {

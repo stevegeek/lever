@@ -65,3 +65,22 @@ func TestIssuePrunesExpiredTickets(t *testing.T) {
 		t.Fatalf("expected the expired ticket pruned on Issue, got %d tickets", n)
 	}
 }
+
+func TestIssueSoleDropsOnlyThatWorkersOlderTickets(t *testing.T) {
+	s := NewTicketStore()
+	old, _ := s.Issue("manager", time.Hour)
+	other, _ := s.Issue("scratch", time.Hour)
+	tk, err := s.IssueSole("manager", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Redeem(old, "manager", time.Now()); err == nil {
+		t.Fatal("an older ticket for the same worker still redeems")
+	}
+	if err := s.Redeem(other, "scratch", time.Now()); err != nil {
+		t.Fatalf("another worker's ticket was dropped: %v", err)
+	}
+	if err := s.Redeem(tk, "manager", time.Now()); err != nil {
+		t.Fatalf("the sole ticket does not redeem: %v", err)
+	}
+}

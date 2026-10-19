@@ -702,3 +702,211 @@ func TestNoLinksWalkReportsAnUnreadableDirAsIs(t *testing.T) {
 		}
 	}
 }
+
+func readDirNames(t *testing.T, dir string) []string {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range ents {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+func assertOnlyLeaf(t *testing.T, dir, leaf string) {
+	t.Helper()
+	if names := readDirNames(t, dir); len(names) != 1 || names[0] != leaf {
+		t.Fatalf("%s holds %v, want only %s (no temp file left)", dir, names, leaf)
+	}
+}
+
+func assertReplaced(t *testing.T, p, want string) {
+	t.Helper()
+	fi, err := os.Lstat(p)
+	if err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm() != 0o600 || hardLinked(fi) {
+		t.Fatalf("%s = %v, %v; want a 0600 regular file with one name", p, fi, err)
+	}
+	if b, _ := os.ReadFile(p); string(b) != want {
+		t.Fatalf("%s holds %q, want %q", p, b, want)
+	}
+}
+
+func TestReplaceInTreeNoLinksCreatesAndReplaces(t *testing.T) {
+	tree := t.TempDir()
+	if err := ReplaceInTreeNoLinks(tree, ".lever/bootstrap.json", []byte("one"), 0o700, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(tree, ".lever")
+	if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() || fi.Mode().Perm() != 0o700 {
+		t.Fatalf(".lever = %v, %v; want a 0700 directory", fi, err)
+	}
+	p := filepath.Join(dir, "bootstrap.json")
+	assertReplaced(t, p, "one")
+	if err := os.Chmod(p, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReplaceInTreeNoLinks(tree, ".lever/bootstrap.json", []byte("two"), 0o700, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertReplaced(t, p, "two")
+	assertOnlyLeaf(t, dir, "bootstrap.json")
+}
+
+// A hard link at the leaf is replaced, never written through: the other
+// name keeps its content and gets none of the new data.
+func TestReplaceInTreeNoLinksDoesNotWriteThroughAHardLink(t *testing.T) {
+	tree := t.TempDir()
+	dir := filepath.Join(tree, ".lever")
+	other := filepath.Join(tree, "workers", "w1", "notes.txt")
+	for _, d := range []string{dir, filepath.Dir(other)} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(other, []byte("worker data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(other, filepath.Join(dir, "bootstrap.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReplaceInTreeNoLinks(tree, ".lever/bootstrap.json", []byte("ticket"), 0o700, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(other); string(b) != "worker data" {
+		t.Fatalf("hard-linked file now holds %q", b)
+	}
+	if fi, _ := os.Stat(other); fi.Mode().Perm() != 0o644 || hardLinked(fi) {
+		t.Fatalf("hard-linked file = %v, want 0644 with its one name back", fi)
+	}
+	assertReplaced(t, filepath.Join(dir, "bootstrap.json"), "ticket")
+	assertOnlyLeaf(t, dir, "bootstrap.json")
+}
+
+// A symlink at the leaf is replaced as an entry; its target is untouched.
+func TestReplaceInTreeNoLinksDoesNotFollowALeafLink(t *testing.T) {
+	tree, outside := t.TempDir(), t.TempDir()
+	target := filepath.Join(outside, "victim")
+	if err := os.WriteFile(target, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(tree, ".lever")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, "bootstrap.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReplaceInTreeNoLinks(tree, ".lever/bootstrap.json", []byte("ticket"), 0o700, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(target); string(b) != "keep" {
+		t.Fatalf("link target changed: %q", b)
+	}
+	if fi, _ := os.Stat(target); fi.Mode().Perm() != 0o644 {
+		t.Fatalf("link target mode changed: %v", fi.Mode())
+	}
+	assertReplaced(t, filepath.Join(dir, "bootstrap.json"), "ticket")
+	assertOnlyLeaf(t, dir, "bootstrap.json")
+}
+
+func TestReplaceInTreeNoLinksDoesNotOpenAFIFO(t *testing.T) {
+	tree := t.TempDir()
+	dir := filepath.Join(tree, ".lever")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(dir, "bootstrap.json"), 0o600); err != nil {
+		t.Skipf("mkfifo: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- ReplaceInTreeNoLinks(tree, ".lever/bootstrap.json", []byte("ticket"), 0o700, 0o600) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ReplaceInTreeNoLinks blocked on a FIFO at the leaf")
+	}
+	assertReplaced(t, filepath.Join(dir, "bootstrap.json"), "ticket")
+	assertOnlyLeaf(t, dir, "bootstrap.json")
+}
+
+func TestReplaceInTreeNoLinksRefusesADirectoryLeaf(t *testing.T) {
+	tree := t.TempDir()
+	dir := filepath.Join(tree, ".lever")
+	leaf := filepath.Join(dir, "bootstrap.json")
+	if err := os.MkdirAll(leaf, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReplaceInTreeNoLinks(tree, ".lever/bootstrap.json", []byte("ticket"), 0o700, 0o600); err == nil {
+		t.Fatal("replacing a directory succeeded")
+	}
+	if fi, err := os.Lstat(leaf); err != nil || !fi.IsDir() {
+		t.Fatalf("leaf = %v, %v; want the directory left alone", fi, err)
+	}
+	assertOnlyLeaf(t, dir, "bootstrap.json")
+}
+
+func TestReplaceInTreeNoLinksRefusesALinkOnThePath(t *testing.T) {
+	for name, link := range map[string]func(tree, outside string) string{
+		"out of tree": func(tree, outside string) string { return outside },
+		"in tree":     func(tree, outside string) string { return filepath.Join(tree, "workers", "w1") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			tree, outside := t.TempDir(), t.TempDir()
+			target := link(tree, outside)
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, filepath.Join(tree, ".lever")); err != nil {
+				t.Fatal(err)
+			}
+			err := ReplaceInTreeNoLinks(tree, ".lever/bootstrap.json", []byte("ticket"), 0o700, 0o600)
+			if !errors.Is(err, ErrSymlink) {
+				t.Fatalf("err = %v, want ErrSymlink", err)
+			}
+			if names := readDirNames(t, target); len(names) != 0 {
+				t.Fatalf("link target gained %v", names)
+			}
+		})
+	}
+}
+
+// The temp file's name is in an agent-writable directory: an entry swapped
+// in for it before the rename is reported, not staged as the data.
+func TestReplaceInTreeNoLinksRefusesASwappedTemp(t *testing.T) {
+	tree, outside := t.TempDir(), t.TempDir()
+	target := filepath.Join(outside, "victim")
+	if err := os.WriteFile(target, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	afterReplaceWrite = func(r *os.Root, tmp string) {
+		if err := r.Remove(tmp); err != nil {
+			t.Error(err)
+		}
+		if err := r.Symlink(target, tmp); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { afterReplaceWrite = nil })
+	err := ReplaceInTreeNoLinks(tree, ".lever/bootstrap.json", []byte("ticket"), 0o700, 0o600)
+	if !errors.Is(err, ErrSymlink) {
+		t.Fatalf("err = %v, want ErrSymlink", err)
+	}
+	if b, _ := os.ReadFile(target); string(b) != "keep" {
+		t.Fatalf("link target changed: %q", b)
+	}
+}
+
+func TestReplaceInTreeNoLinksRefusesEscape(t *testing.T) {
+	tree := t.TempDir()
+	for _, rel := range []string{"", ".", "../x", "/abs", ".lever/../../x", "a//b"} {
+		if err := ReplaceInTreeNoLinks(tree, rel, []byte("x"), 0o700, 0o600); !errors.Is(err, ErrEscapesTree) {
+			t.Errorf("%q: err = %v, want ErrEscapesTree", rel, err)
+		}
+	}
+}

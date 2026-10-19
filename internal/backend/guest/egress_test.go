@@ -589,3 +589,15 @@ func TestApplyEgressFailedJumpCommitFails(t *testing.T) {
 		t.Fatalf("no chain commit may follow a failed jump commit, got %v", bins)
 	}
 }
+
+func TestSafeListingIsBoundedAndInert(t *testing.T) {
+	out := "-P OUTPUT ACCEPT\n\x1b]0;owned\x07" + strings.Repeat("r", 1<<16) + "\n" + strings.Repeat("-A OUTPUT -j ACCEPT\n", 1000)
+	got := safeListing(out)
+	lines := strings.Split(got, "\n")
+	if len(lines) != reportLinesMax+1 || !strings.HasPrefix(lines[len(lines)-1], "and 986 more") || len(got) > 64<<10 || strings.ContainsAny(got, "\x1b\x07") {
+		t.Fatalf("%d lines, %d bytes, last %q", len(lines), len(got), lines[len(lines)-1])
+	}
+	if got := safeListing("-P OUTPUT ACCEPT\n-A OUTPUT -j LEVER_EGRESS\n"); got != "-P OUTPUT ACCEPT\n-A OUTPUT -j LEVER_EGRESS" {
+		t.Fatalf("short listing = %q", got)
+	}
+}

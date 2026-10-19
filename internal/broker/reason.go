@@ -15,6 +15,8 @@ const (
 	PathOperatorWorkerRecycle = "/operator/worker/recycle"
 	PathOperatorWorkerSuspend = "/operator/worker/suspend"
 	PathOperatorWorkerStop    = "/operator/worker/stop"
+	// PathOperatorWorkerNewSession is `lever worker new-session`.
+	PathOperatorWorkerNewSession = "/operator/worker/new-session"
 )
 
 // ReasonHeader carries a machine-readable reason on a worker refusal, so a

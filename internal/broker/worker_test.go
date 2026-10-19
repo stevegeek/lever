@@ -29,6 +29,8 @@ type fakeRuntime struct {
 	resumeProj     []string
 	resumeForced   []string
 	resumeForceErr error
+	resumeTasks    []string // the task of every ResumeTask, which also counts as a resume
+	stopErr        error
 	resumeErr      error // a runtime error whose text carries the container env
 	stopped        []string
 	stopProj       []string
@@ -174,6 +176,12 @@ func (f *fakeRuntime) Resume(_ context.Context, worker, project string) error {
 	f.resumeProj = append(f.resumeProj, project)
 	return f.resumeErr
 }
+func (f *fakeRuntime) ResumeTask(_ context.Context, worker, project, task string) error {
+	f.resumeTasks = append(f.resumeTasks, task)
+	f.resumed = append(f.resumed, worker)
+	f.resumeProj = append(f.resumeProj, project)
+	return f.resumeErr
+}
 func (f *fakeRuntime) ResumeForce(_ context.Context, worker, project string) error {
 	f.resumeForced = append(f.resumeForced, worker)
 	return f.resumeForceErr
@@ -182,7 +190,7 @@ func (f *fakeRuntime) ResumeForce(_ context.Context, worker, project string) err
 func (f *fakeRuntime) Stop(_ context.Context, worker, project string) error {
 	f.stopped = append(f.stopped, worker)
 	f.stopProj = append(f.stopProj, project)
-	return nil
+	return f.stopErr
 }
 func (f *fakeRuntime) Suspend(_ context.Context, worker, project string) error {
 	f.suspend = append(f.suspend, worker)

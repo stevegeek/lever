@@ -138,9 +138,14 @@ so it gives no agent anything new:
 - `lever worker recycle NAME [--task-file F]` discards a worker's record and starts it fresh (any
   declared worker: `recyclable: true` is only the manager's authority), for a slot that needs a fresh context; the workspace is kept and the conversation is lost.
   `lever worker suspend NAME` and `lever worker stop NAME` take a worker down.
+- `lever worker new-session NAME [--task-file F]` keeps the worker's record and workspace and drops
+  its conversation, for a long-lived worker whose context is full or stale: the broker stops it,
+  then resumes the stopped record in a new session with the task in `F`, else its `task_file`.
+  Every check runs before the stop, so a refusal changes nothing. The old conversation is not backed
+  up. A message can't do this: lever never lets a message become a slash command such as `/clear`.
 
-Each verb is the manager's own (`lever-manager agent start`, `resume`, `recycle`, `suspend`,
-`stop`) run with the operator as the actor: the same per-worker lock, the same checks, the same
+Each verb but `new-session` is the manager's own (`lever-manager agent start`, `resume`, `recycle`,
+`suspend`, `stop`) run with the operator as the actor, and `new-session` is a stop and a resume: the same per-worker lock, the same checks, the same
 running-worker cap, and one recycle a minute per worker, a count you and the manager share. The
 broker's audit log names the operator (`caller=operator`).
 

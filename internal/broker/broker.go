@@ -194,8 +194,9 @@ type DispatchConfig struct {
 	// ("user:" + the controller PAT's user). /message/verify looks such a
 	// message up in the sent ledger only. nil ⇒ it answers unavailable.
 	ResolveControllerSender func(ctx context.Context) (string, error)
-	// BeginSession is called just before a worker is created fresh; its
-	// commit records that start once scion created it. A resume records
+	// BeginSession is called just before a worker is created fresh or
+	// resumed in a new session (`lever worker new-session`); its commit
+	// records that start once scion took it. A plain resume records
 	// nothing: the remote proxy lets a contact post to an agent only while
 	// its last fresh start saw the skill on disk. nil ⇒ nothing is recorded.
 	BeginSession func(agent string) (commit func() error)

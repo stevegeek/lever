@@ -125,7 +125,7 @@ func TestOperatorWorkerListRefusals(t *testing.T) {
 // mTLS listener or the admin loopback.
 func TestOperatorWorkerRoutesAreNotOnTheTCPListeners(t *testing.T) {
 	b := newTestBroker(t, &fakeRuntime{}, wakeSpec)
-	for _, path := range []string{PathOperatorWorkerList, PathOperatorWorkerStart, PathOperatorWorkerRecycle, PathOperatorWorkerSuspend, PathOperatorWorkerStop} {
+	for _, path := range []string{PathOperatorWorkerList, PathOperatorWorkerStart, PathOperatorWorkerRecycle, PathOperatorWorkerSuspend, PathOperatorWorkerStop, PathOperatorWorkerNewSession} {
 		for name, h := range map[string]http.Handler{"admin": b.AdminHandler(), "jail": b.JailHandler()} {
 			for _, m := range []string{http.MethodGet, http.MethodPost} {
 				rec := httptest.NewRecorder()

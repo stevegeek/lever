@@ -24,6 +24,10 @@ type WorkerRuntime interface {
 	List(ctx context.Context, project string) ([]scion.Agent, error)
 	Start(ctx context.Context, o scion.StartOpts) error
 	Resume(ctx context.Context, worker, project string) error
+	// ResumeTask resumes a stopped record in a new session that runs task;
+	// on a record that is not stopped the hub would add task to the session
+	// it continues instead.
+	ResumeTask(ctx context.Context, worker, project, task string) error
 	// ResumeForce recovers an error-phase record (scion resume --force); it
 	// refuses phase running.
 	ResumeForce(ctx context.Context, worker, project string) error
@@ -589,6 +593,16 @@ func (b *Broker) resumeExistingWorker(ctx context.Context, w http.ResponseWriter
 // once the worker is live. It never deletes a record: a purge is the
 // operator's decision. actor names the caller in the audit lines.
 func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec WorkerSpec, phase, actor string) {
+	b.resumeRecordAs(ctx, w, spec, phase, actor, nil)
+}
+
+// newSession is a resume of a stopped record in a new session: task (when
+// set) is the session's task, and the start is recorded like a fresh one.
+type newSession struct {
+	task string
+}
+
+func (b *Broker) resumeRecordAs(ctx context.Context, w http.ResponseWriter, spec WorkerSpec, phase, actor string, fresh *newSession) {
 	if comingUp(phase) {
 		// Already coming up: a fresh ticket would replace the one the booting
 		// worker is about to spend. Only wait.
@@ -607,36 +621,7 @@ func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec W
 		return
 	}
 	defer release()
-	// A resume re-resolves the workspace bind source, so a worker dir the
-	// manager swapped for a link would hand the worker whatever it names.
-	if err := b.verifyStrictWorkspace(spec); err != nil {
-		if errors.Is(err, ErrSharedFolder) {
-			b.audit("worker", actor, "deny", "resume "+spec.Name+": "+err.Error())
-			refuse(w, ReasonWorkspaceUnsafe, "forbidden: a shared folder of worker "+spec.Name+" is missing on the host or reached through a symbolic link; the record was kept", http.StatusForbidden)
-			return
-		}
-		if errors.Is(err, fsutil.ErrEscapesTree) || errors.Is(err, ErrReadOnlyOverlap) {
-			b.audit("worker", actor, "deny", "resume "+spec.Name+": workspace dir: "+err.Error())
-			refuse(w, ReasonWorkspaceUnsafe, "forbidden: worker workspace is reached through a symbolic link or overlaps a protected directory (manager.read_only or a shared folder); the record was kept", http.StatusForbidden)
-			return
-		}
-		b.audit("worker", actor, "error", "resume "+spec.Name+": workspace dir: "+err.Error())
-		if errors.Is(err, fs.ErrNotExist) {
-			fix := "Ask the operator to restore the directory, or to run `lever worker purge " + spec.Name + " --force` and dispatch it again"
-			if actor == operatorActor {
-				fix = "Restore the directory, or run `lever worker purge " + spec.Name + " --force` and have the manager start it again"
-			}
-			refuse(w, ReasonWorkspaceMissing, "worker "+spec.Name+"'s workspace directory "+spec.WorkspaceSubdir+" no longer exists on the host (the operator removed or moved it); the record was kept. "+fix, http.StatusConflict)
-			return
-		}
-		refuse(w, ReasonRuntimeError, "workspace error", http.StatusInternalServerError)
-		return
-	}
-	// A resume recreates the container from the record's volumes, so a
-	// record holding access the config has withdrawn would get it back.
-	if err := b.checkSharedAccess(ctx, spec, true); err != nil {
-		b.audit("worker", actor, "deny", "resume "+spec.Name+": "+err.Error())
-		refuse(w, ReasonSharedAccess, "forbidden: "+sharedAccessHint(spec.Name, err)+"; the record was kept", http.StatusForbidden)
+	if !b.resumeChecks(ctx, w, spec, actor) {
 		return
 	}
 	// Stage a fresh ticket BEFORE resuming: a worker past its leaf lifetime
@@ -654,6 +639,17 @@ func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec W
 		// answers 409). A running record with a dead container is the same
 		// case early; if the hub refuses, the manager is told to retry.
 		resume = b.runtime.ResumeForce
+	}
+	var commit func() error
+	if fresh != nil {
+		if fresh.task != "" {
+			resume = func(ctx context.Context, worker, project string) error {
+				return b.runtime.ResumeTask(ctx, worker, project, fresh.task)
+			}
+		}
+		if b.beginSession != nil {
+			commit = b.beginSession(spec.Name)
+		}
 	}
 	if err := resume(ctx, spec.Name, b.instanceProject); err != nil {
 		b.audit("worker", actor, "error", "resume "+spec.Name+" (phase "+phase+"): "+err.Error())
@@ -673,6 +669,12 @@ func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec W
 		refusePhase(w, ReasonRuntimeError, phase, "runtime error: worker "+spec.Name+" (phase "+phase+") did not resume. "+workerPurgeHint(spec.Name), http.StatusBadGateway)
 		return
 	}
+	// A failed session record only keeps contacts out.
+	if commit != nil {
+		if err := commit(); err != nil {
+			b.audit("worker", actor, "error", "resume "+spec.Name+": session record: "+err.Error())
+		}
+	}
 	if err := b.waitWorkerLive(ctx, spec); err != nil {
 		b.audit("worker", actor, "error", "resume "+spec.Name+": "+err.Error())
 		refuse(w, ReasonNotLive, err.Error()+". "+workerPurgeHint(spec.Name), http.StatusBadGateway)
@@ -681,6 +683,44 @@ func (b *Broker) resumeRecord(ctx context.Context, w http.ResponseWriter, spec W
 	b.resetReenrolTries(spec.Name)
 	b.audit("worker", actor, "allow", "resume "+spec.Name)
 	writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
+}
+
+// resumeChecks refuses a resume the workspace, shared-folder or record checks
+// forbid, changing nothing.
+func (b *Broker) resumeChecks(ctx context.Context, w http.ResponseWriter, spec WorkerSpec, actor string) bool {
+	// A resume re-resolves the workspace bind source, so a worker dir the
+	// manager swapped for a link would hand the worker whatever it names.
+	if err := b.verifyStrictWorkspace(spec); err != nil {
+		if errors.Is(err, ErrSharedFolder) {
+			b.audit("worker", actor, "deny", "resume "+spec.Name+": "+err.Error())
+			refuse(w, ReasonWorkspaceUnsafe, "forbidden: a shared folder of worker "+spec.Name+" is missing on the host or reached through a symbolic link; the record was kept", http.StatusForbidden)
+			return false
+		}
+		if errors.Is(err, fsutil.ErrEscapesTree) || errors.Is(err, ErrReadOnlyOverlap) {
+			b.audit("worker", actor, "deny", "resume "+spec.Name+": workspace dir: "+err.Error())
+			refuse(w, ReasonWorkspaceUnsafe, "forbidden: worker workspace is reached through a symbolic link or overlaps a protected directory (manager.read_only or a shared folder); the record was kept", http.StatusForbidden)
+			return false
+		}
+		b.audit("worker", actor, "error", "resume "+spec.Name+": workspace dir: "+err.Error())
+		if errors.Is(err, fs.ErrNotExist) {
+			fix := "Ask the operator to restore the directory, or to run `lever worker purge " + spec.Name + " --force` and dispatch it again"
+			if actor == operatorActor {
+				fix = "Restore the directory, or run `lever worker purge " + spec.Name + " --force` and have the manager start it again"
+			}
+			refuse(w, ReasonWorkspaceMissing, "worker "+spec.Name+"'s workspace directory "+spec.WorkspaceSubdir+" no longer exists on the host (the operator removed or moved it); the record was kept. "+fix, http.StatusConflict)
+			return false
+		}
+		refuse(w, ReasonRuntimeError, "workspace error", http.StatusInternalServerError)
+		return false
+	}
+	// A resume recreates the container from the record's volumes, so a
+	// record holding access the config has withdrawn would get it back.
+	if err := b.checkSharedAccess(ctx, spec, true); err != nil {
+		b.audit("worker", actor, "deny", "resume "+spec.Name+": "+err.Error())
+		refuse(w, ReasonSharedAccess, "forbidden: "+sharedAccessHint(spec.Name, err)+"; the record was kept", http.StatusForbidden)
+		return false
+	}
+	return true
 }
 
 // comingUp reports scion's interim phases on the way to running; "resumed"

@@ -26,11 +26,12 @@ func writeFile(t *testing.T, p, s string) string {
 	return p
 }
 
-// start and recycle send --task-file's task, trimmed; without the flag they
-// send none, which leaves the broker to the worker's task_file.
+// start, recycle and new-session send --task-file's task, trimmed; without
+// the flag they send none, which leaves the broker to the worker's task_file.
 func TestWorkerStartAndRecycleSendTheTask(t *testing.T) {
-	for _, verb := range []string{"start", "recycle"} {
-		path := map[string]string{"start": broker.PathOperatorWorkerStart, "recycle": broker.PathOperatorWorkerRecycle}[verb]
+	for _, verb := range []string{"start", "recycle", "new-session"} {
+		path := map[string]string{"start": broker.PathOperatorWorkerStart, "recycle": broker.PathOperatorWorkerRecycle,
+			"new-session": broker.PathOperatorWorkerNewSession}[verb]
 		for _, withFile := range []bool{true, false} {
 			dir := msgDir(t)
 			t.Chdir(dir)
@@ -159,6 +160,9 @@ func TestWorkerVerbExitCodes(t *testing.T) {
 		{"start", broker.PathOperatorWorkerStart, http.StatusForbidden, broker.ReasonRevoked, 10},
 		{"stop", broker.PathOperatorWorkerStop, http.StatusNotFound, broker.ReasonNoRecord, 8},
 		{"suspend", broker.PathOperatorWorkerSuspend, http.StatusBadGateway, broker.ReasonRuntimeError, 3},
+		{"new-session", broker.PathOperatorWorkerNewSession, http.StatusNotFound, broker.ReasonNoRecord, 8},
+		{"new-session", broker.PathOperatorWorkerNewSession, http.StatusBadGateway, broker.ReasonRuntimeError, 3},
+		{"new-session", broker.PathOperatorWorkerNewSession, http.StatusConflict, broker.ReasonRoleMismatch, 10},
 	} {
 		dir := msgDir(t)
 		t.Chdir(dir)

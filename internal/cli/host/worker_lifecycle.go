@@ -101,6 +101,30 @@ func newWorkerRecycleCmd() *cobra.Command {
 	return c
 }
 
+// newWorkerNewSessionCmd is `lever worker new-session NAME`: the worker's
+// record and workspace are kept and its conversation is dropped, as `lever
+// conversation new` does for the manager.
+func newWorkerNewSessionCmd() *cobra.Command {
+	var asJSON bool
+	var taskFile string
+	c := &cobra.Command{
+		Use:   "new-session NAME",
+		Args:  cobra.ExactArgs(1),
+		Short: "Start a worker on a new conversation, keeping its record and workspace",
+		Long: "Stop a declared worker, which ends its session, and resume its stopped record in a new session through the broker,\n" +
+			"with the per-worker lock and the checks of `lever worker resume`, and wait until it is live. The old conversation\n" +
+			"is not backed up. The task is --task-file's, else the worker's task_file, else the one the hub stored on the record.\n" +
+			"Every check runs before the stop, so a refusal leaves the worker's session as it was. Exit codes and --json\n" +
+			"reasons: see the CLI reference.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runWorkerVerb(cmd, workerVerb{name: "new-session", path: broker.PathOperatorWorkerNewSession, body: taskBody(&taskFile)}, args[0], asJSON)
+		},
+	}
+	c.Flags().StringVar(&taskFile, "task-file", "", "a file holding the new session's task (default: the worker's task_file)")
+	c.Flags().BoolVar(&asJSON, "json", false, jsonFlagUsage)
+	return c
+}
+
 func newWorkerHaltCmd(verb, path, short string) *cobra.Command {
 	var asJSON bool
 	c := &cobra.Command{

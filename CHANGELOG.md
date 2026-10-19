@@ -7,6 +7,63 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **Agents can check that their image matches the host lever.** `lever-manager version` prints the
+  image's lever build and Jail ABI, asks the broker for the host lever's, and says whether the two
+  match. On a mismatch it names the fix: rebuild the agent image, then `lever up --fresh
+  --keep-conversation`; a worker is told to ask the operator for it. Equal Jail ABIs with
+  different builds are compatible and need no rebuild, as in doctor's *agent lever version* row.
+  `lever-manager --version` and `lever-agent --version` print the local line only, and `lever-agent
+  version` does what `lever-manager version` does. The answer comes from a new read-only
+  `GET /version` on the broker's mTLS jail listener: any live agent identity, manager or worker,
+  gets the host's version and Jail ABI and nothing else, with no capability. A request without a
+  client certificate or from a revoked identity gets 403. The manager's skill says how to check.
+
+### Changed
+
+- **Every lever binary reports its exact build commit, in a git worktree too.** `make install`,
+  `make lever-image` and the release build stamp the commit and the dirty state into `lever`,
+  `lever-manager`, `lever-agent` and `lever-tool-db`, and the stamp wins over Go's own VCS stamp,
+  which in a worktree nested inside another checkout names that checkout. A `make install` build
+  of `lever` in a worktree now shows `X.Y.Z (<commit>)` instead of `X.Y.Z (bin …)`, so doctor's
+  *agent lever version* row can tell it is the build the image came from. lever-tool-db's MCP serverInfo
+  carries the commit too.
+
+### Removed
+
+- **Two internal helpers nothing called.** The scion client's runtime broker wait
+  (`RuntimeBrokerReady`; bring-up asks the hub as lever-admin instead) and `wire.Stage` (the host
+  and the broker stage `bootstrap.json` through `fsutil.ReplaceInTreeNoLinks`). No behaviour
+  changes.
+
+### Security
+
+- **An agent that bloats its own hub record no longer stalls `lever up`.** Each agent can write its
+  record's status and activity without a size limit, so the hub's agent list can pass lever's cap
+  on scion's output. The host's agent lists and the waits on them now fail at once with an error
+  that names the cause and the recovery, instead of waiting out the whole budget and reporting
+  "hub not ready", and the error no longer quotes the capped, agent-written output. The hub
+  readiness wait counts a capped list as the hub answering, so `lever up --fresh` (with or without
+  `--keep-conversation`) recovers on its own from an oversized manager record: it suspends and
+  backs up the manager, deletes its record by name, which needs no list, and creates it anew. A
+  plain `lever up` stops before it changes the manager (at the manager's role check or its first
+  agent list) and says to run `lever up --fresh --keep-conversation`. A pending controller
+  authority probe after the hub identity migration that cannot read the agents for this reason
+  stays pending and no longer stops the run.
+  When the list is still too large once the manager's record is gone, a worker's record is the
+  oversized one: `lever up --fresh` creates nothing and says to run `lever worker purge NAME
+  --force` for each worker that may be the one, since lever cannot read the list to tell which.
+
+### Upgrade
+
+- **Jail ABI 7.** The in-jail code changed: `lever-agent` and `lever-manager` (the version
+  commands), `internal/wire` (the `/version` route, `wire.Stage` removed), `internal/scion` (the
+  broker wait removed, the oversized list) and the new build stamp. Rebuild the agent image
+  (`make lever-image` or `make lever-image-slim`, then any instance image built from it) and
+  recreate the manager on it with `lever up --fresh --keep-conversation`. Doctor's *agent lever
+  version* row says so.
+
 ## [0.51.0] - 2026-10-19
 
 ### Changed

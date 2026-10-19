@@ -136,6 +136,9 @@ type run struct {
 	attach bool
 	// freshNoConv is PlanOpts.FreshWithoutConversation.
 	freshNoConv bool
+	// unlisted: under fresh the agent list was too large to read, so the
+	// manager's record is handled by name, unseen.
+	unlisted bool
 	// unattended is set while start-manager makes the fresh start of a manager
 	// with no conversation: the create records its session through
 	// unattendedBegin, never Deps.BeginSession. A nil unattendedBegin records
@@ -312,7 +315,8 @@ type Deps struct {
 	BeginUnattendedSession func(agent string) (UnattendedSession, error)
 	// BackupManagerConversation, when set, runs under PlanOpts.Fresh just before
 	// the manager record rec is deleted (scion deletes its home and conversation
-	// with it). An error stops the fresh start with nothing deleted. Nil backs
+	// with it); rec is nil when the agent list was too large to read. An error
+	// stops the fresh start with nothing deleted. Nil backs
 	// nothing up. It also runs, as a second guard, before the fresh start that
 	// replaces a resume with no conversation (PlanOpts.FreshWithoutConversation).
 	BackupManagerConversation func(ctx context.Context, rec *scion.Agent) error
@@ -1930,7 +1934,7 @@ const NestedVirtRecreateFix = "recreate it to apply the change: `lever up --fres
 // reaches a phase planManager can act on, disappears (nil: a concurrent
 // delete; the caller then creates), or the budget runs out. Exhaustion is a
 // hard error that never touches the record. A list error mid-poll counts as
-// "not yet"; a phase neither transitional nor known stops the wait at once so
+// "not yet", except ErrAgentListTooLarge, which a retry reads again; a phase neither transitional nor known stops the wait at once so
 // planManager refuses it by name.
 func (r *run) settleManagerPhase(ctx context.Context, jp string, rec *scion.Agent) (*scion.Agent, error) {
 	b := r.phaseSettle
@@ -1940,6 +1944,9 @@ func (r *run) settleManagerPhase(ctx context.Context, jp string, rec *scion.Agen
 	var listErr error
 	err := wait.For(ctx, b.spec(wait.ManagerPhaseSettle.Name), func(ctx context.Context) wait.Result {
 		agents, err := r.d.managerScion().List(ctx, jp)
+		if errors.Is(err, scion.ErrAgentListTooLarge) {
+			return wait.Fatal(err)
+		}
 		if err != nil {
 			listErr = err
 			return wait.NotYetErr(err)
@@ -1953,6 +1960,9 @@ func (r *run) settleManagerPhase(ctx context.Context, jp string, rec *scion.Agen
 	})
 	if err == nil {
 		return cur, nil
+	}
+	if errors.Is(err, scion.ErrAgentListTooLarge) {
+		return nil, fmt.Errorf("start-manager: manager %q was in phase %q and could not be re-observed; nothing was changed: %w", r.app.Name, cur.Phase, err)
 	}
 	if !errors.Is(err, wait.ErrTimeout) {
 		return nil, err
@@ -2255,6 +2265,9 @@ func (r *run) recoverDeleteAndCreate(ctx context.Context, jp string, opts scion.
 	// there. --fresh evicts a session the operator no longer trusts, so
 	// "discarded" must be true before a create follows.
 	agents, lerr := r.listAgentsRetry(ctx, jp)
+	if errors.Is(lerr, scion.ErrAgentListTooLarge) {
+		return r.listTooLargeAfterDelete(deleteFailReason, derr)
+	}
 	if lerr != nil {
 		if derr != nil {
 			return fmt.Errorf("start-manager: %s and delete failed: %w", deleteFailReason, derr)
@@ -2272,6 +2285,20 @@ func (r *run) recoverDeleteAndCreate(ctx context.Context, jp string, opts scion.
 		return fmt.Errorf("start-manager: %s: the delete reported no error, but the manager record is still there (phase %s). The previous session was NOT discarded and nothing was created. Run `lever up --fresh` again", deleteFailReason, scion.BoundedQuote(rec.Phase))
 	}
 	return r.startManagerCreate(ctx, opts, true)
+}
+
+// listTooLargeAfterDelete is the agent list still over the cap after the
+// manager's delete: if the delete went through, the oversized record is a
+// worker's. Nothing is created, as for any delete lever cannot confirm.
+func (r *run) listTooLargeAfterDelete(deleteFailReason string, derr error) error {
+	if derr != nil {
+		return fmt.Errorf("start-manager: %s: the delete of manager %q reported %s, and the hub's agent list is still too large for lever to read; nothing was created. "+
+			"The manager's record may still be the oversized one: run `lever up --fresh` again. If its delete then goes through and the list is still too large, a worker's record is the oversized one: %w",
+			deleteFailReason, r.app.Name, scion.BoundedQuote(scion.ErrSummary(derr)), scion.ErrAgentListTooLarge)
+	}
+	return fmt.Errorf("start-manager: %s: manager %q's record was deleted, but the hub's agent list is still too large for lever to read, so a worker's record is oversized; nothing was created. "+
+		"lever cannot read the list to tell which worker: run `lever worker purge NAME --force` for each worker that may be the one (its work product is kept), then `lever up`: %w",
+		deleteFailReason, r.app.Name, scion.ErrAgentListTooLarge)
 }
 
 // ensureFreshBootstrap makes sure fresh, enrolable bootstrap material is staged

@@ -162,3 +162,18 @@ func TestParseJSONDoesNotRedactParsedOutput(t *testing.T) {
 		t.Fatalf("parsed output was altered: %+v", got)
 	}
 }
+
+func TestRunErrKeepsOutputLimit(t *testing.T) {
+	capped := fmt.Errorf("limactl: %w", proc.ErrOutputLimit)
+	err := runErr([]string{"list"}, "", capped)
+	if !errors.Is(err, proc.ErrOutputLimit) || !strings.Contains(err.Error(), "passed its limit") {
+		t.Fatalf("empty output: err = %v, want it to unwrap to and name the cap", err)
+	}
+	err = runErr([]string{"list"}, "killed at lever's cap", capped)
+	if !errors.Is(err, proc.ErrOutputLimit) || err.Error() != "scion list: killed at lever's cap" {
+		t.Fatalf("err = %q, want scion's output alone, unwrapping to the cap", err)
+	}
+	if err := runErr([]string{"list"}, "boom", errors.New("exit status 1")); errors.Is(err, proc.ErrOutputLimit) || err.Error() != "scion list: boom" {
+		t.Fatalf("plain failure: err = %q", err)
+	}
+}

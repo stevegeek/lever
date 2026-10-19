@@ -52,6 +52,7 @@ func (b *Broker) JailHandler() http.Handler {
 	mux.Handle("POST "+wire.PathRenew, control(b.handleRenew))
 	mux.Handle("POST "+wire.PathRequest, control(b.handleRequest))
 	mux.Handle("GET "+wire.PathTools, control(b.handleTools))
+	mux.Handle("GET "+wire.PathVersion, control(b.handleVersion))
 
 	for _, name := range b.reg.Names() {
 		if name == ReservedLLMTool {

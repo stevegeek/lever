@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/wait"
 )
 
@@ -54,7 +55,8 @@ type LiveBudget struct {
 // A mid-poll list error is consumed within the same budget and polling
 // continues; it is surfaced only if the budget exhausts. In the settle window
 // errors are skipped too, but a window with no successful observation is
-// reported (ErrAgentUnverified), not passed.
+// reported (ErrAgentUnverified), not passed. ErrAgentListTooLarge, which a
+// retry reads again, is returned at once from either.
 //
 // On exhaustion it returns an ErrAgentNotLive error with no subject prefix
 // (the caller adds one). A record that stops being live during the window
@@ -103,6 +105,9 @@ func waitLiveOnce(ctx context.Context, list func(context.Context) ([]Agent, erro
 	}
 	err := wait.For(ctx, wait.Attempts(wait.ManagerRunning.Name, attempts, interval), func(ctx context.Context) wait.Result {
 		agents, err := list(ctx)
+		if errors.Is(err, ErrAgentListTooLarge) {
+			return wait.Fatal(err)
+		}
 		if err != nil {
 			lastErr = err
 			return wait.NotYetErr(err)
@@ -140,7 +145,7 @@ func waitLiveOnce(ctx context.Context, list func(context.Context) ([]Agent, erro
 // is stable across it. A pending strike keeps the window open for a bounded
 // few polls past its deadline; if no observation succeeds (a dying VM), the
 // window ends as unverified. A list error between two non-live readings does
-// not break the chain.
+// not break the chain; ErrAgentListTooLarge ends the hold.
 func holdLive(ctx context.Context, list func(context.Context) ([]Agent, error), slug string, interval, settle time.Duration, clk settleClock) error {
 	if interval <= 0 {
 		// Never spin on a zero interval.
@@ -161,6 +166,9 @@ func holdLive(ctx context.Context, list func(context.Context) ([]Agent, error), 
 		case <-clk.after(interval):
 		}
 		agents, err := list(ctx)
+		if errors.Is(err, ErrAgentListTooLarge) {
+			return err
+		}
 		if err != nil {
 			lastErr = err
 		} else {
@@ -239,7 +247,8 @@ func notLiveErr(lastPhase, lastContainer string) error {
 }
 
 // ObserveAgent returns the record for slug as scion lists it now, retrying a
-// failed list up to attempts times. Absent is (nil, nil). It judges nothing.
+// failed list up to attempts times (never ErrAgentListTooLarge). Absent is
+// (nil, nil). It judges nothing.
 // Exhaustion reports the last list error unwrapped (see waitLiveOnce); ctx
 // errors pass through.
 func ObserveAgent(ctx context.Context, list func(context.Context) ([]Agent, error), slug string, attempts int, interval time.Duration) (*Agent, error) {
@@ -250,6 +259,9 @@ func ObserveAgent(ctx context.Context, list func(context.Context) ([]Agent, erro
 	var found *Agent
 	err := wait.For(ctx, wait.Attempts("the agent listing", attempts, interval), func(ctx context.Context) wait.Result {
 		agents, err := list(ctx)
+		if errors.Is(err, ErrAgentListTooLarge) {
+			return wait.Fatal(err)
+		}
 		if err != nil {
 			lastErr = err
 			return wait.NotYetErr(err)
@@ -487,13 +499,32 @@ func (c *Client) List(ctx context.Context, project string) ([]Agent, error) {
 	// runValue: stderr warnings after the JSON would break the parse.
 	out, err := c.runValue(ctx, "", args...)
 	if err != nil {
-		return nil, err
+		return nil, listErr(err)
 	}
 	var agents []Agent
 	if err := parseJSON(out, &agents); err != nil {
 		return nil, err
 	}
 	return agents, nil
+}
+
+// ErrAgentListTooLarge is wrapped by List when scion's agent list passed
+// lever's output cap. Every agent can write its own record's status and
+// activity, so a hostile one can grow the list past the cap; a retry reads the
+// same list, so the error is final. scion delete and suspend name one agent and
+// never list, which is what both recoveries rely on.
+var ErrAgentListTooLarge = errors.New("the hub's agent list is too large for lever to read (scion's output passed lever's size limit), most likely because an agent's record carries an oversized status or activity. " +
+	"If it is the manager's record, `lever up --fresh --keep-conversation` backs up its conversation, deletes the record by name and brings the manager back on that conversation. " +
+	"If it is a worker's, `lever worker purge NAME --force` deletes that worker's record (its work product is kept). " +
+	"lever cannot read the list to tell which agent it is: `lever up --fresh` says so when the list is still too large once the manager's record is gone, and then purge each worker that may be the one")
+
+// listErr keeps none of the capped output: it is agent-written, up to the cap
+// in size, and text matches such as IsBrokerUnavailable run on the error.
+func listErr(err error) error {
+	if errors.Is(err, proc.ErrOutputLimit) && !errors.Is(err, ErrAgentListTooLarge) {
+		return fmt.Errorf("%w (%w)", ErrAgentListTooLarge, proc.ErrOutputLimit)
+	}
+	return err
 }
 
 // ErrDeleteUnconfirmed is wrapped by Delete when scion exits 0 for a delete the

@@ -31,8 +31,8 @@ type workerResult struct {
 	wire.WorkerListResponse[scion.Agent]
 }
 
-// brokerCaller POSTs body as JSON to one broker endpoint and decodes the reply
-// into out.
+// brokerCaller POSTs body as JSON to one broker endpoint, or GETs it when
+// body is nil, and decodes the reply into out.
 type brokerCaller interface {
 	Call(ctx context.Context, endpoint string, body, out any) error
 }
@@ -43,6 +43,9 @@ type httpCaller struct {
 }
 
 func (c httpCaller) Call(ctx context.Context, endpoint string, body, out any) error {
+	if body == nil {
+		return httpjson.Get(ctx, c.client, c.baseURL+endpoint, out)
+	}
 	return httpjson.Post(ctx, c.client, c.baseURL+endpoint, body, out)
 }
 

@@ -12,7 +12,7 @@ LEVER_INSTANCE ?= $(HOME)/lever-instance
 .PHONY: install
 install:
 	@mkdir -p $(PREFIX)
-	go build $(LEVER_BUILDVCS) -o $(PREFIX)/lever ./cmd/lever
+	go build $(LEVER_BUILDVCS) -ldflags "$(LEVER_STAMP_LDFLAGS)" -o $(PREFIX)/lever ./cmd/lever
 	@echo "installed $(PREFIX)/lever"; $(PREFIX)/lever version
 	go build -ldflags "-X main.Version=$(LEVER_VERSION)" -o $(PREFIX)/lever-tool-github ./cmd/lever-tool-github
 	@echo "installed $(PREFIX)/lever-tool-github"
@@ -25,9 +25,15 @@ install:
 # lever-agent cannot link internal/cli, so internal/agent.Version is stamped at
 # build time.
 LEVER_VERSION := $(shell sed -n 's/^const Version = "\(.*\)"/\1/p' internal/cli/root.go)
-LEVER_AGENT_LDFLAGS := -X github.com/stevegeek/lever/internal/agent.Version=$(LEVER_VERSION)
+# The commit every lever binary reports (internal/buildstamp). It wins over Go's
+# VCS stamp, which is wrong in a nested git worktree (see LEVER_BUILDVCS).
+# Lazy (`=`), so git only runs for the targets that build.
+LEVER_GIT_COMMIT = $(shell git rev-parse HEAD 2>/dev/null)
+LEVER_STAMP_LDFLAGS = -X github.com/stevegeek/lever/internal/buildstamp.revision=$(LEVER_GIT_COMMIT) \
+	-X github.com/stevegeek/lever/internal/buildstamp.modified=$(if $(LEVER_GIT_DIRTY),true,false)
+LEVER_AGENT_LDFLAGS = -X github.com/stevegeek/lever/internal/agent.Version=$(LEVER_VERSION) $(LEVER_STAMP_LDFLAGS)
 # lever-tool-db reports its version the same way (captool serverInfo).
-LEVER_TOOL_DB_LDFLAGS := -X main.Version=$(LEVER_VERSION)
+LEVER_TOOL_DB_LDFLAGS = -X main.Version=$(LEVER_VERSION) $(LEVER_STAMP_LDFLAGS)
 # The agent image's lever_version label: what `lever version` prints for this
 # source, so `lever doctor` can compare the image's binaries with the host
 # lever. Lazy (`=`), so git only runs for the targets that build an image.
@@ -35,8 +41,8 @@ LEVER_GIT_REV = $(shell git rev-parse --short=12 HEAD 2>/dev/null)
 LEVER_GIT_DIRTY = $(shell test -n "$$(git status --porcelain 2>/dev/null)" && echo -dirty)
 # Go's VCS stamping takes the first .git directory above the source, so in a
 # git worktree (where .git is a file) nested inside another checkout it stamps
-# that checkout's commit. There, build without it: lever then reports its
-# binary hash instead of a wrong commit.
+# that checkout's commit. There, build without it, so `go version -m` names no
+# wrong commit; LEVER_STAMP_LDFLAGS carries the right one.
 LEVER_BUILDVCS = $(if $(wildcard .git/HEAD),,-buildvcs=false)
 LEVER_IMAGE_VERSION = $(LEVER_VERSION)$(if $(LEVER_GIT_REV), ($(LEVER_GIT_REV)$(LEVER_GIT_DIRTY)))
 # The agent image's lever_jail_abi label (internal/jailabi), which `lever
@@ -53,7 +59,7 @@ LEVER_IMAGE_ARCH ?= $(shell go env GOARCH)
 lever-agent-linux:
 	@mkdir -p $(LEVER_INSTANCE)/vendor/bin
 	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 \
-		go build -ldflags "$(LEVER_AGENT_LDFLAGS)" -o $(LEVER_INSTANCE)/vendor/bin/lever-agent ./cmd/lever-agent
+		go build $(LEVER_BUILDVCS) -ldflags "$(LEVER_AGENT_LDFLAGS)" -o $(LEVER_INSTANCE)/vendor/bin/lever-agent ./cmd/lever-agent
 	@file $(LEVER_INSTANCE)/vendor/bin/lever-agent
 
 # The instance's lever-claude image build context.
@@ -65,11 +71,11 @@ LEVER_IMAGE_CTX ?= $(LEVER_INSTANCE)/image/lever-claude
 lever-image-bins:
 	@mkdir -p $(LEVER_IMAGE_CTX)/bin $(LEVER_IMAGE_CTX)/scionhook
 	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 \
-		go build -ldflags "$(LEVER_AGENT_LDFLAGS)" -o $(LEVER_IMAGE_CTX)/bin/lever-agent ./cmd/lever-agent
+		go build $(LEVER_BUILDVCS) -ldflags "$(LEVER_AGENT_LDFLAGS)" -o $(LEVER_IMAGE_CTX)/bin/lever-agent ./cmd/lever-agent
 	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 \
-		go build -ldflags "$(LEVER_TOOL_DB_LDFLAGS)" -o $(LEVER_IMAGE_CTX)/bin/lever-tool-db ./cmd/lever-tool-db
+		go build $(LEVER_BUILDVCS) -ldflags "$(LEVER_TOOL_DB_LDFLAGS)" -o $(LEVER_IMAGE_CTX)/bin/lever-tool-db ./cmd/lever-tool-db
 	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 \
-		go build -o $(LEVER_IMAGE_CTX)/bin/lever-manager ./cmd/lever-manager
+		go build $(LEVER_BUILDVCS) -ldflags "$(LEVER_STAMP_LDFLAGS)" -o $(LEVER_IMAGE_CTX)/bin/lever-manager ./cmd/lever-manager
 	cp cmd/lever-agent/scionhook/pre-start $(LEVER_IMAGE_CTX)/scionhook/pre-start
 	chmod +x $(LEVER_IMAGE_CTX)/scionhook/pre-start
 	@file $(LEVER_IMAGE_CTX)/bin/lever-agent $(LEVER_IMAGE_CTX)/bin/lever-tool-db $(LEVER_IMAGE_CTX)/bin/lever-manager
@@ -87,11 +93,11 @@ lever-image: framework-image-stage
 framework-image-stage:
 	@mkdir -p $(FRAMEWORK_IMAGE_CTX)/bin $(FRAMEWORK_IMAGE_CTX)/scionhook
 	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 \
-		go build -ldflags "$(LEVER_AGENT_LDFLAGS)" -o $(FRAMEWORK_IMAGE_CTX)/bin/lever-agent ./cmd/lever-agent
+		go build $(LEVER_BUILDVCS) -ldflags "$(LEVER_AGENT_LDFLAGS)" -o $(FRAMEWORK_IMAGE_CTX)/bin/lever-agent ./cmd/lever-agent
 	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 \
-		go build -ldflags "$(LEVER_TOOL_DB_LDFLAGS)" -o $(FRAMEWORK_IMAGE_CTX)/bin/lever-tool-db ./cmd/lever-tool-db
+		go build $(LEVER_BUILDVCS) -ldflags "$(LEVER_TOOL_DB_LDFLAGS)" -o $(FRAMEWORK_IMAGE_CTX)/bin/lever-tool-db ./cmd/lever-tool-db
 	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 \
-		go build -o $(FRAMEWORK_IMAGE_CTX)/bin/lever-manager ./cmd/lever-manager
+		go build $(LEVER_BUILDVCS) -ldflags "$(LEVER_STAMP_LDFLAGS)" -o $(FRAMEWORK_IMAGE_CTX)/bin/lever-manager ./cmd/lever-manager
 	cp cmd/lever-agent/scionhook/pre-start $(FRAMEWORK_IMAGE_CTX)/scionhook/pre-start
 	chmod +x $(FRAMEWORK_IMAGE_CTX)/scionhook/pre-start
 

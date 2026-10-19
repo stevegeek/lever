@@ -57,7 +57,11 @@ var errNoIdentity = errors.New("no identity")
 
 func run(argv []string) error {
 	if len(argv) < 2 {
-		return errors.New("usage: lever-agent <boot|serve-capability|renew|gateway|request|delegate|call|after-compact|claude-ready>")
+		return errors.New("usage: lever-agent <boot|serve-capability|renew|gateway|request|delegate|call|after-compact|claude-ready|version>")
+	}
+	if argv[1] == "--version" || argv[1] == "-version" {
+		fmt.Println(agent.BuildLine("lever-agent", agent.Version))
+		return nil
 	}
 	// SIGINT/SIGTERM cancel ctx. NotifyContext replaces the default terminate
 	// disposition, so every long-lived verb MUST return on ctx.Done or it
@@ -79,9 +83,46 @@ func run(argv []string) error {
 		return cmdAfterCompact(argv[2:], os.Stdout)
 	case "claude-ready":
 		return cmdClaudeReady(argv[2:], os.Getenv("TMUX_PANE"))
+	case "version":
+		return cmdVersion(ctx, argv[2:], os.Stdout)
 	default:
 		return fmt.Errorf("unknown subcommand %q", argv[1])
 	}
+}
+
+// cmdVersion prints this binary's build, then the host lever's (GET /version)
+// and whether the two match.
+func cmdVersion(ctx context.Context, args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("version", flag.ContinueOnError)
+	idDir, brokerURL, bootstrapPath := commonFlags(fs, "directory for the agent identity", "path to bootstrap.json")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("version: unexpected argument %q", fs.Arg(0))
+	}
+	fmt.Fprintln(stdout, agent.BuildLine("lever-agent", agent.Version))
+	id, ok := agent.LoadIdentity(*idDir)
+	if !ok {
+		return fmt.Errorf("version: %w in %s", errNoIdentity, *idDir)
+	}
+	bURL, err := resolveBrokerURL(*brokerURL, *bootstrapPath)
+	if err != nil {
+		return fmt.Errorf("version: %w", err)
+	}
+	client, err := id.Client()
+	if err != nil {
+		return fmt.Errorf("version: build mTLS client: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	host, err := agent.HostVersion(ctx, bURL, client)
+	report, err := agent.VersionReport(agent.Version, host, err, os.Getenv("LEVER_BOOTSTRAP") != "")
+	if err != nil {
+		return fmt.Errorf("version: %w", err)
+	}
+	fmt.Fprintln(stdout, report)
+	return nil
 }
 
 // defaultBootstrapPath is $LEVER_BOOTSTRAP, else ./.lever/bootstrap.json.

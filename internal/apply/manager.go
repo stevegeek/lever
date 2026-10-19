@@ -458,6 +458,13 @@ func planManager(q ManagerRequest, name string, o managerObservation) (managerPl
 // healed and, for a running record, podman's word on its container.
 func (r *run) observeUp(ctx context.Context, jp string) (*scion.Agent, managerObservation, error) {
 	rec, err := r.observeManager(ctx, jp)
+	if r.fresh && errors.Is(err, scion.ErrAgentListTooLarge) {
+		// The delete and the suspend before the backup name the manager and
+		// need no list, so --fresh still discards a record the list hides.
+		r.d.Log("%s: --fresh: the hub's agent list is too large to read; treating manager %q as present and deleting it by name", r.subjectName(), r.app.Name)
+		r.unlisted = true
+		return nil, managerObservation{present: true}, nil
+	}
 	if err != nil {
 		return nil, managerObservation{}, err
 	}
@@ -643,11 +650,19 @@ func (r *run) actUp(ctx context.Context, jp string, rec *scion.Agent, p managerP
 		// after the hub is up, because after lever stop the record is invisible
 		// until this step. The create that follows is what puts a changed
 		// manager.image into effect (a resume keeps the record's image).
-		if err := r.backupBeforeDelete(ctx, jp, rec); err != nil {
+		if err := r.backupBeforeDelete(ctx, jp, rec); err != nil && r.unlisted {
+			// Unseen, the record may already be gone (an earlier --fresh deleted
+			// it), and with it the home the backup reads.
+			return fmt.Errorf("%s: --fresh: backing up manager %q's conversation failed, so lever deleted nothing: %w. If an earlier `lever up --fresh` already deleted the manager's record, there is no conversation left to back up: run `lever up --fresh --no-backup`. Otherwise fix the cause and run `lever up --fresh` again", r.subjectName(), r.app.Name, err)
+		} else if err != nil {
 			return fmt.Errorf("%s: --fresh: backing up manager %q's conversation failed, so the manager was NOT deleted (its record and conversation are kept): %w. Fix the cause and run `lever up --fresh` again, or run `lever up --fresh --no-backup` to discard the conversation without a backup", r.subjectName(), r.app.Name, err)
 		}
+		phase := "unread"
+		if rec != nil {
+			phase = scion.BoundedQuote(rec.Phase)
+		}
 		return r.recoverDeleteAndCreate(ctx, jp, opts,
-			fmt.Sprintf("%s: --fresh — deleting manager %q (phase %s) and starting FRESH (previous session discarded)", r.subjectName(), r.app.Name, scion.BoundedQuote(rec.Phase)),
+			fmt.Sprintf("%s: --fresh — deleting manager %q (phase %s) and starting FRESH (previous session discarded)", r.subjectName(), r.app.Name, phase),
 			"--fresh delete")
 	case verbResume:
 		if rec.Phase == scion.PhaseStopped {
@@ -764,6 +779,9 @@ func (r *run) waitPhase(ctx context.Context, jp, phase string) (last string, err
 	}
 	err = wait.For(ctx, s, func(ctx context.Context) wait.Result {
 		agents, err := r.d.managerScion().List(ctx, jp)
+		if errors.Is(err, scion.ErrAgentListTooLarge) {
+			return wait.Fatal(err)
+		}
 		if err != nil {
 			return wait.NotYetErr(err)
 		}
@@ -821,23 +839,34 @@ const backupSuspendTimeout = 30 * time.Second
 
 // backupBeforeDelete runs Deps.BackupManagerConversation before a delete. A
 // running record is suspended first, so the copy is the conversation as it
-// ends; a failed backup resumes a record it suspended, which is then kept.
+// ends; a failed backup resumes a record it suspended, which is then kept. An
+// unlisted record (rec nil) is suspended too, and is left suspended on a
+// failed backup.
 func (r *run) backupBeforeDelete(ctx context.Context, jp string, rec *scion.Agent) error {
 	if r.d.BackupManagerConversation == nil {
 		return nil
 	}
 	suspended := false
-	if rec != nil && rec.Phase == scion.PhaseRunning {
+	if (rec != nil && rec.Phase == scion.PhaseRunning) || r.unlisted {
 		sctx, cancel := context.WithTimeout(ctx, backupSuspendTimeout)
 		if err := r.d.managerScion().Suspend(sctx, r.app.Name, jp); err != nil {
-			r.d.Log("conversation: could not suspend manager %q before the backup (%s); copying it while it runs", r.app.Name, termsafe.Sanitize(scion.ErrSummary(err)))
+			how := "copying it while it runs"
+			if r.unlisted {
+				how = "it may not be running; copying it as it is"
+			}
+			r.d.Log("conversation: could not suspend manager %q before the backup (%s); %s", r.app.Name, termsafe.Sanitize(scion.ErrSummary(err)), how)
 		} else {
 			suspended = true
 		}
 		cancel()
 	}
 	err := r.d.BackupManagerConversation(ctx, rec)
-	if err != nil && suspended {
+	switch {
+	case err != nil && suspended && r.unlisted:
+		// Unseen, the record may have been suspended already: a resume could
+		// start a manager that was not running.
+		err = fmt.Errorf("%w; manager %q was suspended for the backup and stays suspended", err, r.app.Name)
+	case err != nil && suspended:
 		err = r.resumeAfterFailure(ctx, jp, err, "")
 	}
 	return err
@@ -870,7 +899,9 @@ func (r *run) newSession(ctx context.Context, jp string, q ManagerRequest) (res 
 			err = r.resumeAfterFailure(ctx, jp, err, "on its own conversation")
 		}
 	}()
-	if last, err := r.waitPhase(ctx, jp, scion.PhaseSuspended); err != nil {
+	if last, err := r.waitPhase(ctx, jp, scion.PhaseSuspended); errors.Is(err, scion.ErrAgentListTooLarge) {
+		return res, fmt.Errorf("could not see whether the manager suspended; nothing was changed: %w", err)
+	} else if err != nil {
 		return res, fmt.Errorf("the manager did not suspend (last seen %s); nothing was changed", scion.BoundedQuote(last))
 	}
 	if err := q.WhileSuspended(ctx); err != nil {
@@ -881,6 +912,10 @@ func (r *run) newSession(ctx context.Context, jp string, q ManagerRequest) (res 
 		return res, fmt.Errorf("stopping the manager failed, so its session was not ended: %s", termsafe.Sanitize(scion.ErrSummary(serr)))
 	}
 	if last, werr := r.waitPhase(ctx, jp, scion.PhaseStopped); werr != nil {
+		if errors.Is(werr, scion.ErrAgentListTooLarge) {
+			stopped = true
+			return res, markedError{fmt.Errorf("lever cannot tell whether the manager's session ended and started nothing: %w", werr), ErrStopUnconfirmed}
+		}
 		if r.stillSuspended(ctx, jp) {
 			return res, fmt.Errorf("the manager did not stop (last seen %s), so its session was not ended", scion.BoundedQuote(last))
 		}

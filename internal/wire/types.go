@@ -57,6 +57,13 @@ type ToolsResponse struct {
 	Tools []string `json:"tools"`
 }
 
+// VersionResponse is the body of GET /version: the host lever's build (what
+// `lever version` prints) and its Jail ABI.
+type VersionResponse struct {
+	Version string `json:"version"`
+	JailABI int    `json:"jail_abi"`
+}
+
 // WorkerStartRequest is the body of POST /worker/start and POST
 // /worker/recycle.
 type WorkerStartRequest struct {

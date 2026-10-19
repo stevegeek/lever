@@ -6,6 +6,7 @@ package manager
 
 import (
 	"github.com/spf13/cobra"
+	"github.com/stevegeek/lever/internal/agent"
 	"github.com/stevegeek/lever/internal/cli"
 )
 
@@ -14,8 +15,9 @@ import (
 func NewRoot() *cobra.Command { return newRoot(newMTLSCaller()) }
 
 func newRoot(c brokerCaller) *cobra.Command {
-	root := &cobra.Command{Use: "lever-manager", Short: "In-jail worker orchestration"}
-	root.AddCommand(cli.VersionCmd())
-	root.AddCommand(newAgentCmd(c), newMsgCmd(c), newWatchCmd(c))
+	root := &cobra.Command{Use: "lever-manager", Short: "In-jail worker orchestration",
+		Version: agent.BuildLine("lever-manager", cli.Version)}
+	root.SetVersionTemplate("{{.Version}}\n")
+	root.AddCommand(newVersionCmd(c), newAgentCmd(c), newMsgCmd(c), newWatchCmd(c))
 	return root
 }

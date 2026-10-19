@@ -1208,7 +1208,16 @@ func (w *applyWiring) repairScionHubEndpoint(ctx context.Context, wp string) err
 // roles: that agent holds full hub authority (see apply.Deps.VerifyAgentRole).
 // It fails closed on any question it cannot answer.
 func (w *applyWiring) verifyAgentRole(ctx context.Context, projectName, agentName string) error {
-	return hubapi.VerifyAgentRole(ctx, w.sc.RolesSupported, w.hub(), projectName, agentName)
+	return roleCheckErr(agentName, hubapi.VerifyAgentRole(ctx, w.sc.RolesSupported, w.hub(), projectName, agentName))
+}
+
+// roleCheckErr gives an agent list page over the reply cap the same recovery
+// as scion's oversized list: the role check reads every record in the project.
+func roleCheckErr(agentName string, err error) error {
+	if tooLarge(err) {
+		return fmt.Errorf("checking %q's stored role: %w", agentName, scion.ErrAgentListTooLarge)
+	}
+	return err
 }
 
 // ensureHubAuth installs the assertion public key and the hub's auth block

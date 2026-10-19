@@ -20,6 +20,7 @@ Developer notes for working on lever itself. For using lever, start at the
 | `internal/agentledger` | Host record of each contact message the broker authorized an agent to send. |
 | `internal/apply` | `lever apply`/`up` bring-up: the pure `Plan` and the `Run` executor. |
 | `internal/backend` | The containment `Backend` contract. `types` (stdlib-only leaf: the data types the contract carries for its guest-side verbs), `common` (shared machinery for reach-the-guest backends), `guest` (the in-guest half of provisioning: argv-prefix transport, in-guest scripts, installing what `internal/provision` built, scion state and hub-login settings surgery), `lima`, `orbstack`, `registry` (name → constructor, jail argv, and the `Candidates` guarantee matrix), `backendtest` (shared fakes for backend tests). |
+| `internal/buildstamp` | The build's provenance every lever binary reports: the commit (stamped with `-ldflags -X` by the Makefile and the release build, else Go's VCS stamp), dirty state and binary hash. Stdlib only. |
 | `internal/bridge` | Poll-based scion-event → events-file bridge the manager watches. |
 | `internal/broker` | The capability broker: enrol, request/delegate, MCP gateway, llm proxy, directives. `registry` (tool/operation registry and constraint mapping), `rules` (obtain/delegate policy), `brokertest` (test-only: a broker under test with its CA, server and mTLS clients). |
 | `internal/brokerctl` | Host-side controller for the broker daemon: keys, `serve`, tool supervisor, stop. |

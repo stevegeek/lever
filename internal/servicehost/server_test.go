@@ -234,9 +234,9 @@ func TestBridgeCeilingRefusesBeforeTheServer(t *testing.T) {
 		t.Fatalf("folded key: %d, want 400", resp.StatusCode)
 	}
 	// An unknown field never reaches the server.
-	_, body = r.post("/mcp/fake", `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"echo","arguments":{"msg":"x"},"extra":1},"other":{"name":"forbidden"}}`)
+	_, body = r.post("/mcp/fake", `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"echo","arguments":{"msg":"x"},"extra":1,"_meta":{"progressToken":"p"}},"other":{"name":"forbidden"}}`)
 	logged, _ = os.ReadFile(fakeLog)
-	if strings.Contains(string(logged), `"other"`) || strings.Contains(string(logged), `"extra"`) {
+	if strings.Contains(string(logged), `"other"`) || strings.Contains(string(logged), `"extra"`) || strings.Contains(string(logged), `"_meta"`) {
 		t.Fatalf("SECURITY: unchecked fields reached the server:\n%s", logged)
 	}
 	// A duplicate key is refused: parsers disagree on which one wins.

@@ -91,7 +91,7 @@ brew install stevegeek/tap/lever  # release binaries: lever + the lever-tool-* h
 # — or:
 go install github.com/stevegeek/lever/cmd/lever@latest   # host `lever` onto your GOBIN/PATH
 # — or from a clone (requires Go 1.26.9+):
-make install              # build host `lever` + the host tools lever-tool-github, lever-tool-fizzy, lever-tool-whisper, lever-tool-tts → ~/.local/bin (must be on PATH)
+make install              # build host `lever` + the host tools lever-tool-github, lever-tool-whisper, lever-tool-tts → ~/.local/bin (must be on PATH)
 make lever-image          # build the agent image lever.local/lever-claude:<arch>
 
 cd path/to/my-instance && lever up        # bring up jail + scion + manager, attach the manager TTY
@@ -139,7 +139,7 @@ command and flag is in the [CLI reference](docs-site/_reference/cli.md).
 - [Security model](docs-site/_guides/security-model.md), threat model, the jail, what containment does and does not buy, validation evidence.
 - [Containment backends](docs-site/_reference/backends.md), the jail contract and what OrbStack and Lima each guarantee.
 - [Capabilities](docs-site/_guides/capabilities.md), how agents get authority.
-- [Tools](docs-site/_guides/tools.md), the first-party broker tools: github, fizzy, whisper and tts.
+- [Tools](docs-site/_guides/tools.md), the first-party broker tools: github, whisper and tts.
 - [Agent identity](docs-site/_guides/agent-identity.md), certificates, enrolment, renewal.
 - [Core vs instance](docs-site/_guides/core-vs-instance.md), the boundary between the framework and your setup.
 - [Conventions](docs-site/_guides/conventions.md), recommended (not enforced) tree patterns.

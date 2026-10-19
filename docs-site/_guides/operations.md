@@ -209,7 +209,7 @@ captool masks its decision lines' `detail` whatever logger the tool passes.
 **Audit lines** are records that you and your scripts parse, so their form does not change: the
 `broker.decision` lines in `broker.log` (fields `op`, `caller`, `decision` and `detail`, in that
 order, then the decision's own fields such as `id`, `rule` and `reason`), a tool's decision
-lines (`captool.decision`, `github.push`, `github.<op>`, `fizzy.<op>`) in its tool log, the
+lines (`captool.decision`, `github.push`, `github.<op>`) in its tool log, the
 JSON-lines audits (`remote-audit.jsonl`, `directives.log`) and the ledgers.
 
 What a person reads is not a log line but a message. `lever` prints on your terminal in one
@@ -1919,7 +1919,7 @@ driver).
 ## Upgrading lever
 
 1. Pull and rebuild: `cd lever_to && make all` (the host `lever`, `lever-tool-github`,
-   `lever-tool-fizzy`, `lever-tool-whisper` and `lever-tool-tts`), and if the agent-side binaries changed, rebuild the agent image
+   `lever-tool-whisper` and `lever-tool-tts`), and if the agent-side binaries changed, rebuild the agent image
    (`make lever-image`, or `make lever-image-bins` + your instance's own image build), then
    `lever apply` to load it (or re-save it over the `image_tar` archive on a Docker-less host,
    then `lever apply`). The manager runs a new image only after

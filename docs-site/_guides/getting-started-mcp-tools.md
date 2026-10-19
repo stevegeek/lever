@@ -131,8 +131,6 @@ ambient allowlist. See the [config reference](/reference/config/) for every key 
 
 See also [tools](/tools/), the section for the first-party broker tools lever ships:
 [the github tool](/github-tool/), which pushes agent branches without a GitHub credential in the
-jail (and, if you turn them on, opens and merges PRs, tags releases and reads CI), [the fizzy
-tool](/fizzy-tool/), which gives agents a fixed set of operations on one Fizzy board without the
-Fizzy token, [the whisper tool](/whisper-tool/), which runs speech to text on the host for the chat page's dictation and,
+jail (and, if you turn them on, opens and merges PRs, tags releases and reads CI), [the whisper tool](/whisper-tool/), which runs speech to text on the host for the chat page's dictation and,
 with a grant, for agents, and [the tts tool](/tts-tool/), which reads the chat page's messages aloud with a
 voice on the host.

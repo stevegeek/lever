@@ -29,6 +29,7 @@
 # matches), CHAOS_CALL_TIMEOUT (seconds for one command in the guest, default
 # 180), KEEP=1 (leave the VM for inspection).
 set -uo pipefail
+exec </dev/null
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # Not NAME: an operator's shell may hold a NAME for a real instance, whose VM
@@ -95,9 +96,10 @@ fi
 [ -n "${IMAGE_TAR:-}" ] || { echo "set IMAGE_TAR or IMAGE_CACHE (see the header)"; exit 1; }
 
 # A hung guest must not outlast the budget: every call into it (X and P
-# too) is bounded. --foreground keeps limactl in the terminal's process
-# group, where ssh may read stdin.
-G() { timeout --foreground "${CHAOS_CALL_TIMEOUT:-180}" limactl shell --workdir / "$VM" -- "$@"; }
+# too) is bounded, ssh included. timeout gives the call a process group of
+# its own, where a read of the terminal would stop it, so the run reads no
+# terminal (exec </dev/null above).
+G() { timeout -k 30 "${CHAOS_CALL_TIMEOUT:-180}" limactl shell --workdir / "$VM" -- "$@"; }
 
 WORK="$(mktemp -d /tmp/lc.XXXXXX)"
 INST="$WORK/i"

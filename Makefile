@@ -184,11 +184,15 @@ test-apikey-e2e: install lever-image-bins
 
 # The live Lima e2e targets run one at a time on a machine: each holds this
 # lock for its run and refuses at once while another holds it. e2e-lock-free
-# refuses before install replaces the binaries a running e2e uses.
+# refuses before install replaces the binaries a running e2e uses (a run that
+# starts in between still can). -o keeps the lock out of the daemons a run
+# leaves behind, such as a KEEP=1 VM's.
 E2E_LOCK = $${XDG_CACHE_HOME:-$$HOME/.cache}/lever-e2e.lock
-E2E_LOCKED = command -v flock >/dev/null 2>&1 || { echo "flock not found: the live e2e targets need it (util-linux)"; exit 1; }; \
-	mkdir -p "$$(dirname "$(E2E_LOCK)")" && flock -n -E 75 "$(E2E_LOCK)"
+E2E_LOCKED = command -v flock >/dev/null 2>&1 || { echo "flock not found: the live e2e targets need util-linux flock"; exit 1; }; \
+	mkdir -p "$$(dirname "$(E2E_LOCK)")" && flock -n -o -E 75 "$(E2E_LOCK)"
 E2E_HELD = { rc=$$?; [ "$$rc" != 75 ] || echo "another live e2e holds $(E2E_LOCK); wait for it to finish"; exit "$$rc"; }
+
+.NOTPARALLEL: test-lima-e2e test-lima-stack-e2e test-lima-chaos-e2e test-lima-hubauth-e2e
 
 .PHONY: e2e-lock-free
 e2e-lock-free:
@@ -215,7 +219,7 @@ test-lima-stack-e2e: e2e-lock-free install
 # script's header.
 .PHONY: test-lima-chaos-e2e
 test-lima-chaos-e2e: e2e-lock-free install
-	@$(E2E_LOCKED) timeout -k 300 $$(( $${CHAOS_BUDGET:-1800} + 5400 )) bash tools/test/lima-chaos-e2e.sh </dev/null || $(E2E_HELD)
+	@$(E2E_LOCKED) bash tools/test/e2e-watchdog.sh $$(( $${CHAOS_BUDGET:-1800} + 5400 )) bash tools/test/lima-chaos-e2e.sh || $(E2E_HELD)
 
 # Live e2e of the hub's proxy auth on a real Lima VM: migrates an instance an
 # older lever brought up, binds and removes a contact while agents run,

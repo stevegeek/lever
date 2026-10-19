@@ -54,10 +54,10 @@ check() { local what=$1; shift; if "$@"; then ok "$what"; else bad "$what"; fi; 
 # checkx evaluates a shell condition in this shell (variables and functions).
 checkx() { local what=$1; shift; if eval "$*"; then ok "$what"; else bad "$what"; fi; }
 
-# A short work dir: the broker's operator socket lives under the state dir,
-# and a UNIX socket path is limited to about 100 bytes.
 command -v limactl >/dev/null 2>&1 || { echo "limactl not found"; exit 1; }
 [ -x "$LEVER" ] || { echo "$LEVER not found (make install)"; exit 1; }
+# A short work dir: the broker's operator socket lives under the state dir,
+# and a UNIX socket path is limited to about 100 bytes.
 WORK="$(mktemp -d /tmp/lh.XXXXXX)"
 INST="$WORK/i"
 # Set by the clean slate: until then the VM by this name is not this run's.

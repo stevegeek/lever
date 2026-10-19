@@ -142,7 +142,7 @@ make test-lima-hubauth-e2e # live hub identities: migration from the older relea
 lever acceptance       # six-check live gate against a running instance
 ```
 
-The four `test-lima-*` targets need `flock` and run one at a time: each holds
+The four `test-lima-*` targets need util-linux `flock` and run one at a time: each holds
 `${XDG_CACHE_HOME:-~/.cache}/lever-e2e.lock` and refuses while another run holds it. Each script
 deletes and recreates its own VM, `lever-<name>`, where the name comes from `LIMA_E2E_NAME`,
 `STACK_NAME`, `CHAOS_NAME` or `HUBAUTH_NAME` (never `NAME`) and must end in `e2e`; `KEEP=1` leaves

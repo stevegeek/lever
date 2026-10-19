@@ -18,8 +18,9 @@
 # starts.
 #
 # Env overrides: LIMA_E2E_NAME (default limae2e; must end in e2e), JAIL_PORT,
-# ADMIN_PORT, TOOL_PORT, SUPPRESS_PORT, SCION_VERSION, KEEP=1 (skip teardown for inspection). On failure the end of
-# the broker and tool logs is printed (masked), with or without KEEP=1.
+# ADMIN_PORT, TOOL_PORT, SUPPRESS_PORT, SCION_VERSION, KEEP=1 (skip teardown
+# for inspection). On failure the end of the broker and tool logs is printed
+# (masked), with or without KEEP=1.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

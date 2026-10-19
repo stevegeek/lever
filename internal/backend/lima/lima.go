@@ -573,8 +573,16 @@ func (l *Lima) hardenGuest(ctx context.Context, cfg backend.Config, boot vmBoot)
 		}
 		if rebooted {
 			warn("jail: rebooted the guest once to apply %s", params)
+			first := crash.Warn
 			if crash, err = l.Guest().EnsureCrashRecovery(ctx); err != nil {
 				return err
+			}
+			// A warning such as a failed update-grub may not recur once the
+			// reboot applied the parameters, and still needs saying.
+			for _, w := range first {
+				if !slices.Contains(crash.Warn, w) {
+					crash.Warn = append(crash.Warn, w)
+				}
 			}
 			// Report only: the install, if any, ran before the reboot.
 			after, err := l.Guest().EnsureGuestKernel(ctx, "", guest.KernelOpts{})
@@ -596,16 +604,24 @@ func (l *Lima) hardenGuest(ctx context.Context, cfg backend.Config, boot vmBoot)
 // rebootGuest stops the VM and starts it again the way ensureVM does
 // (startVM, so the no-swap scope applies). One attempt, never retried. A
 // stop that fails with the VM still running is a warning: the bring-up goes
-// on with a reboot pending. A VM left down fails the bring-up.
+// on with a reboot pending. A VM left down, or in a state lever cannot
+// read, fails the bring-up. Only a VM seen stopped is started again, so
+// "rebooted" is never reported for a start that found it still running.
 func (l *Lima) rebootGuest(ctx context.Context, cfg backend.Config, instDir, params string, warn func(string, ...any)) (bool, error) {
 	s := progress.From(ctx).Current()
 	s.Detail("rebooting the VM to apply " + params)
 	res, err := l.Runner().Run(ctx, nil, "limactl", "stop", l.Machine())
 	if err = exitErr(err, res); err != nil {
+		stopErr := briefErr(err, res)
 		status, serr := l.vmStatus(ctx)
-		if serr == nil && status == "Running" {
-			warn("jail: warning: rebooting the guest to apply %s failed: limactl stop: %s; the VM keeps running without it", params, briefErr(err, res))
+		switch {
+		case serr == nil && status == "Running":
+			warn("jail: warning: rebooting the guest to apply %s failed: limactl stop: %s; the VM keeps running without it", params, stopErr)
 			return false, nil
+		case serr != nil:
+			return false, fmt.Errorf("rebooting the guest to apply %s: limactl stop: %s; the VM's state is unknown: %v (run `lever up` again)", params, stopErr, serr)
+		case status != "Stopped":
+			return false, fmt.Errorf("rebooting the guest to apply %s: limactl stop: %s; the VM is %q (run `lever up` again)", params, stopErr, status)
 		}
 	}
 	if err = l.startVM(ctx, cfg.HostSwap, instDir, warn); err != nil {

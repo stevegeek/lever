@@ -436,3 +436,51 @@ func TestEnsureUpFailedRestartFailsOnce(t *testing.T) {
 		t.Errorf("provisioning ran after a failed reboot: %q", f.Calls[p[0]].Argv())
 	}
 }
+
+// A stop that failed but left the VM stopped still gets its one start.
+func TestEnsureUpFailedStopOnStoppedVMStartsIt(t *testing.T) {
+	f, r := rebootRig(t, listStopped)
+	r.on(contains("limactl stop"), proc.Result{Code: 1, Stderr: "level=fatal msg=\"timed out\"\n"})
+	lines, err := ensureUpRig(r)
+	if err != nil {
+		t.Fatalf("EnsureUp: %v", err)
+	}
+	if starts := callsMatching(f, "limactl start"); len(starts) != 2 {
+		t.Fatalf("starts=%v, want two", starts)
+	}
+	if all := strings.Join(lines, "\n"); !strings.Contains(all, "jail: rebooted the guest once to apply no-kvmapf") {
+		t.Errorf("missing the reboot report in:\n%s", all)
+	}
+}
+
+// A stop that failed and left the VM in another state is not started again,
+// and "rebooted" is never reported.
+func TestEnsureUpFailedStopOnBrokenVMFails(t *testing.T) {
+	f, r := rebootRig(t, listStopped)
+	r.on(contains("limactl stop"), proc.Result{Code: 1, Stderr: "level=fatal msg=\"timed out\"\n"})
+	r.on(contains("limactl list --format"), proc.Result{Stdout: listStopped}, proc.Result{Stdout: vm + " Broken\n"})
+	lines, err := ensureUpRig(r)
+	if err == nil || !strings.Contains(err.Error(), "limactl stop: level=fatal") || !strings.Contains(err.Error(), `"Broken"`) {
+		t.Fatalf("err = %v", err)
+	}
+	if starts := callsMatching(f, "limactl start"); len(starts) != 1 {
+		t.Fatalf("starts=%v, want only the first", starts)
+	}
+	if strings.Contains(strings.Join(lines, "\n"), "rebooted the guest") {
+		t.Error("no reboot happened")
+	}
+}
+
+// A warning of the run before the reboot is kept when the run after it no
+// longer gives it.
+func TestEnsureUpRebootKeepsFirstRunWarning(t *testing.T) {
+	_, r := rebootRig(t, listStopped)
+	r.rules[0].results = []proc.Result{{Stdout: stagedOut + "warn: update-grub failed\n"}, {}}
+	lines, err := ensureUpRig(r)
+	if err != nil {
+		t.Fatalf("EnsureUp: %v", err)
+	}
+	if n := strings.Count(strings.Join(lines, "\n"), "jail: warning: update-grub failed"); n != 1 {
+		t.Errorf("update-grub warning printed %d times in:\n%s", n, strings.Join(lines, "\n"))
+	}
+}

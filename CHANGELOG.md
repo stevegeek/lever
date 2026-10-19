@@ -13,12 +13,13 @@ version bump moves the block under the new version heading.
   crash-recovery step writes the kernel command line only once the VM is up, so the first start
   after 0.50.0 booted without it and reported a reboot pending: the setting took a second restart.
   Now, when the bring-up started the VM itself (it was stopped, or new) and `grub.cfg` already
-  holds parameters the running kernel lacks, lever reboots the guest once before anything else runs
-  in it (`limactl stop`, then the same start, in the no-swap scope where it applies) and prints
+  holds parameters the running kernel lacks, lever reboots the guest once before it provisions
+  anything in it (`limactl stop`, then the same start, in the no-swap scope where it applies) and prints
   `jail: rebooted the guest once to apply no-kvmapf`. A new `guest_kernel: hwe` kernel boots in the
   same reboot. At most one reboot per bring-up; a VM that was already running is never rebooted
-  and still reports the reboot pending. A failed stop leaves the VM running with the pending line;
-  a failed start fails the bring-up, and the next `lever up` starts the VM with the parameters.
+  and still reports the reboot pending. A stop that fails while the VM still runs leaves it running
+  with the pending line; any other failure fails the bring-up, and the next `lever up` starts the
+  VM with the parameters.
 
 ### Changed
 

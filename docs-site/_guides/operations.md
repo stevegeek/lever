@@ -1661,7 +1661,7 @@ The kernel command line (always, the first time, and once more on a VM converged
 use). The sysctls and the unload take effect at once.
 
 When the bring-up started the VM itself (it was stopped, or new) and `grub.cfg` already holds
-parameters the running kernel lacks, lever reboots the guest once, before anything else runs in
+parameters the running kernel lacks, lever reboots the guest once, before it provisions anything in
 it: `limactl stop`, then the same start (in the no-swap scope where it applies), then the check
 again. It prints `jail: rebooted the guest once to apply no-kvmapf` (the parameters it applied).
 A new kernel from `guest_kernel: hwe` boots in the same reboot. So after an upgrade one `lever
@@ -1670,8 +1670,9 @@ was already running is never rebooted, since agents may be working in it.
 
 What is still pending after that, or on a running VM, prints `jail: reboot pending: …` (the line
 names only what is missing); `lever stop`, then `lever up`, reboots the VM and keeps the manager
-conversation. A reboot whose `limactl stop` fails leaves the VM running with the line printed; one
-whose start fails fails the bring-up, and the next `lever up` starts the VM with the parameters.
+conversation. A reboot whose `limactl stop` fails while the VM still runs leaves it running with
+the line printed; any other failure fails the bring-up, and the next `lever up` starts the VM with
+the parameters.
 Doctor's *guest crash recovery* row reads `/proc/sys/kernel/*`, `/proc/cmdline` and `/sys/module`
 and warns until all of it is in place.
 

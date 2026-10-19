@@ -42,7 +42,9 @@ func sanitizeWorkerEvent(worker string, e broker.WorkerEvent) broker.WorkerEvent
 	if !watchIDRE.MatchString(e.ID) {
 		e.ID = ""
 	}
-	msg := termsafe.Sanitize(strings.TrimPrefix(e.Message, scion.WorkerReportedPrefix))
+	// Runs of blanks collapse, so a padded message cannot wrap on the
+	// terminal into what reads as an event line of its own.
+	msg := strings.Join(strings.Fields(termsafe.Sanitize(strings.TrimPrefix(e.Message, scion.WorkerReportedPrefix))), " ")
 	if len(msg) > maxWatchMessage {
 		msg = strings.ToValidUTF8(msg[:maxWatchMessage], "") + "…"
 	}

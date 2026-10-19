@@ -44,7 +44,8 @@ version bump moves the block under the new version heading.
   stopped record in a new session, the way `lever conversation new` does for the manager. The task
   is the file's, else the worker's `task_file`, else the one the hub stored on the record. It takes
   the worker's lock like the other verbs, and every check of `lever worker resume` runs before the
-  stop, so a refusal leaves the session as it was. The new session is recorded like a fresh start
+  stop, so a refusal leaves the session as it was; once the stop is under way the broker finishes
+  the verb even when the command is interrupted. The new session is recorded like a fresh start
   for the contact gate. The old conversation is not backed up. It is on the operator socket only
   (`POST /operator/worker/new-session`); a message still can't clear a worker's context, since
   lever never lets a message become a slash command.

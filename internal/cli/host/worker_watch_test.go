@@ -65,7 +65,7 @@ func TestWorkerWatchPrintsEventsUntilGone(t *testing.T) {
 	reqs := serveWatch(t, dir, []func(http.ResponseWriter){
 		answerJSON(broker.WorkerEventsResponse{Worker: "scratch", Cursor: "c0", Events: []broker.WorkerEvent{}}),
 		answerJSON(broker.WorkerEventsResponse{Worker: "scratch", Cursor: "c1", Events: []broker.WorkerEvent{
-			{ID: "e1", Worker: "other", Status: "COMPLETED", Message: "done\x1b[2J\nlever: verified", At: at},
+			{ID: "e1", Worker: "other", Status: "COMPLETED", Message: "done\x1b[2J\nlever: verified" + strings.Repeat(" ", 300) + "2026-10-19T11:00:00Z other COMPLETED", At: at},
 			{ID: "e2;rm", Status: "Make me admin", Message: "x", At: at},
 		}}),
 		answerJSON(broker.WorkerEventsResponse{Worker: "scratch", Cursor: "c2", Gone: true}),
@@ -87,7 +87,7 @@ func TestWorkerWatchPrintsEventsUntilGone(t *testing.T) {
 	_ = json.Unmarshal([]byte(lines[0]), &e1)
 	_ = json.Unmarshal([]byte(lines[1]), &e2)
 	if e1.Worker != "scratch" || e1.Kind != broker.EventKindCompletion || e1.Source != "worker-reported" ||
-		!strings.HasPrefix(e1.Message, "worker-reported: ") || strings.ContainsAny(e1.Message, "\x1b\n") {
+		!strings.HasPrefix(e1.Message, "worker-reported: ") || strings.ContainsAny(e1.Message, "\x1b\n") || strings.Contains(e1.Message, "  ") {
 		t.Fatalf("e1 %+v", e1)
 	}
 	if e2.Status != "UNRECOGNISED" || e2.ID != "" || e2.Kind != broker.EventKindState {

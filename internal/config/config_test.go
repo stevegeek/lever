@@ -1379,11 +1379,11 @@ func TestRemoteDefaults(t *testing.T) {
 	}
 }
 
-// 8446 was the guest login forwarder's port; nothing reserves it now.
+// remote.port 8446 is not reserved.
 func TestRemotePort8446IsFree(t *testing.T) {
 	base := "name: x\nbackend: orbstack\ntree: ./tree\nmanager: {}\nremote:\n  enabled: true\n  base_url: \"https://demo.tailnet.ts.net\"\n"
 	if _, err := LoadNoHostChecks(writeConfig(t, base+"  port: 8446\n")); err != nil {
-		t.Fatalf("remote.port 8446 must load now that no forwarder is mirrored onto it: %v", err)
+		t.Fatalf("remote.port 8446 must load: %v", err)
 	}
 }
 

@@ -294,8 +294,7 @@ func TestContactSessionSurvivesAStampOnlyRelease(t *testing.T) {
 	if err := contactSession(app, st, "scratch"); err != nil {
 		t.Fatalf("a stamp-only release made the session stale: %v", err)
 	}
-	// A record holding the full-file hash, as releases before 0.33.1 wrote,
-	// is stale.
+	// A record holding the full-file hash is stale.
 	r := sessionrec.Record{Agent: "scratch", SkillHash: skills.Hash(want), Version: "0.33.0", Started: time.Now().UTC()}
 	if err := sessionrec.Append(st.Sessions(), r); err != nil {
 		t.Fatal(err)

@@ -624,6 +624,13 @@ func (b *Broker) resumeRecordAs(ctx context.Context, w http.ResponseWriter, spec
 	if !b.resumeChecks(ctx, w, spec, actor) {
 		return
 	}
+	if b.isRevoked(spec.Name) {
+		// Revoke takes no worker lock: one that landed during the checks
+		// above must not get the worker a fresh ticket.
+		b.audit("worker", actor, "deny", "resume "+spec.Name+": revoked")
+		refuse(w, ReasonRevoked, "worker "+spec.Name+" is revoked", http.StatusForbidden)
+		return
+	}
 	// Stage a fresh ticket BEFORE resuming: a worker past its leaf lifetime
 	// re-enrols on boot and the old ticket is spent, and the ticket dir is
 	// tmpfs, so after a jail restart podman refuses the missing mount source.
@@ -642,6 +649,14 @@ func (b *Broker) resumeRecordAs(ctx context.Context, w http.ResponseWriter, spec
 	}
 	var commit func() error
 	if fresh != nil {
+		// The hub continues a record that reads suspended, task and all, and
+		// a worker can still post its own phase: read it once more, as late
+		// as lever can.
+		if now, cs, err := b.recordOf(ctx, spec); err != nil || now != scion.PhaseStopped || scion.ContainerLive(cs) {
+			b.audit("worker", actor, "deny", "resume "+spec.Name+": no longer reads stopped before the new session")
+			refuse(w, ReasonRuntimeError, "runtime error: worker "+spec.Name+" no longer reads stopped, so no new session was started; check `lever worker list` and try again", http.StatusBadGateway)
+			return
+		}
 		if fresh.task != "" {
 			resume = func(ctx context.Context, worker, project string) error {
 				return b.runtime.ResumeTask(ctx, worker, project, fresh.task)

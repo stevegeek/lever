@@ -18,7 +18,6 @@ import (
 const PathOperatorWorkerEvents = "/operator/worker/events"
 
 const (
-	// MaxEventsWait bounds one long poll; a longer wait is cut to it.
 	MaxEventsWait = 30 * time.Second
 	// eventsPollDefault spaces the hub reads of one long poll: each is a
 	// scion process in the jail.
@@ -95,18 +94,21 @@ func decodeCursor(s string) (eventsCursor, bool) {
 	return c, true
 }
 
-// after reports whether an event at t with id comes after the cursor.
 func (c eventsCursor) after(t time.Time, id string) bool {
 	return t.After(c.At) || t.Equal(c.At) && !slices.Contains(c.IDs, id)
 }
 
-// advance moves the cursor past an event at t with id.
 func (c *eventsCursor) advance(t time.Time, id string) {
 	switch {
 	case t.After(c.At):
 		c.At, c.IDs = t, []string{id}
-	case t.Equal(c.At) && len(c.IDs) < maxCursorIDs:
+	case !t.Equal(c.At):
+	case len(c.IDs) < maxCursorIDs:
 		c.IDs = append(c.IDs, id)
+	default:
+		// More events at one instant than the cursor can name: skip the
+		// rest of that instant rather than send them on every poll.
+		c.At, c.IDs = c.At.Add(time.Nanosecond), nil
 	}
 }
 
@@ -162,8 +164,8 @@ func (b *Broker) handleOperatorWorkerEvents(w http.ResponseWriter, r *http.Reque
 	}
 }
 
-// workerEventsOnce reads the record and the feed once. start answers no
-// events and a cursor past the feed as it is.
+// workerEventsOnce with start answers no events, only a cursor past the feed
+// as it is.
 func (b *Broker) workerEventsOnce(ctx context.Context, spec WorkerSpec, start bool, cur *eventsCursor) (WorkerEventsResponse, error) {
 	resp := WorkerEventsResponse{Worker: spec.Name, Events: []WorkerEvent{}}
 	phase, err := b.phaseOf(ctx, spec)

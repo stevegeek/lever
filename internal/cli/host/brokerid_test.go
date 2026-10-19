@@ -237,9 +237,9 @@ func TestBrokerStartTreatsAReusedPIDAsStale(t *testing.T) {
 	}
 }
 
-// The same old broker with broker.pid naming this instance's `lever broker
-// serve`: refused too, and nothing is stopped.
-func TestBrokerStartRefusesItsOwnOldBroker(t *testing.T) {
+// A broker with no instance id is refused even when broker.pid names this
+// instance's `lever broker serve`, and nothing is stopped.
+func TestBrokerStartRefusesAnIDLessBrokerOfOurs(t *testing.T) {
 	st, cfg := instanceState(t)
 	url, port := epochServer(t, answer("", "v0.35.0", "h"))
 	app := &config.App{Name: "a"}

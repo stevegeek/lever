@@ -401,14 +401,6 @@ func TestMessageToARunningRecordWithADeadContainerIsRefused(t *testing.T) {
 	}
 }
 
-// TestSendTimeoutsFitTheInFlightBound: every recorded send's scion call ends
-// inside sentledger.MaxSendDuration, which bounds an entry with no done line.
-func TestSendTimeoutsFitTheInFlightBound(t *testing.T) {
-	if sendTimeout >= sentledger.MaxSendDuration || defaultJailControlTimeout >= sentledger.MaxSendDuration {
-		t.Fatalf("send %v / control %v must stay under %v", sendTimeout, defaultJailControlTimeout, sentledger.MaxSendDuration)
-	}
-}
-
 func postNote(t *testing.T, b *Broker, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, wire.PathOperatorNote, strings.NewReader(body))

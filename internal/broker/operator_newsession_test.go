@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -21,8 +22,10 @@ func newSessionBroker(t *testing.T, phase, taskFile string) (*Broker, *fakeRunti
 	t.Helper()
 	b, rt, audit := operatorStartBroker(t, phase, false, taskFile)
 	b.liveInterval = time.Millisecond
+	// The phase read, the stop wait, and the read just before the resume.
 	rt.listFirst = [][]scion.Agent{
 		{{Slug: "worker", Phase: phase, ContainerStatus: "Up 1 minute"}},
+		{{Slug: "worker", Phase: scion.PhaseStopped, ContainerStatus: stoppedDown}},
 		{{Slug: "worker", Phase: scion.PhaseStopped, ContainerStatus: stoppedDown}},
 	}
 	var sessions [2]int
@@ -171,5 +174,48 @@ func TestOperatorWorkerNewSessionWaitsForTheLock(t *testing.T) {
 	unlock()
 	if code := <-done; code != http.StatusOK || len(rt.stopped) != 1 {
 		t.Fatalf("%d stopped=%v", code, rt.stopped)
+	}
+}
+
+// A revoke that lands while the worker stops leaves it stopped: no ticket,
+// no resume.
+func TestOperatorWorkerNewSessionRevokedDuringTheStop(t *testing.T) {
+	b, rt, _, sessions := newSessionBroker(t, scion.PhaseRunning, "")
+	b.containerRunning = func(context.Context, string) (bool, error) {
+		b.Revoke("worker")
+		return false, nil
+	}
+	rec := callOperator(t, b, http.MethodPost, PathOperatorWorkerNewSession, `{"worker":"worker"}`)
+	if rec.Code != http.StatusForbidden || rec.Header().Get(ReasonHeader) != ReasonRevoked {
+		t.Fatalf("%d %q %s", rec.Code, rec.Header().Get(ReasonHeader), rec.Body)
+	}
+	if len(rt.stopped) != 1 || len(rt.resumed) != 0 || len(rt.staged["worker"]) != 0 || *sessions != [2]int{} {
+		t.Fatalf("stopped=%v resumed=%v staged=%d sessions=%v", rt.stopped, rt.resumed, len(rt.staged["worker"]), *sessions)
+	}
+}
+
+// A record that turns suspended (a worker can post its own phase) between
+// the stop wait and the resume is not resumed with the task.
+func TestOperatorWorkerNewSessionRereadsThePhase(t *testing.T) {
+	b, rt, _, sessions := newSessionBroker(t, scion.PhaseRunning, "next job")
+	rt.listFirst[2] = []scion.Agent{{Slug: "worker", Phase: scion.PhaseSuspended, ContainerStatus: stoppedDown}}
+	rec := callOperator(t, b, http.MethodPost, PathOperatorWorkerNewSession, `{"worker":"worker"}`)
+	if rec.Code != http.StatusBadGateway || rec.Header().Get(ReasonHeader) != ReasonRuntimeError {
+		t.Fatalf("%d %q %s", rec.Code, rec.Header().Get(ReasonHeader), rec.Body)
+	}
+	if len(rt.resumed) != 0 || len(rt.resumeTasks) != 0 || *sessions != [2]int{} {
+		t.Fatalf("resumed=%v tasks=%q sessions=%v", rt.resumed, rt.resumeTasks, *sessions)
+	}
+}
+
+// Every resume checks revocation once more before it stages a ticket:
+// revoke takes no worker lock.
+func TestResumeRecordRefusesARevokedWorker(t *testing.T) {
+	b, rt, _, spec := recycleBroker(t, scion.PhaseSuspended, false)
+	b.Revoke("worker")
+	rec := httptest.NewRecorder()
+	b.resumeRecordAs(context.Background(), rec, spec, scion.PhaseSuspended, operatorActor, nil)
+	if rec.Code != http.StatusForbidden || len(rt.staged["worker"]) != 0 || len(rt.resumed) != 0 {
+		t.Fatalf("%d staged=%d resumed=%v", rec.Code, len(rt.staged["worker"]), rt.resumed)
 	}
 }

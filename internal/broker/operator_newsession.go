@@ -17,6 +17,9 @@ import (
 // apart: a container's graceful stop can take scion's whole stop timeout.
 const stopWaitAttempts = 120
 
+// newSessionBudget bounds a new session from its stop to the live worker.
+const newSessionBudget = 10 * time.Minute
+
 var errStopUnconfirmed = errors.New("the stop was not confirmed")
 
 // handleOperatorWorkerNewSession is `lever worker new-session NAME`: it keeps
@@ -93,6 +96,10 @@ func (b *Broker) handleOperatorWorkerNewSession(w http.ResponseWriter, r *http.R
 	if !b.resumeChecks(ctx, w, spec, operatorActor) {
 		return
 	}
+	// From the stop on, a caller that goes away must not leave the worker
+	// stopped half way: the rest runs to its end on its own bound.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), newSessionBudget)
+	defer cancel()
 	// Always asked, whatever the phase reads: the phase is hub text the
 	// worker can set, and a suspended record would take the task into the
 	// session it continues.
@@ -104,6 +111,12 @@ func (b *Broker) handleOperatorWorkerNewSession(w http.ResponseWriter, r *http.R
 	if err := b.waitWorkerStopped(ctx, spec); err != nil {
 		b.audit("worker", operatorActor, "error", verb+": "+err.Error())
 		refuse(w, ReasonRuntimeError, "runtime error: worker "+spec.Name+" did not read stopped with its container down in time, so no new session was started. The worker may be stopped: run `lever worker new-session "+spec.Name+"` again, or `lever worker resume "+spec.Name+"`", http.StatusBadGateway)
+		return
+	}
+	if b.isRevoked(spec.Name) {
+		// Revoke takes no worker lock, so it can land during the stop.
+		b.audit("worker", operatorActor, "deny", verb+": revoked during the stop; the worker is left stopped")
+		refuse(w, ReasonRevoked, "worker "+spec.Name+" was revoked while it stopped; it is left stopped", http.StatusForbidden)
 		return
 	}
 	b.audit("worker", operatorActor, "allow", verb+": stopped (was "+phase+"); "+taskAudit(task))

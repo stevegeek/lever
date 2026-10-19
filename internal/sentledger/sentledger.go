@@ -444,10 +444,6 @@ func (l *Ledger) ByRef(recipient, id string) (Sent, bool, error) {
 	return Sent{}, false, nil
 }
 
-// MaxSendDuration bounds an in-flight send (no done line): scion's CLI call
-// and the hub's dispatch retry each stop well inside it.
-const MaxSendDuration = 2 * time.Minute
-
 // Count is the number of record files in dir (for doctor), or an error
 // when dir is unsafe. A missing directory is zero files.
 func Count(dir string) (int, error) {

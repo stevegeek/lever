@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -201,5 +202,21 @@ func TestOperatorWorkerEventsWaits(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the long poll did not answer the new event")
+	}
+}
+
+// More events at one instant than the cursor names: the rest of that
+// instant is skipped, never sent again on every poll.
+func TestEventsCursorOverflow(t *testing.T) {
+	at := time.Date(2026, 10, 19, 11, 0, 0, 0, time.UTC)
+	c := eventsCursor{Agent: "a"}
+	for i := range maxCursorIDs + 1 {
+		c.advance(at, fmt.Sprint("e", i))
+	}
+	if !c.At.After(at) || len(c.IDs) != 0 || c.after(at, "e999") {
+		t.Fatalf("%+v", c)
+	}
+	if !c.after(at.Add(time.Second), "next") {
+		t.Fatal("a later event must still come")
 	}
 }

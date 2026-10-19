@@ -47,6 +47,9 @@ type Config struct {
 	// it. The hub stays reachable through the guest's pasta mapping of
 	// 169.254.1.2 to the VM loopback (guest.PastaHostAddr).
 	ForceHostNetwork bool
+	// OutputLimit caps each of stdout and stderr of a command whose context
+	// carries no cap of its own (proc.WithOutputLimit); 0 leaves it uncapped.
+	OutputLimit int
 }
 
 type Runner struct {
@@ -107,6 +110,16 @@ func (r *Runner) argv(dir string, env map[string]string, name string, args []str
 	return argv, tok, nil
 }
 
+// limitOutput applies cfg.OutputLimit to a ctx that carries no cap of its
+// own: a caller that legitimately reads more, such as a conversation
+// capture, sets its own cap, which wins.
+func (r *Runner) limitOutput(ctx context.Context) context.Context {
+	if _, ok := proc.OutputLimit(ctx); ok || r.cfg.OutputLimit <= 0 {
+		return ctx
+	}
+	return proc.WithOutputLimit(ctx, r.cfg.OutputLimit)
+}
+
 func (r *Runner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
 	return r.RunIn(ctx, "", env, name, args...)
 }
@@ -116,6 +129,7 @@ func (r *Runner) RunIn(ctx context.Context, dir string, env map[string]string, n
 	if err != nil {
 		return proc.Result{}, err
 	}
+	ctx = r.limitOutput(ctx)
 	if tok == "" {
 		return r.cfg.Host.Run(ctx, nil, argv[0], argv[1:]...)
 	}
@@ -136,7 +150,7 @@ func (r *Runner) RunStdin(ctx context.Context, stdin io.Reader, env map[string]s
 			stdin = io.MultiReader(line, stdin)
 		}
 	}
-	return r.cfg.Host.RunStdin(ctx, stdin, nil, argv[0], argv[1:]...)
+	return r.cfg.Host.RunStdin(r.limitOutput(ctx), stdin, nil, argv[0], argv[1:]...)
 }
 
 // AttachArgv builds the host argv to exec an interactive command inside the

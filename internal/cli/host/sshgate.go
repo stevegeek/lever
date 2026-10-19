@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 
 	"github.com/stevegeek/lever/internal/apply"
+	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/conduit"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/jail"
@@ -149,7 +149,7 @@ exec podman run --rm --pull=never --network=none ` + jail.ScionKeepIDUserns + ` 
 // counts as not shown, so conduit waits for the next apply.
 func agentImagesEnforcePolicy(ctx context.Context, jr proc.Runner, app *config.App) error {
 	for _, img := range agentImages(app) {
-		res, err := jr.Run(ctx, nil, "sh", "-c", imagePolicyScript, "_", img)
+		res, err := jr.Run(proc.WithOutputLimit(ctx, smallGuestOutputLimit), nil, "sh", "-c", imagePolicyScript, "_", img)
 		if err == nil && res.Code == 0 {
 			continue
 		}
@@ -161,7 +161,7 @@ func agentImagesEnforcePolicy(ctx context.Context, jr proc.Runner, app *config.A
 		case 5:
 			return fmt.Errorf("the sciontool in agent image %s does not enforce the hub's conduit policy (rebuild the image on a scion with the conduit controls)", img)
 		}
-		return fmt.Errorf("could not check the sciontool in agent image %s: %v: %s", img, err, strings.TrimSpace(res.Stderr))
+		return fmt.Errorf("could not check the sciontool in agent image %s: %v: %s", img, err, guest.SafeLine(res.Stderr, 500))
 	}
 	return nil
 }

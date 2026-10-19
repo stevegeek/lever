@@ -873,12 +873,16 @@ func (w *applyWiring) initHubAuth(ctx context.Context) error {
 	return nil
 }
 
+// smallGuestOutputLimit caps a jail command whose real output is a line or
+// a small file (a clock read, a marker file, a probe's exit status).
+const smallGuestOutputLimit = 64 << 10
+
 // readGuestClock reads `date +%s` in the jail. A failed read signs on the
 // host clock: the jail is then unreachable for the assertions too, and doctor
 // reports a large skew.
 func readGuestClock(ctx context.Context, jr proc.Runner, log func(string, ...any)) hubauth.Clock {
 	at := time.Now()
-	res, err := jr.Run(ctx, nil, "date", "+%s")
+	res, err := jr.Run(proc.WithOutputLimit(ctx, smallGuestOutputLimit), nil, "date", "+%s")
 	if err == nil {
 		if epoch, perr := strconv.ParseInt(strings.TrimSpace(res.Stdout), 10, 64); perr == nil {
 			return hubauth.ClockFromGuestEpoch(epoch, at)

@@ -3,6 +3,7 @@ package guest
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/stevegeek/lever/internal/scion/layout"
@@ -61,7 +62,7 @@ func withoutGcloudADC(existing []byte) ([]byte, bool, error) {
 	if !bytes.Contains(existing, []byte(keyGcloudADC)) {
 		return existing, false, nil
 	}
-	doc, err := layout.ParseSettings(existing)
+	doc, err := parseJailSettings(existing)
 	if err != nil {
 		return nil, false, fmt.Errorf("guest: parse the jail's %s: %w", layout.SettingsRel, err)
 	}
@@ -90,7 +91,7 @@ func telemetrySettingsConverged(existing []byte, off bool) ([]byte, bool, error)
 	if !off && len(bytes.TrimSpace(existing)) == 0 {
 		return existing, false, nil
 	}
-	doc, err := layout.ParseSettings(existing)
+	doc, err := parseJailSettings(existing)
 	if err != nil {
 		return nil, false, fmt.Errorf("guest: parse the jail's %s: %w", layout.SettingsRel, err)
 	}
@@ -138,11 +139,25 @@ func isFalse(n *yaml.Node) bool {
 	return n.Kind == yaml.ScalarNode && n.Decode(&b) == nil && !b
 }
 
+// settingsErrMax bounds what a settings parse error may quote.
+const settingsErrMax = 200
+
+// parseJailSettings is layout.ParseSettings for a settings file the guest
+// wrote: a YAML error can quote the text it failed on, so the error is cut
+// to settingsErrMax and made terminal-safe.
+func parseJailSettings(content []byte) (*yaml.Node, error) {
+	doc, err := layout.ParseSettings(content)
+	if err != nil {
+		return nil, errors.New(SafeLine(err.Error(), settingsErrMax))
+	}
+	return doc, nil
+}
+
 // ScionTelemetryEnabled returns "false" / "true" for an explicit
 // `telemetry.enabled`, "" when the key is absent (scion's default, which is
 // ON).
 func ScionTelemetryEnabled(settings []byte) (string, error) {
-	doc, err := layout.ParseSettings(settings)
+	doc, err := parseJailSettings(settings)
 	if err != nil {
 		return "", err
 	}

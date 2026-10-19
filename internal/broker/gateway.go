@@ -52,7 +52,7 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 		return nil, fmt.Errorf("broker: tool %q bad backend %q: %w", toolName, t.Backend, err)
 	}
 	rp := newToolProxy(target)
-	rp.ErrorLog = slog.NewLogLogger(b.log.Handler(), slog.LevelWarn)
+	rp.ErrorLog = slog.NewLogLogger(b.log.With("op", toolName).Handler(), slog.LevelWarn)
 	v, _ := b.backendErrs.LoadOrStore(toolName, &backendErrLimit{every: backendErrEvery})
 	limit := v.(*backendErrLimit)
 	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
@@ -110,6 +110,10 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 		if t.FirstParty && b.toolSecret != "" {
 			r.Header.Set(toolSecretHeader, b.toolSecret)
 		}
+		// ReverseProxy turns an Upgrade request into a raw tunnel that later
+		// messages would cross unauthorized, and fails a malformed one with
+		// agent-chosen text before dialing. MCP never upgrades.
+		r.Header.Del("Upgrade")
 		rp.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), callerKey{}, caller)))
 	}), nil
 }

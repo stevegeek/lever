@@ -490,8 +490,8 @@ client unchanged, and the client opens a new session. The broker writes one audi
 per minute while the backend is down (`decision=error detail=gateway.backend_unavailable`, with
 `backend=<host:port>`, the error, and `suppressed=<n>` for the failures it left out since the
 last line). The *tool backends* row of `lever doctor` dials the server. The gateway answers every
-method but `POST` (an MCP client's `GET` and `DELETE`) with `405` and `Allow: POST`: it offers no SSE stream and no session teardown, which
-the MCP client accepts.
+method but `POST` (an MCP client's `GET` and `DELETE`) with `405` and `Allow: POST`: it offers no
+SSE stream and no session teardown, which the MCP client accepts.
 
 ### `operator`
 

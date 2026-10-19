@@ -219,3 +219,42 @@ func TestGatewayDeniesBeforeProxyWhenBackendDown(t *testing.T) {
 		t.Fatalf("SECURITY: a denied call was proxied:\n%s", audit)
 	}
 }
+
+// An Upgrade header must neither open a tunnel past per-message gating nor
+// let the agent write a backend_unavailable line with text it chose.
+func TestGatewayDropsUpgrade(t *testing.T) {
+	var sawUpgrade atomic.Bool
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Upgrade") != "" || r.Header.Get("Connection") != "" {
+			sawUpgrade.Store(true)
+		}
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+	}))
+	t.Cleanup(up.Close)
+	cfg, audit := auditConfig(t)
+	b := New(cfg)
+	if err := b.reg.Register(regTool("db", up.URL, "read")); err != nil {
+		t.Fatal(err)
+	}
+	h, err := b.gatewayHandler("db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, upg := range []string{"websocket", "\xc3\xa9 FAKE: dial tcp 10.0.0.9:5432 refused"} {
+		r := httptest.NewRequest("POST", "/mcp/db/", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`))
+		r.TLS = leafFor(t, b, "worker")
+		r.Header.Set("Connection", "Upgrade")
+		r.Header.Set("Upgrade", upg)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("Upgrade %q: status = %d, want the plain forwarded 200; body = %s", upg, w.Code, w.Body)
+		}
+	}
+	if sawUpgrade.Load() {
+		t.Fatal("SECURITY: the backend received an upgrade request")
+	}
+	if strings.Contains(audit.String(), "backend_unavailable") {
+		t.Fatalf("SECURITY: agent-chosen text reached the backend_unavailable line:\n%s", audit)
+	}
+}

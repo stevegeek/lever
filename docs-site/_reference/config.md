@@ -437,7 +437,9 @@ running as your own user-session process (launchd, a terminal, however you run i
 what keeps macOS Automation/TCC grants intact for AppleScript-driven servers. The broker
 registers it from config at boot, exposes it at `/mcp/<name>/` on its mTLS listener, and
 proxies to `backend`. Jailed agents therefore reach it **only through a capability** — no
-`manager.allow_ports` hole, no hand-authored `.mcp.json`.
+`manager.allow_ports` hole, no hand-authored `.mcp.json`. Every request goes to `backend`'s own
+path (`/` when `backend` has none) with the agent's query string dropped; any other path under
+`/mcp/<name>/` gets `404` and never reaches the server, so its other routes stay out of reach.
 
 Per-tool capability grain, `gate`:
 

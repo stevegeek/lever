@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"path"
-	"strings"
 	"sync"
 	"time"
 
@@ -637,16 +636,22 @@ func (r *run) ensureUp(ctx context.Context, jp string, q ManagerRequest) (Manage
 }
 
 // refuseUnqualifiedRecord refuses to keep or resume a manager record whose
-// image is unqualified. scion keeps a record's image for life and rewrites an
-// unqualified one to the hub's image registry at every start, a setting any
-// agent can change between applies (to a registry it controls, which scion
-// pulls from); only a fresh create moves the record to a qualified name.
+// image the hub can rewrite. scion keeps a record's image for life and
+// rewrites an unqualified one to the hub's image registry at every start, a
+// setting any agent can change between applies (to a registry it controls,
+// which scion pulls from). A record with no image, created without one, runs
+// the template's or harness's default, which is rewritten the same way. Only a
+// fresh create moves the record to a qualified name.
 func (r *run) refuseUnqualifiedRecord(rec *scion.Agent) error {
-	if rec == nil || rec.Image == "" || strings.Contains(rec.Image, "@") || imageref.Qualified(rec.Image) {
+	if rec == nil || imageref.Fixed(rec.Image) {
 		return nil
 	}
-	return fmt.Errorf("%s: manager %q was created on the unqualified image name %s, which the hub rewrites to its image registry at every start, a setting any agent can change; nothing was changed. Run `lever up --fresh --keep-conversation` to recreate it on %s and keep its conversation",
-		r.subjectName(), r.app.Name, termsafe.Sanitize(rec.Image), termsafe.Sanitize(r.app.ManagerAgentImage()))
+	what := "was created on the unqualified image name " + termsafe.Sanitize(rec.Image)
+	if rec.Image == "" {
+		what = "has no image on its record (it was created without one), so it runs a default image name"
+	}
+	return fmt.Errorf("%s: manager %q %s, which the hub rewrites to its image registry at every start, a setting any agent can change; nothing was changed. Run `lever up --fresh --keep-conversation` to recreate it on %s and keep its conversation",
+		r.subjectName(), r.app.Name, what, termsafe.Sanitize(r.app.ManagerAgentImage()))
 }
 
 // actUp makes the plan's change to the record; the gate after it confirms

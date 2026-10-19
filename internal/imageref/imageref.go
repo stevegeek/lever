@@ -23,6 +23,14 @@ func Qualified(ref string) bool {
 	return i > 0 && strings.ContainsAny(ref[:i], ".:")
 }
 
+// Fixed reports whether an agent record on ref runs it whatever the hub's
+// image registry reads: a qualified name, or a digest-pinned one, whose
+// rewrite can only fail the pull. An empty ref is not fixed: the runtime then
+// resolves the template's or harness's default image, which scion rewrites.
+func Fixed(ref string) bool {
+	return ref != "" && (strings.Contains(ref, "@") || Qualified(ref))
+}
+
 // Agent returns the name an agent runs the configured image ref under. A
 // qualified or digest-pinned ref is returned unchanged: podman cannot tag a
 // digest, and scion's rewrite of a digest-pinned ref can only fail the pull.

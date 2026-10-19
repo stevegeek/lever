@@ -1,6 +1,7 @@
 package apply
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -289,8 +290,10 @@ type agentLifecycleRunner struct {
 
 	phase, containerStatus string
 	inited                 bool
-	// image is the record's image, when set.
-	image string
+	// image is the record's image, lever.local/img:amd64 when unset;
+	// noImage lists the record with no image at all.
+	image   string
+	noImage bool
 
 	startCalls, resumeCalls, deleteCalls, listCalls int
 	resumeForceCalls                                int // subset of resumeCalls carrying --force
@@ -369,10 +372,10 @@ func (r *agentLifecycleRunner) RunIn(ctx context.Context, dir string, env map[st
 		if r.phase == "" {
 			return proc.Result{Stdout: "[]"}, nil
 		}
-		if r.image != "" {
-			return proc.Result{Stdout: fmt.Sprintf(`[{"slug":%q,"phase":%q,"containerStatus":%q,"image":%q}]`, r.slug, r.phase, r.containerStatus, r.image)}, nil
+		if r.noImage {
+			return proc.Result{Stdout: fmt.Sprintf(`[{"slug":%q,"phase":%q,"containerStatus":%q}]`, r.slug, r.phase, r.containerStatus)}, nil
 		}
-		return proc.Result{Stdout: fmt.Sprintf(`[{"slug":%q,"phase":%q,"containerStatus":%q}]`, r.slug, r.phase, r.containerStatus)}, nil
+		return proc.Result{Stdout: fmt.Sprintf(`[{"slug":%q,"phase":%q,"containerStatus":%q,"image":%q}]`, r.slug, r.phase, r.containerStatus, cmp.Or(r.image, "lever.local/img:amd64"))}, nil
 	case "start":
 		r.startCalls++
 		r.record(dir, env, name, args)
@@ -4265,27 +4268,30 @@ func TestStartManagerFreshAfterAnUnconfirmedDelete(t *testing.T) {
 	}
 }
 
-// A plain apply over a manager record on an unqualified image name changes
-// nothing: no suspend, resume or create.
+// A plain apply over a manager record on an unqualified image name, or with
+// no image, changes nothing: no suspend, resume or create.
 func TestApplyRefusesAManagerOnAnUnqualifiedImage(t *testing.T) {
 	for _, phase := range []string{"running", "suspended"} {
-		app, f := newObserveFirstApp(t)
-		r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: phase, initContainerStatus: "created", image: "scionlocal/lever-claude:arm64"}
-		err := runApply(app, Deps{
-			Scion:            scion.New(r, scion.Options{}),
-			GuestBoot:        &fakeGuestBoot{current: bootB, recorded: bootA},
-			ContainerRunning: podmanSays(false),
-		})
-		testutil.WantErrContaining(t, err, "unqualified image name")
-		testutil.WantErrContaining(t, err, "lever up --fresh --keep-conversation")
-		if r.suspendCalls != 0 || r.resumeCalls != 0 || r.startCalls != 0 || r.deleteCalls != 0 {
-			t.Errorf("%s: suspend=%d resume=%d start=%d delete=%d, want none", phase, r.suspendCalls, r.resumeCalls, r.startCalls, r.deleteCalls)
+		for _, noImage := range []bool{false, true} {
+			app, f := newObserveFirstApp(t)
+			r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: phase, initContainerStatus: "created", image: "scionlocal/lever-claude:arm64", noImage: noImage}
+			err := runApply(app, Deps{
+				Scion:            scion.New(r, scion.Options{}),
+				GuestBoot:        &fakeGuestBoot{current: bootB, recorded: bootA},
+				ContainerRunning: podmanSays(false),
+			})
+			testutil.WantErrContaining(t, err, map[bool]string{false: "unqualified image name", true: "no image on its record"}[noImage])
+			testutil.WantErrContaining(t, err, "lever up --fresh --keep-conversation")
+			if r.suspendCalls != 0 || r.resumeCalls != 0 || r.startCalls != 0 || r.deleteCalls != 0 {
+				t.Errorf("%s, no image %v: suspend=%d resume=%d start=%d delete=%d, want none", phase, noImage, r.suspendCalls, r.resumeCalls, r.startCalls, r.deleteCalls)
+			}
 		}
 	}
 }
 
 // A record on an unqualified image name is refused whatever the image it
-// runs or the path; a qualified, digest-pinned or unreported one is not.
+// runs or the path, and so is one with no image; a qualified or
+// digest-pinned one is not.
 func TestRefuseUnqualifiedRecord(t *testing.T) {
 	for _, c := range []struct {
 		image  string
@@ -4296,7 +4302,7 @@ func TestRefuseUnqualifiedRecord(t *testing.T) {
 		{"lever-claude:arm64", true},
 		{"lever.local/lever-claude:arm64", false},
 		{"scionlocal/x@sha256:abc", false},
-		{"", false},
+		{"", true},
 	} {
 		r := &run{app: &config.App{Name: "m", Manager: config.Manager{Image: "lever.local/lever-claude:arm64"}}}
 		err := r.refuseUnqualifiedRecord(&scion.Agent{Slug: "m", Phase: scion.PhaseRunning, Image: c.image})
@@ -4313,11 +4319,12 @@ func TestRefuseUnqualifiedRecord(t *testing.T) {
 }
 
 // Restore, new session and the broker's re-enrol resume the record too: each
-// refuses one on an unqualified image name before it changes anything.
+// refuses one on an unqualified image name, or with none, before it changes
+// anything.
 func TestResumePathsRefuseAnUnqualifiedRecord(t *testing.T) {
-	for _, intent := range []ManagerIntent{ManagerRestore, ManagerNewSession, ManagerReenrol} {
+	for i, intent := range []ManagerIntent{ManagerRestore, ManagerNewSession, ManagerReenrol, ManagerRestore, ManagerNewSession, ManagerReenrol} {
 		app, f := newObserveFirstApp(t)
-		r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "Up 5 minutes", image: "scionlocal/lever-claude:arm64"}
+		r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "Up 5 minutes", image: "scionlocal/lever-claude:arm64", noImage: i >= 3}
 		staged, swapped := 0, 0
 		d, q := reenrolDeps(r, &staged)
 		q.Intent, q.Force = intent, true

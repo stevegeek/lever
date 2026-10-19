@@ -262,9 +262,9 @@ func TestStartManagerFreshSkipsTheHeal(t *testing.T) {
 
 func TestHealNamedSessionsCoversWorkers(t *testing.T) {
 	f := proc.NewFakeRunner()
-	f.Script("scion list", proc.Result{Stdout: `[{"slug":"hello","phase":"running","containerStatus":"Up 1 hour"},` +
-		`{"slug":"scratch","phase":"running","containerStatus":"Up 5 minutes"},` +
-		`{"slug":"stray","phase":"running","containerStatus":"Up 5 minutes"}]`})
+	f.Script("scion list", proc.Result{Stdout: `[{"slug":"hello","phase":"running","containerStatus":"Up 1 hour","image":"lever.local/img:amd64"},` +
+		`{"slug":"scratch","phase":"running","containerStatus":"Up 5 minutes","image":"lever.local/img:amd64"},` +
+		`{"slug":"stray","phase":"running","containerStatus":"Up 5 minutes","image":"lever.local/img:amd64"}]`})
 	f.Script("scion reset-auth", proc.Result{Stdout: "ok"})
 	app := helloApp(t.TempDir())
 	app.Workers = []config.Worker{{Name: "scratch", Dir: "workers/scratch"}, {Name: "idle", Dir: "workers/idle"}}
@@ -325,8 +325,8 @@ func TestStartManagerWorkerPreRoleRecordNotReset(t *testing.T) {
 	app.Workers = []config.Worker{{Name: "scratch", Dir: "workers/scratch"}}
 	f := proc.NewFakeRunner()
 	f.Script("scion reset-auth", proc.Result{Stdout: "ok"})
-	f.Script("scion list", proc.Result{Stdout: `[{"slug":"hello","phase":"running","containerStatus":"Up 1 hour"},` +
-		`{"slug":"scratch","phase":"running","containerStatus":"Up 5 minutes"}]`})
+	f.Script("scion list", proc.Result{Stdout: `[{"slug":"hello","phase":"running","containerStatus":"Up 1 hour","image":"lever.local/img:amd64"},` +
+		`{"slug":"scratch","phase":"running","containerStatus":"Up 5 minutes","image":"lever.local/img:amd64"}]`})
 	sc := scion.New(f, scion.Options{})
 	var sink logSink
 	deps := Deps{Scion: sc, AgentSession: &fakeSessionProbe{tok: expiredToken()}, Log: sink.logf,

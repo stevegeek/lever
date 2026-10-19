@@ -36,6 +36,27 @@ func scionRewrite(ref, registry string) string {
 
 // TestAgentNeverRewritten: whatever image_registry an agent sets on the hub,
 // the name an agent image runs under keeps lever's registry.
+func TestFixed(t *testing.T) {
+	for in, want := range map[string]bool{
+		"":                          false,
+		"lever-claude:amd64":        false,
+		"scionlocal/lever-claude:1": false,
+		"localhost/x:1":             false,
+		"a/b/c:1":                   false,
+		"lever.local/x:1":           true,
+		"ghcr.io/org/x:1":           true,
+		"registry:5000/x:1":         true,
+		"x@sha256:abc":              true,
+	} {
+		if got := Fixed(in); got != want {
+			t.Errorf("Fixed(%q) = %v, want %v", in, got, want)
+		}
+		if want && in != "" && !strings.Contains(in, "@") && scionRewrite(in, "ghcr.io/attacker") != in {
+			t.Errorf("Fixed(%q) holds, but the mirror of scion's rule rewrites it", in)
+		}
+	}
+}
+
 func TestAgentNeverRewritten(t *testing.T) {
 	for _, in := range []string{"scionlocal/lever-claude-slim:arm64", "lever-claude:amd64", "a/b/c:1", "localhost/x:1"} {
 		if scionRewrite(in, "ghcr.io/attacker") == in {

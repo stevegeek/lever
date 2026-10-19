@@ -30,6 +30,10 @@ type fakeRuntime struct {
 	resumeForced   []string
 	resumeForceErr error
 	resumeTasks    []string // the task of every ResumeTask, which also counts as a resume
+	inbox          []scion.Event
+	inboxErr       error
+	inboxUnread    []bool               // the unread argument of every Inbox call
+	inboxFn        func() []scion.Event // when set, answers every Inbox
 	stopErr        error
 	resumeErr      error // a runtime error whose text carries the container env
 	stopped        []string
@@ -203,8 +207,12 @@ func (f *fakeRuntime) EnvSet(_ context.Context, project, _, _ string) error {
 	return nil
 }
 func (f *fakeRuntime) Message(_ context.Context, _ scion.MsgOpts) error { return nil }
-func (f *fakeRuntime) Inbox(_ context.Context, _ bool, _ string) ([]scion.Event, error) {
-	return nil, nil
+func (f *fakeRuntime) Inbox(_ context.Context, unread bool, _ string) ([]scion.Event, error) {
+	f.inboxUnread = append(f.inboxUnread, unread)
+	if f.inboxFn != nil {
+		return f.inboxFn(), nil
+	}
+	return f.inbox, f.inboxErr
 }
 
 // testInstanceProject is the instance project (-g): every worker is an agent in

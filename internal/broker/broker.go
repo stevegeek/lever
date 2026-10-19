@@ -394,6 +394,10 @@ type Broker struct {
 	directiveExpiryMax time.Duration
 	dirRate            *rateWindow
 
+	// eventsPoll spaces the hub reads of a worker events long poll
+	// (eventsPollDefault when zero).
+	eventsPoll time.Duration
+
 	// msgPhaseTimeout bounds the phase read before a send
 	// (msgPhaseTimeoutDefault when zero).
 	msgPhaseTimeout time.Duration

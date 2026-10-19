@@ -130,6 +130,7 @@ func (b *Broker) OperatorHandler() http.Handler {
 	mux.HandleFunc("POST "+PathOperatorWorkerSuspend, b.handleOperatorWorkerSuspend)
 	mux.HandleFunc("POST "+PathOperatorWorkerStop, b.handleOperatorWorkerStop)
 	mux.HandleFunc("POST "+PathOperatorWorkerNewSession, b.handleOperatorWorkerNewSession)
+	mux.HandleFunc("POST "+PathOperatorWorkerEvents, b.handleOperatorWorkerEvents)
 	mux.HandleFunc("POST "+wire.PathOperatorAgentMessagesMatch, b.handleAgentMessagesMatch)
 	return mux
 }

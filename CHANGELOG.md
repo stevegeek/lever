@@ -50,6 +50,18 @@ version bump moves the block under the new version heading.
   (`POST /operator/worker/new-session`); a message still can't clear a worker's context, since
   lever never lets a message become a slash command.
 
+- **`lever worker watch NAME [--json]`: a worker's hub events from the host (lever#238).** It
+  long-polls the new `POST /operator/worker/events` on the broker's operator socket and prints the
+  worker's state changes and the completion summary it reports with `sciontool status`, from the
+  moment the watch starts. The broker reads the hub's notification feed with nothing acknowledged,
+  so the manager's inbox is unchanged, and passes on only the events the hub attributes to that
+  worker's record id, as `/msg/list` does. Every event is marked `worker-reported`, is one line of
+  at most 1 KiB, and carries the status only when the hub produces it (`UNRECOGNISED` otherwise);
+  a completion is a trigger to check the work, never its result. `--json` prints one event per
+  line. The watch ends on Ctrl-C, after `--idle-timeout`, or with exit `8` when the record is
+  purged or replaced, and it rides out a broker restart. Free-text messages from a worker to the
+  operator are not part of it.
+
 ## [0.51.0] - 2026-10-19
 
 ### Changed

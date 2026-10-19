@@ -133,6 +133,10 @@ so it gives no agent anything new:
   Run it after `lever stop` and `lever up` (which resumes the manager, not the workers), or whenever
   a send is refused with exit `9`. It is a no-op for a running worker. It does not start a worker
   that has no record (exit `8`): `lever worker start` does.
+- `lever worker watch NAME [--json]` prints the worker's hub events as they come: its state changes
+  and the completion summary it reports. Each is the worker's own report, so a completion is a
+  trigger to go and look at its work (its workspace, its tests), never the result itself. Start the
+  watch before the work, since it shows only events from then on.
 - `lever msg send "…" --to NAME` gives a running worker its next piece of work. The worker verifies
   it as an `operator-note`. Exit `9` means the worker was not running and nothing was sent.
 - `lever worker recycle NAME [--task-file F]` discards a worker's record and starts it fresh (any

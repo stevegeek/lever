@@ -14,7 +14,7 @@ import (
 func newWorkerCmd(factory BackendFactory) *cobra.Command {
 	cmd := &cobra.Command{Use: "worker", Short: "Manage worker agents host-side"}
 	cmd.AddCommand(newWorkerPurgeCmd(factory), newWorkerListCmd(), newWorkerStartCmd(), newWorkerResumeCmd(),
-		newWorkerRecycleCmd(), newWorkerNewSessionCmd(), newWorkerSuspendCmd(), newWorkerStopCmd())
+		newWorkerRecycleCmd(), newWorkerNewSessionCmd(), newWorkerSuspendCmd(), newWorkerStopCmd(), newWorkerWatchCmd())
 	return cmd
 }
 

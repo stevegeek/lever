@@ -128,6 +128,30 @@ func TestReadFileNoTreeLinksSwapAfterLstat(t *testing.T) {
 	}
 }
 
+// A link outside the tree whose target climbs with ".." from below the tree
+// root is refused: an agent could move the directories it climbs out of.
+func TestReadFileNoTreeLinksRefusesClimbingInsideTheTree(t *testing.T) {
+	root, tree, _ := noTreeLinksFixture(t)
+	if err := os.MkdirAll(filepath.Join(tree, "jobs", "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	climb := filepath.Join(root, "climb.md")
+	if err := os.Symlink(filepath.Join(tree, "jobs", "sub")+"/../42.md", climb); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadFileNoTreeLinks(climb, tree, 1<<10); !errors.Is(err, ErrSymlink) {
+		t.Fatalf("climb below the tree root: %v", err)
+	}
+	// From the tree root itself, which no agent can move, it is allowed.
+	up := filepath.Join(root, "up.md")
+	if err := os.Symlink(tree+"/../tasks/t.md", up); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := ReadFileNoTreeLinks(up, tree, 1<<10); err != nil || string(b) != "host task" {
+		t.Fatalf("climb from the tree root: %q %v", b, err)
+	}
+}
+
 // Swapped back and forth while it is read, an in-tree directory never
 // yields the file behind the link.
 func TestReadFileNoTreeLinksRace(t *testing.T) {

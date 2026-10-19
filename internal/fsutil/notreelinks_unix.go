@@ -43,6 +43,14 @@ func ReadFileNoTreeLinks(path, tree string, max int64) ([]byte, error) {
 	for len(todo) > 0 {
 		name := todo[0]
 		todo = todo[1:]
+		if name == ".." {
+			// A link's target may climb with "..": below the tree root, an
+			// agent can move the directories it climbs out of, and so aim
+			// the climb past the tree.
+			if inside, err := belowTree(dir, path, tree); err != nil || inside {
+				return nil, fmt.Errorf("%s: \"..\" inside a directory agents can write: %w", path, ErrSymlink)
+			}
+		}
 		var st unix.Stat_t
 		if err := unix.Fstatat(dir, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 			return nil, &fs.PathError{Op: "stat", Path: path, Err: err}
@@ -104,6 +112,23 @@ func ReadFileNoTreeLinks(path, tree string, max int64) ([]byte, error) {
 		}
 	}
 	return nil, fmt.Errorf("%s: a directory: %w", path, ErrNotRegularFile)
+}
+
+// belowTree reports whether the directory open as dir lies strictly inside
+// tree: the tree root itself is a mount point no agent can move.
+func belowTree(dir int, path, tree string) (bool, error) {
+	inside, err := InsideByIdentityFD(dir, path, tree)
+	if err != nil || !inside {
+		return inside, err
+	}
+	var d, t unix.Stat_t
+	if err := unix.Fstat(dir, &d); err != nil {
+		return true, err
+	}
+	if err := unix.Stat(tree, &t); err != nil {
+		return true, err
+	}
+	return d.Dev != t.Dev || d.Ino != t.Ino, nil
 }
 
 // components splits p into its names, dropping empty and "." ones.

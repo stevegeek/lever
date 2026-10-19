@@ -138,18 +138,6 @@ version bump moves the block under the new version heading.
   can still hold a stale build under the old name, which a `lever.yaml` naming it would have loaded
   and run. Every apply now pins the hub's image registry to `lever.local` (see Security).
 
-### Fixed
-
-- **The broker refuses a tool call with duplicate keys, or keys equal under case folding.** The
-  gateway checks a message's capability, operation and arguments by exact key, and forwards the
-  message re-encoded with every key it holds. An MCP server written in Go decodes into structs,
-  which match keys regardless of case under Unicode folding, so
-  `{"params":{"name":"read"},"paramſ":{"name":"write"}}` passed as a `read` and could run as a
-  `write` there. Likewise a backend whose parser keeps the first of two `method` keys, where Go
-  keeps the last. The gateway now answers a message with a repeated key, or one equal to another
-  under folding, or nested deeper than 256 levels, with `400` and logs a `deny`, for every broker
-  tool.
-
 ### Security
 
 - **Every apply pins the hub's image registry to `lever.local`, and lever refuses to start a
@@ -192,6 +180,16 @@ version bump moves the block under the new version heading.
   itself under a change of case (`repo: Repo`), and a key renamed to another renamed key, in a
   chain (`a: b, b: c`) or a cycle (`a: b, b: a`), whose own argument the gateway would refuse.
 
+- **The broker refuses a tool call with duplicate keys, or keys equal under case folding.** The
+  gateway checks a message's capability, operation and arguments by exact key, and forwards the
+  message re-encoded with every key it holds. An MCP server written in Go decodes into structs,
+  which match keys regardless of case under Unicode folding, so
+  `{"params":{"name":"read"},"paramſ":{"name":"write"}}` passed as a `read` and could run as a
+  `write` there. Likewise a backend whose parser keeps the first of two `method` keys, where Go
+  keeps the last. The gateway now answers a message with a repeated key, or one equal to another
+  under folding, or nested deeper than 256 levels, with `400` and logs a `deny`, for every broker
+  tool.
+
 - **An agent that bloats its own hub record no longer stalls `lever up`.** Each agent can write its
   record's status and activity without a size limit, so the hub's agent list can pass lever's cap
   on scion's output. The host's agent lists and the waits on them now fail at once with an error
@@ -225,10 +223,10 @@ version bump moves the block under the new version heading.
 - **Jail ABI 7.** The in-jail code changed: `lever-agent` and `lever-manager` (the version
   commands), `internal/wire` (the `/version` route, `wire.Stage` and the wake types removed),
   `internal/scion` (the broker wait removed, the oversized list), `internal/mcp` and `captool`
-  (the renamed constraint key) and the new build stamp. Rebuild the agent image
-  (`make lever-image` or `make lever-image-slim`, then any instance image built from it) and
-  recreate the manager on it with `lever up --fresh --keep-conversation`. Doctor's *agent lever
-  version* row says so.
+  (the renamed constraint key), `lever-tool-db` (its MCP serverInfo carries the build stamp) and
+  the new build stamp. Rebuild the agent image (`make lever-image` or `make lever-image-slim`,
+  then any instance image built from it) and recreate the manager on it with `lever up --fresh
+  --keep-conversation`. Doctor's *agent lever version* row says so.
 
 - **Rename `scionlocal/<name>` to `lever.local/<name>` in `lever.yaml`:** `manager.image`,
   `workers[].image` and any `security.allowed_image_registries` entry that allowed it. Rebuild the
@@ -241,14 +239,23 @@ version bump moves the block under the new version heading.
 - **A manager or worker created by an older lever on an unqualified image name, or with none,
   must be recreated** (doctor's *manager image* row lists them). For the manager run `lever up
   --fresh --keep-conversation` once; plain `lever up`, `lever apply`, conversation restores, new
-  conversations and the broker's re-enrol refuse it until then. Recycle each such worker before
-  upgrading with `lever worker recycle NAME` (or `lever worker purge NAME --force`, then `lever
-  worker start NAME`; both work after the upgrade too): the new broker refuses to resume, heal or
-  wake it, and an autostart of it only warns. Set `manager.image` if your `lever.yaml` leaves it
-  out. The first apply sets the hub's image registry to `lever.local`.
+  conversations and the broker's re-enrol refuse it until then. After upgrading, recycle each
+  such worker with `lever worker recycle NAME` (or `lever worker purge NAME --force`, then `lever
+  worker start NAME`); until then the broker refuses to resume, heal or wake it, and an autostart
+  of it only warns. Set `manager.image` if your `lever.yaml` leaves it out. The first apply sets
+  the hub's image registry to `lever.local`.
 
-- **Fix any `caveat_param` that config load now refuses** (see Security): bind each constraint
-  key directly to its argument.
+- **Fix any config that load now refuses** (see Security): bind each `caveat_param` constraint
+  key directly to its argument, and spell each image name one way, so `x:arm64` and
+  `docker.io/library/x:arm64` are not both in `lever.yaml`.
+
+- **The new operator verbs and the gateway's new checks need this release's broker.** `lever
+  apply` or `lever up` restarts the broker when its version changes.
+
+- **Service hosts are optional:** nothing changes until `broker.service_hosts` is set. To add
+  one, run `lever service-host init` on the other machine, declare it in `broker.service_hosts`,
+  run `lever service-host pair <name>` on the lever host, then `lever reload` (see the service
+  hosts guide).
 
 - **Host programs that called `/operator/wake` must run `lever worker resume NAME`** (or POST
   `/operator/worker/resume` without `for`). Run `lever reload` after upgrading: a broker of the

@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.51.0] - 2026-10-19
+
 ### Changed
 
 - **The sizing guide says what fixes the async page fault panic.** "Host injected async #PF in

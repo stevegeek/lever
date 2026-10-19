@@ -312,6 +312,9 @@ type Broker struct {
 	grantTTL  time.Duration
 	ticketTTL time.Duration
 	log       *slog.Logger
+	// backendErrs holds one *backendErrLimit per tool name, shared by every
+	// gateway handler built for that tool.
+	backendErrs sync.Map
 
 	apiKey      []byte
 	llmUpstream *url.URL

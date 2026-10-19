@@ -227,6 +227,18 @@ func TestBridgeCeilingRefusesBeforeTheServer(t *testing.T) {
 	if !strings.Contains(r.log.String(), "decision=deny tool=fake op=forbidden caller=worker-a") {
 		t.Fatalf("no deny audit line:\n%s", r.log)
 	}
+	// A key equal to another under case folding would be read by a Go
+	// server's struct decoding in place of the one checked.
+	resp, _ = r.post("/mcp/fake", `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"echo","arguments":{}},"paramſ":{"name":"forbidden"}}`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("folded key: %d, want 400", resp.StatusCode)
+	}
+	// An unknown field never reaches the server.
+	_, body = r.post("/mcp/fake", `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"echo","arguments":{"msg":"x"},"extra":1},"other":{"name":"forbidden"}}`)
+	logged, _ = os.ReadFile(fakeLog)
+	if strings.Contains(string(logged), `"other"`) || strings.Contains(string(logged), `"extra"`) {
+		t.Fatalf("SECURITY: unchecked fields reached the server:\n%s", logged)
+	}
 	// A duplicate name key is decided on the value that is forwarded.
 	resp, _ = r.post("/mcp/fake", `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo","name":"forbidden","arguments":{}}}`)
 	if resp.StatusCode != http.StatusForbidden {
@@ -421,4 +433,32 @@ func TestFileTransportPicksUpARotatedKey(t *testing.T) {
 	if code := get(); code == 200 {
 		t.Fatal("the rotated key was not picked up: the old one was still presented")
 	}
+}
+
+func TestBridgeStopsWhatTheServerStarted(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "child.pid")
+	r := newRig(t, 500*time.Millisecond, Tool{Name: "sh", Command: []string{"/bin/sh", "-c", "sleep 30 & echo $! > " + marker + "; exit 0"}, Allow: []string{"x"}})
+	resp, _ := r.post("/mcp/sh", call("1", "x", ""))
+	if resp.StatusCode == 200 {
+		t.Fatal("a server that exits answered")
+	}
+	b, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid := strings.TrimSpace(string(b))
+	for i := 0; i < 100; i++ {
+		if _, err := os.Stat("/proc/" + pid); err != nil {
+			return
+		}
+		st, _ := os.ReadFile("/proc/" + pid + "/stat")
+		if strings.Contains(string(st), ") Z ") {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, err := os.Stat("/proc/self"); err != nil {
+		t.Skip("no /proc")
+	}
+	t.Fatalf("the server's background child %s outlived it", pid)
 }

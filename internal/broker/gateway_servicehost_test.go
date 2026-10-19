@@ -206,3 +206,44 @@ func TestServiceHostWithAnotherKeyIsRefused(t *testing.T) {
 		t.Fatalf("the broker's log does not name the pin mismatch:\n%s", r.audit)
 	}
 }
+
+func TestGatewayRefusesKeysEqualUnderCaseFolding(t *testing.T) {
+	r := newServiceHostRig(t, nil)
+	tok, err := token.Mint(r.b.keys.Private, token.Grant{
+		Agent: "worker", Capability: token.Capability{Tool: "db", Operation: "read"}, Expiry: time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := &gatewayRig{t: t, b: r.b, tool: "db"}
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read","arguments":{"_capability":"` +
+		base64urlNoPad(tok) + `"}},"paramſ":{"name":"write"}}`
+	if w := g.post("worker", body); w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+	if len(*r.upBodies) != 0 {
+		t.Fatal("SECURITY: a folded-key message reached the backend")
+	}
+}
+
+func TestServiceHostCallerSurvivesAConnectionHeader(t *testing.T) {
+	r := newServiceHostRig(t, nil)
+	tok, err := token.Mint(r.b.keys.Private, token.Grant{
+		Agent: "worker", Capability: token.Capability{Tool: "db", Operation: "read"}, Expiry: time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("POST", "/mcp/db/", strings.NewReader(toolsCall("read", `"table":"A"`, base64urlNoPad(tok))))
+	req.Header.Set("Connection", "X-Lever-Caller")
+	req.TLS = leafFor(t, r.b, "worker")
+	h, err := r.b.gatewayHandler("db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !strings.Contains(r.shLog.String(), "caller=worker") {
+		t.Fatalf("status %d; service host log:\n%s", w.Code, r.shLog)
+	}
+}

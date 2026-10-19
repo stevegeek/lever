@@ -123,8 +123,9 @@ a new one, then update `fingerprint` in `lever.yaml` and run `lever apply`.
 ### On the service host
 
 The service host reads only its own file. Keep it, and every file it names, writable by you alone:
-`serve` refuses a config, certificate or key that group or others can write, and a key they can
-read. A secret file (`env_files`, `header_files`) is read, and refused on the same terms, each time
+`serve` refuses a config, certificate or key that another user owns (root aside) or that group
+or others can write, and a key they can read. Keep the directories that hold them yours alone
+too: the checks are on the files. A secret file (`env_files`, `header_files`) is read, and refused on the same terms, each time
 a stdio server starts or an upstream call is made, so a rotated secret needs no restart of `serve`
 (a running stdio server keeps the value it started with).
 
@@ -171,7 +172,14 @@ A stdio server runs once, on the first call, and is shared by every call; the se
 it again on the next call after it exits. The service host initializes it itself and keeps no MCP
 session of its own, so an agent never has to re-initialize after a restart of either side.
 Requests the server makes back to the client (sampling, roots) are refused, and its notifications
-are dropped.
+are dropped. Each server runs in its own process group: when it exits, or `serve` stops, whatever
+it started is stopped with it. After a server fails to start, calls fail at once for two seconds
+instead of starting it again each time.
+
+The service host forwards only the message fields MCP defines (for `tools/call`, the tool's
+`name`, `arguments` and `_meta`), re-encoded from what it checked, and refuses with `400` a message
+with two keys that are equal under Unicode case folding (`params` and `paramſ`): a server written
+in Go matches keys that way, and would otherwise read another call than the one checked.
 
 `tools/list` answers list only the operations in `allow`. A `tools/call` for any other operation is
 refused with `403` before it reaches the server. Only `initialize`, `ping`, `tools/list`,

@@ -12,7 +12,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -72,12 +74,10 @@ var reservedHeaders = []string{
 }
 
 // LoadConfig reads and checks the service host config at path. It refuses a
-// file others can write: whoever can edit it can widen the ceiling.
+// file another user owns or others can write: whoever can edit it can widen
+// the ceiling.
 func LoadConfig(path string) (*Config, error) {
-	if err := checkNotWritableByOthers(path); err != nil {
-		return nil, err
-	}
-	b, err := os.ReadFile(path)
+	b, err := readChecked(path, false)
 	if err != nil {
 		return nil, err
 	}
@@ -168,8 +168,8 @@ func checkListen(listen string, allowWildcard bool) error {
 	if err != nil {
 		return fmt.Errorf("listen %q: %v", listen, err)
 	}
-	if port == "" || port == "0" {
-		return fmt.Errorf("listen %q: needs a fixed port", listen)
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 || port != strconv.Itoa(n) {
+		return fmt.Errorf("listen %q: needs a fixed port, 1-65535", listen)
 	}
 	if host == "" {
 		if allowWildcard {
@@ -257,35 +257,37 @@ func validHeaderName(s string) bool {
 	return true
 }
 
-// checkNotWritableByOthers refuses a file group or others can write.
-func checkNotWritableByOthers(path string) error {
-	fi, err := os.Stat(path)
+// readChecked reads a file that only its owner, who must be this user or
+// root, can change; with private, that only the owner can read either. The
+// checks are made on the opened file, so a swap after them changes nothing.
+func readChecked(path string, private bool) ([]byte, error) {
+	f, err := os.Open(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if !fi.Mode().IsRegular() {
-		return fmt.Errorf("%s is not a regular file", path)
-	}
-	if fi.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("%s is writable by group or others (mode %04o); chmod go-w it", path, fi.Mode().Perm())
-	}
-	return nil
-}
-
-// readPrivate reads a key or secret file that only its owner may read.
-func readPrivate(path string) ([]byte, error) {
-	fi, err := os.Stat(path)
+	defer f.Close()
+	fi, err := f.Stat()
 	if err != nil {
 		return nil, err
 	}
 	if !fi.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s is not a regular file", path)
 	}
-	if fi.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("%s is readable or writable by group or others (mode %04o); chmod 600 it", path, fi.Mode().Perm())
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() && st.Uid != 0 {
+		return nil, fmt.Errorf("%s is owned by uid %d, not by this user", path, st.Uid)
 	}
-	return os.ReadFile(path)
+	perm := fi.Mode().Perm()
+	if private && perm&0o077 != 0 {
+		return nil, fmt.Errorf("%s is readable or writable by group or others (mode %04o); chmod 600 it", path, perm)
+	}
+	if perm&0o022 != 0 {
+		return nil, fmt.Errorf("%s is writable by group or others (mode %04o); chmod go-w it", path, perm)
+	}
+	return io.ReadAll(io.LimitReader(f, 1<<20))
 }
+
+// readPrivate reads a key or secret file that only its owner may read.
+func readPrivate(path string) ([]byte, error) { return readChecked(path, true) }
 
 // readSecretValue is a secret file's content without its trailing newline.
 // A header value must be one line; an environment value may hold several.

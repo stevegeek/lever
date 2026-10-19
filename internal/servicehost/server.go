@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -283,6 +282,9 @@ func (s *Server) serveInfo(w http.ResponseWriter) {
 // decodeMessage keeps numbers as written, so re-encoding the checked
 // message changes no argument value.
 func decodeMessage(body []byte) (map[string]any, bool) {
+	if FoldedKeyCollision(body) {
+		return nil, false
+	}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
 	var msg map[string]any
@@ -292,7 +294,30 @@ func decodeMessage(body []byte) (map[string]any, bool) {
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return nil, false
 	}
-	return msg, true
+	return knownFields(msg), true
+}
+
+// knownFields keeps only the message fields MCP defines, so a key the
+// ceiling check never read cannot reach the server.
+func knownFields(msg map[string]any) map[string]any {
+	out := map[string]any{}
+	for _, k := range []string{"jsonrpc", "id", "method", "params"} {
+		if v, ok := msg[k]; ok {
+			out[k] = v
+		}
+	}
+	if out["method"] == "tools/call" {
+		if params, ok := out["params"].(map[string]any); ok {
+			kept := map[string]any{}
+			for _, k := range []string{"name", "arguments", "_meta"} {
+				if v, ok := params[k]; ok {
+					kept[k] = v
+				}
+			}
+			out["params"] = kept
+		}
+	}
+	return out
 }
 
 func toolsCallName(msg map[string]any) string {
@@ -356,10 +381,7 @@ func writeJSON(w http.ResponseWriter, status int, b []byte) {
 
 // Serve listens on cfg.Listen until ctx ends.
 func Serve(ctx context.Context, cfg *Config, log *slog.Logger, version string) error {
-	if err := checkNotWritableByOthers(cfg.CertPath()); err != nil {
-		return err
-	}
-	certPEM, err := os.ReadFile(cfg.CertPath())
+	certPEM, err := readChecked(cfg.CertPath(), false)
 	if err != nil {
 		return err
 	}

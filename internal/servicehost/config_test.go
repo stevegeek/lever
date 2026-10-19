@@ -38,6 +38,8 @@ func TestLoadConfig(t *testing.T) {
 		{"wildcard forced", "allow_wildcard_listen: true\n" + strings.Replace(good, "100.64.1.2", "0.0.0.0", 1), 0o600, ""},
 		{"hostname listen", strings.Replace(good, "100.64.1.2", "box.local", 1), 0o600, "literal IP"},
 		{"no port", strings.Replace(good, ":7443", ":0", 1), 0o600, "fixed port"},
+		{"port 00", strings.Replace(good, ":7443", ":00", 1), 0o600, "fixed port"},
+		{"named port", strings.Replace(good, ":7443", ":https", 1), 0o600, "fixed port"},
 		{"no fingerprint", strings.Replace(good, "client_fingerprint: "+testFP+"\n", "", 1), 0o600, "client_fingerprint is required"},
 		{"bad fingerprint", strings.Replace(good, testFP, "sha256:zz", 1), 0o600, "64 hex"},
 		{"unknown key", good + "allows: [x]\n", 0o600, "not found"},

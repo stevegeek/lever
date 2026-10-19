@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -48,7 +49,13 @@ type stdioServer struct {
 	mu     sync.Mutex
 	proc   *stdioProc
 	closed bool
+	// failedAt is when the last start or initialize failed: a server that
+	// cannot start is not respawned on every call.
+	failedAt time.Time
 }
+
+// restartBackoff is how long after a failed start calls fail fast.
+const restartBackoff = 2 * time.Second
 
 type stdioProc struct {
 	cmd     *exec.Cmd
@@ -59,8 +66,10 @@ type stdioProc struct {
 	pendMu  sync.Mutex
 	pending map[int64]chan []byte
 
-	// done closes when the server's stdout ends, exited once it is reaped.
+	// done closes when the server's stdout ends or it exits, exited once
+	// it is reaped.
 	done       chan struct{}
+	doneOnce   sync.Once
 	exited     chan struct{}
 	initResult json.RawMessage
 }
@@ -105,18 +114,24 @@ func (s *stdioServer) running(ctx context.Context, protocolVersion string) (*std
 			return p, nil
 		}
 	}
+	if !s.failedAt.IsZero() && time.Since(s.failedAt) < restartBackoff {
+		return nil, errProcExited
+	}
 	p, err := s.start()
 	if err != nil {
+		s.failedAt = time.Now()
+		s.log.Warn("servicehost.stdio_start_failed", "tool", s.tool.Name, "err", err.Error())
 		return nil, err
 	}
 	ictx, cancel := context.WithTimeout(ctx, initTimeout)
 	defer cancel()
 	if err := p.initialize(ictx, protocolVersion, s.version); err != nil {
-		p.stop()
+		go p.stop()
+		s.failedAt = time.Now()
 		s.log.Warn("servicehost.stdio_init_failed", "tool", s.tool.Name, "err", err.Error())
 		return nil, err
 	}
-	s.proc = p
+	s.proc, s.failedAt = p, time.Time{}
 	return p, nil
 }
 
@@ -127,6 +142,8 @@ func (s *stdioServer) start() (*stdioProc, error) {
 	}
 	cmd := exec.Command(s.tool.Command[0], s.tool.Command[1:]...)
 	cmd.Env = env
+	// Its own process group, so stopping it also stops what it started.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Dir = s.defDir
 	if s.tool.Dir != "" {
 		cmd.Dir = s.tool.Dir
@@ -152,10 +169,16 @@ func (s *stdioServer) start() (*stdioProc, error) {
 	go s.logStderr(stderr)
 	go func() {
 		p.read(stdout)
-		close(p.done)
+		p.markDone()
 		p.stop()
+	}()
+	// Reaped as soon as it exits, even while something it started still
+	// holds its stdout; Wait then closes the read end.
+	go func() {
 		err := cmd.Wait()
+		p.markDone()
 		close(p.exited)
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		s.log.Warn("servicehost.stdio_exited", "tool", s.tool.Name, "pid", cmd.Process.Pid, "err", fmt.Sprint(err))
 	}()
 	return p, nil
@@ -185,19 +208,20 @@ func (s *stdioServer) close() {
 	}
 }
 
-// stop closes stdin, which ends a well-behaved server, and kills it after
-// stopGrace.
+func (p *stdioProc) markDone() { p.doneOnce.Do(func() { close(p.done) }) }
+
+// stop closes stdin, which ends a well-behaved server, and kills its process
+// group after stopGrace. It returns once the server is reaped.
 func (p *stdioProc) stop() {
 	p.writeMu.Lock()
 	_ = p.stdin.Close()
 	p.writeMu.Unlock()
-	go func() {
-		select {
-		case <-p.exited:
-		case <-time.After(stopGrace):
-			_ = p.cmd.Process.Kill()
-		}
-	}()
+	select {
+	case <-p.exited:
+	case <-time.After(stopGrace):
+		_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
+		<-p.exited
+	}
 }
 
 // read routes each response to its waiting call. Requests from the server

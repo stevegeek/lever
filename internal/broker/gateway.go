@@ -21,6 +21,7 @@ import (
 	"github.com/stevegeek/lever/internal/cap/token"
 	"github.com/stevegeek/lever/internal/logging"
 	"github.com/stevegeek/lever/internal/mcp"
+	"github.com/stevegeek/lever/internal/servicehost"
 )
 
 // toolSecretHeader must equal captool.ToolSecretHeader; the captool e2e test
@@ -56,6 +57,14 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 	sh, onServiceHost := b.serviceHosts[toolName]
 	if onServiceHost {
 		rp.Transport = sh.Transport
+		// Set on the outbound request, after hop-by-hop removal, so an agent's
+		// Connection header cannot drop it. For the service host's audit log
+		// only; it grants nothing there.
+		rewrite := rp.Rewrite
+		rp.Rewrite = func(pr *httputil.ProxyRequest) {
+			rewrite(pr)
+			pr.Out.Header.Set("X-Lever-Caller", callerFrom(pr.In.Context()))
+		}
 		augment := rp.ModifyResponse
 		rp.ModifyResponse = func(resp *http.Response) error {
 			// The service host's own ceiling refused a call the broker
@@ -125,6 +134,14 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
+		// The token check reads exact map keys; a backend decoding into Go
+		// structs matches keys case-insensitively and would read another
+		// call out of the same bytes.
+		if servicehost.FoldedKeyCollision(body) {
+			b.audit(toolName, caller, "deny", "keys equal under case folding")
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
 		if !b.authorizeToolCall(w, r, t, caller, body) {
 			return
 		}
@@ -133,10 +150,6 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 		// scrub so an inbound forgery is already gone.
 		if t.FirstParty && b.toolSecret != "" {
 			r.Header.Set(toolSecretHeader, b.toolSecret)
-		}
-		// For the service host's audit log only; it grants nothing there.
-		if onServiceHost {
-			r.Header.Set("X-Lever-Caller", caller)
 		}
 		// ReverseProxy turns an Upgrade request into a raw tunnel that later
 		// messages would cross unauthorized, and fails a malformed one with

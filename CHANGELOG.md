@@ -7,6 +7,44 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **Agents can check that their image matches the host lever.** `lever-manager version` prints the
+  image's lever build and Jail ABI, asks the broker for the host lever's, and says whether the two
+  match. On a mismatch it names the fix: rebuild the agent image, then `lever up --fresh
+  --keep-conversation`; a worker is told to ask the operator for it. Equal Jail ABIs with
+  different builds are compatible and need no rebuild, as in doctor's *agent lever version* row.
+  `lever-manager --version` and `lever-agent --version` print the local line only, and `lever-agent
+  version` does what `lever-manager version` does. The answer comes from a new read-only
+  `GET /version` on the broker's mTLS jail listener: any live agent identity, manager or worker,
+  gets the host's version and Jail ABI and nothing else, with no capability. A request without a
+  client certificate or from a revoked identity gets 403. The manager's skill says how to check.
+
+### Changed
+
+- **Every lever binary reports its exact build commit, in a git worktree too.** `make install`,
+  `make lever-image` and the release build stamp the commit and the dirty state into `lever`,
+  `lever-manager`, `lever-agent` and `lever-tool-db`, and the stamp wins over Go's own VCS stamp,
+  which in a worktree nested inside another checkout names that checkout. A worktree build of
+  `lever` now shows `X.Y.Z (<commit>)` instead of `X.Y.Z (bin …)`, so doctor's *agent lever
+  version* row can tell it is the build the image came from. lever-tool-db's MCP serverInfo
+  carries the commit too.
+
+### Removed
+
+- **Two internal helpers nothing called.** The scion client's runtime broker wait
+  (`RuntimeBrokerReady`; bring-up asks the hub as lever-admin instead) and `wire.Stage` (the host
+  and the broker stage `bootstrap.json` through `fsutil.ReplaceInTreeNoLinks`). No behaviour
+  changes.
+
+### Upgrade
+
+- **Jail ABI 7.** The in-jail code changed: `lever-agent` and `lever-manager` (the version
+  commands), `internal/wire` (the `/version` route, `wire.Stage` removed), `internal/scion` (the
+  broker wait removed) and the new build stamp. Rebuild the agent image (`make lever-image` or
+  `make lever-image-slim`, then any instance image built from it) and recreate the manager on it
+  with `lever up --fresh --keep-conversation`. Doctor's *agent lever version* row says so.
+
 ## [0.51.0] - 2026-10-19
 
 ### Changed

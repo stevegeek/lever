@@ -8,17 +8,12 @@
 package cli
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"runtime/debug"
-	"strings"
-	"sync"
 
 	"github.com/spf13/cobra"
+	"github.com/stevegeek/lever/internal/buildstamp"
 	"github.com/stevegeek/lever/internal/termsafe"
 )
 
@@ -29,88 +24,10 @@ func VersionCmd() *cobra.Command {
 	return &cobra.Command{Use: "version", Run: func(c *cobra.Command, _ []string) { c.Println(VersionString()) }}
 }
 
-// VersionString is the release Version plus the build's VCS commit (with
-// "-dirty") or, for a `go install module@vX` build, the module version.
-//
-// A build with no provenance, or a dirty one, also gets the binary's content
-// hash: Go stamps no VCS info in a git worktree (its .git is a file), and all
-// dirty builds of one commit share a stamp. apply restarts the broker and the
-// remote proxy when this string changes, so it must differ between builds.
-func VersionString() string { return versionString() }
-
-var versionString = sync.OnceValue(func() string {
-	var rev, modVersion string
-	dirty := false
-	if info, ok := debug.ReadBuildInfo(); ok {
-		modVersion = info.Main.Version
-		for _, s := range info.Settings {
-			switch s.Key {
-			case "vcs.revision":
-				rev = s.Value
-			case "vcs.modified":
-				dirty = s.Value == "true"
-			}
-		}
-	}
-	bin := ""
-	if needsBinaryHash(rev, dirty, modVersion) {
-		bin = executableHash()
-	}
-	return formatVersion(Version, rev, dirty, modVersion, bin)
-})
-
-// needsBinaryHash reports a build whose stamp does not tell builds apart: no
-// commit and no module version, or a commit with uncommitted changes.
-func needsBinaryHash(rev string, dirty bool, modVersion string) bool {
-	if rev != "" {
-		return dirty
-	}
-	return modVersion == "" || modVersion == "(devel)"
-}
-
-// executableHash is the first 12 hex digits of the running binary's SHA-256,
-// or "" when the binary cannot be read.
-func executableHash() string {
-	exe, err := os.Executable()
-	if err != nil {
-		return ""
-	}
-	f, err := os.Open(exe)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return ""
-	}
-	return hex.EncodeToString(h.Sum(nil))[:12]
-}
-
-// A VCS commit takes precedence over a module version; bin is appended when set.
-func formatVersion(base, rev string, dirty bool, modVersion, bin string) string {
-	var parts []string
-	switch {
-	case rev != "":
-		short := rev
-		if len(short) > 12 {
-			short = short[:12]
-		}
-		if dirty {
-			short += "-dirty"
-		}
-		parts = append(parts, short)
-	case modVersion != "" && modVersion != "(devel)":
-		parts = append(parts, modVersion)
-	}
-	if bin != "" {
-		parts = append(parts, "bin "+bin)
-	}
-	if len(parts) == 0 {
-		return base
-	}
-	return base + " (" + strings.Join(parts, ", ") + ")"
-}
+// VersionString is the release Version plus the build's provenance
+// (buildstamp.Describe). apply restarts the broker and the remote proxy when it
+// changes.
+func VersionString() string { return buildstamp.Describe(Version) }
 
 // Exit codes a command can ask for with WithExitCode. A script that must tell
 // these cases apart reads the code, never the error text: the text can carry

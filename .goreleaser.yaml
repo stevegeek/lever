@@ -25,6 +25,10 @@ builds:
       - CGO_ENABLED=0
     flags:
       - -trimpath
+    # The commit `lever version` reports (internal/buildstamp); -s -w as in
+    # goreleaser's default, which a set ldflags replaces.
+    ldflags:
+      - -s -w -X github.com/stevegeek/lever/internal/buildstamp.revision={{ .FullCommit }} -X github.com/stevegeek/lever/internal/buildstamp.modified={{ .IsGitDirty }}
     goos: [darwin, linux]
     goarch: [amd64, arm64]
 

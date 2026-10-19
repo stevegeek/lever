@@ -950,8 +950,8 @@ conversation and names the old one's backup id; the boot prompt's reply arrives 
 When lever refused or the run failed, the page shows why in red. When the proxy restarted
 meanwhile, or the run is still going after 7 minutes, the page says it lost track of it;
 `lever conversation list` and the log below tell how it ended. Text you were typing stays in the
-box, and the box is off while the manager is down. The old conversation stays in its backup on the host
-(`lever conversation list`), and `lever conversation restore` puts it back.
+box, and the box is off while the manager is down. The old conversation stays in its backup on the
+host (`lever conversation list`), and `lever conversation restore` puts it back.
 
 The route (`POST /lever/api/new-conversation`) is accepted only:
 
@@ -965,7 +965,8 @@ The route (`POST /lever/api/new-conversation`) is accepted only:
 Its 202 answer carries the run's id. The page reads the run's state with
 `POST /lever/api/new-conversation/status` and `{"id": "<id>"}`, under the same operator and origin
 rules: `running`, `ok` with the backup id (none when the home held no conversation, or lever cannot
-tell which backup the run saved), or `failed` with a fixed word. The proxy keeps only the latest run, in memory; any other id gets 404.
+tell which backup the run saved), or `failed` with a fixed word. The proxy keeps only the latest
+run, in memory; any other id gets 404.
 
 The proxy runs `lever conversation new` itself, as the host user it runs as, in its own session
 (a restart of the proxy does not stop it half way), with its output in

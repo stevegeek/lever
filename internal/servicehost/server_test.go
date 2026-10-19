@@ -239,6 +239,9 @@ func TestBridgeCeilingRefusesBeforeTheServer(t *testing.T) {
 	if strings.Contains(string(logged), `"other"`) || strings.Contains(string(logged), `"extra"`) || strings.Contains(string(logged), `"_meta"`) {
 		t.Fatalf("SECURITY: unchecked fields reached the server:\n%s", logged)
 	}
+	if !strings.Contains(string(logged), `"msg":"x"`) {
+		t.Fatalf("the call with unknown fields did not reach the server:\n%s", logged)
+	}
 	// A duplicate key is refused: parsers disagree on which one wins.
 	resp, _ = r.post("/mcp/fake", `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo","name":"forbidden","arguments":{}}}`)
 	if resp.StatusCode != http.StatusBadRequest {

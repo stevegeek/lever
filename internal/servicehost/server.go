@@ -300,8 +300,8 @@ func decodeMessage(body []byte) (map[string]any, bool) {
 
 // knownFields keeps only the message fields MCP defines, so a key the
 // ceiling check never read cannot reach the server. A call's _meta is
-// dropped too: its only use is a progress token, and both transports drop
-// the server's notifications.
+// dropped too: the ceiling never reads it, and what MCP puts there (a
+// progress token) asks for notifications both transports drop.
 func knownFields(msg map[string]any) map[string]any {
 	out := map[string]any{}
 	for _, k := range []string{"jsonrpc", "id", "method", "params"} {

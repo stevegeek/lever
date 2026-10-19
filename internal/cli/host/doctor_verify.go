@@ -85,7 +85,7 @@ const agentMessagesClockWarn = 5 * time.Second
 func checkGuestClock(ctx context.Context, jr proc.Runner, now func() time.Time, agentMessages bool) checkResult {
 	const name = "guest clock"
 	before := now()
-	res, err := jr.Run(ctx, nil, "date", "-u", "+%s")
+	res, err := jr.Run(proc.WithOutputLimit(ctx, smallGuestOutputLimit), nil, "date", "-u", "+%s")
 	after := now()
 	if err != nil {
 		return checkResult{name, true, "not checked (the guest did not answer: " + firstLine(err.Error()) + ")", ""}

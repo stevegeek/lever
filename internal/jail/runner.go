@@ -8,6 +8,8 @@ package jail
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"os"
@@ -47,6 +49,9 @@ type Config struct {
 	// it. The hub stays reachable through the guest's pasta mapping of
 	// 169.254.1.2 to the VM loopback (guest.PastaHostAddr).
 	ForceHostNetwork bool
+	// OutputLimit caps each of stdout and stderr of a command whose context
+	// carries no cap of its own (proc.WithOutputLimit); 0 leaves it uncapped.
+	OutputLimit int
 }
 
 type Runner struct {
@@ -107,6 +112,31 @@ func (r *Runner) argv(dir string, env map[string]string, name string, args []str
 	return argv, tok, nil
 }
 
+// A cap the caller set wins over cfg.OutputLimit, larger or smaller: a
+// caller that legitimately reads more, such as a conversation capture, sets
+// its own, and one that reads partial output at its cap (a log tail) gets it
+// unchanged.
+func (r *Runner) limitOutput(ctx context.Context) (context.Context, func(proc.Result, error) (proc.Result, error)) {
+	if _, ok := proc.OutputLimit(ctx); ok || r.cfg.OutputLimit <= 0 {
+		return ctx, keepResult
+	}
+	return proc.WithOutputLimit(ctx, r.cfg.OutputLimit), r.overLimitResult
+}
+
+func keepResult(res proc.Result, err error) (proc.Result, error) { return res, err }
+
+// overLimitResult swaps the partial output of a command stopped at the
+// default cap for one line naming the cap. Callers that never chose a cap
+// (the scion client) quote the output in their error, so the error says why
+// it failed instead of carrying megabytes of guest text.
+func (r *Runner) overLimitResult(res proc.Result, err error) (proc.Result, error) {
+	if !errors.Is(err, proc.ErrOutputLimit) {
+		return res, err
+	}
+	msg := fmt.Sprintf("the command's output passed lever's %d-byte limit for a jail command; it was killed", r.cfg.OutputLimit)
+	return proc.Result{Stderr: msg, Code: res.Code}, err
+}
+
 func (r *Runner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
 	return r.RunIn(ctx, "", env, name, args...)
 }
@@ -116,10 +146,11 @@ func (r *Runner) RunIn(ctx context.Context, dir string, env map[string]string, n
 	if err != nil {
 		return proc.Result{}, err
 	}
+	ctx, done := r.limitOutput(ctx)
 	if tok == "" {
-		return r.cfg.Host.Run(ctx, nil, argv[0], argv[1:]...)
+		return done(r.cfg.Host.Run(ctx, nil, argv[0], argv[1:]...))
 	}
-	return r.cfg.Host.RunStdin(ctx, strings.NewReader(tok+"\n"), nil, argv[0], argv[1:]...)
+	return done(r.cfg.Host.RunStdin(ctx, strings.NewReader(tok+"\n"), nil, argv[0], argv[1:]...))
 }
 
 func (r *Runner) RunStdin(ctx context.Context, stdin io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
@@ -136,7 +167,8 @@ func (r *Runner) RunStdin(ctx context.Context, stdin io.Reader, env map[string]s
 			stdin = io.MultiReader(line, stdin)
 		}
 	}
-	return r.cfg.Host.RunStdin(ctx, stdin, nil, argv[0], argv[1:]...)
+	ctx, done := r.limitOutput(ctx)
+	return done(r.cfg.Host.RunStdin(ctx, stdin, nil, argv[0], argv[1:]...))
 }
 
 // AttachArgv builds the host argv to exec an interactive command inside the

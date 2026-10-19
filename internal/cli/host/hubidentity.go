@@ -787,7 +787,7 @@ func markerFix(jp, prev string) string {
 // tree's marker file. lever trees are never git repositories
 // (config.checkNonGitTree), so the marker is the one-file form.
 func readProjectMarker(ctx context.Context, jr proc.Runner, jp string) (id, slug string, err error) {
-	res, err := jr.Run(ctx, nil, "sh", "-c", `[ -f "$1" ] && [ ! -L "$1" ] && cat "$1"`, "_", path.Join(jp, ".scion"))
+	res, err := jr.Run(proc.WithOutputLimit(ctx, smallGuestOutputLimit), nil, "sh", "-c", `[ -f "$1" ] && [ ! -L "$1" ] && cat "$1"`, "_", path.Join(jp, ".scion"))
 	if err != nil {
 		return "", "", fmt.Errorf("reading the project marker %s/.scion: %w", jp, err)
 	}

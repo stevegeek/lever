@@ -2,7 +2,9 @@ package brokerctl
 
 import (
 	"context"
+	"errors"
 	"os"
+	"os/exec"
 	"testing"
 	"time"
 
@@ -50,4 +52,24 @@ func TestJailGuestBootRefusesOddValues(t *testing.T) {
 	if was, err := g.Recorded(); err != nil || was != "" {
 		t.Fatalf("a junk record reads as none: %q, %v", was, err)
 	}
+}
+
+// The boot id read stops a guest that floods it, which the broker's
+// uncapped jail runner would otherwise hold in memory.
+func TestJailGuestBootReadIsCapped(t *testing.T) {
+	if _, err := exec.LookPath("yes"); err != nil {
+		t.Skip("no yes(1)")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	g := JailGuestBoot{R: bootFlood{}, State: state.State{Dir: t.TempDir()}}
+	if _, err := g.Current(ctx); !errors.Is(err, proc.ErrOutputLimit) {
+		t.Fatalf("Current = %v, want the output limit", err)
+	}
+}
+
+type bootFlood struct{ proc.RealRunner }
+
+func (f bootFlood) Run(ctx context.Context, env map[string]string, _ string, _ ...string) (proc.Result, error) {
+	return f.RealRunner.Run(ctx, env, "yes")
 }

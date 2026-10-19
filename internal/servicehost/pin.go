@@ -131,11 +131,15 @@ func ServerTLSConfig(cert tls.Certificate, clientPin Fingerprint) *tls.Config {
 // serverPin. Chain and host name verification are off because the pin
 // replaces them; VerifyConnection always runs.
 func ClientTLSConfig(cert tls.Certificate, serverPin Fingerprint) *tls.Config {
+	return clientTLSConfig(func() (*tls.Certificate, error) { return &cert, nil }, serverPin)
+}
+
+func clientTLSConfig(cert func() (*tls.Certificate, error), serverPin Fingerprint) *tls.Config {
 	return &tls.Config{
 		MinVersion: tls.VersionTLS13,
 		// Always sent: the Certificates field would withhold it from a server
 		// that names acceptable CAs the self-signed pair is not under.
-		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) { return &cert, nil },
+		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) { return cert() },
 		InsecureSkipVerify:   true,
 		VerifyConnection:     verifyPin(serverPin),
 	}

@@ -30,7 +30,8 @@ func ServiceHostRoutes(app *config.App, st state.State) (map[string]broker.Servi
 		if len(tools) == 0 {
 			continue
 		}
-		cert, _, err := servicehost.LoadClientKeyPair(st.ServiceHostClientCert(h.Name), st.ServiceHostClientKey(h.Name))
+		certPath, keyPath := st.ServiceHostClientCert(h.Name), st.ServiceHostClientKey(h.Name)
+		_, _, err := servicehost.LoadClientKeyPair(certPath, keyPath)
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, fmt.Errorf("brokerctl: service host %q is not paired: run `lever service-host pair %s`", h.Name, h.Name)
 		}
@@ -41,7 +42,7 @@ func ServiceHostRoutes(app *config.App, st state.State) (map[string]broker.Servi
 		if err != nil {
 			return nil, fmt.Errorf("brokerctl: service host %q: %w", h.Name, err)
 		}
-		tr := servicehost.Transport(cert, pin)
+		tr := servicehost.FileTransport(certPath, keyPath, pin)
 		for _, t := range tools {
 			routes[t.Name] = broker.ServiceHostRoute{Host: h.Name, Transport: tr}
 		}

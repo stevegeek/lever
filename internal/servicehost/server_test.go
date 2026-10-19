@@ -90,10 +90,15 @@ func fakeTool(t *testing.T, fakeLog string, allow ...string) Tool {
 
 func newRig(t *testing.T, timeout time.Duration, tools ...Tool) *rig {
 	t.Helper()
+	return newRigFor(t, newKeyPair(t, x509.ExtKeyUsageClientAuth), timeout, tools...)
+}
+
+func newRigFor(t *testing.T, client keyPair, timeout time.Duration, tools ...Tool) *rig {
+	t.Helper()
 	if timeout == 0 {
 		timeout = 20 * time.Second
 	}
-	r := &rig{t: t, server: newKeyPair(t, x509.ExtKeyUsageServerAuth), client: newKeyPair(t, x509.ExtKeyUsageClientAuth), log: &syncBuffer{}}
+	r := &rig{t: t, server: newKeyPair(t, x509.ExtKeyUsageServerAuth), client: client, log: &syncBuffer{}}
 	cfg := &Config{Listen: "127.0.0.1:7443", ClientFingerprint: string(r.client.fp), CallTimeout: timeout, Tools: tools, dir: t.TempDir()}
 	if err := cfg.validate(); err != nil {
 		t.Fatal(err)
@@ -382,5 +387,38 @@ func TestProbeClassifiesFailures(t *testing.T) {
 	down.Close()
 	if _, err := Probe(ctx, downAddr, r.client.cert, r.server.fp); step(err) != "unreachable" {
 		t.Fatalf("down host: %v", err)
+	}
+}
+
+func TestFileTransportPicksUpARotatedKey(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := filepath.Join(dir, "client.crt"), filepath.Join(dir, "client.key")
+	fp, _, err := EnsureKeyPair(certPath, keyPath, "x", x509.ExtKeyUsageClientAuth, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, _, err := LoadClientKeyPair(certPath, keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := newRigFor(t, keyPair{cert, fp}, 0, fakeTool(t, filepath.Join(t.TempDir(), "fake.log"), "echo"))
+	c := &http.Client{Transport: FileTransport(certPath, keyPath, r.server.fp)}
+	get := func() int {
+		resp, err := c.Get(r.ts.URL + InfoPath)
+		if err != nil {
+			return 0
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := get(); code != 200 {
+		t.Fatalf("paired key from disk: %d", code)
+	}
+	time.Sleep(10 * time.Millisecond)
+	if _, _, err := EnsureKeyPair(certPath, keyPath, "x", x509.ExtKeyUsageClientAuth, true); err != nil {
+		t.Fatal(err)
+	}
+	if code := get(); code == 200 {
+		t.Fatal("the rotated key was not picked up: the old one was still presented")
 	}
 }

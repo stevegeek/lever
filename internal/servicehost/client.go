@@ -9,7 +9,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -18,10 +20,21 @@ import (
 // before the host slept or restarted could hang a call, and a fresh
 // handshake per call is what makes the next call work once the host is back.
 func Transport(client tls.Certificate, serverPin Fingerprint) *http.Transport {
+	return transport(ClientTLSConfig(client, serverPin))
+}
+
+// FileTransport is Transport with the client pair read from disk, again
+// whenever either file changes, so a re-pair takes effect on the next call.
+func FileTransport(certPath, keyPath string, serverPin Fingerprint) *http.Transport {
+	f := &fileCert{certPath: certPath, keyPath: keyPath}
+	return transport(clientTLSConfig(f.load, serverPin))
+}
+
+func transport(tc *tls.Config) *http.Transport {
 	return &http.Transport{
 		Proxy:               nil,
 		DialContext:         (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
-		TLSClientConfig:     ClientTLSConfig(client, serverPin),
+		TLSClientConfig:     tc,
 		TLSHandshakeTimeout: 10 * time.Second,
 		DisableKeepAlives:   true,
 	}
@@ -80,4 +93,42 @@ func classify(err error) error {
 	default:
 		return &ProbeError{"unreachable", err}
 	}
+}
+
+type fileCert struct {
+	certPath, keyPath string
+
+	mu    sync.Mutex
+	stamp string
+	cert  *tls.Certificate
+}
+
+func (f *fileCert) load() (*tls.Certificate, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	stamp, err := fileStamp(f.certPath, f.keyPath)
+	if err != nil {
+		return nil, err
+	}
+	if f.cert != nil && stamp == f.stamp {
+		return f.cert, nil
+	}
+	cert, _, err := LoadClientKeyPair(f.certPath, f.keyPath)
+	if err != nil {
+		return nil, err
+	}
+	f.cert, f.stamp = &cert, stamp
+	return f.cert, nil
+}
+
+func fileStamp(paths ...string) (string, error) {
+	var b strings.Builder
+	for _, p := range paths {
+		fi, err := os.Stat(p)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&b, "%d/%d/%o;", fi.ModTime().UnixNano(), fi.Size(), fi.Mode().Perm())
+	}
+	return b.String(), nil
 }

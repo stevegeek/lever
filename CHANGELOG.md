@@ -7,6 +7,14 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`lever --version` no longer names a wrong commit when built in a git worktree.** Go's own VCS
+  stamping looks for the first `.git` directory above the source, so `make install` in a worktree
+  inside another checkout stamped that checkout's commit, dirty state and last tag. In a worktree
+  `make install` now builds `lever` without VCS stamping, so `--version` shows the binary's hash
+  (`0.51.0 (bin …)`) instead. Builds from an ordinary checkout and release builds are unchanged.
+
 ## [0.50.0] - 2026-10-19
 
 ### Added

@@ -178,8 +178,10 @@ instead of starting it again each time.
 
 The service host forwards only the message fields MCP defines (for `tools/call`, the tool's
 `name`, `arguments` and `_meta`), re-encoded from what it checked, and refuses with `400` a message
-with two keys that are equal under Unicode case folding (`params` and `paramſ`): a server written
-in Go matches keys that way, and would otherwise read another call than the one checked.
+with a repeated key, or two keys equal under Unicode case folding (`params` and `paramſ`), as the
+broker does: a server written in Go matches keys that way, and would otherwise read another call
+than the one checked. A stdio server that does not read a call within `call_timeout` is stopped,
+and started again on a later call.
 
 `tools/list` answers list only the operations in `allow`. A `tools/call` for any other operation is
 refused with `403` before it reaches the server. Only `initialize`, `ping`, `tools/list`,

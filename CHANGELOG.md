@@ -30,12 +30,14 @@ version bump moves the block under the new version heading.
 
 ### Fixed
 
-- **The broker refuses a tool call with two keys that are equal under case folding.** The gateway
+- **The broker refuses a tool call with duplicate keys, or keys equal under case folding.** The gateway
   checks a message's capability, operation and arguments by exact key, and forwards the message
   re-encoded with every key it holds. An MCP server written in Go decodes into structs, which match
   keys regardless of case under Unicode folding, so `{"params":{"name":"read"},"paramſ":{"name":
-  "write"}}` passed as a `read` and could run as a `write` there. The gateway now answers such a
-  message `400` and logs a `deny`, for every broker tool.
+  "write"}}` passed as a `read` and could run as a `write` there. Likewise a backend whose parser
+  keeps the first of two `method` keys, where Go keeps the last. The gateway now answers a message
+  with a repeated key, or one equal to another under folding, or nested deeper than 256 levels,
+  with `400` and logs a `deny`, for every broker tool.
 
 ### Changed
 

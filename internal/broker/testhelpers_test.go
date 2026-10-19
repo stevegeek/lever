@@ -2,6 +2,7 @@ package broker
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -16,6 +17,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -154,6 +156,12 @@ func withManager(cn, slug string) configOpt {
 // withRuntime wires the worker dispatch side: the runtime, the declared
 // workers, the bootstrap CA/URL staged for them and the instance project.
 func withRuntime(rt WorkerRuntime, specs ...WorkerSpec) configOpt {
+	// A spec with no image would be refused at every fresh start; one that
+	// names none gets fakeRecordImage.
+	specs = slices.Clone(specs)
+	for i := range specs {
+		specs[i].Image = cmp.Or(specs[i].Image, fakeRecordImage)
+	}
 	return func(c *Config) {
 		c.Dispatch.Runtime, c.Dispatch.Workers = rt, specs
 		// The fake runtime doubles as the guest ticket channel.

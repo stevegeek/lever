@@ -547,6 +547,12 @@ func (r *run) ensureUp(ctx context.Context, jp string, q ManagerRequest) (Manage
 	if err != nil {
 		return ManagerResult{}, err
 	}
+	if opts.Image == "" {
+		// A create would make a record with no image, which refuseUnqualifiedRecord
+		// then refuses for good; before observeUp, so a --fresh deletes nothing.
+		return ManagerResult{}, fmt.Errorf("%s: manager.image is not set in %s, so the manager would run a default image name the hub rewrites to its image registry; nothing was changed. Set it (e.g. %s/lever-claude)",
+			r.subjectName(), config.CanonicalName, imageref.Registry)
+	}
 	rec, o, err := r.observeUp(ctx, jp)
 	if err != nil {
 		return ManagerResult{}, err

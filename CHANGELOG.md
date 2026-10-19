@@ -166,7 +166,9 @@ version bump moves the block under the new version heading.
   manager's `agent resume` and `agent start`, `lever worker resume`, `start` and `new-session`,
   autostart, the chat page's resume and the certificate heal, before it stages a ticket or stops
   anything, with the new reason `image-unqualified` (exit 10) and the advice to run `lever worker
-  recycle NAME`. Doctor's *manager image* row fails for any such record, a worker's included.
+  recycle NAME`. Since a create with no image makes such a record, `lever up` and a fresh worker
+  start now refuse while `manager.image` is unset. Doctor's *manager image* row fails for any
+  such record, a worker's included, and while `manager.image` is unset.
 
 - **Two spellings of one image name are one image to config and to `image_tar`.** `x:arm64` and
   `docker.io/library/x:arm64` are one name in the jail's podman, but config load compared them as
@@ -242,8 +244,8 @@ version bump moves the block under the new version heading.
   conversations and the broker's re-enrol refuse it until then. Recycle each such worker before
   upgrading with `lever worker recycle NAME` (or `lever worker purge NAME --force`, then `lever
   worker start NAME`; both work after the upgrade too): the new broker refuses to resume, heal or
-  wake it, and an autostart of it only warns. The first apply sets the hub's
-  image registry to `lever.local`.
+  wake it, and an autostart of it only warns. Set `manager.image` if your `lever.yaml` leaves it
+  out. The first apply sets the hub's image registry to `lever.local`.
 
 - **Fix any `caveat_param` that config load now refuses** (see Security): bind each constraint
   key directly to its argument.

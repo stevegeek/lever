@@ -4289,6 +4289,25 @@ func TestApplyRefusesAManagerOnAnUnqualifiedImage(t *testing.T) {
 	}
 }
 
+// With no manager.image a create would make a record with no image: ensureUp
+// refuses before it looks at, deletes or creates anything.
+func TestEnsureUpRefusesAnEmptyManagerImage(t *testing.T) {
+	for _, fresh := range []bool{false, true} {
+		app, f := newObserveFirstApp(t)
+		app.Manager.Image = ""
+		r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "created"}
+		intent := ManagerKeep
+		if fresh {
+			intent = ManagerFresh
+		}
+		_, err := EnsureManager(context.Background(), app, fillDeps(Deps{Scion: scion.New(r, scion.Options{}), Log: func(string, ...any) {}}), ManagerRequest{Intent: intent})
+		testutil.WantErrContaining(t, err, "manager.image is not set")
+		if r.suspendCalls+r.resumeCalls+r.startCalls+r.deleteCalls != 0 {
+			t.Errorf("fresh %v: suspend=%d resume=%d start=%d delete=%d, want none", fresh, r.suspendCalls, r.resumeCalls, r.startCalls, r.deleteCalls)
+		}
+	}
+}
+
 // A record on an unqualified image name is refused whatever the image it
 // runs or the path, and so is one with no image; a qualified or
 // digest-pinned one is not.

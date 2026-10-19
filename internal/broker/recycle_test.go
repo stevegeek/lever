@@ -26,7 +26,7 @@ func recycleBroker(t *testing.T, phase string, recyclable bool) (*Broker, *fakeR
 		t.Fatal(err)
 	}
 	spec := WorkerSpec{Name: "worker", WorkspaceSubdir: "workers/worker", HostWorkspace: ws,
-		TicketDir: "/run/user/501/lever/tickets/worker", Recyclable: recyclable}
+		TicketDir: "/run/user/501/lever/tickets/worker", Image: fakeRecordImage, Recyclable: recyclable}
 	rt := &fakeRuntime{agents: map[string][]scion.Agent{}}
 	if phase != "" {
 		rt.agents[testInstanceProject] = []scion.Agent{{Slug: "worker", Phase: phase, ContainerStatus: "Exited (0) 1 minute ago"}}

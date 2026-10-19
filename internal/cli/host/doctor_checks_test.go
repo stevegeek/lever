@@ -1585,6 +1585,9 @@ func TestCheckManagerImage(t *testing.T) {
 		{"record without image", listing(scion.Agent{Slug: "assistant", Phase: "running"}), false, "assistant (no image)", "lever up --fresh --keep-conversation"},
 		{"list fails", func(context.Context, string) ([]scion.Agent, error) { return nil, fmt.Errorf("hub down") }, true, "not checked", ""},
 	}
+	if r := checkManagerImage(context.Background(), "/lever", "assistant", "", listing()); r.ok || !strings.Contains(r.fix, "manager.image") {
+		t.Errorf("no manager.image: %+v", r)
+	}
 	for _, c := range cases {
 		configured := "lever.local/lever-claude:arm64"
 		if strings.HasPrefix(c.label, "unqualified, configured bare") {

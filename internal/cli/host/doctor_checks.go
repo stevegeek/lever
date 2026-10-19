@@ -1157,7 +1157,10 @@ func activityAge(a *scionpkg.Agent, now time.Time) string {
 // between applies.
 func checkManagerImage(ctx context.Context, project, name, configured string, list agentLister) checkResult {
 	const check = "manager image"
-	if list == nil || configured == "" {
+	if configured == "" {
+		return checkResult{check, false, "manager.image is not set, so a new agent record would run a default image name the hub rewrites to its image registry; lever refuses to start the manager or a fresh worker", "set manager.image in " + config.CanonicalName + " (e.g. " + imageref.Registry + "/lever-claude)"}
+	}
+	if list == nil {
 		return checkResult{check, true, "not checked", ""}
 	}
 	want := imageref.Agent(configured)

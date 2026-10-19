@@ -141,3 +141,36 @@ func TestBounceRefusesARewritableRecordImage(t *testing.T) {
 		t.Fatalf("bounced a rewritable record: resumed=%v", rt.resumed)
 	}
 }
+
+// A fresh start with no image configured would make a record every later
+// start refuses: it is refused itself, before the ticket.
+func TestFreshStartRefusesNoImage(t *testing.T) {
+	for name, call := range map[string]func(t *testing.T, b *Broker) *httptest.ResponseRecorder{
+		"manager start":  imagePaths["manager start"],
+		"operator start": imagePaths["operator start"],
+		"operator recycle": func(t *testing.T, b *Broker) *httptest.ResponseRecorder {
+			return callOperator(t, b, http.MethodPost, PathOperatorWorkerRecycle, `{"worker":"worker"}`)
+		},
+	} {
+		rt := &fakeRuntime{agents: map[string][]scion.Agent{}}
+		b := newTestBroker(t, rt, imageSpec)
+		s := b.workers["worker"]
+		s.Image = ""
+		b.workers["worker"] = s
+		rec := call(t, b)
+		if rec.Code != http.StatusConflict || rec.Header().Get(ReasonHeader) != ReasonImageUnqualified || len(rt.started)+len(rt.staged) != 0 {
+			t.Errorf("%s: %d %q started=%d staged=%d: %s", name, rec.Code, rec.Header().Get(ReasonHeader), len(rt.started), len(rt.staged), rec.Body)
+		}
+	}
+}
+
+// A record that is gone by the image check is not resumed: scion would
+// create it from the template, with no image.
+func TestResumeRefusesARecordGoneByTheImageCheck(t *testing.T) {
+	rt := &fakeRuntime{listFirst: [][]scion.Agent{{{Slug: "worker", Phase: scion.PhaseSuspended}}, {}}, agents: map[string][]scion.Agent{}}
+	b := newTestBroker(t, rt, imageSpec)
+	rec := callOperator(t, b, http.MethodPost, PathOperatorWorkerResume, `{"worker":"worker"}`)
+	if rec.Code != http.StatusNotFound || rec.Header().Get(ReasonHeader) != ReasonNoRecord || len(rt.resumed)+len(rt.staged) != 0 {
+		t.Fatalf("%d %q resumed=%v staged=%d: %s", rec.Code, rec.Header().Get(ReasonHeader), rt.resumed, len(rt.staged), rec.Body)
+	}
+}

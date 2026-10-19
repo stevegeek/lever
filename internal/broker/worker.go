@@ -741,6 +741,13 @@ func (b *Broker) recordImageOK(ctx context.Context, w http.ResponseWriter, spec 
 		return false
 	}
 	a := scion.FindAgent(agents, spec.Name)
+	if a == nil {
+		// The caller saw a record: scion's resume of a missing one creates it
+		// from the template, with no image.
+		b.audit("worker", actor, "deny", verb+" "+spec.Name+": its record is gone")
+		refuse(w, ReasonNoRecord, "worker "+spec.Name+" no longer has a record on the hub; nothing was changed. Start it instead: `lever worker start "+spec.Name+"`", http.StatusNotFound)
+		return false
+	}
 	if !rewritableImage(a) {
 		return true
 	}
@@ -810,6 +817,13 @@ func workerPurgeHint(worker string) string {
 }
 
 func (b *Broker) startFreshWorker(ctx context.Context, w http.ResponseWriter, spec WorkerSpec, task string, configTask bool, actor string) {
+	if spec.Image == "" {
+		// The record would have no image (rewritableImage), and no later
+		// start of it would be allowed.
+		b.audit("worker", actor, "deny", "start "+spec.Name+": no image is configured")
+		refuse(w, ReasonImageUnqualified, "worker "+spec.Name+" has no image configured (manager.image or workers[].image in lever.yaml), so it would run a default image name the hub rewrites to its image registry; nothing was changed", http.StatusConflict)
+		return
+	}
 	// Before any side effect.
 	release, ok := b.admitOrRefuse(ctx, w, actor, "start", spec.Name)
 	if !ok {

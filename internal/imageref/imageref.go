@@ -28,7 +28,8 @@ func Qualified(ref string) bool {
 // rewrite can only fail the pull. An empty ref is not fixed: the runtime then
 // resolves the template's or harness's default image, which scion rewrites.
 func Fixed(ref string) bool {
-	return ref != "" && (strings.Contains(ref, "@") || Qualified(ref))
+	// scion keeps only the last path component, so a digest elsewhere is lost.
+	return ref != "" && (strings.Contains(ref[strings.LastIndex(ref, "/")+1:], "@") || Qualified(ref))
 }
 
 // Agent returns the name an agent runs the configured image ref under. A

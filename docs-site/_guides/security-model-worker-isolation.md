@@ -359,7 +359,9 @@ restore or new conversation and the broker's re-enrol refuse to keep or resume s
 say to run `lever up --fresh --keep-conversation`. The broker refuses to resume, start, heal or
 wake such a worker, for the manager, the operator (`lever worker resume`, `start`, `new-session`,
 autostart) and the chat page alike, and says to run `lever worker recycle NAME`. `lever doctor`'s
-`manager image` row fails while any such record exists, and recreating them clears it. The runtime route can likewise switch the hub's container runtime, which fails agent starts
+`manager image` row fails while any such record exists, and recreating them clears it.
+
+The runtime route can likewise switch the hub's container runtime, which fails agent starts
 until the next `lever apply` sets it back to podman as lever-admin; doctor's `hub container
 runtime` row fails meanwhile. That pin stores the hub's profiles in its database, which from then
 on outranks `profiles:` in the jail's `settings.yaml`. The workstation settings route can turn on

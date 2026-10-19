@@ -162,6 +162,9 @@ func (l *Lima) ensureVM(ctx context.Context, cfg backend.Config) error {
 		if !created {
 			l.saveGuestLogs(cfg, inst, true)
 		}
+		if cfg.Warn != nil {
+			warnRunningVMSwap(cfg.HostSwap, l.instanceDir(inst), cfg.Warn)
+		}
 		s.Skip("already running")
 		return nil
 	}

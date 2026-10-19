@@ -1824,7 +1824,8 @@ so whatever touches it stalls on the host's swap-in, and with KVM async page fau
 manager's `resources` caps work inside the guest; they do not stop the host swapping the guest
 out.
 
-On a Linux host `lever apply` and `lever up` start a stopped VM with
+On a Linux host every bring-up that starts a stopped VM (`lever up`, `lever apply`, `lever
+conversation new` and `restore`, `lever reload`) starts it with
 
 ```
 systemd-run --user --scope --collect --property=MemorySwapMax=0 -- limactl start ...
@@ -1843,7 +1844,9 @@ does. The scope is used only when both hold:
 
 Otherwise, or when `systemd-run` cannot start the scope, the VM starts the old way and apply
 warns why; the limit is never a reason not to start the VM. A running VM is not moved: restart it
-(`lever stop`, then `lever up`) to get the limit. `host_swap: true` in `lever.yaml` starts it the
+(`lever stop`, then `lever up`) to get the limit; until then each bring-up warns that the running
+VM's QEMU is outside such a scope. `lever provision` does not read `lever.yaml`, so a VM it
+starts always gets the scope when the host can give one. `host_swap: true` in `lever.yaml` starts it the
 old way without the warning. A host with no swap device (`/proc/swaps` lists none) starts it the
 old way silently, and doctor does not warn there. On macOS nothing changes.
 

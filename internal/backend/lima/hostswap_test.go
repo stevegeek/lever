@@ -378,3 +378,40 @@ func TestNoSwapScopePrefixShape(t *testing.T) {
 		t.Errorf("probe = %q", swapScopeProbe)
 	}
 }
+
+func TestWarnRunningVMSwap(t *testing.T) {
+	const swaps = "Filename\tType\tSize\tUsed\tPriority\n/dev/zram0\tpartition\t8388604\t0\t100\n"
+	cases := []struct {
+		name     string
+		hostSwap bool
+		limit    string
+		swaps    string
+		want     bool
+	}{
+		{"unscoped VM warns", false, "max", swaps, true},
+		{"scoped VM is quiet", false, "0", swaps, false},
+		{"host_swap true is quiet", true, "max", swaps, false},
+		{"host without swap is quiet", false, "max", "Filename\tType\tSize\tUsed\tPriority\n", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := newHostSwapRoot(t)
+			r.write(filepath.Join(r.proc, "swaps"), c.swaps)
+			r.qemu("4242", "qemu-system-x86", "1024", scopeCgroup)
+			r.write(filepath.Join(r.cgroup, scopeCgroup, "memory.swap.max"), c.limit+"\n")
+			var got []string
+			warnRunningVMSwap(c.hostSwap, r.inst, func(f string, a ...any) { got = append(got, fmt.Sprintf(f, a...)) })
+			if (len(got) == 1) != c.want || len(got) > 1 {
+				t.Fatalf("warnings = %q, want one: %v", got, c.want)
+			}
+			if c.want && !strings.Contains(got[0], "pid 4242") {
+				t.Fatalf("warning = %q", got[0])
+			}
+		})
+	}
+	t.Run("VM with no qemu.pid is quiet", func(t *testing.T) {
+		r := newHostSwapRoot(t)
+		r.write(filepath.Join(r.proc, "swaps"), swaps)
+		warnRunningVMSwap(false, r.inst, func(f string, a ...any) { t.Fatalf("warned: "+f, a...) })
+	})
+}

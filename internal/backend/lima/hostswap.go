@@ -159,6 +159,20 @@ func (l *Lima) startVM(ctx context.Context, hostSwap bool, instDir string, warn 
 	return err
 }
 
+// warnRunningVMSwap reads host files only: a running VM keeps the cgroup it
+// started in, so a host_swap change or an upgrade takes effect only when the
+// VM next starts, and nothing else at bring-up would say so.
+func warnRunningVMSwap(hostSwap bool, instDir string, warn func(string, ...any)) {
+	if hostSwap || hostGOOS != "linux" || !HostHasSwap() {
+		return
+	}
+	s, err := ReadHostSwap(instDir)
+	if err != nil || s.NoSwap() {
+		return
+	}
+	warn("jail: warning: the running VM's qemu (pid %d) is not in a cgroup with memory.swap.max=0 (%s); the host can swap the VM's memory out until the VM next starts (`lever stop`, then `lever up`; or set host_swap: true)", s.PID, s.Limit())
+}
+
 // HostSwap is what the host's /proc and cgroup files say about a running
 // Lima VM's qemu process.
 type HostSwap struct {

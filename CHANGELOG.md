@@ -7,6 +7,33 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **Service hosts: an instance's MCP servers, and their credentials, can run on other machines
+  on the tailnet (lever#234).** `lever service-host serve` runs on the other machine, from the
+  same `lever` binary, and serves the tools in its own config: stdio MCP servers it starts as
+  children, each with only its own environment and secret files, or streamable-HTTP servers it
+  forwards to with their credential headers. Declare the machine in `broker.service_hosts` and
+  give a tool `host: <name>` instead of `command` or `backend`; it is an external tool that may
+  leave loopback. The broker reaches the service host over TLS 1.3 with both keys pinned: `lever
+  service-host init` makes the service host's key, `lever service-host pair <name>` makes the
+  broker's client key in `.lever-state`, and only the two fingerprints are copied between the
+  machines. The service host refuses any other client during the handshake and enforces its own
+  ceiling (`allow`, the operations this instance may call there) whatever the broker allowed, so a
+  compromised lever host gets no more than that ceiling; it never sees a capability token, and
+  nothing on the lever host accepts a connection from it. It keeps no MCP sessions. While one
+  service host is down only its tools answer `503`, and the next call after it is back works.
+  Both sides log each decision; a refusal there is also a `service_host.refused` line in
+  `broker.log`. `lever doctor` adds a row per service host: reachable, pins and pairing, the tools
+  it serves against the config, and operations outside its ceiling. The VM, the jail, the broker,
+  its keys and the LLM key stay on the lever host. See the new service hosts guide.
+
+### Changed
+
+- **The broker bounds a tool's `tools/list` answer to 16 MiB.** The gateway reads it whole to add
+  the capability argument; a larger answer is now refused as a backend error (`503`) instead of
+  being read into memory without a limit.
+
 ## [0.51.0] - 2026-10-19
 
 ### Changed

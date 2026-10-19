@@ -130,6 +130,11 @@ boundaries:
   non-loopback `backend` would hand a jailed agent a path to other hosts *through the
   broker*, circumventing the jail's LAN-drop egress. Config validation rejects it unless the
   tool sets `allow_non_loopback: true` (an explicit, reviewed opt-in).
+- **A service-host tool reaches one pinned machine only.** A tool with `host:` goes to its
+  [service host](/service-hosts/) over mutual TLS: the broker presents a client key the jail never
+  sees and accepts only the server key `lever.yaml` pins, and the service host enforces its own
+  ceiling of tools and operations and holds the credentials. See the
+  [threat model](/service-hosts/#threat-model).
 - **The gate protects the *jailed agent's* path, nothing more.** Any other host-local
   process can still hit the server's `127.0.0.1` port directly — host processes are already
   inside the host trust boundary; the broker does not claim to sandbox them from each other.

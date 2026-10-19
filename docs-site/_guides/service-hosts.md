@@ -112,18 +112,21 @@ lever service-host serve ~/lever-service-host/service-host.yaml
 Run `lever apply` (or `lever reload`) on the lever host, then `lever doctor`: its *service host
 laptop* row should be green.
 
-`pair` refuses to replace an existing key; `pair --rotate` makes a new one (update
-`client_fingerprint` on the service host, then restart the broker with `lever apply`). `init` never
-replaces a server key: delete `server.key` and `server.crt` yourself to make a new one, then update
-`fingerprint` in `lever.yaml`.
+`pair` keeps an existing key and prints its fingerprint again; `pair --rotate` makes a new one.
+The broker reads the key again whenever its files change, so after a rotation update
+`client_fingerprint` on the service host and restart `serve` there; calls fail with `503` in
+between. `init` never replaces a server key: delete `server.key` and `server.crt` yourself to make
+a new one, then update `fingerprint` in `lever.yaml` and run `lever apply`.
 
 ## Config
 
 ### On the service host
 
 The service host reads only its own file. Keep it, and every file it names, writable by you alone:
-`serve` refuses a config, key or secret file that group or others can write, and a key or secret
-file they can read.
+`serve` refuses a config, certificate or key that group or others can write, and a key they can
+read. A secret file (`env_files`, `header_files`) is read, and refused on the same terms, each time
+a stdio server starts or an upstream call is made, so a rotated secret needs no restart of `serve`
+(a running stdio server keeps the value it started with).
 
 ```yaml
 # service-host.yaml
@@ -151,7 +154,7 @@ tools:
 
 | Key | Meaning |
 |---|---|
-| `listen` | `host:port` to listen on. Use the machine's tailnet address (or loopback behind your own front). A wildcard (`0.0.0.0`, `::`, or no host) is refused unless `allow_wildcard_listen: true`. |
+| `listen` | `host:port` to listen on, with a literal IP. Use the machine's tailnet address (or loopback behind your own front). A wildcard (`0.0.0.0`, `::`, or no host) is refused unless `allow_wildcard_listen: true`. |
 | `client_fingerprint` | Required. The broker's client key, from `lever service-host pair`. Any other client is refused during the handshake. |
 | `cert`, `key` | The server certificate and key `init` wrote. Default `server.crt` and `server.key` next to the config; relative paths resolve there. |
 | `call_timeout` | How long one call may take before the service host answers `504`. Default `5m`. |
@@ -172,8 +175,9 @@ are dropped.
 
 `tools/list` answers list only the operations in `allow`. A `tools/call` for any other operation is
 refused with `403` before it reaches the server. Only `initialize`, `ping`, `tools/list`,
-`tools/call` and `notifications/initialized` are served; anything else gets JSON-RPC "method not
-found", and every method but `POST` gets `405`.
+`tools/call` and `notifications/initialized` are served; any other request gets JSON-RPC "method
+not found", any other notification is accepted and dropped, and every HTTP method but `POST` gets
+`405`. Any other path gets `404`.
 
 ### On the lever host
 
@@ -210,8 +214,9 @@ A tool with `host:` is an external tool: it implies `external: true` and `allow_
 and takes `gate`, `operations` and `allowed_values` as any external tool does. Config load refuses a
 `host:` tool that also sets `command`, `backend` or `allow_non_loopback`, a `host:` that names no
 declared service host, and two service hosts with the same name or address. The
-broker refuses to start while a declared service host is not paired, or while the state directory
-is inside the tree (an agent could read the client key there).
+broker refuses to start while a service host that a tool uses is not paired, or its client key is
+readable by group or others, and refuses service hosts altogether while the state directory is
+inside the tree (an agent could read the client key there); `pair` refuses that too.
 
 The broker sends each call to `https://<address>/mcp/<tool>`, presenting the client key, and sets
 `X-Lever-Caller` to the calling agent so the service host's audit log can name it; the service host
@@ -248,7 +253,7 @@ on that port: the service host terminates TLS itself.
 | A call ran past `call_timeout` | `504`. | Service host log. |
 | An operation outside the ceiling | `403`; the server never sees the call. | Both: the broker's `allow` line, then `deny` on the service host and `service_host.refused` in `broker.log`. |
 | The service host's key changed (re-`init`, or a machine pretending to be it) | `503`, as for a down host. | `broker.log`: the certificate pin mismatch. *service host* doctor row fails. |
-| The broker's key changed (`pair --rotate`) and the service host was not updated | `503`. | Service host log: the refused client fingerprint. Doctor row fails. |
+| The broker's key changed (`pair --rotate`) and the service host was not updated | `503`. | Service host log: the refused client fingerprint. Doctor row fails and prints the fingerprint to set. |
 | Not paired yet | The broker does not start; `lever apply` names the service host. | |
 
 ## Doctor
@@ -258,12 +263,14 @@ completes the mutual TLS handshake with the broker's client key (checking the pi
 service host's list of the tools it serves for this instance, with each tool's ceiling. The row
 fails when the host is unreachable, not paired, the pin does not match, or the service host refuses
 the client key, and when a `host:` tool in `lever.yaml` is not served there. It warns when an
-operation in a tool's `operations` (gate `fine`) lies outside that tool's ceiling: every call to it
-would be refused.
+operation in a tool's `operations` (gate `fine`) lies outside that tool's ceiling, since every call
+to it would be refused, and when no tool uses the service host.
 
 ## Logs
 
 `lever service-host serve` logs to its standard error, one line per decision:
 `decision=allow|deny tool=<name> op=<operation> caller=<agent>`, plus refused handshakes with the
-client fingerprint they offered, server exits and timeouts. Run it under your service manager
-(launchd, systemd) to keep the log. It never logs arguments, results or credentials.
+client fingerprint they offered, server starts and exits, failed calls and timeouts, and each stdio
+server's own standard error, line by line. Run it under your service manager (launchd, systemd) to
+keep the log. The service host itself never logs arguments, results or credentials; what a stdio
+server prints on its standard error is that server's choice.

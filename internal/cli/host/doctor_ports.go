@@ -133,7 +133,7 @@ func checkInstancePorts(app *config.App, st state.State, p instancePortsProbes) 
 			p.brokerAlive = true
 		case got.InstanceID == "" && p.brokerAlive:
 			return warnResult(name, fmt.Sprintf("the broker on 127.0.0.1:%d reports no instance id: it predates this lever version", app.EffectiveAdminPort()),
-				"run `lever apply` to restart it with this binary")
+				"run `lever stop`, then `lever up`, which starts it with this binary")
 		default:
 			foreignBroker = true
 			held = append(held, fmt.Sprintf("broker ports %d/%d by another lever instance's broker (instance id %s, this instance's %s)",

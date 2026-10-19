@@ -7,6 +7,292 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.60.0] - 2026-10-19
+
+### Added
+
+- **Agents can check that their image matches the host lever.** `lever-manager version` prints the
+  image's lever build and Jail ABI, asks the broker for the host lever's, and says whether the two
+  match. On a mismatch it names the fix: rebuild the agent image, then `lever up --fresh
+  --keep-conversation`; a worker is told to ask the operator for it. Equal Jail ABIs with
+  different builds are compatible and need no rebuild, as in doctor's *agent lever version* row.
+  `lever-manager --version` and `lever-agent --version` print the local line only, and `lever-agent
+  version` does what `lever-manager version` does. The answer comes from a new read-only
+  `GET /version` on the broker's mTLS jail listener: any live agent identity, manager or worker,
+  gets the host's version and Jail ABI and nothing else, with no capability. A request without a
+  client certificate or from a revoked identity gets 403. The manager's skill says how to check.
+
+- **`lever worker list [--json]`: see the workers from the host (lever#237).** It lists every
+  declared worker as the broker sees it on the hub: phase (`none` with no record), activity, last
+  activity, container status, and `idle_at_prompt`, which is `true` for a running worker waiting
+  for input or done, `false` for a busy or not-running one, and `null` when the record doesn't
+  settle it (the hub's `stalled` covers both an idle worker and one that can't reach the model).
+  The activity is marked `worker-reported`: the hooks inside the worker's own container report it,
+  and the worker can set its phase and container status on the hub too, so the list is the worker's
+  word.
+  The broker passes only known labels, and the CLI bounds and sanitizes every string again.
+  `--json` prints one line, `{"ok","workers":[…],"reason","error","exit"}`. Read-only, through
+  the new `GET /operator/worker/list` on the broker's operator socket.
+
+- **`lever worker start`, `recycle`, `suspend` and `stop` from the host, and `autostart`
+  (lever#235).** They run the manager's own verbs through the broker's operator socket with the
+  operator as the actor, with the same per-worker lock, role, workspace and shared-folder checks,
+  running-worker cap and one-a-minute recycle limit, which the manager's recycles share. `start` and
+  `recycle` take the task from `--task-file` (read on the host: a regular file, at most 64 KiB,
+  never through a symbolic link inside the tree) or from the worker's new `task_file` setting, which
+  lives at the instance root like `prompt_file`. A worker with `autostart: true` is resumed or
+  started by `lever up` and `lever apply` once the manager is up; a failure warns, naming the
+  worker, and the bring-up still succeeds. The `--json` line and the exit codes are those of `lever
+  worker resume`, plus `12` (`not-stopped`); new reasons are `task-file`, `bad-task`,
+  `task-too-long`, `task-fixed`, `config-file`, `not-stopped` and `rate-limited`. `lever worker
+  recycle` works on any declared worker: `recyclable: true` is the manager's authority to recycle,
+  and the operator owns the instance, so the manager's `/worker/recycle` still needs it and the
+  operator's verb does not. The manager's own start and recycle refusals keep their status and text,
+  and now carry `X-Lever-Reason` too. Nothing changes inside the jail, and the manager and workers
+  get no new authority.
+
+- **`lever worker new-session NAME [--task-file F]`: a new conversation for a worker, keeping its
+  record and workspace (lever#236).** The broker stops the worker, which ends its session, waits
+  until the hub reads the record stopped and podman shows its container down, and resumes the
+  stopped record in a new session, the way `lever conversation new` does for the manager. The task
+  is the file's, else the worker's `task_file`, else the one the hub stored on the record. It takes
+  the worker's lock like the other verbs, and every check of `lever worker resume` runs before the
+  stop, so a refusal leaves the session as it was; once the stop is under way the broker finishes
+  the verb even when the command is interrupted. The new session is recorded like a fresh start
+  for the contact gate. The old conversation is not backed up. It is on the operator socket only
+  (`POST /operator/worker/new-session`); a message still can't clear a worker's context, since
+  lever never lets a message become a slash command.
+
+- **`lever worker watch NAME [--json]`: a worker's hub events from the host (lever#238).** It
+  long-polls the new `POST /operator/worker/events` on the broker's operator socket and prints the
+  worker's state changes and the completion summary it reports with `sciontool status`, from the
+  moment the watch starts. The broker reads the hub's notification feed with nothing acknowledged,
+  so the manager's inbox is unchanged, and passes on only the events the hub attributes to that
+  worker's record id, as `/msg/list` does. Every event is marked `worker-reported`, is one line of
+  at most 1 KiB, and carries the status only when the hub produces it (`UNRECOGNISED` otherwise);
+  a completion is a trigger to check the work, never its result. `--json` prints one event per
+  line. The watch ends on Ctrl-C, after `--idle-timeout`, or with exit `8` when the record is
+  purged or replaced, and it rides out a broker restart. Free-text messages from a worker to the
+  operator are not part of it.
+
+- **Service hosts: an instance's MCP servers, and their credentials, can run on other machines
+  on the tailnet (lever#234).** `lever service-host serve` runs on the other machine, from the
+  same `lever` binary, and serves the tools in its own config: stdio MCP servers it starts as
+  children, each with only its own environment and secret files, or streamable-HTTP servers it
+  forwards to with their credential headers. Declare the machine in `broker.service_hosts` and
+  give a tool `host: <name>` instead of `command` or `backend`; it is an external tool that may
+  leave loopback. The broker reaches the service host over TLS 1.3 with both keys pinned: `lever
+  service-host init` makes the service host's key, `lever service-host pair <name>` makes the
+  broker's client key in `.lever-state`, and only the two fingerprints are copied between the
+  machines. The service host refuses any other client during the handshake and enforces its own
+  ceiling (`allow`, the operations this instance may call there) whatever the broker allowed, so a
+  compromised lever host gets no more than that ceiling; it never sees a capability token, and
+  nothing on the lever host accepts a connection from it. It keeps no MCP sessions. While one
+  service host is down only its tools answer `503`, and the next call after it is back works.
+  Both sides log each decision; a refusal there is also a `service_host.refused` line in
+  `broker.log`. `lever doctor` adds a row per service host: reachable, pins and pairing, the tools
+  it serves against the config, and operations outside its ceiling. The VM, the jail, the broker,
+  its keys and the LLM key stay on the lever host. See the new service hosts guide.
+
+### Changed
+
+- **Every lever binary reports its exact build commit, in a git worktree too.** `make install`,
+  `make lever-image` and the release build stamp the commit and the dirty state into `lever`,
+  `lever-manager`, `lever-agent` and `lever-tool-db`, and the stamp wins over Go's own VCS stamp,
+  which in a worktree nested inside another checkout names that checkout. A `make install` build
+  of `lever` in a worktree now shows `X.Y.Z (<commit>)` instead of `X.Y.Z (bin …)`, so doctor's
+  *agent lever version* row can tell it is the build the image came from. lever-tool-db's MCP
+  serverInfo carries the commit too.
+
+- **The broker bounds a tool's `tools/list` answer to 16 MiB.** The gateway reads it whole to add
+  the capability argument; a larger answer is now refused as a backend error (`503`) instead of
+  being read into memory without a limit.
+
+### Removed
+
+- **Internal code nothing used.** The scion client's runtime broker wait (`RuntimeBrokerReady`;
+  bring-up asks the hub as lever-admin instead), `wire.Stage` (the host and the broker stage
+  `bootstrap.json` through `fsutil.ReplaceInTreeNoLinks`), and the wire path and request type of
+  the removed `/operator/wake` route. No behaviour changes.
+
+- **The broker's `/operator/wake` route.** It was deprecated in 0.50.0. The remote chat page now
+  wakes a worker through `/operator/worker/resume`, with a `for` object naming the worker, the
+  chat login and its tier, which keeps the chat page's narrower rules (only a suspended or stopped
+  worker, a stopped one only for the operator's login, never the manager). The worker is named
+  only inside `for`, so a broker that predates it refuses the request instead of running the
+  operator's wider resume. The old route answers 404.
+
+- **Compatibility code for instances older than 0.51.0.** The broker's `/chat/verify` route for
+  0.27 agent images, which matched a lever message by its timestamp when the image could not pass
+  a `ref` (the in-image `chat_verify` tool already asks `/message/verify`), and with it the
+  timestamp match in the sent ledger; the reading of `guest-boot.json` into `lifecycle.json`
+  (0.50.0); the `remote.login_port` key and its warning (0.39.0); the clean-up of the single-file
+  chat ledger (`chat-ledger.jsonl`) and of the `.lever-manifest.yaml` runtime manifest; session
+  records that hold a skill's full-file hash (before 0.33.1), which now read as stale; the
+  expired-certificate check's reading of the Go stdlog lines `broker.out.log` held before 0.36.0;
+  and the restart of a broker without an instance id (before 0.36.0), which is now refused like
+  any broker that is not this instance's. `lever doctor`'s *guest clock* row now only warns when
+  the guest's clock is off, unless agent messages are on: no verification depends on it any more.
+
+- **The `scionlocal/<name>` image name.** lever no longer runs a configured `scionlocal/<name>` as
+  `lever.local/<name>`: config refuses the old name and gives the `lever.local/` one, and `make
+  lever-image` and `make lever-image-slim` tag only `lever.local/<name>:<arch>`. A host's docker
+  can still hold a stale build under the old name, which a `lever.yaml` naming it would have loaded
+  and run. Every apply now pins the hub's image registry to `lever.local` (see Security).
+
+### Fixed
+
+- **`lever up` recovers from an empty hub pid file.** A guest killed while the hub started can
+  leave `~/.scion/server.pid` empty. Scion then refuses every later `scion server start` ("invalid
+  PID in file"), so every `lever up` failed. Lever now removes a pid file that holds anything but
+  the digits scion writes (empty, a trailing newline, other bytes), as it already removed one
+  naming a dead or foreign pid. Found by the new chaos e2e.
+- **`lever up` recovers a manager that a dead hub left in phase "starting".** The hub writes
+  "starting" before it dispatches a resume, and only the same hub process moves it on. If the hub
+  dies in between, nothing in scion clears it, a resume gets "already exists", and every `lever
+  up` refused after its 60 s wait until the operator discarded the session with `--fresh`. Now,
+  once the wait is over, if podman has no container for the manager, lever runs `scion stop` on
+  the record, after a second podman look 30 s later. That is the hub's own remedy for a stuck
+  start: it cancels the start and keeps the record and its agent home. Lever then resumes the
+  manager as it would any stopped one, so it comes back in a new claude session. The old
+  conversation stays in the home (`lever attach`, then `/resume`). A record with a container, or
+  one podman cannot read, is still refused untouched. Found by the new chaos e2e.
+
+### Security
+
+- **Every apply pins the hub's image registry to `lever.local`, and lever refuses to start a
+  manager or worker record on an unqualified image name or none.** scion rewrites an agent
+  record's unqualified image name `x` (or `a/x`) to `<registry>/x` at every start, and a record
+  with no image runs the template's or harness's default name, rewritten the same way. Under the
+  old `scionlocal` pin, with the `scionlocal/` alias gone, that named a stale image in the jail
+  or, through podman's short-name path, a Docker Hub pull. Under `lever.local` it names the image
+  lever just loaded, or none, and the start fails; but an agent can point the registry at its own
+  before the next apply, and scion pulls from there. A plain `lever up` or `lever apply`, a
+  conversation restore, a new conversation (the daily one too) and the broker's re-enrol now stop
+  before they change such a manager, instead of warning, and say to run `lever up --fresh
+  --keep-conversation`. The broker refuses to resume, start, heal or wake such a worker, for the
+  manager's `agent resume` and `agent start`, `lever worker resume`, `start` and `new-session`,
+  autostart, the chat page's resume and the certificate heal, before it stages a ticket or stops
+  anything, with the new reason `image-unqualified` (exit 10) and the advice to run `lever worker
+  recycle NAME`. Since a create with no image makes such a record, `lever up` and a fresh worker
+  start now refuse while `manager.image` is unset. Doctor's *manager image* row fails for any
+  such record, a worker's included, and while `manager.image` is unset.
+
+- **Two spellings of one image name are one image to config and to `image_tar`.** `x:arm64` and
+  `docker.io/library/x:arm64` are one name in the jail's podman, but config load compared them as
+  written, and an `image_tar` archive's tags were compared the same way, so one agent could end
+  up running another's image. Config load and the tag check now compare normalised names
+  (`docker.io` as the default registry, `library/` for a single-name image, `:latest` as the
+  default tag, a lowercase registry host), with the `localhost/` and `lever.local/` names an image
+  is loaded under. A config with two such spellings is refused.
+
+- **A constraint on a renamed argument is checked against that argument only.** When a tool's
+  `caveat_param` maps a constraint key to another argument name (`repo: repository`), the gateway
+  and `captool` also read an argument named like the key itself, so a call that omitted
+  `repository` and sent `"repo":"allowed"` met a `repo=allowed` constraint, while a tool decoding
+  into a Go struct could read `"Repository":"evil"` from the same call. A renamed key now binds
+  only its argument, and the broker answers `400` (`captool` an invalid params error) to a call
+  that carries an argument named like a renamed key, under any case.
+
+- **Config load refuses an ambiguous `caveat_param`.** An empty argument name bound a
+  constraint key to an argument the agent names `""`. Config load now refuses an empty name on
+  either side, a name starting with `_` (the broker's own, as in `_capability`), a key renamed to
+  itself under a change of case (`repo: Repo`), and a key renamed to another renamed key, in a
+  chain (`a: b, b: c`) or a cycle (`a: b, b: a`), whose own argument the gateway would refuse.
+
+- **The broker refuses a tool call with duplicate keys, or keys equal under case folding.** The
+  gateway checks a message's capability, operation and arguments by exact key, and forwards the
+  message re-encoded with every key it holds. An MCP server written in Go decodes into structs,
+  which match keys regardless of case under Unicode folding, so
+  `{"params":{"name":"read"},"paramſ":{"name":"write"}}` passed as a `read` and could run as a
+  `write` there. Likewise a backend whose parser keeps the first of two `method` keys, where Go
+  keeps the last. The gateway now answers a message with a repeated key, or one equal to another
+  under folding, or nested deeper than 256 levels, with `400` and logs a `deny`, for every broker
+  tool.
+
+- **An agent that bloats its own hub record no longer stalls `lever up`.** Each agent can write its
+  record's status and activity without a size limit, so the hub's agent list can pass lever's cap
+  on scion's output. The host's agent lists and the waits on them now fail at once with an error
+  that names the cause and the recovery, instead of waiting out the whole budget and reporting
+  "hub not ready", and the error no longer quotes the capped, agent-written output. The hub
+  readiness wait counts a capped list as the hub answering, so `lever up --fresh` (with or without
+  `--keep-conversation`) recovers on its own from an oversized manager record: it suspends and
+  backs up the manager, deletes its record by name, which needs no list, and creates it anew. A
+  plain `lever up` stops before it changes the manager (at the manager's role check or its first
+  agent list) and says to run `lever up --fresh --keep-conversation`. A pending controller
+  authority probe after the hub identity migration that cannot read the agents for this reason
+  stays pending and no longer stops the run.
+  When the list is still too large once the manager's record is gone, a worker's record is the
+  oversized one: `lever up --fresh` creates nothing and says to run `lever worker purge NAME
+  --force` for each worker that may be the one, since lever cannot read the list to tell which.
+
+- **The commands `lever` runs in the jail after the bring-up are capped too.** Only the bring-up's
+  guest commands, and a few probes with caps of their own, stopped at a size limit; the rest (the
+  scion CLI, the project marker read, the guest clock read, the agent image policy check) held
+  whatever the guest printed in memory. Every command the `lever` CLI runs in the jail now stops
+  at 8 MiB on stdout or stderr unless it sets its own cap, and fails with an error that says the
+  output passed lever's limit, in place of the output. The guest clock reads (apply and doctor),
+  the project marker read, the agent image policy check and the guest boot id read stop at
+  64 KiB. A clock read past its cap signs on the host clock, with the usual warning, and a marker
+  read past its cap is a failed read. The conversation backup keeps its own larger cap, and the
+  broker's other commands are unchanged. The policy check's quoted stderr and a `settings.yaml`
+  parse error are now cut short and stripped of terminal control sequences.
+
+### Upgrade
+
+- **Jail ABI 7.** The in-jail code changed: `lever-agent` and `lever-manager` (the version
+  commands), `internal/wire` (the `/version` route, `wire.Stage` and the wake types removed),
+  `internal/scion` (the broker wait removed, the oversized list), `internal/mcp` and `captool`
+  (the renamed constraint key), `lever-tool-db` (its MCP serverInfo carries the build stamp) and
+  the new build stamp. Rebuild the agent image (`make lever-image` or `make lever-image-slim`,
+  then any instance image built from it) and recreate the manager on it with `lever up --fresh
+  --keep-conversation`. Doctor's *agent lever version* row says so.
+
+- **Rename `scionlocal/<name>` to `lever.local/<name>` in `lever.yaml`:** `manager.image`,
+  `workers[].image` and any `security.allowed_image_registries` entry that allowed it. Rebuild the
+  image (`make lever-image` or `make lever-image-slim`), and build an instance image `FROM
+  lever.local/lever-claude:<arch>`. An `image_tar` archive must carry the
+  `lever.local/<name>:<arch>` tag: tag the image with it and save the archive again. A manager still
+  running on the old name fails doctor's *manager image* row until `lever up --fresh
+  --keep-conversation` recreates it.
+
+- **A manager or worker created by an older lever on an unqualified image name, or with none,
+  must be recreated** (doctor's *manager image* row lists them). For the manager run `lever up
+  --fresh --keep-conversation` once; plain `lever up`, `lever apply`, conversation restores, new
+  conversations and the broker's re-enrol refuse it until then. After upgrading, recycle each
+  such worker with `lever worker recycle NAME` (or `lever worker purge NAME --force`, then `lever
+  worker start NAME`); until then the broker refuses to resume, heal or wake it, and an autostart
+  of it only warns. Set `manager.image` if your `lever.yaml` leaves it out. The first apply sets
+  the hub's image registry to `lever.local`.
+
+- **Fix any config that load now refuses** (see Security): bind each `caveat_param` constraint
+  key directly to its argument, and spell each image name one way, so `x:arm64` and
+  `docker.io/library/x:arm64` are not both in `lever.yaml`.
+
+- **The new operator verbs and the gateway's new checks need this release's broker.** `lever
+  apply` or `lever up` restarts the broker when its version changes.
+
+- **Service hosts are optional:** nothing changes until `broker.service_hosts` is set. To add
+  one, run `lever service-host init <config>` on the other machine and put the fingerprint it
+  prints in a `broker.service_hosts` entry; run `lever service-host pair <name>` on the lever host
+  and put that fingerprint in the service host's `client_fingerprint`; start `lever service-host
+  serve <config>` there, then run `lever reload` (see the service hosts guide).
+
+- **Host programs that called `/operator/wake` must run `lever worker resume NAME`** (or POST
+  `/operator/worker/resume` without `for`). Run `lever reload` after upgrading: a broker of the
+  last release refuses the chat page's new wake request (it names no worker it knows), so the wake
+  fails until the broker runs this release.
+
+- **Remove `remote.login_port` from `lever.yaml`** if it is still there: it is now ignored without a
+  warning. A leftover `.lever-state/chat-ledger.jsonl`, `chat-ledger.jsonl.1`, `guest-boot.json`
+  or `<tree>/.lever-manifest.yaml` holds nothing lever reads and can be deleted.
+
+- **An agent whose session record predates 0.33.1 refuses contacts** until it starts fresh
+  (`lever up --fresh` for the manager, `lever worker new-session` or a recycle for a worker).
+
+- **A broker started by a lever older than 0.36.0** is refused by `lever up` and `lever apply`:
+  run `lever stop`, then `lever up`.
+
 ## [0.51.0] - 2026-10-19
 
 ### Changed

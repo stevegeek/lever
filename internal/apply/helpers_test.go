@@ -99,7 +99,7 @@ func absentThenRunningList(f *proc.FakeRunner, listCalls *int, slug string, c pr
 	if *listCalls == 1 {
 		return proc.Result{Stdout: "[]"}, nil
 	}
-	return proc.Result{Stdout: fmt.Sprintf(`[{"slug":%q,"phase":"running","containerStatus":"running"}]`, slug)}, nil
+	return proc.Result{Stdout: fmt.Sprintf(`[{"slug":%q,"phase":"running","containerStatus":"running","image":"lever.local/img:amd64"}]`, slug)}, nil
 }
 
 func countRearm(n *int) func(context.Context) error {

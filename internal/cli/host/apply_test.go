@@ -34,7 +34,7 @@ import (
 // real tree/workers/worker subdir.
 func writeTmpConfig(t *testing.T) string {
 	t.Helper()
-	dir := writeInstance(t, "manager:\n  image: scionlocal/lever-claude:latest\n  allow_ports: [3305]\nworkers:\n  - name: worker\n    dir: workers/worker\n")
+	dir := writeInstance(t, "manager:\n  image: lever.local/lever-claude:latest\n  allow_ports: [3305]\nworkers:\n  - name: worker\n    dir: workers/worker\n")
 	if err := os.MkdirAll(filepath.Join(dir, "workspace", "workers", "worker"), 0o755); err != nil {
 		t.Fatal(err)
 	}

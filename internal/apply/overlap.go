@@ -39,7 +39,7 @@ func lane(k StepKind) string {
 // remote proxy reaches the broker's operator socket.
 func waitsFor(k StepKind) []string {
 	switch k {
-	case KindMintManagerBootstrap, KindRemoteProxy:
+	case KindMintManagerBootstrap, KindRemoteProxy, KindWorkerAutostart:
 		return []string{"broker"}
 	case KindStartManager:
 		return []string{"broker", "images"}

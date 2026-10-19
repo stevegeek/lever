@@ -24,6 +24,7 @@ func TestTypesKeepTheirWireShape(t *testing.T) {
 		{"CapRequest/no constraints", CapRequest{Tool: "db", Op: "read", BoundTo: "a"}, `{"tool":"db","op":"read","bound_to":"a"}`},
 		{"CapResponse", CapResponse{Token: "tok"}, `{"token":"tok"}`},
 		{"ToolsResponse", ToolsResponse{Tools: []string{"a", "b"}}, `{"tools":["a","b"]}`},
+		{"VersionResponse", VersionResponse{Version: "0.60.0 (abc)", JailABI: 7}, `{"version":"0.60.0 (abc)","jail_abi":7}`},
 		{"WorkerStartRequest", WorkerStartRequest{Worker: "w", Task: "go"}, `{"worker":"w","task":"go"}`},
 		{"WorkerRequest", WorkerRequest{Worker: "w"}, `{"worker":"w"}`},
 		{"WorkerResponse", WorkerResponse{Worker: "w", Phase: "running"}, `{"worker":"w","phase":"running"}`},

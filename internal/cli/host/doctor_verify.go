@@ -73,19 +73,15 @@ const guestClockWarn = 2 * time.Second
 const agentMessagesClockWarn = 5 * time.Second
 
 // checkGuestClock compares the guest's clock with the host's. A message is
-// verified by its ref whatever the clocks say, but an older agent image cannot
-// pass the ref, and the broker then matches the envelope's guest timestamp
-// against the host clock within sentledger.ClockSkew; a drifted guest (Lima
-// after the host slept) fails those verifications.
-//
-// With agent messages on, a guest behind the host matters more: the agent
+// verified by its ref whatever the clocks say, so a drifted guest (Lima after
+// the host slept) is only reported, except with agent messages on: the agent
 // ledger binds a contact message only when its guest timestamp is at most
 // agentledger.SkewBefore before its host-time authorization, so beyond that
 // every authorized message is hidden from contacts.
 func checkGuestClock(ctx context.Context, jr proc.Runner, now func() time.Time, agentMessages bool) checkResult {
 	const name = "guest clock"
 	before := now()
-	res, err := jr.Run(ctx, nil, "date", "-u", "+%s")
+	res, err := jr.Run(proc.WithOutputLimit(ctx, smallGuestOutputLimit), nil, "date", "-u", "+%s")
 	after := now()
 	if err != nil {
 		return checkResult{name, true, "not checked (the guest did not answer: " + firstLine(err.Error()) + ")", ""}
@@ -104,12 +100,8 @@ func checkGuestClock(ctx context.Context, jr proc.Runner, now func() time.Time, 
 		return checkResult{name, false, fmt.Sprintf("guest clock is %s behind the host: with agent messages on, the hub stamps an agent's message before its authorization, and contacts are not shown it once that is more than %s",
 			skew.Round(time.Second), agentledger.SkewBefore), fix}
 	}
-	switch {
-	case skew > sentledger.ClockSkew+time.Second:
-		return checkResult{name, false, fmt.Sprintf("guest clock is %s off the host: agents on images built before message_verify cannot verify lever's messages (they match by time, within %s)",
-			skew.Round(time.Second), sentledger.ClockSkew), fix}
-	case skew > guestClockWarn+time.Second:
-		return warnResult(name, fmt.Sprintf("guest clock is %s off the host (agent images built before message_verify fail to verify lever's messages past %s)", skew.Round(time.Second), sentledger.ClockSkew), fix)
+	if skew > guestClockWarn+time.Second {
+		return warnResult(name, fmt.Sprintf("guest clock is %s off the host", skew.Round(time.Second)), fix)
 	}
 	return checkResult{name, true, detail, ""}
 }

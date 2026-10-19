@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"path"
-	"strings"
 	"sync"
 	"time"
 
@@ -458,6 +457,13 @@ func planManager(q ManagerRequest, name string, o managerObservation) (managerPl
 // healed and, for a running record, podman's word on its container.
 func (r *run) observeUp(ctx context.Context, jp string) (*scion.Agent, managerObservation, error) {
 	rec, err := r.observeManager(ctx, jp)
+	if r.fresh && errors.Is(err, scion.ErrAgentListTooLarge) {
+		// The delete and the suspend before the backup name the manager and
+		// need no list, so --fresh still discards a record the list hides.
+		r.d.Log("%s: --fresh: the hub's agent list is too large to read; treating manager %q as present and deleting it by name", r.subjectName(), r.app.Name)
+		r.unlisted = true
+		return nil, managerObservation{present: true}, nil
+	}
 	if err != nil {
 		return nil, managerObservation{}, err
 	}
@@ -541,9 +547,20 @@ func (r *run) ensureUp(ctx context.Context, jp string, q ManagerRequest) (Manage
 	if err != nil {
 		return ManagerResult{}, err
 	}
+	if opts.Image == "" {
+		// A create would make a record with no image, which refuseUnqualifiedRecord
+		// then refuses for good; before observeUp, so a --fresh deletes nothing.
+		return ManagerResult{}, fmt.Errorf("%s: manager.image is not set in %s, so the manager would run a default image name the hub rewrites to its image registry; nothing was changed. Set it (e.g. %s/lever-claude)",
+			r.subjectName(), config.CanonicalName, imageref.Registry)
+	}
 	rec, o, err := r.observeUp(ctx, jp)
 	if err != nil {
 		return ManagerResult{}, err
+	}
+	if !r.fresh {
+		if err := r.refuseUnqualifiedRecord(rec); err != nil {
+			return ManagerResult{}, err
+		}
 	}
 	p, err := planManager(q, r.app.Name, o)
 	if err == nil && p.recover {
@@ -624,17 +641,33 @@ func (r *run) ensureUp(ctx context.Context, jp string, q ManagerRequest) (Manage
 	return res, nil
 }
 
+// refuseUnqualifiedRecord refuses to keep or resume a manager record whose
+// image the hub can rewrite. scion keeps a record's image for life and
+// rewrites an unqualified one to the hub's image registry at every start, a
+// setting any agent can change between applies (to a registry it controls,
+// which scion pulls from). A record with no image, created without one, runs
+// the template's or harness's default, which is rewritten the same way. Only a
+// fresh create moves the record to a qualified name.
+func (r *run) refuseUnqualifiedRecord(rec *scion.Agent) error {
+	if rec == nil || imageref.Fixed(rec.Image) {
+		return nil
+	}
+	what := "was created on the unqualified image name " + termsafe.Sanitize(rec.Image)
+	if rec.Image == "" {
+		what = "has no image on its record (it was created without one), so it runs a default image name"
+	}
+	fix := "Run `lever up --fresh --keep-conversation` to recreate it on " + termsafe.Sanitize(r.app.ManagerAgentImage()) + " and keep its conversation"
+	if r.app.ManagerAgentImage() == "" {
+		fix = "Set manager.image in " + config.CanonicalName + ", then run `lever up --fresh --keep-conversation` to recreate it on that image and keep its conversation"
+	}
+	return fmt.Errorf("%s: manager %q %s, which the hub rewrites to its image registry at every start, a setting any agent can change; nothing was changed. %s",
+		r.subjectName(), r.app.Name, what, fix)
+}
+
 // actUp makes the plan's change to the record; the gate after it confirms
 // the container is up, so a kept running record over a dead container fails
 // loudly there.
 func (r *run) actUp(ctx context.Context, jp string, rec *scion.Agent, p managerPlan, opts scion.StartOpts) error {
-	if rec != nil && !r.fresh && rec.Image != "" && !strings.Contains(rec.Image, "@") && !imageref.Qualified(rec.Image) {
-		// scion keeps the image a record was created with and rewrites an
-		// unqualified one to the hub's image registry at every start, which an
-		// agent can set between applies.
-		r.d.Log("%s: WARNING: manager %q was created on the unqualified image name %s, which the hub rewrites to its image registry at every start, a setting any agent can change; recreate it on %s with `lever up --fresh --keep-conversation`",
-			r.subjectName(), r.app.Name, termsafe.Sanitize(rec.Image), opts.Image)
-	}
 	switch p.verb {
 	case verbCreate:
 		return r.startManagerCreate(ctx, opts, p.mustCreate)
@@ -643,11 +676,19 @@ func (r *run) actUp(ctx context.Context, jp string, rec *scion.Agent, p managerP
 		// after the hub is up, because after lever stop the record is invisible
 		// until this step. The create that follows is what puts a changed
 		// manager.image into effect (a resume keeps the record's image).
-		if err := r.backupBeforeDelete(ctx, jp, rec); err != nil {
+		if err := r.backupBeforeDelete(ctx, jp, rec); err != nil && r.unlisted {
+			// Unseen, the record may already be gone (an earlier --fresh deleted
+			// it), and with it the home the backup reads.
+			return fmt.Errorf("%s: --fresh: backing up manager %q's conversation failed, so lever deleted nothing: %w. If an earlier `lever up --fresh` already deleted the manager's record, there is no conversation left to back up: run `lever up --fresh --no-backup`. Otherwise fix the cause and run `lever up --fresh` again", r.subjectName(), r.app.Name, err)
+		} else if err != nil {
 			return fmt.Errorf("%s: --fresh: backing up manager %q's conversation failed, so the manager was NOT deleted (its record and conversation are kept): %w. Fix the cause and run `lever up --fresh` again, or run `lever up --fresh --no-backup` to discard the conversation without a backup", r.subjectName(), r.app.Name, err)
 		}
+		phase := "unread"
+		if rec != nil {
+			phase = scion.BoundedQuote(rec.Phase)
+		}
 		return r.recoverDeleteAndCreate(ctx, jp, opts,
-			fmt.Sprintf("%s: --fresh — deleting manager %q (phase %s) and starting FRESH (previous session discarded)", r.subjectName(), r.app.Name, scion.BoundedQuote(rec.Phase)),
+			fmt.Sprintf("%s: --fresh — deleting manager %q (phase %s) and starting FRESH (previous session discarded)", r.subjectName(), r.app.Name, phase),
 			"--fresh delete")
 	case verbResume:
 		if rec.Phase == scion.PhaseStopped {
@@ -681,6 +722,9 @@ func (r *run) swapConversation(ctx context.Context, jp string, q ManagerRequest)
 	agents, err := sc.List(ctx, jp)
 	if err != nil {
 		return res, fmt.Errorf("the hub does not answer (%s); bring the instance up first (`lever up --no-attach`)", termsafe.Sanitize(scion.ErrSummary(err)))
+	}
+	if err := r.refuseUnqualifiedRecord(scion.FindAgent(agents, r.app.Name)); err != nil {
+		return res, err
 	}
 	p, err := planManager(q, r.app.Name, observationOf(scion.FindAgent(agents, r.app.Name)))
 	if err != nil {
@@ -764,6 +808,9 @@ func (r *run) waitPhase(ctx context.Context, jp, phase string) (last string, err
 	}
 	err = wait.For(ctx, s, func(ctx context.Context) wait.Result {
 		agents, err := r.d.managerScion().List(ctx, jp)
+		if errors.Is(err, scion.ErrAgentListTooLarge) {
+			return wait.Fatal(err)
+		}
 		if err != nil {
 			return wait.NotYetErr(err)
 		}
@@ -821,23 +868,34 @@ const backupSuspendTimeout = 30 * time.Second
 
 // backupBeforeDelete runs Deps.BackupManagerConversation before a delete. A
 // running record is suspended first, so the copy is the conversation as it
-// ends; a failed backup resumes a record it suspended, which is then kept.
+// ends; a failed backup resumes a record it suspended, which is then kept. An
+// unlisted record (rec nil) is suspended too, and is left suspended on a
+// failed backup.
 func (r *run) backupBeforeDelete(ctx context.Context, jp string, rec *scion.Agent) error {
 	if r.d.BackupManagerConversation == nil {
 		return nil
 	}
 	suspended := false
-	if rec != nil && rec.Phase == scion.PhaseRunning {
+	if (rec != nil && rec.Phase == scion.PhaseRunning) || r.unlisted {
 		sctx, cancel := context.WithTimeout(ctx, backupSuspendTimeout)
 		if err := r.d.managerScion().Suspend(sctx, r.app.Name, jp); err != nil {
-			r.d.Log("conversation: could not suspend manager %q before the backup (%s); copying it while it runs", r.app.Name, termsafe.Sanitize(scion.ErrSummary(err)))
+			how := "copying it while it runs"
+			if r.unlisted {
+				how = "it may not be running; copying it as it is"
+			}
+			r.d.Log("conversation: could not suspend manager %q before the backup (%s); %s", r.app.Name, termsafe.Sanitize(scion.ErrSummary(err)), how)
 		} else {
 			suspended = true
 		}
 		cancel()
 	}
 	err := r.d.BackupManagerConversation(ctx, rec)
-	if err != nil && suspended {
+	switch {
+	case err != nil && suspended && r.unlisted:
+		// Unseen, the record may have been suspended already: a resume could
+		// start a manager that was not running.
+		err = fmt.Errorf("%w; manager %q was suspended for the backup and stays suspended", err, r.app.Name)
+	case err != nil && suspended:
 		err = r.resumeAfterFailure(ctx, jp, err, "")
 	}
 	return err
@@ -852,6 +910,9 @@ func (r *run) newSession(ctx context.Context, jp string, q ManagerRequest) (res 
 	agents, err := sc.List(ctx, jp)
 	if err != nil {
 		return res, fmt.Errorf("the hub does not answer (%s); nothing was changed", termsafe.Sanitize(scion.ErrSummary(err)))
+	}
+	if err := r.refuseUnqualifiedRecord(scion.FindAgent(agents, r.app.Name)); err != nil {
+		return res, err
 	}
 	p, err := planManager(q, r.app.Name, observationOf(scion.FindAgent(agents, r.app.Name)))
 	if err != nil {
@@ -870,7 +931,9 @@ func (r *run) newSession(ctx context.Context, jp string, q ManagerRequest) (res 
 			err = r.resumeAfterFailure(ctx, jp, err, "on its own conversation")
 		}
 	}()
-	if last, err := r.waitPhase(ctx, jp, scion.PhaseSuspended); err != nil {
+	if last, err := r.waitPhase(ctx, jp, scion.PhaseSuspended); errors.Is(err, scion.ErrAgentListTooLarge) {
+		return res, fmt.Errorf("could not see whether the manager suspended; nothing was changed: %w", err)
+	} else if err != nil {
 		return res, fmt.Errorf("the manager did not suspend (last seen %s); nothing was changed", scion.BoundedQuote(last))
 	}
 	if err := q.WhileSuspended(ctx); err != nil {
@@ -881,6 +944,10 @@ func (r *run) newSession(ctx context.Context, jp string, q ManagerRequest) (res 
 		return res, fmt.Errorf("stopping the manager failed, so its session was not ended: %s", termsafe.Sanitize(scion.ErrSummary(serr)))
 	}
 	if last, werr := r.waitPhase(ctx, jp, scion.PhaseStopped); werr != nil {
+		if errors.Is(werr, scion.ErrAgentListTooLarge) {
+			stopped = true
+			return res, markedError{fmt.Errorf("lever cannot tell whether the manager's session ended and started nothing: %w", werr), ErrStopUnconfirmed}
+		}
 		if r.stillSuspended(ctx, jp) {
 			return res, fmt.Errorf("the manager did not stop (last seen %s), so its session was not ended", scion.BoundedQuote(last))
 		}
@@ -994,6 +1061,9 @@ func (r *run) reenrol(ctx context.Context, jp string, q ManagerRequest, release 
 		return res, fmt.Errorf("listing the agents: %s", termsafe.Sanitize(scion.ErrSummary(err)))
 	}
 	rec := scion.FindAgent(agents, r.app.Name)
+	if err := r.refuseUnqualifiedRecord(rec); err != nil {
+		return res, refused(err)
+	}
 	// A resume takes no --role: a record whose stored role the installed
 	// scion reads as full is never bounced, before any ticket is staged.
 	if err := r.d.VerifyAgentRole(ctx, path.Base(jp), r.app.Name); err != nil {

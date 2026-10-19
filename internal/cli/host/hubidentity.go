@@ -322,7 +322,12 @@ func (h *hubIdentity) run(ctx context.Context) error {
 	}
 	if mode == state.HubModeMigrated && rec.ProbePending {
 		patRec, _, _ := h.st.LoadControllerPATRecord()
-		if err := probeControllerAuthority(ctx, h.pat, h.sc, rec.ProjectID, jp, lifecycle, patRec); err != nil {
+		err := probeControllerAuthority(ctx, h.pat, h.sc, rec.ProjectID, jp, lifecycle, patRec)
+		if errors.Is(err, errProbeDeferred) {
+			h.log("lever: warning: %v", err)
+			return nil
+		}
+		if err != nil {
 			// Never re-promoted: an admin role granted through the API outlives
 			// scion's config reconcile, and the controller's PAT is the broker's
 			// credential. The controller stays a member, the probe stays owed,
@@ -782,7 +787,7 @@ func markerFix(jp, prev string) string {
 // tree's marker file. lever trees are never git repositories
 // (config.checkNonGitTree), so the marker is the one-file form.
 func readProjectMarker(ctx context.Context, jr proc.Runner, jp string) (id, slug string, err error) {
-	res, err := jr.Run(ctx, nil, "sh", "-c", `[ -f "$1" ] && [ ! -L "$1" ] && cat "$1"`, "_", path.Join(jp, ".scion"))
+	res, err := jr.Run(proc.WithOutputLimit(ctx, smallGuestOutputLimit), nil, "sh", "-c", `[ -f "$1" ] && [ ! -L "$1" ] && cat "$1"`, "_", path.Join(jp, ".scion"))
 	if err != nil {
 		return "", "", fmt.Errorf("reading the project marker %s/.scion: %w", jp, err)
 	}
@@ -990,8 +995,14 @@ func probeControllerAuthority(ctx context.Context, pat *hubapi.Client, sc identi
 	if _, err := pat.SharedDirs(ctx, projectID); err != nil {
 		note("shared dirs", err)
 	}
+	// An oversized agent record makes the two agent reads unreadable. That
+	// proves nothing either way, so the probe stays owed, but it must not
+	// stop `lever up --fresh` from deleting an oversized manager record.
+	oversized := false
 	caps, err := pat.ProjectAgentCapabilities(ctx, projectID)
-	if err != nil {
+	if tooLarge(err) {
+		oversized = true
+	} else if err != nil {
 		note("agent capabilities", err)
 	} else {
 		if !slices.Contains(caps.Scope, "create") {
@@ -1005,7 +1016,9 @@ func probeControllerAuthority(ctx context.Context, pat *hubapi.Client, sc identi
 			}
 		}
 	}
-	if _, err := sc.List(ctx, jp); err != nil {
+	if _, err := sc.List(ctx, jp); errors.Is(err, scion.ErrAgentListTooLarge) {
+		oversized = true
+	} else if err != nil {
 		failed = append(failed, "scion list: "+err.Error())
 	}
 	slices.Sort(missing)
@@ -1015,7 +1028,20 @@ func probeControllerAuthority(ctx context.Context, pat *hubapi.Client, sc identi
 	if len(failed) > 0 {
 		return fmt.Errorf("controller PAT probe could not complete: %s", strings.Join(failed, "; "))
 	}
+	if oversized {
+		return errProbeDeferred
+	}
 	return nil
+}
+
+// errProbeDeferred is a probe that found nothing missing but could not read
+// the agents: an agent record is over lever's cap.
+var errProbeDeferred = errors.New("the controller PAT probe could not read the hub's agents, because an agent record is too large for lever to read; it runs again at the next apply")
+
+// tooLarge reports a hub reply over the call's reply cap.
+func tooLarge(err error) bool {
+	var ae *hubapi.APIError
+	return errors.As(err, &ae) && ae.TooLarge
 }
 
 // forbidden reports a hub answer that refused the credential's authority.

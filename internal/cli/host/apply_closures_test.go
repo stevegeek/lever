@@ -307,7 +307,7 @@ func writeJSONEpoch(w http.ResponseWriter, a broker.EpochAnswer) {
 }
 
 // TestEgressAllowlistIgnoresRemoteAccess: the hub login needs no host port,
-// so enabling remote access (even with a leftover remote.login_port) must not
+// so enabling remote access must not
 // widen the egress allowlist the backend turns into iptables ACCEPT rules.
 func TestEgressAllowlistIgnoresRemoteAccess(t *testing.T) {
 	build := func(t *testing.T, remote bool) backend.Config {
@@ -318,7 +318,7 @@ func TestEgressAllowlistIgnoresRemoteAccess(t *testing.T) {
 			t.Fatal(err)
 		}
 		if remote {
-			app.Remote = config.Remote{Enabled: true, BaseURL: "https://demo.tailnet.ts.net", LoginPort: 8447}
+			app.Remote = config.Remote{Enabled: true, BaseURL: "https://demo.tailnet.ts.net"}
 		}
 		sb := &stubBackend{}
 		if _, err := buildApplyDeps(context.Background(), app, p, func(string, string) (backend.Backend, error) { return sb, nil }, inertApplyOpts); err != nil {

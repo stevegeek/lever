@@ -6,7 +6,7 @@ name: acceptance
 backend: orbstack
 tree: workspace
 manager:
-  image: scionlocal/lever-claude:latest
+  image: lever.local/lever-claude:latest
   prompt_file: manager.md
   allow_ports: []
   # The manager may mint db.read tokens bound to the worker (delegation), but

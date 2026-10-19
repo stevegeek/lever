@@ -609,3 +609,51 @@ func TestGatewayThirdPartyGetsNoToolSecret(t *testing.T) {
 		t.Fatalf("third-party tool received %s=%q; want no header at all", toolSecretHeader, gotSecret)
 	}
 }
+
+// A constraint key that caveat_param renames binds only its argument. An
+// argument named like the key, with the renamed one omitted or spelled under
+// another case (which a Go struct decoder in the tool reads), is a 400 that
+// never reaches the backend; the renamed argument alone is checked as usual.
+func TestGatewayRenamedConstraintKeyBindsOnlyItsArgument(t *testing.T) {
+	rig := func(t *testing.T) *gatewayRig {
+		return newGatewayRig(t, testConfig(t), func(u string) registry.Tool {
+			return registry.Tool{Name: "db", Backend: u, Operations: map[string]registry.Operation{
+				"read": {Name: "read", CaveatParam: map[string]string{"repo": "repository"}},
+			}}
+		})
+	}
+	for name, args := range map[string]string{
+		"key in place of the argument":  `"repo":"allowed","Repository":"evil"`,
+		"key alone":                     `"repo":"allowed"`,
+		"key next to the argument":      `"repo":"allowed","repository":"allowed"`,
+		"key under another case":        `"Repo":"allowed","repository":"allowed"`,
+		"key under another case, alone": `"REPO":"allowed","Repository":"evil"`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := rig(t)
+			w := g.post("worker", toolsCall("read", args, mintFor(t, g.b, "worker", map[string]string{"repo": "allowed"})))
+			if w.Code != http.StatusBadRequest || g.reached {
+				t.Fatalf("SECURITY: status %d, backend reached %v; want 400 and no forward", w.Code, g.reached)
+			}
+		})
+	}
+	t.Run("the renamed argument", func(t *testing.T) {
+		g := rig(t)
+		cap := mintFor(t, g.b, "worker", map[string]string{"repo": "allowed"})
+		g.assertForwarded(g.post("worker", toolsCall("read", `"repository":"allowed"`, cap)), "the constrained argument")
+	})
+	t.Run("the renamed argument with another value", func(t *testing.T) {
+		g := rig(t)
+		cap := mintFor(t, g.b, "worker", map[string]string{"repo": "allowed"})
+		g.assertDenied(g.post("worker", toolsCall("read", `"repository":"evil"`, cap)), "a value the constraint forbids")
+	})
+	t.Run("the renamed argument under another case only", func(t *testing.T) {
+		g := rig(t)
+		cap := mintFor(t, g.b, "worker", map[string]string{"repo": "allowed"})
+		g.assertDenied(g.post("worker", toolsCall("read", `"Repository":"allowed"`, cap)), "no binding for the constraint")
+	})
+	t.Run("an unconstrained token", func(t *testing.T) {
+		g := rig(t)
+		g.assertForwarded(g.post("worker", toolsCall("read", `"repository":"any"`, mintFor(t, g.b, "worker", nil))), "no constraint")
+	})
+}

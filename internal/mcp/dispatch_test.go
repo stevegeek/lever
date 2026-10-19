@@ -109,6 +109,35 @@ func TestMapConstraintParamsIdentityAndRename(t *testing.T) {
 	if _, ok := out["table"]; ok {
 		t.Fatalf("absent renamed arg produced a binding: %v", out)
 	}
+	// An argument named like the renamed key never binds it.
+	cp := map[string]string{"repo": "repository"}
+	out = MapConstraintParams(cp, map[string]string{"repo": "allowed", "Repository": "evil"})
+	if _, ok := out["repo"]; ok {
+		t.Fatalf("an argument named like the renamed key bound it: %v", out)
+	}
+	out = MapConstraintParams(cp, map[string]string{"repo": "allowed", "repository": "evil"})
+	if out["repo"] != "evil" {
+		t.Fatalf("the renamed argument must bind the key: %v", out)
+	}
+}
+
+func TestRenamedKeyArg(t *testing.T) {
+	cp := map[string]string{"repo": "repository", "table": "table", "Owner": "owner"}
+	for _, c := range []struct {
+		args map[string]string
+		want string
+	}{
+		{map[string]string{"repository": "a", "table": "t", "owner": "o"}, ""},
+		{map[string]string{"repo": "a", "Repository": "b"}, "repo"},
+		{map[string]string{"rEpO": "a"}, "repo"},
+		{map[string]string{"owner": "o", "OWNER": "p"}, "Owner"},
+		{map[string]string{"Table": "t"}, ""},
+		{nil, ""},
+	} {
+		if got := RenamedKeyArg(cp, c.args); got != c.want {
+			t.Errorf("RenamedKeyArg(%v) = %q, want %q", c.args, got, c.want)
+		}
+	}
 }
 
 func TestDispatchReportsServiceVersion(t *testing.T) {

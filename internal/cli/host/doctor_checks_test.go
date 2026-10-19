@@ -1572,19 +1572,28 @@ func TestCheckManagerImage(t *testing.T) {
 		wantFix    string
 	}{
 		{"same", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "lever.local/lever-claude:arm64"}), true, "lever.local/lever-claude:arm64", ""},
-		{"created by an older lever on the bare name", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "scionlocal/lever-claude:arm64"}), true, "assistant (scionlocal/lever-claude:arm64) created on an unqualified image name", "lever up --fresh --keep-conversation"},
-		{"same, podman-qualified bare", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "localhost/scionlocal/lever-claude:arm64"}), true, "unqualified", "--keep-conversation"},
-		{"a worker on a bare name", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "lever.local/lever-claude:arm64"}, scion.Agent{Slug: "w", Image: "scionlocal/lever-claude:arm64"}), true, "w (scionlocal/lever-claude:arm64)", "recycling"},
+		{"created by an older lever on the bare name", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "scionlocal/lever-claude:arm64"}), false, "assistant (scionlocal/lever-claude:arm64) created on an unqualified image name", "lever up --fresh --keep-conversation"},
+		{"same, podman-qualified bare", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "localhost/scionlocal/lever-claude:arm64"}), false, "unqualified", "--keep-conversation"},
+		{"unqualified, configured bare", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "lever-claude:arm64"}), false, "unqualified", "--keep-conversation"},
+		{"a worker on a bare name", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "lever.local/lever-claude:arm64"}, scion.Agent{Slug: "w", Image: "scionlocal/lever-claude:arm64"}), false, "w (scionlocal/lever-claude:arm64)", "lever worker recycle NAME"},
+		{"a worker with no image", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "lever.local/lever-claude:arm64"}, scion.Agent{Slug: "w"}), false, "w (no image)", "lever worker purge NAME --force"},
 		{"a worker on a digest", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "lever.local/lever-claude:arm64"}, scion.Agent{Slug: "w", Image: "x@sha256:aa"}), true, "as configured", ""},
 		{"drifted", listing(scion.Agent{Slug: "assistant", Phase: "suspended", Image: "scionlocal/lever-claude:v1"}), false, "scionlocal/lever-claude:v1", "lever up --fresh"},
-		{"no manager record, a worker on a bare name", listing(scion.Agent{Slug: "w", Image: "scionlocal/lever-claude:arm64"}), true, "w (scionlocal/lever-claude:arm64) created on an unqualified", "recycling"},
+		{"no manager record, a worker on a bare name", listing(scion.Agent{Slug: "w", Image: "scionlocal/lever-claude:arm64"}), false, "w (scionlocal/lever-claude:arm64) created on an unqualified", "lever worker recycle NAME"},
 		{"drifted manager, a worker on a bare name", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "lever.local/other:arm64"}, scion.Agent{Slug: "w", Image: "scionlocal/lever-claude:arm64"}), false, "w (scionlocal/lever-claude:arm64)", "lever up --fresh"},
 		{"no record", listing(scion.Agent{Slug: "scratch", Phase: "running", Image: "lever.local/x:1"}), true, "not checked", ""},
-		{"record without image", listing(scion.Agent{Slug: "assistant", Phase: "running"}), true, "not checked", ""},
+		{"record without image", listing(scion.Agent{Slug: "assistant", Phase: "running"}), false, "assistant (no image)", "lever up --fresh --keep-conversation"},
 		{"list fails", func(context.Context, string) ([]scion.Agent, error) { return nil, fmt.Errorf("hub down") }, true, "not checked", ""},
 	}
+	if r := checkManagerImage(context.Background(), "/lever", "assistant", "", listing()); r.ok || !strings.Contains(r.fix, "manager.image") {
+		t.Errorf("no manager.image: %+v", r)
+	}
 	for _, c := range cases {
-		r := checkManagerImage(context.Background(), "/lever", "assistant", "scionlocal/lever-claude:arm64", c.list)
+		configured := "lever.local/lever-claude:arm64"
+		if strings.HasPrefix(c.label, "unqualified, configured bare") {
+			configured = "lever-claude:arm64"
+		}
+		r := checkManagerImage(context.Background(), "/lever", "assistant", configured, c.list)
 		if c.label == "same" && r.fix != "" {
 			t.Fatalf("same: a fix %q on a healthy row", r.fix)
 		}

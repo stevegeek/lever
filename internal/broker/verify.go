@@ -241,18 +241,6 @@ func (b *Broker) verifyUnavailable(branch, reason string, retryAfter int, note, 
 }
 
 func (b *Broker) handleMessageVerify(w http.ResponseWriter, r *http.Request) {
-	b.serveVerify(w, r, false)
-}
-
-// handleChatVerify serves /chat/verify for older agent images that cannot
-// pass a ref: a lever message is matched by timestamp instead.
-// /message/verify never does that, so an injected envelope that guesses a
-// timestamp cannot use up a genuine message.
-func (b *Broker) handleChatVerify(w http.ResponseWriter, r *http.Request) {
-	b.serveVerify(w, r, true)
-}
-
-func (b *Broker) serveVerify(w http.ResponseWriter, r *http.Request, legacy bool) {
 	caller, ok := b.requireLiveAgent(w, r, "verify", "")
 	if !ok {
 		return
@@ -262,7 +250,7 @@ func (b *Broker) serveVerify(w http.ResponseWriter, r *http.Request, legacy bool
 	if ok, wait := b.verifyRate.take(caller, now); !ok {
 		a = b.verifyUnavailable("", reasonRateLimited, retrySeconds(wait), "too many verifications this minute", "rate limited")
 	} else {
-		a = b.verify(w, r, caller, now, legacy)
+		a = b.verify(w, r, caller, now)
 		// A miss counts against its own budget only, so a flood of misses
 		// cannot crowd out genuine messages.
 		if a.resp.Result == wire.VerifyNone || a.resp.Result == wire.VerifyAlreadyVerified {
@@ -290,7 +278,7 @@ func retrySeconds(d time.Duration) int {
 	return s
 }
 
-func (b *Broker) verify(w http.ResponseWriter, r *http.Request, caller string, now time.Time, legacy bool) verifyAnswer {
+func (b *Broker) verify(w http.ResponseWriter, r *http.Request, caller string, now time.Time) verifyAnswer {
 	var req wire.MessageVerifyRequest
 	if err := decodeBody(w, r, smallBodyLimit, &req); err != nil {
 		return b.verifyNone("", reasonBadRequest, `the request was not valid JSON; send the envelope's "timestamp" and "from"`, "bad body")
@@ -338,7 +326,7 @@ func (b *Broker) verify(w http.ResponseWriter, r *http.Request, caller string, n
 		return b.verifyUnavailable("", reasonResolver, 0, "the broker cannot tell lever's sender from others now",
 			"resolving the controller sender: "+cerr.Error())
 	case label == controller:
-		return b.verifyLever(caller, from, req.Ref, ts, now, legacy)
+		return b.verifyLever(caller, from, req.Ref, ts, now)
 	}
 	// The controller's hub email can be renamed under a running broker. Only
 	// the current label is ever accepted: an envelope carrying an earlier one
@@ -348,7 +336,7 @@ func (b *Broker) verify(w http.ResponseWriter, r *http.Request, caller string, n
 			return collision(fresh)
 		}
 		if label == fresh {
-			return b.verifyLever(caller, from, req.Ref, ts, now, legacy)
+			return b.verifyLever(caller, from, req.Ref, ts, now)
 		}
 	}
 	return b.verifyNone("", reasonUnknownSender,
@@ -432,7 +420,7 @@ func replyRef(sender string) string {
 
 // verifyLever answers from the sent ledger only: sends recorded for the
 // caller's CN.
-func (b *Broker) verifyLever(caller, from, ref string, ts, now time.Time, legacy bool) verifyAnswer {
+func (b *Broker) verifyLever(caller, from, ref string, ts, now time.Time) verifyAnswer {
 	const branch = "lever"
 	ref = strings.ToLower(strings.TrimSpace(ref))
 	what := from + " " + chatledger.FormatTime(ts)
@@ -447,27 +435,16 @@ func (b *Broker) verifyLever(caller, from, ref string, ts, now time.Time, legacy
 		}
 		return b.verifyUnavailable(branch, reason, 0, "the record of lever's messages cannot be read", what+": "+err.Error())
 	}
-	var sends []sentledger.Sent
-	switch {
-	case ref != "":
-		s, ok, err := led.ByRef(caller, ref)
-		if err != nil {
-			return b.leverReadError(what, err)
-		}
-		if ok {
-			sends = []sentledger.Sent{s}
-		}
-	case legacy:
-		sends, err = led.InWindow(caller, ts.UTC().Truncate(time.Second), now)
-		if err != nil {
-			return b.leverReadError(what, err)
-		}
-	default:
+	if ref == "" {
 		return b.verifyNone(branch, reasonNoRef,
 			`a message lever sent carries "ref=<32 hex>" at the end of its first line; pass it as ref`, what+": no ref")
 	}
+	s, ok, err := led.ByRef(caller, ref)
+	if err != nil {
+		return b.leverReadError(what, err)
+	}
 	var found []verifiedEntry
-	for _, s := range sends {
+	if ok {
 		found = append(found, verifiedEntry{
 			useID: "lever:" + s.ID, recorded: s.Before, expired: now.Sub(s.Before) > sentledger.Window,
 			msg: wire.VerifiedMessage{Source: wire.VerifyLever, Kind: s.Kind, From: from,

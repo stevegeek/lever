@@ -6,6 +6,8 @@ import (
 	"fmt"
 
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/scion"
+	"github.com/stevegeek/lever/internal/termsafe"
 	"github.com/stevegeek/lever/internal/wait"
 )
 
@@ -15,8 +17,9 @@ import (
 // has not read back:
 //
 //   - beginManagerResume, before the resume: the host tree has no symbolic
-//     links (config.App.PrepareManagerReadOnlyHost) and no recorded mount
-//     directory is gone (checkStaleTreeMounts);
+//     links (config.App.PrepareManagerReadOnlyHost), no recorded mount
+//     directory is gone (checkStaleTreeMounts) and the record's image is one
+//     the hub cannot rewrite (refuseUnqualifiedRecord);
 //   - Resumed, right after the resume call: every tree mount's source is read
 //     back from the guest; a mismatch suspends the manager;
 //   - Live, once the manager is live, or Settle on a path with no gate: the
@@ -48,6 +51,15 @@ func beginManagerResume(ctx context.Context, d Deps, app *config.App, project, s
 	}
 	// Every caller resumes the record, so a gone directory refuses.
 	if err := m.r.checkStaleTreeMounts(ctx, project, false); err != nil {
+		return nil, err
+	}
+	// Here too, not only on entry to each intent: a --fresh run skips that
+	// check, yet resumes the old record when its backup fails.
+	agents, err := m.r.listAgentsRetry(ctx, project)
+	if err != nil {
+		return nil, fmt.Errorf("%s: listing the agents: %s", subject, termsafe.Sanitize(scion.ErrSummary(err)))
+	}
+	if err := m.r.refuseUnqualifiedRecord(scion.FindAgent(agents, app.Name)); err != nil {
 		return nil, err
 	}
 	return m, nil

@@ -1,6 +1,7 @@
 package apply
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -289,11 +291,20 @@ type agentLifecycleRunner struct {
 
 	phase, containerStatus string
 	inited                 bool
+	// image is the record's image, lever.local/img:amd64 when unset;
+	// noImage lists the record with no image at all.
+	image   string
+	noImage bool
 
 	startCalls, resumeCalls, deleteCalls, listCalls int
 	resumeForceCalls                                int // subset of resumeCalls carrying --force
 	suspendCalls                                    int
 	suspendErr                                      error
+	// stopCalls counts scion stop on the record; stop moves it to stopped,
+	// or to stopPhase when set (a stop that did not take), or fails with stopErr.
+	stopCalls int
+	stopErr   error
+	stopPhase string
 }
 
 func (r *agentLifecycleRunner) ensureInit() {
@@ -367,7 +378,10 @@ func (r *agentLifecycleRunner) RunIn(ctx context.Context, dir string, env map[st
 		if r.phase == "" {
 			return proc.Result{Stdout: "[]"}, nil
 		}
-		return proc.Result{Stdout: fmt.Sprintf(`[{"slug":%q,"phase":%q,"containerStatus":%q}]`, r.slug, r.phase, r.containerStatus)}, nil
+		if r.noImage {
+			return proc.Result{Stdout: fmt.Sprintf(`[{"slug":%q,"phase":%q,"containerStatus":%q}]`, r.slug, r.phase, r.containerStatus)}, nil
+		}
+		return proc.Result{Stdout: fmt.Sprintf(`[{"slug":%q,"phase":%q,"containerStatus":%q,"image":%q}]`, r.slug, r.phase, r.containerStatus, cmp.Or(r.image, "lever.local/img:amd64"))}, nil
 	case "start":
 		r.startCalls++
 		r.record(dir, env, name, args)
@@ -399,6 +413,14 @@ func (r *agentLifecycleRunner) RunIn(ctx context.Context, dir string, env map[st
 			return proc.Result{Code: 1, Stderr: r.suspendErr.Error()}, r.suspendErr
 		}
 		r.phase, r.containerStatus = "suspended", "stopped"
+		return proc.Result{Stdout: "ok"}, nil
+	case "stop":
+		r.stopCalls++
+		r.record(dir, env, name, args)
+		if r.stopErr != nil {
+			return proc.Result{Code: 1, Stderr: r.stopErr.Error()}, r.stopErr
+		}
+		r.phase, r.containerStatus = cmp.Or(r.stopPhase, "stopped"), ""
 		return proc.Result{Stdout: "ok"}, nil
 	case "delete":
 		r.deleteCalls++
@@ -996,6 +1018,129 @@ func TestStartManagerTransitionalPhaseNeverSettlesFailsWithoutDelete(t *testing.
 	}
 }
 
+// TestStartManagerStaleStartingIsStoppedThenResumed: a hub killed mid-resume
+// leaves the record in phase starting with no container, which nothing in
+// scion moves on and which resume refuses. With podman showing no container,
+// lever stops the record (keeping it) and resumes it; with a container, an
+// unreadable podman, or no podman probe, it refuses as before and touches
+// nothing.
+func TestStartManagerStaleStartingIsStoppedThenResumed(t *testing.T) {
+	settle := RetryBudget{Attempts: 2, Interval: time.Millisecond}
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "starting", initContainerStatus: ""}
+	var logged logSink
+	j := &seqJanitor{errs: []error{jail.ErrNoContainer, jail.ErrNoContainer}}
+	deps := Deps{
+		Scion:            scion.New(r, scion.Options{}),
+		StaleContainer:   j,
+		PhaseSettleRetry: settle,
+		Log:              logged.logf,
+	}
+	if err := runApply(app, deps); err != nil {
+		t.Fatalf("a stale starting record with no container must be recovered: %v", err)
+	}
+	if r.stopCalls != 1 || r.resumeCalls != 1 || r.deleteCalls != 0 || r.startCalls != 0 {
+		t.Fatalf("stop/resume/delete/start = %d/%d/%d/%d, want 1/1/0/0", r.stopCalls, r.resumeCalls, r.deleteCalls, r.startCalls)
+	}
+	ref := jail.ContainerName(path.Base(JailPath(app.Tree, app.Tree, "")), app.Name)
+	if len(j.refs) < 2 || j.refs[0] != ref || j.refs[1] != ref {
+		t.Fatalf("podman looks = %q, want at least two of %s", j.refs, ref)
+	}
+	if !slices.ContainsFunc(logged.lines, func(l string) bool {
+		return strings.Contains(l, "a start the hub did not finish") && strings.Contains(l, "new claude session")
+	}) {
+		t.Errorf("no log line names the recovery and the new session: %q", logged.lines)
+	}
+
+	// A container that appears by the second look is a slow start: kept.
+	app2, f2 := newObserveFirstApp(t)
+	r2 := &agentLifecycleRunner{FakeRunner: f2, slug: "hello", initPhase: "starting", initContainerStatus: ""}
+	j2 := &seqJanitor{errs: []error{jail.ErrNoContainer, nil}}
+	err := runApply(app2, Deps{Scion: scion.New(r2, scion.Options{}), StaleContainer: j2, PhaseSettleRetry: settle})
+	testutil.WantErrContaining(t, err, "starting", "--fresh")
+	if r2.stopCalls != 0 || r2.resumeCalls != 0 {
+		t.Fatalf("a container on the second look: stop/resume = %d/%d, want 0/0", r2.stopCalls, r2.resumeCalls)
+	}
+
+	// Other stuck phases are not probed and not stopped.
+	for _, phase := range []string{"stopping", "created", "provisioning", "cloning"} {
+		app, f := newObserveFirstApp(t)
+		r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: phase, initContainerStatus: ""}
+		j := &seqJanitor{errs: []error{jail.ErrNoContainer}}
+		err := runApply(app, Deps{Scion: scion.New(r, scion.Options{}), StaleContainer: j, PhaseSettleRetry: settle})
+		testutil.WantErrContaining(t, err, phase)
+		if r.stopCalls != 0 || r.resumeCalls != 0 {
+			t.Fatalf("%s: stop/resume = %d/%d, want 0/0", phase, r.stopCalls, r.resumeCalls)
+		}
+	}
+
+	for _, c := range []struct {
+		name string
+		j    StaleContainerOps
+	}{
+		{"a container exists", &fakeJanitor{states: []jail.ContainerState{created(staleID)}}},
+		{"podman unreadable", &fakeJanitor{stateErr: errors.New("podman hung")}},
+		{"no podman probe", nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			app, f := newObserveFirstApp(t)
+			r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "starting", initContainerStatus: ""}
+			deps := Deps{Scion: scion.New(r, scion.Options{}), StaleContainer: c.j, PhaseSettleRetry: settle}
+			err := runApply(app, deps)
+			testutil.WantErrContaining(t, err, "starting", "--fresh")
+			if r.stopCalls != 0 || r.resumeCalls != 0 || r.deleteCalls != 0 || r.startCalls != 0 {
+				t.Fatalf("stop/resume/delete/start = %d/%d/%d/%d, want all 0", r.stopCalls, r.resumeCalls, r.deleteCalls, r.startCalls)
+			}
+		})
+	}
+
+	// A stop that fails, or does not take, is refused without a resume.
+	for _, c := range []struct {
+		name      string
+		stopErr   error
+		stopPhase string
+		want      string
+	}{
+		{"stop fails", errors.New("hub said no"), "", "scion stop"},
+		{"stop does not take", nil, "stopping", "not stopped"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			app, f := newObserveFirstApp(t)
+			r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "starting", initContainerStatus: "",
+				stopErr: c.stopErr, stopPhase: c.stopPhase}
+			deps := Deps{Scion: scion.New(r, scion.Options{}), StaleContainer: &fakeJanitor{stateErr: jail.ErrNoContainer}, PhaseSettleRetry: settle}
+			err := runApply(app, deps)
+			testutil.WantErrContaining(t, err, c.want, "--fresh")
+			if r.stopCalls != 1 || r.resumeCalls != 0 || r.deleteCalls != 0 {
+				t.Fatalf("stop/resume/delete = %d/%d/%d, want 1/0/0", r.stopCalls, r.resumeCalls, r.deleteCalls)
+			}
+		})
+	}
+}
+
+// seqJanitor answers State with errs in turn (the last one repeats; nil is a
+// created container) and records each ref asked about.
+type seqJanitor struct {
+	errs []error
+	refs []string
+}
+
+func (j *seqJanitor) State(_ context.Context, ref string) (jail.ContainerState, error) {
+	j.refs = append(j.refs, ref)
+	err := j.errs[0]
+	if len(j.errs) > 1 {
+		j.errs = j.errs[1:]
+	}
+	if err != nil {
+		return jail.ContainerState{}, err
+	}
+	return created(staleID), nil
+}
+
+func (j *seqJanitor) Remove(context.Context, string) error {
+	return errors.New("seqJanitor removes nothing")
+}
+
 // TestStartManagerCreatedNeverSettlesNamesWarmUp: a manager
 // stuck in phase created is the first start of a large image losing to
 // scion's start timeout; the error names the cause and the manual warm-up
@@ -1434,13 +1579,13 @@ func TestRunDispatchesStepsInOrder(t *testing.T) {
 	f := scionOKRunner()
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
-		Manager: config.Manager{Image: "scionlocal/lever-claude:latest"},
+		Manager: config.Manager{Image: "lever.local/lever-claude:latest"},
 		Workers: []config.Worker{{Name: "worker", Dir: "workers/worker"}},
 	}
 	var loadImg bool
 	deps := Deps{
 		LoadImage: func(_ context.Context, ref string) error {
-			loadImg = (ref == "scionlocal/lever-claude:latest")
+			loadImg = (ref == "lever.local/lever-claude:latest")
 			return nil
 		},
 		Scion: hubScion(f, app),
@@ -1452,7 +1597,7 @@ func TestRunDispatchesStepsInOrder(t *testing.T) {
 		t.Fatal("host step load-image not called")
 	}
 	j := joinedCalls(f)
-	for _, want := range []string{"init --machine", "config set --global --non-interactive image_registry scionlocal", "server start", "init --non-interactive", "hub link", "-- hello"} {
+	for _, want := range []string{"init --machine", "config set --global --non-interactive image_registry lever.local", "server start", "init --non-interactive", "hub link", "-- hello"} {
 		if !strings.Contains(j, want) {
 			t.Fatalf("missing scion call %q in: %q", want, j)
 		}
@@ -3756,9 +3901,9 @@ func TestRunLoadImageTarForwardsImageTagPolicy(t *testing.T) {
 			return nil
 		},
 	})
-	app := &config.App{Manager: config.Manager{Image: "scionlocal/mgr:arm64"},
-		Workers: []config.Worker{{Name: "w", Image: "scionlocal/x:arm64"}}}
-	step := Step{Target: "scionlocal/x:arm64", TarPath: "/inst/images/x.tar"}
+	app := &config.App{Manager: config.Manager{Image: "lever.local/mgr:arm64"},
+		Workers: []config.Worker{{Name: "w", Image: "lever.local/x:arm64"}}}
+	step := Step{Target: "lever.local/x:arm64", TarPath: "/inst/images/x.tar"}
 	if err := runLoadImage(context.Background(), step, d, app); err != nil {
 		t.Fatalf("runLoadImage: %v", err)
 	}
@@ -3769,12 +3914,12 @@ func TestRunLoadImageTarForwardsImageTagPolicy(t *testing.T) {
 	if err := runLoadImage(context.Background(), step, d, app); err != nil {
 		t.Fatalf("runLoadImage: %v", err)
 	}
-	for _, ok := range []string{"scionlocal/x:arm64", "docker.io/scionlocal/x:arm64", "lever.local/x:arm64", "scionlocal/other:1"} {
+	for _, ok := range []string{"lever.local/x:arm64", "x:arm64", "docker.io/x:arm64", "lever.local/other:1", "scionlocal/mgr:arm64"} {
 		if err := got(ok); err != nil {
 			t.Errorf("%s: %v", ok, err)
 		}
 	}
-	for _, bad := range []string{"lever.local/mgr:arm64", "scionlocal/mgr:arm64", "docker.io/scionlocal/mgr:arm64", "mgr:arm64"} {
+	for _, bad := range []string{"lever.local/mgr:arm64", "docker.io/mgr:arm64", "docker.io/library/mgr:arm64", "mgr:arm64"} {
 		if err := got(bad); err == nil || !strings.Contains(err.Error(), "configured for another agent") {
 			t.Errorf("%s: want refused, got %v", bad, err)
 		}
@@ -4109,7 +4254,7 @@ func TestManagerStartOptsNestedVirtVolume(t *testing.T) {
 // The manager is created on a qualified image name: scion rewrites a bare one
 // to the hub's image registry, which any agent can set.
 func TestManagerStartOptsQualifiedImage(t *testing.T) {
-	for _, img := range []string{"scionlocal/lever-claude:arm64", "lever.local/lever-claude:arm64"} {
+	for _, img := range []string{"lever-claude:arm64", "lever.local/lever-claude:arm64"} {
 		r := &run{app: &config.App{Name: "m", Manager: config.Manager{Image: img}, Broker: config.Broker{LLMAuth: config.LLMAuthSubscription}}}
 		opts, err := r.managerStartOpts(context.Background(), "/lever/proj", "task", "")
 		if err != nil {
@@ -4260,27 +4405,94 @@ func TestStartManagerFreshAfterAnUnconfirmedDelete(t *testing.T) {
 	}
 }
 
-// A manager an older lever created keeps its unqualified image name, which
-// the hub's image registry still applies to: keeping or resuming it warns.
-func TestActUpWarnsOnAnUnqualifiedImage(t *testing.T) {
+// A plain apply over a manager record on an unqualified image name, or with
+// no image, changes nothing: no suspend, resume or create.
+func TestApplyRefusesAManagerOnAnUnqualifiedImage(t *testing.T) {
+	for _, phase := range []string{"running", "suspended"} {
+		for _, noImage := range []bool{false, true} {
+			app, f := newObserveFirstApp(t)
+			r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: phase, initContainerStatus: "created", image: "scionlocal/lever-claude:arm64", noImage: noImage}
+			err := runApply(app, Deps{
+				Scion:            scion.New(r, scion.Options{}),
+				GuestBoot:        &fakeGuestBoot{current: bootB, recorded: bootA},
+				ContainerRunning: podmanSays(false),
+			})
+			testutil.WantErrContaining(t, err, map[bool]string{false: "unqualified image name", true: "no image on its record"}[noImage])
+			testutil.WantErrContaining(t, err, "lever up --fresh --keep-conversation")
+			if r.suspendCalls != 0 || r.resumeCalls != 0 || r.startCalls != 0 || r.deleteCalls != 0 {
+				t.Errorf("%s, no image %v: suspend=%d resume=%d start=%d delete=%d, want none", phase, noImage, r.suspendCalls, r.resumeCalls, r.startCalls, r.deleteCalls)
+			}
+		}
+	}
+}
+
+// With no manager.image a create would make a record with no image: ensureUp
+// refuses before it looks at, deletes or creates anything.
+func TestEnsureUpRefusesAnEmptyManagerImage(t *testing.T) {
+	for _, fresh := range []bool{false, true} {
+		app, f := newObserveFirstApp(t)
+		app.Manager.Image = ""
+		r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "created"}
+		intent := ManagerKeep
+		if fresh {
+			intent = ManagerFresh
+		}
+		_, err := EnsureManager(context.Background(), app, fillDeps(Deps{Scion: scion.New(r, scion.Options{}), Log: func(string, ...any) {}}), ManagerRequest{Intent: intent})
+		testutil.WantErrContaining(t, err, "manager.image is not set")
+		if r.suspendCalls+r.resumeCalls+r.startCalls+r.deleteCalls != 0 {
+			t.Errorf("fresh %v: suspend=%d resume=%d start=%d delete=%d, want none", fresh, r.suspendCalls, r.resumeCalls, r.startCalls, r.deleteCalls)
+		}
+	}
+}
+
+// A record on an unqualified image name is refused whatever the image it
+// runs or the path, and so is one with no image; a qualified or
+// digest-pinned one is not.
+func TestRefuseUnqualifiedRecord(t *testing.T) {
 	for _, c := range []struct {
-		image string
-		warn  bool
+		image  string
+		refuse bool
 	}{
 		{"scionlocal/lever-claude:arm64", true},
 		{"localhost/scionlocal/lever-claude:arm64", true},
+		{"lever-claude:arm64", true},
 		{"lever.local/lever-claude:arm64", false},
-		{"", false},
+		{"scionlocal/x@sha256:abc", false},
+		{"", true},
 	} {
-		var logs []string
-		r := &run{app: &config.App{Name: "m"}, d: Deps{Log: func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }}}
-		rec := &scion.Agent{Slug: "m", Phase: scion.PhaseRunning, Image: c.image}
-		if err := r.actUp(context.Background(), "/lever", rec, managerPlan{verb: verbNone}, scion.StartOpts{Image: "lever.local/lever-claude:arm64"}); err != nil {
-			t.Fatal(err)
+		r := &run{app: &config.App{Name: "m", Manager: config.Manager{Image: "lever.local/lever-claude:arm64"}}}
+		err := r.refuseUnqualifiedRecord(&scion.Agent{Slug: "m", Phase: scion.PhaseRunning, Image: c.image})
+		if (err != nil) != c.refuse {
+			t.Errorf("%q: err = %v, want refused %v", c.image, err, c.refuse)
 		}
-		got := strings.Contains(strings.Join(logs, "\n"), "unqualified image name")
-		if got != c.warn {
-			t.Errorf("%q: warned = %v, want %v (%q)", c.image, got, c.warn, logs)
+		if err != nil {
+			testutil.WantErrContaining(t, err, "lever up --fresh --keep-conversation")
+		}
+	}
+	if err := (&run{app: &config.App{Name: "m"}}).refuseUnqualifiedRecord(nil); err != nil {
+		t.Errorf("no record: %v", err)
+	}
+	// With no manager.image, a fresh create would make the same record.
+	err := (&run{app: &config.App{Name: "m"}}).refuseUnqualifiedRecord(&scion.Agent{Slug: "m"})
+	testutil.WantErrContaining(t, err, "Set manager.image in lever.yaml")
+}
+
+// Restore, new session and the broker's re-enrol resume the record too: each
+// refuses one on an unqualified image name, or with none, before it changes
+// anything.
+func TestResumePathsRefuseAnUnqualifiedRecord(t *testing.T) {
+	for i, intent := range []ManagerIntent{ManagerRestore, ManagerNewSession, ManagerReenrol, ManagerRestore, ManagerNewSession, ManagerReenrol} {
+		app, f := newObserveFirstApp(t)
+		r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "Up 5 minutes", image: "scionlocal/lever-claude:arm64", noImage: i >= 3}
+		staged, swapped := 0, 0
+		d, q := reenrolDeps(r, &staged)
+		q.Intent, q.Force = intent, true
+		q.WhileSuspended = func(context.Context) error { swapped++; return nil }
+		q.BeginSession = func() (func() error, error) { swapped++; return func() error { return nil }, nil }
+		_, err := EnsureManager(context.Background(), app, d, q)
+		testutil.WantErrContaining(t, err, "lever up --fresh --keep-conversation")
+		if staged+swapped+r.suspendCalls+r.resumeCalls+r.startCalls+r.deleteCalls != 0 {
+			t.Errorf("%s: staged %d swapped %d suspend %d resume %d start %d delete %d, want none", intent, staged, swapped, r.suspendCalls, r.resumeCalls, r.startCalls, r.deleteCalls)
 		}
 	}
 }

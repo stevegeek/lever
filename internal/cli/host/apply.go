@@ -601,17 +601,11 @@ func (bc *brokerController) Start(ctx context.Context) error {
 	// Anything but a decodable epoch 200 means no lever broker is serving. Something
 	// else holding a port makes the child's bind fail, which Healthy reports.
 	if er, err := readBrokerIdentity(probeCtx, bc.admin, bc.adminURL); err == nil {
-		// alive: broker.pid names a live `lever broker serve` of this instance, not a
-		// pid the OS reused.
-		_, _, alive := bc.state.BrokerStatus()
-		switch judgeRunningBroker(er, ours, cli.VersionString(), brokerctl.ConfigHash(bc.app), alive) {
+		switch judgeRunningBroker(er, ours, cli.VersionString(), brokerctl.ConfigHash(bc.app)) {
 		case brokerReuse:
 			progress.From(ctx).Note("reused")
 			return nil // same instance, binary and broker config; keep the process + PID
 		case brokerRefuse:
-			if er.InstanceID == "" {
-				return fmt.Errorf("%w (this instance's %s names no live process)", foreignBrokerError(bc.app.EffectiveAdminPort(), er, ours), stateRel(bc.state, bc.state.PID()))
-			}
 			return foreignBrokerError(bc.app.EffectiveAdminPort(), er, ours)
 		}
 		bc.log.printf("lever: broker predates this binary or its tool config changed — restarting it (was %q)", er.Version)
@@ -873,12 +867,16 @@ func (w *applyWiring) initHubAuth(ctx context.Context) error {
 	return nil
 }
 
+// smallGuestOutputLimit caps a jail command whose real output is a line or
+// a small file (a clock read, a marker file, a probe's exit status).
+const smallGuestOutputLimit = 64 << 10
+
 // readGuestClock reads `date +%s` in the jail. A failed read signs on the
 // host clock: the jail is then unreachable for the assertions too, and doctor
 // reports a large skew.
 func readGuestClock(ctx context.Context, jr proc.Runner, log func(string, ...any)) hubauth.Clock {
 	at := time.Now()
-	res, err := jr.Run(ctx, nil, "date", "+%s")
+	res, err := jr.Run(proc.WithOutputLimit(ctx, smallGuestOutputLimit), nil, "date", "+%s")
 	if err == nil {
 		if epoch, perr := strconv.ParseInt(strings.TrimSpace(res.Stdout), 10, 64); perr == nil {
 			return hubauth.ClockFromGuestEpoch(epoch, at)
@@ -1015,7 +1013,10 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 
 		// StopRemoteProxy needs no controller: teardown is by pid file.
 		StartRemoteProxy: rc.Start,
-		StopRemoteProxy:  func(context.Context) error { return brokerctl.StopRemoteProxy(st) },
+		AutostartWorker: func(ctx context.Context, worker string) error {
+			return autostartWorker(ctx, w.app, st, worker)
+		},
+		StopRemoteProxy: func(context.Context) error { return brokerctl.StopRemoteProxy(st) },
 		FenceRemoteLogins: func(context.Context) error {
 			return fenceRemoteLogins(w.app, st, func() error { return brokerctl.StopRemoteProxy(st) })
 		},
@@ -1208,7 +1209,16 @@ func (w *applyWiring) repairScionHubEndpoint(ctx context.Context, wp string) err
 // roles: that agent holds full hub authority (see apply.Deps.VerifyAgentRole).
 // It fails closed on any question it cannot answer.
 func (w *applyWiring) verifyAgentRole(ctx context.Context, projectName, agentName string) error {
-	return hubapi.VerifyAgentRole(ctx, w.sc.RolesSupported, w.hub(), projectName, agentName)
+	return roleCheckErr(agentName, hubapi.VerifyAgentRole(ctx, w.sc.RolesSupported, w.hub(), projectName, agentName))
+}
+
+// roleCheckErr gives an agent list page over the reply cap the same recovery
+// as scion's oversized list: the role check reads every record in the project.
+func roleCheckErr(agentName string, err error) error {
+	if tooLarge(err) {
+		return fmt.Errorf("checking %q's stored role: %w", agentName, scion.ErrAgentListTooLarge)
+	}
+	return err
 }
 
 // ensureHubAuth installs the assertion public key and the hub's auth block

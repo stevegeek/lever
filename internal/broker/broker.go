@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"sync"
 	"time"
@@ -76,6 +77,18 @@ type Config struct {
 	// without it, so X-Lever-Caller is never trusted on a direct dial past the
 	// broker. Empty ⇒ no header is sent.
 	ToolSecret string
+	// ServiceHosts routes the tools that run on a service host, by tool
+	// name. Such a tool's backend is the service host's https URL.
+	ServiceHosts map[string]ServiceHostRoute
+}
+
+// ServiceHostRoute is how the gateway reaches one service-host tool.
+type ServiceHostRoute struct {
+	// Host is the service host's name in config, for the audit log.
+	Host string
+	// Transport presents the broker's client key and pins the service
+	// host's server key.
+	Transport http.RoundTripper
 }
 
 // IdentityConfig is the broker's keys, CA and policy: everything that decides
@@ -194,8 +207,9 @@ type DispatchConfig struct {
 	// ("user:" + the controller PAT's user). /message/verify looks such a
 	// message up in the sent ledger only. nil ⇒ it answers unavailable.
 	ResolveControllerSender func(ctx context.Context) (string, error)
-	// BeginSession is called just before a worker is created fresh; its
-	// commit records that start once scion created it. A resume records
+	// BeginSession is called just before a worker is created fresh or
+	// resumed in a new session (`lever worker new-session`); its commit
+	// records that start once scion took it. A plain resume records
 	// nothing: the remote proxy lets a contact post to an agent only while
 	// its last fresh start saw the skill on disk. nil ⇒ nothing is recorded.
 	BeginSession func(agent string) (commit func() error)
@@ -393,6 +407,10 @@ type Broker struct {
 	directiveExpiryMax time.Duration
 	dirRate            *rateWindow
 
+	// eventsPoll spaces the hub reads of a worker events long poll
+	// (eventsPollDefault when zero).
+	eventsPoll time.Duration
+
 	// msgPhaseTimeout bounds the phase read before a send
 	// (msgPhaseTimeoutDefault when zero).
 	msgPhaseTimeout time.Duration
@@ -419,6 +437,7 @@ type Broker struct {
 	epochInstanceID string
 	toolSecret      string
 	timeouts        TimeoutConfig
+	serviceHosts    map[string]ServiceHostRoute
 }
 
 // New builds a Broker from c.
@@ -450,8 +469,9 @@ func New(c Config) *Broker {
 		manager: id.ManagerIdentity, managerSlug: id.ManagerSlug, managerClaude: id.ManagerClaude,
 		grantTTL: id.GrantTTL, ticketTTL: id.TicketTTL,
 		log: c.Log, version: c.Version, configHash: c.ConfigHash, epochInstanceID: c.InstanceID, toolSecret: c.ToolSecret,
-		timeouts: c.Timeouts.withDefaults(),
-		minEpoch: pe.Revocation.MinEpoch, revoked: revoked, persist: pe.PersistRevocation,
+		serviceHosts: c.ServiceHosts,
+		timeouts:     c.Timeouts.withDefaults(),
+		minEpoch:     pe.Revocation.MinEpoch, revoked: revoked, persist: pe.PersistRevocation,
 		directives: newDirectiveStore(pe.Directives, pe.PersistDirectives, c.Log),
 		apiKey:     llm.APIKey, llmUpstream: up,
 		runtime: d.Runtime, workers: workers, brokerCAPEM: d.BrokerCAPEM, brokerURL: d.BrokerURL,

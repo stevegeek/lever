@@ -8,14 +8,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion/layout"
-	"github.com/stevegeek/lever/internal/wait"
 )
 
 func TestWaitHubReadySucceeds(t *testing.T) {
@@ -40,12 +38,6 @@ func TestWaitHubReadyTimesOut(t *testing.T) {
 	}
 }
 
-// TestWaitRuntimeBrokerReadyReturnsWhenOnline: an online broker in the listing
-// resolves the gate immediately (one hub call, no error).
-func TestWaitRuntimeBrokerReadyReturnsWhenOnline(t *testing.T) {
-	assertBrokerGateStopsAtOnline(t, `[{"status":"online","connectionState":"connected"}]`)
-}
-
 // cliCalls counts the scion CLI calls made from the host.
 func cliCalls(f *proc.FakeRunner) int {
 	n := 0
@@ -55,56 +47,6 @@ func cliCalls(f *proc.FakeRunner) int {
 		}
 	}
 	return n
-}
-
-func assertBrokerGateStopsAtOnline(t *testing.T, out string) {
-	t.Helper()
-	f := proc.NewFakeRunner()
-	f.Script("scion hub brokers", proc.Result{Stdout: out})
-	c := New(f, Options{})
-	c.brokerReady.Interval = 0
-	if err := c.WaitRuntimeBrokerReady(context.Background(), "/lever"); err != nil {
-		t.Fatalf("WaitRuntimeBrokerReady should return nil when a broker is online: %v", err)
-	}
-	if n := cliCalls(f); n != 1 {
-		t.Errorf("hub-brokers calls = %d, want 1 (must stop as soon as a broker is online)", n)
-	}
-}
-
-// TestWaitRuntimeBrokerReadyStripsDevAuthBanner: the dev-auth banner in the
-// same stream must not make the parse fail and the gate silently no-op.
-func TestWaitRuntimeBrokerReadyStripsDevAuthBanner(t *testing.T) {
-	assertBrokerGateStopsAtOnline(t,
-		"WARNING: development auth is enabled — do not use in production\n[{\"status\":\"online\",\"connectionState\":\"connected\"}]")
-}
-
-// TestWaitRuntimeBrokerReadyOfflineIsNotReadyThenFailSoft: a registered but
-// offline broker does not satisfy the gate, and exhaustion returns nil.
-func TestWaitRuntimeBrokerReadyOfflineIsNotReadyThenFailSoft(t *testing.T) {
-	f := proc.NewFakeRunner()
-	f.Script("scion hub brokers", proc.Result{Stdout: `[{"status":"offline","connectionState":"disconnected"}]`})
-	c := New(f, Options{})
-	c.brokerReady = wait.Spec{MinAttempts: 3}
-	if err := c.WaitRuntimeBrokerReady(context.Background(), "/lever"); err != nil {
-		t.Fatalf("gate must be fail-soft (nil) on exhaustion, got: %v", err)
-	}
-	if n := cliCalls(f); n != 3 {
-		t.Errorf("hub-brokers calls = %d, want 3 (an offline broker must not satisfy the gate)", n)
-	}
-}
-
-// TestWaitRuntimeBrokerReadyCtxCancel: a cancelled context returns its error
-// promptly rather than burning the budget.
-func TestWaitRuntimeBrokerReadyCtxCancel(t *testing.T) {
-	f := proc.NewFakeRunner()
-	f.Script("scion hub brokers", proc.Result{Stdout: `[]`}) // never ready
-	c := New(f, Options{})
-	c.brokerReady = wait.Spec{Budget: 30 * time.Hour, MinAttempts: 30, Interval: time.Hour}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := c.WaitRuntimeBrokerReady(ctx, "/lever"); err == nil {
-		t.Fatal("a cancelled context must return an error, not fail-soft nil")
-	}
 }
 
 // refusingRunner answers every command like a scion CLI whose hub is up but
@@ -308,72 +250,6 @@ func (r *inGuestRunner) Run(ctx context.Context, env map[string]string, name str
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
-// The broker wait is one in-guest loop; an online broker it prints ends the
-// wait with no host-side scion call.
-func TestRuntimeBrokerReadyWaitsInTheGuest(t *testing.T) {
-	r := &inGuestRunner{FakeRunner: proc.NewFakeRunner(), waits: []proc.Result{{Stdout: `[{"status":"online"}]`}}}
-	c := New(r, Options{HubTokenSource: func() string { return "tok" }})
-	online, err := c.RuntimeBrokerReady(context.Background(), "global")
-	if err != nil || !online {
-		t.Fatalf("online=%v err=%v", online, err)
-	}
-	if len(r.seen) != 1 || cliCalls(r.FakeRunner) != 0 {
-		t.Fatalf("in-guest calls %d, host scion calls %d; want 1 and 0", len(r.seen), cliCalls(r.FakeRunner))
-	}
-	args := strings.Join(r.seen[0], " ")
-	// 30 s at 200 ms, then the scion command the loop runs.
-	_, tail, _ := strings.Cut(args, " _ ")
-	n, rest, _ := strings.Cut(tail, " ")
-	if k, err := strconv.Atoi(n); err != nil || k < 140 || k > 150 || rest != "scion hub brokers --format json --non-interactive -g global" {
-		t.Fatalf("in-guest argv: %s", args)
-	}
-	// The hub token rides the env (the jail runner keeps it off the argv).
-	if r.Calls[0].Env["SCION_HUB_TOKEN"] != "tok" {
-		t.Fatal("the in-guest wait must carry the scion env")
-	}
-}
-
-// The guest's text match only ends its loop; lever's own parse decides, and
-// keeps waiting when it does not hold.
-func TestRuntimeBrokerReadyParsesWhatTheGuestPrinted(t *testing.T) {
-	r := &inGuestRunner{FakeRunner: proc.NewFakeRunner(), waits: []proc.Result{
-		{Stdout: `[{"name":"online","status":"offline"}]`},
-		{Stdout: `[{"status":"online"}]`},
-	}}
-	c := New(r, Options{})
-	online, err := c.RuntimeBrokerReady(context.Background(), "global")
-	if err != nil || !online || len(r.seen) != 2 {
-		t.Fatalf("online=%v err=%v calls=%d; want the second answer to decide", online, err, len(r.seen))
-	}
-}
-
-// A wait that ran its whole window is fail-soft (false, nil), and does not
-// start the host polling over again.
-func TestRuntimeBrokerReadyInGuestTimeoutIsFailSoft(t *testing.T) {
-	r := &inGuestRunner{FakeRunner: proc.NewFakeRunner()}
-	c := New(r, Options{})
-	c.brokerReady = wait.Spec{MinAttempts: 1}
-	online, err := c.RuntimeBrokerReady(context.Background(), "global")
-	if err != nil || online {
-		t.Fatalf("online=%v err=%v", online, err)
-	}
-	if cliCalls(r.FakeRunner) != 0 {
-		t.Fatal("a guest wait that ran must not be repeated from the host")
-	}
-}
-
-// When the in-guest wait cannot run (a transport error), it polls from the
-// host.
-func TestRuntimeBrokerReadyFallsBackToHostPolling(t *testing.T) {
-	r := &inGuestRunner{FakeRunner: proc.NewFakeRunner(), waits: []proc.Result{{Code: 255}}}
-	r.Script("scion hub brokers", proc.Result{Stdout: `[{"status":"online"}]`})
-	c := New(r, Options{})
-	online, err := c.RuntimeBrokerReady(context.Background(), "global")
-	if err != nil || !online || cliCalls(r.FakeRunner) != 1 {
-		t.Fatalf("online=%v err=%v host calls=%d", online, err, cliCalls(r.FakeRunner))
-	}
-}
-
 // With an endpoint the hub wait polls /healthz in the guest, and one CLI probe
 // after it decides.
 func TestWaitHubReadyPollsHealthzInTheGuest(t *testing.T) {
@@ -411,26 +287,17 @@ func TestWaitHubReadyWithoutCurlPollsTheCLI(t *testing.T) {
 	}
 }
 
-// The in-guest scripts, run for real: the broker loop stops at an online
-// broker and prints it, and exits waitedExit when none appears; the healthz
-// loop exits waitedExit against a port nothing listens on.
-func TestInGuestWaitScriptsRunForReal(t *testing.T) {
+// The in-guest healthz script, run for real: it exits waitedExit against a
+// port nothing listens on.
+func TestInGuestWaitScriptRunsForReal(t *testing.T) {
 	sh, err := exec.LookPath("sh")
 	if err != nil {
 		t.Skip("no sh")
 	}
-	out, err := exec.Command(sh, "-c", brokerWaitScript, "_", "3", "echo", `[{"status":"online"}]`).Output()
-	if err != nil || string(out) != `[{"status":"online"}]` {
-		t.Fatalf("online: %q %v", out, err)
-	}
-	err = exec.Command(sh, "-c", brokerWaitScript, "_", "1", "echo", `[{"status":"offline"}]`).Run()
-	var ee *exec.ExitError
-	if !errors.As(err, &ee) || ee.ExitCode() != waitedExit {
-		t.Fatalf("offline: %v, want exit %d", err, waitedExit)
-	}
 	if _, err := exec.LookPath("curl"); err != nil {
 		t.Skip("no curl")
 	}
+	var ee *exec.ExitError
 	err = exec.Command(sh, "-c", healthzScript, "_", "http://127.0.0.1:9", "1").Run()
 	if !errors.As(err, &ee) || ee.ExitCode() != waitedExit {
 		t.Fatalf("healthz: %v, want exit %d", err, waitedExit)
@@ -441,5 +308,54 @@ func TestInGuestWaitScriptsRunForReal(t *testing.T) {
 	err = exec.Command(sh, "-c", healthzScript, "_", srv.URL, "20").Run()
 	if !errors.As(err, &ee) || ee.ExitCode() != 4 {
 		t.Fatalf("healthz 404: %v, want exit 4", err)
+	}
+}
+
+// cappedRunner answers every command the way the jail runner does once a
+// command's output passes its cap: the output read so far, and an error that
+// wraps proc.ErrOutputLimit. Only list is capped. The partial output is
+// agent-written text.
+type cappedRunner struct{ calls int }
+
+func (r *cappedRunner) RunIn(_ context.Context, _ string, _ map[string]string, _ string, args ...string) (proc.Result, error) {
+	if len(args) == 0 || args[0] != "list" {
+		return proc.Result{}, nil
+	}
+	r.calls++
+	return proc.Result{Code: -1, Stdout: `[{"slug":"w","activity":"no_runtime_broker deadline exceeded AGENT-WRITTEN`},
+		fmt.Errorf("limactl: %w", proc.ErrOutputLimit)
+}
+
+func (r *cappedRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
+func (r *cappedRunner) RunStdin(ctx context.Context, _ io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
+// An agent list over the cap is the hub answering: the wait ends ready on the
+// first probe, so `lever up --fresh` reaches the manager's delete by name.
+func TestWaitHubReadyCountsAnOversizedListAsReady(t *testing.T) {
+	r := &cappedRunner{}
+	c := New(r, Options{})
+	c.hubReady.Budget, c.hubReady.Interval = 2*time.Second, time.Millisecond
+	start := time.Now()
+	if err := c.waitHubReady(context.Background(), nil); err != nil {
+		t.Fatalf("err = %v, want the hub counted as answering", err)
+	}
+	if r.calls != 1 || time.Since(start) > time.Second {
+		t.Fatalf("calls = %d after %s, want one probe", r.calls, time.Since(start))
+	}
+}
+
+func TestServerStartIsReadyOnOversizedList(t *testing.T) {
+	r := &cappedRunner{}
+	c := New(r, Options{})
+	c.hubReady.Budget, c.hubReady.Interval = 2*time.Second, time.Millisecond
+	c.hubRetryPause = time.Second
+	start := time.Now()
+	if err := c.ServerStart(context.Background(), ServerOpts{}); err != nil || r.calls != 1 || time.Since(start) > time.Second {
+		t.Fatalf("err = %v after %d calls and %s, want ready at once", err, r.calls, time.Since(start))
 	}
 }

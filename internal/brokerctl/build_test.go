@@ -17,7 +17,7 @@ func sampleApp() *config.App {
 		Name:    "demo",
 		Backend: "orbstack",
 		Manager: config.Manager{
-			Image:    "scionlocal/mgr",
+			Image:    "lever.local/mgr",
 			Delegate: []config.DelegateGrant{{Tool: "db", Op: "read", To: []string{"worker"}}},
 		},
 		Workers: []config.Worker{{Name: "worker", Dir: "work"}},

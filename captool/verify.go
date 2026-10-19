@@ -44,6 +44,10 @@ func (s *Server) handleToolsCall(id any, msg map[string]any, caller string) []by
 		s.audit(op, caller, "deny", "bad capability encoding")
 		return mcp.Error(id, mcp.CodeServerError, "forbidden")
 	}
+	if mcp.RenamedKeyArg(o.CaveatParam, args) != "" {
+		s.audit(op, caller, "deny", "an argument is named like a renamed constraint key")
+		return mcp.Error(id, mcp.CodeInvalidParams, "invalid params")
+	}
 	params := mcp.MapConstraintParams(o.CaveatParam, args)
 	if err := token.Verify(pubKey, rawTok, token.Request{
 		Caller: caller, Capability: token.Capability{Tool: s.name, Operation: op},

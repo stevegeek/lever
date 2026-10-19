@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"maps"
 	"net"
 	"net/url"
 	"path"
@@ -39,6 +40,22 @@ func (t Tool) validate() error {
 		if o.Name == wire.WildcardOp {
 			return fmt.Errorf("config: broker tool %q declares operation %q, which is reserved for gate: coarse", t.Name, wire.WildcardOp)
 		}
+		if err := validateCaveatParam(o.CaveatParam); err != nil {
+			return fmt.Errorf("config: broker tool %q operation %q caveat_param: %w", t.Name, o.Name, err)
+		}
+	}
+	if t.Host != "" {
+		switch {
+		case !t.External:
+			return fmt.Errorf("config: broker tool %q sets host but not external (a service-host tool is external; config load sets it)", t.Name)
+		case len(t.Command) != 0:
+			return fmt.Errorf("config: broker tool %q sets both host and command (a service-host tool runs on that host, not here)", t.Name)
+		case t.Backend != "":
+			return fmt.Errorf("config: broker tool %q sets both host and backend (the broker derives a service-host tool's address from broker.service_hosts)", t.Name)
+		case t.AllowNonLoopback:
+			return fmt.Errorf("config: broker tool %q sets allow_non_loopback, which host implies; remove it", t.Name)
+		}
+		return t.validateGate()
 	}
 	if !t.External {
 		if t.Gate != "" {
@@ -61,6 +78,11 @@ func (t Tool) validate() error {
 	if err := t.validateExternalBackend(); err != nil {
 		return err
 	}
+	return t.validateGate()
+}
+
+// validateGate checks an external tool's operations against its gate.
+func (t Tool) validateGate() error {
 	if t.EffectiveGate() == GateCoarse {
 		if len(t.Operations) != 0 {
 			return fmt.Errorf("config: external broker tool %q is gate: coarse and must not declare operations (coarse admits the whole surface; use gate: fine to enumerate)", t.Name)
@@ -190,6 +212,44 @@ func validateLimaKeys(a *App, goos string) error {
 	return nil
 }
 
+// validateCaveatParam refuses a constraint key map whose binding is
+// ambiguous. An empty name binds to an argument the agent names "", and a
+// leading "_" is the gateway's own namespace (_capability). A renamed key
+// binds only its argument and the gateway refuses a call carrying an argument
+// named like the key under case folding, so a key renamed to itself under
+// folding, or to another renamed key (a chain, or a cycle), would refuse the
+// very argument it is meant to read.
+func validateCaveatParam(cp map[string]string) error {
+	keys := slices.Sorted(maps.Keys(cp))
+	for _, ck := range keys {
+		arg := cp[ck]
+		switch {
+		case ck == "" || arg == "":
+			return fmt.Errorf("%q: %q: an empty constraint key or argument name", ck, arg)
+		case strings.HasPrefix(ck, "_") || strings.HasPrefix(arg, "_"):
+			return fmt.Errorf("%q: %q: names starting with _ are reserved for the broker", ck, arg)
+		case ck != arg && strings.EqualFold(ck, arg):
+			return fmt.Errorf("%q: %q renames the key to itself under a change of case; write %q: %q", ck, arg, ck, ck)
+		}
+	}
+	for _, ck := range keys {
+		arg := cp[ck]
+		if ck == arg {
+			continue
+		}
+		for _, other := range keys {
+			if other == ck || other == cp[other] || !strings.EqualFold(arg, other) {
+				continue
+			}
+			if strings.EqualFold(cp[other], ck) {
+				return fmt.Errorf("%q: %q and %q: %q rename each other (a cycle)", ck, arg, other, cp[other])
+			}
+			return fmt.Errorf("%q: %q names the renamed key %q (%q: %q); bind each key to its argument directly", ck, arg, other, other, cp[other])
+		}
+	}
+	return nil
+}
+
 // toolNameRE: a tool name becomes the /mcp/<name>/ route and a `claude mcp
 // add` token, so it must be safe in a URL path and never collide with the
 // reserved wildcard op. Underscores are admitted because MCP server names use
@@ -204,6 +264,16 @@ var digestRE = regexp.MustCompile(`@[a-z0-9]+:[0-9a-fA-F]{32,}$`)
 func (s Security) validateImage(field, ref string) error {
 	if !imageRE.MatchString(ref) {
 		return fmt.Errorf("config: %s %q has invalid characters", field, ref)
+	}
+	// A host's docker can still hold a stale lever image under scionlocal/,
+	// which a config naming it would load and run; docker and podman also
+	// spell that name with docker.io/, index.docker.io/ or localhost/.
+	bare := ref
+	for _, p := range []string{"docker.io/", "index.docker.io/", "localhost/"} {
+		bare = strings.TrimPrefix(bare, p)
+	}
+	if name, ok := strings.CutPrefix(bare, "scionlocal/"); ok {
+		return fmt.Errorf("config: %s %q: lever's images are named %s/<name>; use %s/%s (make lever-image builds it)", field, ref, imageref.Registry, imageref.Registry, name)
 	}
 	if len(s.AllowedImageRegistries) > 0 && !registryAllowed(ref, s.AllowedImageRegistries) {
 		return fmt.Errorf("config: %s %q is not from an allowed registry (allowed: %s)", field, ref, strings.Join(s.AllowedImageRegistries, ", "))
@@ -463,6 +533,9 @@ func (a *App) validateWorker(g Worker) error {
 	}
 	if g.InstructionsFile != "" && !confinedRel(g.InstructionsFile) {
 		return fmt.Errorf("config: worker %q instructions_file %q must be a relative path inside the instance root (no \"..\", not absolute)", g.Name, g.InstructionsFile)
+	}
+	if g.TaskFile != "" && !confinedRel(g.TaskFile) {
+		return fmt.Errorf("config: worker %q task_file %q must be a relative path inside the instance root (no \"..\", not absolute)", g.Name, g.TaskFile)
 	}
 	if err := validateClaude(fmt.Sprintf("worker %q", g.Name), g.ClaudeSettings, g.AfterCompactNote); err != nil {
 		return err
@@ -1021,6 +1094,9 @@ func (a *App) validateBroker() error {
 			return fmt.Errorf("config: broker.api_key_file is required when llm_auth is api-key")
 		}
 	}
+	if err := a.validateServiceHosts(); err != nil {
+		return err
+	}
 	return a.validateBrokerGrants()
 }
 
@@ -1115,20 +1191,21 @@ func validateImageTar(who, image, tar string) error {
 	return nil
 }
 
-// validateAgentImagesDistinct: two configured refs that run under one agent
-// image name (scionlocal/x and lever.local/x) would each re-tag it on load,
-// and one of the agents would run the other's image.
+// validateAgentImagesDistinct: two configured refs that the jail's podman
+// holds under one name (x and lever.local/x, or x:1 and
+// docker.io/library/x:1) would each re-tag it on load, and one of the agents
+// would run the other's image.
 func (a *App) validateAgentImagesDistinct() error {
 	from := map[string]string{}
 	check := func(ref string) error {
-		agent := imageref.Agent(ref)
-		if agent == "" {
-			return nil
+		for _, name := range imageref.Names(ref) {
+			if prev, ok := from[name]; ok && prev != ref {
+				return fmt.Errorf("config: images %q and %q are both held in the jail as %s; name one image one way", prev, ref, name)
+			}
 		}
-		if prev, ok := from[agent]; ok && prev != ref {
-			return fmt.Errorf("config: images %q and %q both run in the jail as %s; name one image one way", prev, ref, agent)
+		for _, name := range imageref.Names(ref) {
+			from[name] = ref
 		}
-		from[agent] = ref
 		return nil
 	}
 	if err := check(a.ManagerImage()); err != nil {

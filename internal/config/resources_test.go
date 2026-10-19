@@ -13,7 +13,7 @@ cpus: 2
 memory: 4GiB
 guest_profile: small
 manager:
-  image: scionlocal/lever-claude:latest
+  image: lever.local/lever-claude:latest
   resources:
     memory: 1536MiB
     cpu: 1.5
@@ -122,7 +122,7 @@ func TestRejectBadResourcesAndCap(t *testing.T) {
 backend: lima
 tree: ./tree
 manager:
-  image: scionlocal/lever-claude:latest
+  image: lever.local/lever-claude:latest
 `
 	rejectNoHost(t, base+"  resources:\n    memory: 100MiB\n", "manager resources.memory", "at least 512MiB")
 	rejectNoHost(t, base+"workers:\n  - name: w\n    dir: workers/w\n    resources:\n      cpu: lots\n", `worker "w" resources.cpu "lots" invalid`)

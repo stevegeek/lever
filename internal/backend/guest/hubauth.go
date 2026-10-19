@@ -207,7 +207,7 @@ func HubAuthSettings(spec types.HubAuth) map[string]any {
 // writes them) are left alone.
 func hubAuthSettingsConverged(existing []byte, spec types.HubAuth, hasServerYAML bool) (out []byte, restart string, changed bool, err error) {
 	var dropped []string
-	doc, err := layout.ParseSettings(existing)
+	doc, err := parseJailSettings(existing)
 	if err != nil {
 		return nil, "", false, fmt.Errorf("guest: parse the jail's %s: %w", layout.SettingsRel, err)
 	}

@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/remoteproxy"
@@ -88,14 +89,14 @@ func TestRemoteWakeOverTheOperatorSocket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var got wire.OperatorWakeRequest
+	var got broker.WorkerResumeRequest
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != wire.PathOperatorWake || r.Method != http.MethodPost {
+		if r.URL.Path != broker.PathOperatorWorkerResume || r.Method != http.MethodPost {
 			http.NotFound(w, r)
 			return
 		}
 		_ = json.NewDecoder(r.Body).Decode(&got)
-		if got.Worker == "w-busy" {
+		if got.For != nil && got.For.Worker == "w-busy" {
 			http.Error(w, "not asleep", http.StatusConflict)
 			return
 		}
@@ -108,7 +109,9 @@ func TestRemoteWakeOverTheOperatorSocket(t *testing.T) {
 	if wake == nil {
 		t.Fatal("no wake with the state outside the tree")
 	}
-	if err := wake(context.Background(), "c@x", "contact", "w1"); err != nil || got != (wire.OperatorWakeRequest{Worker: "w1", Login: "c@x", Tier: "contact"}) {
+	// For is always set, so the broker applies the chat page's narrower
+	// rules whatever the login.
+	if err := wake(context.Background(), "c@x", "contact", "w1"); err != nil || got.Worker != "" || got.For == nil || *got.For != (broker.ResumeFor{Worker: "w1", Login: "c@x", Tier: "contact"}) {
 		t.Fatalf("%v %+v", err, got)
 	}
 	var we *remoteproxy.WakeError

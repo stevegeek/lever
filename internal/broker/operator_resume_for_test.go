@@ -3,6 +3,7 @@ package broker
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -13,12 +14,18 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/scion"
-	"github.com/stevegeek/lever/internal/wire"
 )
 
+// postWake posts the remote chat page's resume: body names the worker, the
+// login and the tier, which go in the request's For.
 func postWake(t *testing.T, b *Broker, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, wire.PathOperatorWake, strings.NewReader(body))
+	var old struct{ Worker, Login, Tier string }
+	if json.Unmarshal([]byte(body), &old) == nil {
+		raw, _ := json.Marshal(WorkerResumeRequest{For: &ResumeFor{Worker: old.Worker, Login: old.Login, Tier: old.Tier}})
+		body = string(raw)
+	}
+	req := httptest.NewRequest(http.MethodPost, PathOperatorWorkerResume, strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	b.OperatorHandler().ServeHTTP(rec, req)
 	return rec
@@ -101,16 +108,46 @@ func TestOperatorWakeBoundsTheLogin(t *testing.T) {
 	}
 }
 
-// The wake route is the operator socket's alone: the admin listener is
-// unauthenticated loopback that the hub's network can reach.
-func TestOperatorWakeIsNotOnTheTCPListeners(t *testing.T) {
-	b := newTestBroker(t, &fakeRuntime{}, wakeSpec)
-	for name, h := range map[string]http.Handler{"admin": b.AdminHandler(), "jail": b.JailHandler()} {
+// The old wake route is gone from every listener.
+func TestOperatorWakeRouteIsGone(t *testing.T) {
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{testInstanceProject: {{Slug: "worker", Phase: "suspended"}}}}
+	b := newTestBroker(t, rt, wakeSpec)
+	for name, h := range map[string]http.Handler{"operator": b.OperatorHandler(), "admin": b.AdminHandler(), "jail": b.JailHandler()} {
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, wire.PathOperatorWake, strings.NewReader(`{"worker":"worker"}`)))
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/operator/wake", strings.NewReader(`{"worker":"worker","login":"c@x","tier":"operator"}`)))
 		if rec.Code != http.StatusNotFound && rec.Code != http.StatusMethodNotAllowed {
-			t.Errorf("%s handler answers %s: %d", name, wire.PathOperatorWake, rec.Code)
+			t.Errorf("%s handler answers /operator/wake: %d", name, rec.Code)
 		}
+	}
+	if len(rt.resumed) != 0 {
+		t.Fatal("resumed through the removed route")
+	}
+}
+
+// A request For a login is narrow even when the login is empty: the For
+// object, not its contents, selects the remote rules. Naming the worker
+// both ways is refused.
+func TestOperatorResumeForAnEmptyLoginIsStillNarrow(t *testing.T) {
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{testInstanceProject: {{Slug: "worker", Phase: "stopped"}}}}
+	b := newTestBroker(t, rt, wakeSpec)
+	rec := callOperator(t, b, http.MethodPost, PathOperatorWorkerResume, `{"for":{"worker":"worker"}}`)
+	if rec.Code != http.StatusConflict || rec.Header().Get(ReasonHeader) != ReasonStoppedByOperator || len(rt.resumed) != 0 {
+		t.Fatalf("%d %q resumed=%v", rec.Code, rec.Header().Get(ReasonHeader), rt.resumed)
+	}
+	rec = callOperator(t, b, http.MethodPost, PathOperatorWorkerResume, `{"worker":"worker","for":{"worker":"worker","tier":"operator"}}`)
+	if rec.Code != http.StatusBadRequest || len(rt.resumed) != 0 {
+		t.Fatalf("both: %d resumed=%v", rec.Code, rt.resumed)
+	}
+	// A broker that predates For decodes the chat page's request with no
+	// worker, which every resume refuses.
+	var older struct{ Worker string }
+	raw, _ := json.Marshal(WorkerResumeRequest{For: &ResumeFor{Worker: "worker", Login: "c@x", Tier: "contact"}})
+	if json.Unmarshal(raw, &older) != nil || older.Worker != "" {
+		t.Fatalf("the chat page's request names a worker at the top: %s", raw)
+	}
+	// Without For the operator's own resume takes the stopped record.
+	if rec := callOperator(t, b, http.MethodPost, PathOperatorWorkerResume, `{"worker":"worker"}`); rec.Code != http.StatusOK || len(rt.resumed) != 1 {
+		t.Fatalf("operator: %d %s", rec.Code, rec.Body)
 	}
 }
 

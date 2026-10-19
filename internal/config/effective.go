@@ -120,16 +120,6 @@ func (a *App) EffectiveAllowedPorts() []int {
 	return out
 }
 
-// Warnings are settings that load but no longer do anything, one sentence
-// each. Unlike RemoteWarnings they apply whether or not remote access is on.
-func (a *App) Warnings() []string {
-	var out []string
-	if a.Remote.LoginPort != 0 {
-		out = append(out, "remote.login_port is no longer used (the hub login needs no port); remove it")
-	}
-	return out
-}
-
 // DefaultRemoteIdentityHeader is remote.identity_header when unset: the
 // header `tailscale serve` puts the tailnet login in.
 const DefaultRemoteIdentityHeader = "Tailscale-User-Login"
@@ -351,6 +341,15 @@ func (a *App) WorkerInstructionsPath(g Worker) string {
 		return ""
 	}
 	return filepath.Join(a.dir, g.InstructionsFile)
+}
+
+// WorkerTaskPath is resolved at the instance root like
+// WorkerInstructionsPath, and has no fallback either.
+func (a *App) WorkerTaskPath(g Worker) string {
+	if g.TaskFile == "" {
+		return ""
+	}
+	return filepath.Join(a.dir, g.TaskFile)
 }
 
 // OperatorAllowedSignersPath returns the absolute path to the operator's

@@ -99,7 +99,7 @@ func TestWorkerResumeExitCodes(t *testing.T) {
 			t.Errorf("%q: exit %d, want %d (%v)", tc.reason, got, tc.exit, err)
 			continue
 		}
-		var res workerResumeResult
+		var res workerVerbResult
 		line := lastJSONLine(out)
 		if err := json.Unmarshal([]byte(line), &res); err != nil {
 			t.Errorf("%q: --json line %q: %v", tc.reason, line, err)
@@ -126,7 +126,7 @@ func TestWorkerResumeJSONSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var res workerResumeResult
+	var res workerVerbResult
 	if err := json.Unmarshal([]byte(lastJSONLine(out)), &res); err != nil || !res.OK || res.Phase != "running" || res.Exit != 0 {
 		t.Fatalf("%q: %+v %v", out, res, err)
 	}
@@ -209,7 +209,7 @@ func TestWorkerResumeJSONIsOnStdout(t *testing.T) {
 	if exitCodeOf(err) != 8 {
 		t.Fatalf("exit %d: %v", exitCodeOf(err), err)
 	}
-	var res workerResumeResult
+	var res workerVerbResult
 	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout.String())), &res); err != nil || res.Reason != broker.ReasonNoRecord {
 		t.Fatalf("stdout %q: %v", stdout.String(), err)
 	}

@@ -121,11 +121,10 @@ func lockForDestroy(ctx context.Context, app *config.App, st state.State, force 
 	return func() {}, nil
 }
 
-// clearStagedRuntimeState removes the bootstrap ticket and runtime manifest
-// staged in the mount, so they do not point at a torn-down broker.
+// clearStagedRuntimeState removes the bootstrap ticket staged in the mount,
+// so it does not point at a torn-down broker.
 func clearStagedRuntimeState(app *config.App) {
 	_ = os.Remove(filepath.Join(app.Tree, ".lever", "bootstrap.json"))
-	_ = os.Remove(filepath.Join(app.Tree, config.ManifestName))
 	_ = os.Remove(filepath.Join(app.Tree, ".lever")) // removed only if now empty
 }
 

@@ -236,11 +236,10 @@ func TestDirectiveForAnAgentThatIsNotRunningIsNotStored(t *testing.T) {
 			t.Fatalf("phase %q: the refusal does not name the phase: %s", phase, body)
 		}
 		// The operator has no lever-manager on the host: the text names the
-		// host's own resume, or sends them to the manager to start a worker
-		// with no record.
+		// host's own resume, or its own start for a worker with no record.
 		want := "lever worker resume worker"
 		if phase == "" {
-			want = "ask the manager to"
+			want = "lever worker start worker"
 		}
 		if !strings.Contains(string(body), want) {
 			t.Fatalf("phase %q: the refusal is not worded for the operator: %s", phase, body)
@@ -399,14 +398,6 @@ func TestMessageToARunningRecordWithADeadContainerIsRefused(t *testing.T) {
 	rec = callWorker(t, b, "/msg/send", `{"to":"worker","body":"x"}`, "manager")
 	if rec.Code != http.StatusOK || len(rt.sent) != 1 {
 		t.Fatalf("a worker with no reported container status must still get its message: %d %s", rec.Code, rec.Body.String())
-	}
-}
-
-// TestSendTimeoutsFitTheInFlightBound: every recorded send's scion call ends
-// inside sentledger.MaxSendDuration, which bounds an entry with no done line.
-func TestSendTimeoutsFitTheInFlightBound(t *testing.T) {
-	if sendTimeout >= sentledger.MaxSendDuration || defaultJailControlTimeout >= sentledger.MaxSendDuration {
-		t.Fatalf("send %v / control %v must stay under %v", sendTimeout, defaultJailControlTimeout, sentledger.MaxSendDuration)
 	}
 }
 

@@ -2,6 +2,7 @@ package broker
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +31,12 @@ type fakeRuntime struct {
 	resumeProj     []string
 	resumeForced   []string
 	resumeForceErr error
+	resumeTasks    []string // the task of every ResumeTask, which also counts as a resume
+	inbox          []scion.Event
+	inboxErr       error
+	inboxUnread    []bool               // the unread argument of every Inbox call
+	inboxFn        func() []scion.Event // when set, answers every Inbox
+	stopErr        error
 	resumeErr      error // a runtime error whose text carries the container env
 	stopped        []string
 	stopProj       []string
@@ -70,6 +78,9 @@ type fakeRuntime struct {
 	purged    []string
 	purgeErr  error
 	ticketErr error
+	// keepEmptyImage lists a record with no image as it is; otherwise List
+	// gives it fakeRecordImage.
+	keepEmptyImage bool
 }
 
 // PurgeWorker satisfies WorkerPurger: it drops the worker's record from
@@ -118,7 +129,23 @@ func (f *fakeRuntime) lastStaged(t *testing.T, worker string) wire.Bootstrap {
 	return bs
 }
 
-func (f *fakeRuntime) List(_ context.Context, project string) ([]scion.Agent, error) {
+// fakeRecordImage is the image every listed record carries unless it names
+// its own or the fake sets keepEmptyImage.
+const fakeRecordImage = "lever.local/img:1"
+
+func (f *fakeRuntime) List(ctx context.Context, project string) ([]scion.Agent, error) {
+	agents, err := f.list(ctx, project)
+	if f.keepEmptyImage || len(agents) == 0 {
+		return agents, err
+	}
+	out := slices.Clone(agents)
+	for i := range out {
+		out[i].Image = cmp.Or(out[i].Image, fakeRecordImage)
+	}
+	return out, err
+}
+
+func (f *fakeRuntime) list(_ context.Context, project string) ([]scion.Agent, error) {
 	f.listCalls++
 	f.listProjects = append(f.listProjects, project)
 	if f.listErr != nil {
@@ -174,6 +201,12 @@ func (f *fakeRuntime) Resume(_ context.Context, worker, project string) error {
 	f.resumeProj = append(f.resumeProj, project)
 	return f.resumeErr
 }
+func (f *fakeRuntime) ResumeTask(_ context.Context, worker, project, task string) error {
+	f.resumeTasks = append(f.resumeTasks, task)
+	f.resumed = append(f.resumed, worker)
+	f.resumeProj = append(f.resumeProj, project)
+	return f.resumeErr
+}
 func (f *fakeRuntime) ResumeForce(_ context.Context, worker, project string) error {
 	f.resumeForced = append(f.resumeForced, worker)
 	return f.resumeForceErr
@@ -182,7 +215,7 @@ func (f *fakeRuntime) ResumeForce(_ context.Context, worker, project string) err
 func (f *fakeRuntime) Stop(_ context.Context, worker, project string) error {
 	f.stopped = append(f.stopped, worker)
 	f.stopProj = append(f.stopProj, project)
-	return nil
+	return f.stopErr
 }
 func (f *fakeRuntime) Suspend(_ context.Context, worker, project string) error {
 	f.suspend = append(f.suspend, worker)
@@ -195,8 +228,12 @@ func (f *fakeRuntime) EnvSet(_ context.Context, project, _, _ string) error {
 	return nil
 }
 func (f *fakeRuntime) Message(_ context.Context, _ scion.MsgOpts) error { return nil }
-func (f *fakeRuntime) Inbox(_ context.Context, _ bool, _ string) ([]scion.Event, error) {
-	return nil, nil
+func (f *fakeRuntime) Inbox(_ context.Context, unread bool, _ string) ([]scion.Event, error) {
+	f.inboxUnread = append(f.inboxUnread, unread)
+	if f.inboxFn != nil {
+		return f.inboxFn(), nil
+	}
+	return f.inbox, f.inboxErr
 }
 
 // testInstanceProject is the instance project (-g): every worker is an agent in
@@ -1121,9 +1158,10 @@ func TestWorkerResumeVerbWaitsUntilRunning(t *testing.T) {
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"phase":"running"`) {
 		t.Fatalf("status = %d (%s), want 200 running", rec.Code, rec.Body.String())
 	}
-	// One observe-first read, two "resumed" readings, then the running one.
-	if rt.listCalls != 4 {
-		t.Fatalf("List calls = %d, want 4 (the verb must poll past the interim phase)", rt.listCalls)
+	// One observe-first read, the image check, two "resumed" readings, then
+	// the running one.
+	if rt.listCalls != 5 {
+		t.Fatalf("List calls = %d, want 5 (the verb must poll past the interim phase)", rt.listCalls)
 	}
 
 	// A worker that never leaves the interim phase is an error that names it.

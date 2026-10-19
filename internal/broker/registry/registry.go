@@ -8,6 +8,7 @@
 package registry
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -129,6 +130,10 @@ func (r *Registry) Names() []string {
 	return names
 }
 
+// ErrRenamedKeyArg is wrapped by MapParams for a call carrying an argument
+// named like a constraint key that caveat_param binds to another argument.
+var ErrRenamedKeyArg = errors.New("an argument is named like a renamed constraint key")
+
 // MapParams builds the constraint-keyed param set the token layer verifies,
 // from the request's MCP arguments. The mapping lives in mcp because the
 // broker and captool must compute byte-identical param sets.
@@ -142,6 +147,9 @@ func (r *Registry) MapParams(tool, op string, args map[string]string) (map[strin
 	o, ok := t.Operations[op]
 	if !ok {
 		return nil, fmt.Errorf("registry: tool %q has no operation %q", tool, op)
+	}
+	if ck := mcp.RenamedKeyArg(o.CaveatParam, args); ck != "" {
+		return nil, fmt.Errorf("registry: %w: %q (bound to argument %q)", ErrRenamedKeyArg, ck, o.CaveatParam[ck])
 	}
 	return mcp.MapConstraintParams(o.CaveatParam, args), nil
 }

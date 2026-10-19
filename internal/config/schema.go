@@ -54,6 +54,24 @@ type Tool struct {
 	// jailed agent a path to another host through the broker, bypassing the
 	// jail's LAN-drop egress.
 	AllowNonLoopback bool `yaml:"allow_non_loopback"`
+	// Host names the broker.service_hosts entry that runs this tool. It
+	// implies External and a non-loopback backend, and replaces Command and
+	// Backend. The json tag keeps it out of brokerctl.ConfigHash while unset.
+	Host string `yaml:"host" json:",omitempty"`
+}
+
+// ServiceHost is another machine that runs some of the instance's MCP
+// servers and their credentials (`lever service-host serve`). The broker
+// reaches it over mutual TLS, presenting the client key `lever service-host
+// pair` made and accepting only the server key Fingerprint names.
+type ServiceHost struct {
+	Name string `yaml:"name"`
+	// Address is host:port. DNS is not trusted: the pin authenticates the
+	// machine.
+	Address string `yaml:"address"`
+	// Fingerprint is "sha256:" and the hex SHA-256 of the service host's
+	// server key (its SubjectPublicKeyInfo).
+	Fingerprint string `yaml:"fingerprint"`
 }
 
 // EffectiveGate is the declared gate, or GateFine when unset.
@@ -131,6 +149,9 @@ type Broker struct {
 	LLMUpstream string    `yaml:"llm_upstream"`
 	Tools       []Tool    `yaml:"tools"`
 	Messaging   Messaging `yaml:"messaging"`
+	// ServiceHosts are the machines `host:` tools run on. The json tag keeps
+	// it out of brokerctl.ConfigHash while unset.
+	ServiceHosts []ServiceHost `yaml:"service_hosts" json:",omitempty"`
 	// AutoReenrol selects which agents the broker re-enrols after an mTLS
 	// leaf merely expires (never a revoked or epoch-stale identity).
 	AutoReenrol AutoReenrolMode `yaml:"auto_reenrol"`
@@ -217,10 +238,17 @@ type Worker struct {
 	Obtain           []Grant         `yaml:"obtain"`
 	Delegate         []DelegateGrant `yaml:"delegate"`
 	// Recyclable lets the manager discard this worker's record and start it
-	// fresh with a new task; its workspace is kept. Without it only the
-	// operator's `lever worker purge` discards a record. The json tag keeps
-	// it out of brokerctl.ConfigHash while false.
+	// fresh with a new task; its workspace is kept. The operator's purge and
+	// recycle never need it. The json tag keeps it out of
+	// brokerctl.ConfigHash while false.
 	Recyclable bool `yaml:"recyclable" json:",omitempty"`
+	// TaskFile is the task of a fresh start by the operator (`lever worker
+	// start` or `recycle` with no --task-file, and autostart). Boot material
+	// like instructions_file: at the instance root, outside the tree.
+	TaskFile string `yaml:"task_file" json:",omitempty"`
+	// Autostart has `lever up` and `lever apply` resume or start the worker
+	// once the manager is up. A failure warns; the bring-up still succeeds.
+	Autostart bool `yaml:"autostart" json:",omitempty"`
 	// Resources is not inherited from the manager and is create-time only.
 	// The json tag keeps it out of brokerctl.ConfigHash while unset.
 	Resources Resources `yaml:"resources" json:",omitzero"`
@@ -352,9 +380,6 @@ type Remote struct {
 	// refused. Off by default: anything that reaches the listener directly
 	// can set that header.
 	TrustForwardedHost bool `yaml:"trust_forwarded_host"`
-	// LoginPort is parsed so an old lever.yaml still loads, and otherwise
-	// ignored (App.Warnings names it).
-	LoginPort int `yaml:"login_port"`
 	// Landing is what the remote origin opens on: the hub's web UI
 	// (RemoteLandingConsole, the default) or lever's chat page
 	// (RemoteLandingChat). Chat needs an operator-tier allowed_users entry:

@@ -30,6 +30,7 @@ func WorkerSpecs(app *config.App, jailMount, jailUID string) []broker.WorkerSpec
 			Model:           app.WorkerModel(g), // own model:, else the manager's; empty ⇒ scion decides
 			// Own instructions_file only, never the manager's. Read at dispatch.
 			InstructionsPath: app.WorkerInstructionsPath(g),
+			TaskPath:         app.WorkerTaskPath(g),
 			APIKey:           app.EffectiveWorkerLLMAuth(g) == config.LLMAuthAPIKey,
 			Recyclable:       g.Recyclable,
 			Claude:           g.Claude(),

@@ -217,15 +217,18 @@ func TestFreshBackupSuspendsAndResumesOnFailure(t *testing.T) {
 	for _, c := range []struct {
 		name    string
 		roleErr error
+		image   string
 		resumes int
 		want    string
 	}{
-		{"resumed", nil, 1, "the manager was resumed"},
-		{"guard refuses", errors.New("pre-role record"), 0, "the manager stays suspended: pre-role record"},
+		{"resumed", nil, "", 1, "the manager was resumed"},
+		{"guard refuses", errors.New("pre-role record"), "", 0, "the manager stays suspended: pre-role record"},
+		// --fresh skips the keep's image check, so the resume must make it.
+		{"unqualified image", nil, "scionlocal/lever-claude:1", 0, "the manager stays suspended: start-manager: manager \"hello\" was created on the unqualified image name"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			app, f := newObserveFirstApp(t)
-			r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "Up 1 minute"}
+			r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "Up 1 minute", image: c.image}
 			var order []string
 			d := fillDeps(Deps{Scion: scion.New(r, scion.Options{}), Log: func(string, ...any) {},
 				InspectContainerMounts: func(context.Context, string) ([]jail.Mount, error) { return nil, nil },

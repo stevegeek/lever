@@ -18,21 +18,28 @@
 # ref of this repo built into the work dir; default: c288d646, the 0.38.0
 # release, the last before proxy auth).
 #
-# The config keeps the image name an older lever.yaml uses (scionlocal/...):
-# after the migration this lever starts agents on its lever.local/ name, and
-# doctor flags the manager the older lever created on the unqualified one.
+# Both levers run the image under its lever.local/ name: the older lever loads
+# a qualified name as written and starts its agents on it, and this one has no
+# other name for it.
 #
-# Env: IMAGE_TAR (required), IMAGE (default scionlocal/lever-claude-slim),
+# Env: IMAGE_TAR (required), IMAGE (default lever.local/lever-claude-slim),
 # OLD_LEVER | OLD_REF, LEVER (default ~/.local/bin/lever), SCION_VERSION
 # (default: the release pin), OLD_SCION_VERSION (the older lever's pin,
-# default e0f61f2d), NAME, KEEP=1.
+# default e0f61f2d), HUBAUTH_NAME (default hubauthe2e; must end in e2e),
+# KEEP=1.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-NAME="${NAME:-hubauthe2e}"
+# Not NAME: an operator's shell may hold a NAME for a real instance, whose VM
+# this run would delete.
+NAME="${HUBAUTH_NAME:-hubauthe2e}"
+case $NAME in
+*e2e) ;;
+*) echo "HUBAUTH_NAME=$NAME: the name must end in e2e (this run deletes the VM lever-<name>)"; exit 2 ;;
+esac
 VM="lever-${NAME}"
 LEVER="${LEVER:-$HOME/.local/bin/lever}"
-IMAGE="${IMAGE:-scionlocal/lever-claude-slim}"
+IMAGE="${IMAGE:-lever.local/lever-claude-slim}"
 : "${IMAGE_TAR:?set IMAGE_TAR to a docker archive holding $IMAGE:<arch>}"
 SCION_VERSION="${SCION_VERSION:-$(sed -n 's/^const ReleasePin = "\(.*\)"/\1/p' "$REPO_ROOT/internal/provision/scionbin/release.go")}"
 OLD_SCION_VERSION="${OLD_SCION_VERSION:-e0f61f2d}"
@@ -47,16 +54,20 @@ check() { local what=$1; shift; if "$@"; then ok "$what"; else bad "$what"; fi; 
 # checkx evaluates a shell condition in this shell (variables and functions).
 checkx() { local what=$1; shift; if eval "$*"; then ok "$what"; else bad "$what"; fi; }
 
+command -v limactl >/dev/null 2>&1 || { echo "limactl not found"; exit 1; }
+[ -x "$LEVER" ] || { echo "$LEVER not found (make install)"; exit 1; }
 # A short work dir: the broker's operator socket lives under the state dir,
 # and a UNIX socket path is limited to about 100 bytes.
 WORK="$(mktemp -d /tmp/lh.XXXXXX)"
 INST="$WORK/i"
+# Set by the clean slate: until then the VM by this name is not this run's.
+slate=0
 cleanup() {
 	rc=$?
 	if [ "${KEEP:-0}" = 1 ]; then echo "KEEP=1: leaving $VM and $WORK"; return; fi
 	pkill -f "lever broker serve.*$INST" 2>/dev/null
 	pkill -f "lever remote serve.*$INST" 2>/dev/null
-	limactl delete --force "$VM" >/dev/null 2>&1
+	[ "$slate" = 1 ] && limactl delete --force "$VM" >/dev/null 2>&1
 	rm -rf "$WORK"
 	exit $rc
 }
@@ -172,6 +183,10 @@ start_worker2() {
 	checkx "$1: the manager starts worker2" 'X exec "lever--$NAME" lever-manager agent list 2>&1 | grep -q worker2'
 }
 
+say "clean slate"
+slate=1
+limactl delete --force "$VM" >/dev/null 2>&1 && echo "deleted stale $VM"
+
 say "old lever: apply (dev-auth window flow, scion $OLD_SCION_VERSION)"
 write_config ""
 (cd "$INST" && "$OLD_LEVER" init >/dev/null 2>&1)
@@ -218,12 +233,17 @@ X cp /tmp/r1.py "lever--$NAME:/tmp/r1.py"
 checkx "an agent can rename the dev user (the hazard R1 repairs)" '[ "$(X exec -e E2E_EMAIL=lever-admin@lever.local "lever--$NAME" python3 /tmp/r1.py)" = 200 ]'
 
 say "migrate with this lever (scion $SCION_VERSION) while the manager and the worker run"
-# The older lever kept no record of the tokens it minted. The migration
+# A lever from before the token records kept no record of the tokens it minted. The migration
 # re-mints them; the old ones carry the controller's authority, so it must
 # revoke them although it never recorded them. Their values stay in files.
 install -m 600 "$INST/.lever-state/controller.pat" "$WORK/old-controller.pat"
 [ -s "$INST/.lever-state/remote.pat" ] && install -m 600 "$INST/.lever-state/remote.pat" "$WORK/old-remote.pat"
 echo "      | older lever's token records: $(ls "$INST/.lever-state/"*.pat.json 2>/dev/null | wc -l)"
+# The pinned older lever (0.38.0) already records its tokens, so the
+# controller's record is dropped here to stand for a lever from before the
+# records: the migration must revoke that token as unrecorded (lever#229).
+# The remote token keeps its record and goes the recorded re-mint path.
+rm -f "$INST/.lever-state/controller.pat.json"
 # tokcode <file>: the hub's status for /api/v1/auth/me with the token in
 # file (over stdin).
 tokcode() { G sh -c 'read -r t; curl -sS -m 20 -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $t" http://127.0.0.1:8080/api/v1/auth/me' < "$1"; }
@@ -270,14 +290,12 @@ att=$(cd "$INST" && timeout 15 script -qfec "'$LEVER' attach" /dev/null 2>&1 | h
 checkx "lever attach opens with the member controller's PAT" '[ ${#att} -gt 100 ] && ! printf "%s" "$att" | grep -qiE "authentication failed|forbidden|no access token"'
 checkx "the migration needed no broker link (the old window linked it)" '! grep -q "linking the jail.s runtime broker" "$WORK/migrate.log"'
 start_worker2 "migrated"
-AGENT_NAME="${IMAGE#lever.local/}"; AGENT_NAME="${AGENT_NAME#scionlocal/}"
+AGENT_NAME="${IMAGE#lever.local/}"
 AGENT_IMAGE="lever.local/$AGENT_NAME:$ARCH"
 w2img=$(X inspect -f '{{.ImageName}}' lever--worker2 2>&1)
 checkx "migrated: worker2 runs the image under its lever.local name ($w2img)" '[ "$w2img" = "$AGENT_IMAGE" ]'
 checkx "migrated: the jail holds $AGENT_IMAGE" 'X image inspect "$AGENT_IMAGE" >/dev/null 2>&1'
-mrow=$(doctor_row "manager image")
-echo "      | $mrow" | cut -c1-400
-checkx "migrated: doctor warns that the manager runs an unqualified image name" '[[ "$mrow" == "! manager image"*unqualified* ]]'
+check "migrated: doctor: manager image" row_ok "manager image"
 fence_checks "migrated"
 
 say "a contact added while agents run"

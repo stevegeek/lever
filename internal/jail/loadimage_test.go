@@ -26,12 +26,12 @@ func TestLoadImageArgs(t *testing.T) {
 }
 
 func TestImageInspectArgs(t *testing.T) {
-	got := imageInspectArgs(orbPrefix("lever-demo", "leveruser"), "501", "scionlocal/lever-claude:latest")
+	got := imageInspectArgs(orbPrefix("lever-demo", "leveruser"), "501", "myorg/lever-claude:latest")
 	want := []string{
 		"orb", "-m", "lever-demo", "-u", "leveruser",
 		"env",
 		"XDG_RUNTIME_DIR=/run/user/501",
-		"podman", "image", "inspect", "--format", "{{.Id}}", "scionlocal/lever-claude:latest",
+		"podman", "image", "inspect", "--format", "{{.Id}}", "myorg/lever-claude:latest",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("imageInspectArgs:\n got  %v\n want %v", got, want)
@@ -59,7 +59,7 @@ func TestNormalizeImageID(t *testing.T) {
 
 const (
 	testImageID = "eb84fdc6f2a3a064445bb2a2fbc89c515666c428d6c96b6ab68a4cd218819688"
-	testImgRef  = "scionlocal/lever-claude:latest"
+	testImgRef  = "myorg/lever-claude:latest"
 )
 
 // imageLoadedRunner scripts the host docker and the jail prefix call
@@ -170,13 +170,13 @@ func TestPruneImagesArgs(t *testing.T) {
 // entrypoint so neither sciontool's hook nor claude runs, and no pull or
 // network.
 func TestWarmImageArgs(t *testing.T) {
-	got := warmImageArgs(orbPrefix("lever-demo", "leveruser"), "501", "scionlocal/lever-claude:arm64")
+	got := warmImageArgs(orbPrefix("lever-demo", "leveruser"), "501", "myorg/lever-claude:arm64")
 	want := []string{
 		"orb", "-m", "lever-demo", "-u", "leveruser",
 		"env",
 		"XDG_RUNTIME_DIR=/run/user/501",
 		"podman", "run", "--rm", "--pull=never", "--network=none",
-		"--userns=keep-id:uid=1000,gid=1000", "--entrypoint", "true", "scionlocal/lever-claude:arm64",
+		"--userns=keep-id:uid=1000,gid=1000", "--entrypoint", "true", "myorg/lever-claude:arm64",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("warmImageArgs:\n got  %v\n want %v", got, want)
@@ -291,10 +291,10 @@ func TestAliasArgs(t *testing.T) {
 		ref  string
 		tags []string
 	}{
-		{"scionlocal/lever-claude:arm64", []string{"docker.io/scionlocal/lever-claude:arm64", "localhost/scionlocal/lever-claude:arm64", "lever.local/lever-claude:arm64"}},
-		{"scionlocal/x", []string{"docker.io/scionlocal/x:latest", "localhost/scionlocal/x:latest", "lever.local/x:latest"}},
+		{"myorg/lever-claude:arm64", []string{"docker.io/myorg/lever-claude:arm64", "localhost/myorg/lever-claude:arm64", "lever.local/myorg/lever-claude:arm64"}},
+		{"myorg/x", []string{"docker.io/myorg/x:latest", "localhost/myorg/x:latest", "lever.local/myorg/x:latest"}},
 		{"alpine:3", []string{"docker.io/library/alpine:3", "localhost/alpine:3", "lever.local/alpine:3"}},
-		{"localhost/scionlocal/x:1", []string{"localhost/scionlocal/x:1", "lever.local/localhost/scionlocal/x:1"}},
+		{"localhost/myorg/x:1", []string{"localhost/myorg/x:1", "lever.local/localhost/myorg/x:1"}},
 	} {
 		got := aliasArgs(orbPrefix("lever-demo", "leveruser"), "501", c.ref)
 		if want := append(append([]string{}, pre...), c.tags...); !reflect.DeepEqual(got, want) {
@@ -309,8 +309,8 @@ func TestAliasSkipsQualifiedRefs(t *testing.T) {
 	// A digest-pinned ref (security.require_image_digest) is self-naming
 	// too: docker save writes it with no RepoTag, and a digest is not a
 	// legal tag target, so an alias attempt could only fail the load.
-	for _, ref := range []string{"ghcr.io/org/img:1", "lever.local/lever-claude:arm64", "reg:5000/img:1", "docker.io/scionlocal/x:latest",
-		"scionlocal/x@sha256:" + strings.Repeat("a", 64), "alpine@sha256:" + strings.Repeat("a", 64)} {
+	for _, ref := range []string{"ghcr.io/org/img:1", "lever.local/lever-claude:arm64", "reg:5000/img:1", "docker.io/myorg/x:latest",
+		"myorg/x@sha256:" + strings.Repeat("a", 64), "alpine@sha256:" + strings.Repeat("a", 64)} {
 		r := proc.NewFakeRunner()
 		r.Script("orb", proc.Result{})
 		if err := aliasLoaded(context.Background(), r, orbPrefix("m", "u"), "501", ref); err != nil {
@@ -329,40 +329,40 @@ func TestImageLoadedChecksTheAgentName(t *testing.T) {
 	r := proc.NewFakeRunner()
 	r.Script("docker", proc.Result{Stdout: testImageID})
 	r.Script("orb", proc.Result{Stdout: testImageID})
-	if !ImageLoaded(context.Background(), r, orbPrefix("m", "u"), "501", "scionlocal/lever-claude:arm64") {
+	if !ImageLoaded(context.Background(), r, orbPrefix("m", "u"), "501", "myorg/lever-claude:arm64") {
 		t.Fatal("want loaded")
 	}
-	if got := r.Calls[1].Args[len(r.Calls[1].Args)-1]; got != "lever.local/lever-claude:arm64" {
+	if got := r.Calls[1].Args[len(r.Calls[1].Args)-1]; got != "lever.local/myorg/lever-claude:arm64" {
 		t.Fatalf("the jail was asked for %q, want the agent name", got)
 	}
 }
 
 // Both load paths alias after a successful load; a failed load does not.
 func TestLoadImagePathsAliasLocalhostAfterLoad(t *testing.T) {
-	path, _ := writeDockerArchive(t, t.TempDir(), tarImageSpec{repoTags: []string{"scionlocal/lever-claude:arm64"}})
+	path, _ := writeDockerArchive(t, t.TempDir(), tarImageSpec{repoTags: []string{"myorg/lever-claude:arm64"}})
 	r := proc.NewFakeRunner()
 	r.Script("orb", proc.Result{})
-	if err := LoadImageTar(context.Background(), r, orbPrefix("m", "u"), "501", "scionlocal/lever-claude:arm64", path, nil); err != nil {
+	if err := LoadImageTar(context.Background(), r, orbPrefix("m", "u"), "501", "myorg/lever-claude:arm64", path, nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(r.Calls) != 2 || !strings.Contains(strings.Join(r.Calls[1].Args, " "), "podman tag docker.io/scionlocal/lever-claude:arm64 localhost/scionlocal/lever-claude:arm64 lever.local/lever-claude:arm64") {
+	if len(r.Calls) != 2 || !strings.Contains(strings.Join(r.Calls[1].Args, " "), "podman tag docker.io/myorg/lever-claude:arm64 localhost/myorg/lever-claude:arm64 lever.local/myorg/lever-claude:arm64") {
 		t.Fatalf("want load then alias, got %+v", r.Calls)
 	}
 	// The docker-save path shares the same tail.
 	r = proc.NewFakeRunner()
 	r.Script("orb", proc.Result{})
-	if err := loadImageAndAlias(context.Background(), r, orbPrefix("m", "u"), "501", "scionlocal/x", func(w io.Writer) error {
+	if err := loadImageAndAlias(context.Background(), r, orbPrefix("m", "u"), "501", "myorg/x", func(w io.Writer) error {
 		_, err := io.WriteString(w, "bytes")
 		return err
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(r.Calls) != 2 || !strings.Contains(strings.Join(r.Calls[1].Args, " "), "podman tag docker.io/scionlocal/x:latest localhost/scionlocal/x:latest lever.local/x:latest") {
+	if len(r.Calls) != 2 || !strings.Contains(strings.Join(r.Calls[1].Args, " "), "podman tag docker.io/myorg/x:latest localhost/myorg/x:latest lever.local/myorg/x:latest") {
 		t.Fatalf("want load then alias with :latest filled in, got %+v", r.Calls)
 	}
 	// A failed load never re-tags.
 	r = proc.NewFakeRunner()
-	if err := loadImageAndAlias(context.Background(), r, orbPrefix("m", "u"), "501", "scionlocal/x", func(w io.Writer) error { return nil }); err == nil {
+	if err := loadImageAndAlias(context.Background(), r, orbPrefix("m", "u"), "501", "myorg/x", func(w io.Writer) error { return nil }); err == nil {
 		t.Fatal("want load error")
 	}
 	if len(r.Calls) != 1 {
@@ -374,8 +374,8 @@ func TestLoadImagePathsAliasLocalhostAfterLoad(t *testing.T) {
 // localhost/ image while apply reports success.
 func TestLocalhostAliasFailureIsFatal(t *testing.T) {
 	r := &loadThenFail{FakeRunner: proc.NewFakeRunner()}
-	err := loadImageAndAlias(context.Background(), r, orbPrefix("m", "u"), "501", "scionlocal/x:latest", func(w io.Writer) error { return nil })
-	if err == nil || !strings.Contains(err.Error(), "localhost/scionlocal/x:latest and lever.local/x:latest") {
+	err := loadImageAndAlias(context.Background(), r, orbPrefix("m", "u"), "501", "myorg/x:latest", func(w io.Writer) error { return nil })
+	if err == nil || !strings.Contains(err.Error(), "localhost/myorg/x:latest and lever.local/myorg/x:latest") {
 		t.Fatalf("err = %v, want the alias failure naming the target tag", err)
 	}
 }

@@ -127,6 +127,15 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 		b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+slug+": "+err.Error())
 		return
 	}
+	agents, err := b.runtime.List(hctx, b.instanceProject)
+	if err != nil {
+		b.audit("reenrol", cn, "error", "natural lapse: list: "+err.Error())
+		return
+	}
+	if a := scion.FindAgent(agents, slug); rewritableImage(a) {
+		b.audit("reenrol", cn, "deny", rewritableImageRefusal(spec, a))
+		return
+	}
 	if err := stage(hctx); err != nil {
 		b.audit("reenrol", cn, "error", err.Error())
 		return
@@ -264,14 +273,16 @@ func (b *Broker) bounceForReenrol(ctx context.Context, cn, slug string) (verb st
 		return "", false
 	}
 	phase := ""
-	for _, a := range agents {
-		if a.Slug == slug {
-			phase = scion.PhaseLabel(a.Phase)
-			break
-		}
+	rec := scion.FindAgent(agents, slug)
+	if rec != nil {
+		phase = scion.PhaseLabel(rec.Phase)
 	}
 	// A resume re-resolves the workspace bind source (as in resumeRecord).
 	if spec, isWorker := b.workers[slug]; isWorker {
+		if rewritableImage(rec) {
+			b.audit("reenrol", cn, "deny", rewritableImageRefusal(spec, rec))
+			return "", false
+		}
 		if err = b.verifyStrictWorkspace(spec); err != nil {
 			b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+slug+": workspace dir: "+err.Error())
 			return "", false

@@ -22,7 +22,7 @@ import (
 // refusal, before any ticket is staged; an unknown change is refused.
 func TestManagerLifecycleMapsRefusals(t *testing.T) {
 	f := proc.NewFakeRunner()
-	f.Script("scion list", proc.Result{Stdout: `[{"slug":"assistant","phase":"suspended","containerStatus":"stopped"}]`})
+	f.Script("scion list", proc.Result{Stdout: `[{"slug":"assistant","phase":"suspended","containerStatus":"stopped","image":"lever.local/lever-claude:1"}]`})
 	app := &config.App{Name: "assistant", Tree: t.TempDir()}
 	staged := false
 	d := apply.Deps{

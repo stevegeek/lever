@@ -46,3 +46,13 @@ func openParentDir(fd int) (int, error) {
 type mountCheck struct{ outer string }
 
 func (*mountCheck) rootInside(uint64) (bool, error) { return false, nil }
+
+// openDirAt opens the directory name below dir without following a link,
+// falling back to O_SEARCH for a directory the user may only search.
+func openDirAt(dir int, name string) (int, error) {
+	fd, err := unix.Openat(dir, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	if errors.Is(err, unix.EACCES) {
+		fd, err = unix.Openat(dir, name, oSearch|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	}
+	return fd, err
+}

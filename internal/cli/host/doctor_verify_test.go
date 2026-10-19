@@ -123,8 +123,8 @@ func TestCheckGuestClock(t *testing.T) {
 	}{
 		{0, true, false, "within"},
 		{4 * time.Second, true, true, "off the host"},
-		{30 * time.Second, false, false, "cannot verify"},
-		{-30 * time.Second, false, false, "cannot verify"},
+		{30 * time.Second, true, true, "off the host"},
+		{-30 * time.Second, true, true, "off the host"},
 	} {
 		fr := proc.NewFakeRunner()
 		fr.Script("date -u +%s", proc.Result{Stdout: strconv.FormatInt(now.Add(tc.off).Unix(), 10) + "\n"})

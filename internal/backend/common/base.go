@@ -273,7 +273,9 @@ func (b *Base) ApplyEgress(ctx context.Context, allowedPorts []int, closedIntern
 }
 
 // JailRunner returns the command transport into the jail; see
-// backend.Backend for its use before EnsureUp.
+// backend.Backend for its use before EnsureUp. A command run without a cap
+// of its own gets guest.OutputLimit: the guest and the agents in it shape
+// what scion and the probes print, and the host holds all of it in memory.
 func (b *Base) JailRunner() proc.Runner {
 	return b.jail()
 }
@@ -284,6 +286,7 @@ func (b *Base) jail() *jail.Runner {
 		Prefix:           b.jailPrefix(),
 		UID:              b.RunUID(),
 		ForceHostNetwork: b.opts.ForceHostNetwork,
+		OutputLimit:      guest.OutputLimit,
 	})
 }
 

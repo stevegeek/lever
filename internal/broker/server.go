@@ -43,7 +43,6 @@ func (b *Broker) JailHandler() http.Handler {
 	mux.Handle("POST "+wire.PathDirectiveCheck, control(b.handleDirectiveCheck))
 	mux.Handle("POST "+wire.PathDirectivePreview, control(b.handleDirectivePreview))
 	mux.Handle("POST "+wire.PathMessageVerify, control(b.handleMessageVerify))
-	mux.Handle("POST "+wire.PathChatVerify, control(b.handleChatVerify))
 	mux.Handle("POST "+wire.PathContacts, control(b.handleContacts))
 	mux.Handle("POST "+wire.PathContactMessage, control(b.handleContactMessage))
 	mux.Handle("POST "+wire.PathFilesList, control(b.handleFilesList))
@@ -52,6 +51,7 @@ func (b *Broker) JailHandler() http.Handler {
 	mux.Handle("POST "+wire.PathRenew, control(b.handleRenew))
 	mux.Handle("POST "+wire.PathRequest, control(b.handleRequest))
 	mux.Handle("GET "+wire.PathTools, control(b.handleTools))
+	mux.Handle("GET "+wire.PathVersion, control(b.handleVersion))
 
 	for _, name := range b.reg.Names() {
 		if name == ReservedLLMTool {
@@ -122,8 +122,14 @@ func (b *Broker) AdminHandler() http.Handler {
 func (b *Broker) OperatorHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+wire.PathOperatorNote, b.handleOperatorNote)
-	mux.HandleFunc("POST "+wire.PathOperatorWake, b.handleOperatorWake)
 	mux.HandleFunc("POST "+PathOperatorWorkerResume, b.handleOperatorWorkerResume)
+	mux.HandleFunc("GET "+PathOperatorWorkerList, b.handleOperatorWorkerList)
+	mux.HandleFunc("POST "+PathOperatorWorkerStart, b.handleOperatorWorkerStart)
+	mux.HandleFunc("POST "+PathOperatorWorkerRecycle, b.handleOperatorWorkerRecycle)
+	mux.HandleFunc("POST "+PathOperatorWorkerSuspend, b.handleOperatorWorkerSuspend)
+	mux.HandleFunc("POST "+PathOperatorWorkerStop, b.handleOperatorWorkerStop)
+	mux.HandleFunc("POST "+PathOperatorWorkerNewSession, b.handleOperatorWorkerNewSession)
+	mux.HandleFunc("POST "+PathOperatorWorkerEvents, b.handleOperatorWorkerEvents)
 	mux.HandleFunc("POST "+wire.PathOperatorAgentMessagesMatch, b.handleAgentMessagesMatch)
 	return mux
 }

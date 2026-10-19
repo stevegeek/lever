@@ -25,11 +25,7 @@ func TestClearStagedRuntimeState(t *testing.T) {
 		t.Fatal(err)
 	}
 	bootstrap := filepath.Join(tree, ".lever", "bootstrap.json")
-	manifest := filepath.Join(tree, config.ManifestName)
 	if err := os.WriteFile(bootstrap, []byte("{}"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(manifest, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -37,9 +33,6 @@ func TestClearStagedRuntimeState(t *testing.T) {
 
 	if _, err := os.Stat(bootstrap); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("bootstrap.json should be removed, stat err = %v", err)
-	}
-	if _, err := os.Stat(manifest); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("manifest should be removed, stat err = %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(tree, ".lever")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("empty .lever dir should be removed, stat err = %v", err)

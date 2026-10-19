@@ -30,6 +30,9 @@ const (
 	PathFilesList = "/files/list"
 	// PathFilesShare records one file an agent shares with a login.
 	PathFilesShare = "/files/share"
+	// PathVersion answers the host lever's version and Jail ABI to any live
+	// agent, and nothing else.
+	PathVersion = "/version"
 )
 
 // Admin (loopback) listener routes.
@@ -46,10 +49,6 @@ const (
 
 // Operator note (UDS) channel route: `lever msg send`.
 const PathOperatorNote = "/operator/note"
-
-// PathOperatorWake is the remote chat page's wake of a suspended or stopped
-// worker, on the same 0600 operator socket (never the admin listener).
-const PathOperatorWake = "/operator/wake"
 
 // PathOperatorAgentMessagesMatch asks which agent rows of a contact's history
 // the agent ledger recorded. It is served only on the 0600 operator socket,

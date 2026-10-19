@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -1057,4 +1058,67 @@ func TestResumeTaskArgv(t *testing.T) {
 	if len(f.Calls) != 1 {
 		t.Fatalf("a refused task reached scion: %d calls", len(f.Calls))
 	}
+}
+
+func TestListOversizedIsAgentListTooLarge(t *testing.T) {
+	r := &cappedRunner{}
+	_, err := New(r, Options{}).List(context.Background(), "proj")
+	if !errors.Is(err, ErrAgentListTooLarge) || !errors.Is(err, proc.ErrOutputLimit) {
+		t.Fatalf("err = %v, want ErrAgentListTooLarge wrapping proc.ErrOutputLimit", err)
+	}
+	for _, want := range []string{"agent list is too large", "lever up --fresh --keep-conversation", "lever worker purge NAME --force", "troubleshooting quick table"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error lacks %q: %v", want, err)
+		}
+	}
+	// The capped output is agent-written: none of it reaches the error, where
+	// IsBrokerUnavailable would match it.
+	for _, bad := range []string{"AGENT-WRITTEN", "/api/v1"} {
+		if strings.Contains(err.Error(), bad) {
+			t.Errorf("error carries %q: %v", bad, err)
+		}
+	}
+	if IsBrokerUnavailable(err) {
+		t.Errorf("the capped list reads as broker unavailable: %v", err)
+	}
+}
+
+func TestListOtherErrorIsNotAgentListTooLarge(t *testing.T) {
+	r := &refusingRunner{stderr: "Error: hub is not responding\n"}
+	_, err := New(r, Options{}).List(context.Background(), "proj")
+	if err == nil || errors.Is(err, ErrAgentListTooLarge) || errors.Is(err, proc.ErrOutputLimit) {
+		t.Fatalf("err = %v, want a plain list error", err)
+	}
+}
+
+// The live waits and ObserveAgent poll List; an oversized list ends each at
+// the first call instead of after its whole budget.
+func TestAgentWaitsFailAtOnceOnOversizedList(t *testing.T) {
+	ctx := context.Background()
+	calls := 0
+	tooLarge := func(context.Context) ([]Agent, error) {
+		calls++
+		return nil, listErr(fmt.Errorf("scion list: %w", proc.ErrOutputLimit))
+	}
+	check := func(name string, err error) {
+		t.Helper()
+		if !errors.Is(err, ErrAgentListTooLarge) || calls != 1 {
+			t.Errorf("%s: err = %v after %d calls, want ErrAgentListTooLarge after 1", name, err, calls)
+		}
+		calls = 0
+	}
+	check("WaitAgentLive", WaitAgentLive(ctx, tooLarge, "w", LiveBudget{Attempts: 100, Interval: time.Millisecond}))
+	_, err := ObserveAgent(ctx, tooLarge, "w", 100, time.Millisecond)
+	check("ObserveAgent", err)
+
+	live := []Agent{{Slug: "w", Phase: "running", ContainerStatus: "Up 1 second"}}
+	first := true
+	liveThenTooLarge := func(ctx context.Context) ([]Agent, error) {
+		if first {
+			first = false
+			return live, nil
+		}
+		return tooLarge(ctx)
+	}
+	check("WaitAgentLive settle", WaitAgentLive(ctx, liveThenTooLarge, "w", LiveBudget{Attempts: 1, Interval: time.Millisecond, Settle: time.Hour}))
 }

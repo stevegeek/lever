@@ -71,7 +71,7 @@ func (f *fakeConvScion) List(context.Context, string) ([]scion.Agent, error) {
 	if f.container != "" {
 		cs = f.container
 	}
-	return []scion.Agent{{Slug: "mgr", Phase: f.phase, Activity: f.activity, ContainerStatus: cs}}, nil
+	return []scion.Agent{{Slug: "mgr", Phase: f.phase, Activity: f.activity, ContainerStatus: cs, Image: "lever.local/lever-claude:1"}}, nil
 }
 
 func (f *fakeConvScion) Stop(context.Context, string, string) error {

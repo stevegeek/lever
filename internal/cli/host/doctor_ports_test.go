@@ -15,7 +15,7 @@ import (
 )
 
 // portsApp: broker 9443/9444, one supervised tool on 9201, one external on
-// 9301, remote 9445 (and a leftover login_port 9447, which lever ignores).
+// 9301, remote 9445.
 func portsApp(remote bool) *config.App {
 	app := &config.App{Name: "a"}
 	app.Broker.JailPort, app.Broker.AdminPort = 9443, 9444
@@ -25,7 +25,7 @@ func portsApp(remote bool) *config.App {
 	}
 	if remote {
 		app.Remote.Enabled = true
-		app.Remote.Port, app.Remote.LoginPort = 9445, 9447
+		app.Remote.Port = 9445
 	}
 	return app
 }
@@ -91,7 +91,6 @@ func TestCheckInstancePorts(t *testing.T) {
 		{"external tool's port is its own", portsApp(false), portsProbes(nil, false, false, 9301), false, nil, nil},
 		{"remote port held while the proxy is down", portsApp(true), portsProbes(nil, false, false, 9445), true,
 			[]string{"remote.port 9445 by another process"}, nil},
-		{"the ignored login_port is not an instance port", portsApp(true), portsProbes(nil, false, false, 9447), false, nil, nil},
 		{"remote port is the proxy's own", portsApp(true), portsProbes(nil, false, true, 9445), false, nil, nil},
 		{"remote off: its ports are not this instance's", portsApp(false), portsProbes(nil, false, false, 8445), false, nil, nil},
 		{"a non-lever process on the jail port", portsApp(false), portsProbes(nil, false, false, 9443), true,

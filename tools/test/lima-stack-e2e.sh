@@ -19,21 +19,27 @@
 #
 # Env: SCION_VERSION (default: the release pin), IMAGE_TAR, IMAGE (default
 # lever.local/lever-claude-slim), SAVE_IMAGE_TAR (copy the archive lever loaded
-# there, e.g. for the hub auth e2e; a lever.local image is also tagged
-# scionlocal/<name> in it, the name an older lever.yaml uses), IMAGE_CACHE (an
+# there, e.g. for the hub auth e2e), IMAGE_CACHE (an
 # archive path: reuse the archive an earlier run saved there when the key file
 # beside it matches this tree's in-jail fingerprint, pins, arch and image, else
-# build the image and save it there), LEVER (default ~/.local/bin/lever), NAME,
-# KEEP=1 (leave the VM for inspection).
+# build the image and save it there), LEVER (default ~/.local/bin/lever),
+# STACK_NAME (default stacke2e; must end in e2e), KEEP=1 (leave the VM for
+# inspection).
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-NAME="${NAME:-stacke2e}"
+# Not NAME: an operator's shell may hold a NAME for a real instance, whose VM
+# this run would delete.
+NAME="${STACK_NAME:-stacke2e}"
+case $NAME in
+*e2e) ;;
+*) echo "STACK_NAME=$NAME: the name must end in e2e (this run deletes the VM lever-<name>)"; exit 2 ;;
+esac
 VM="lever-${NAME}"
 LEVER="${LEVER:-$HOME/.local/bin/lever}"
 IMAGE="${IMAGE:-lever.local/lever-claude-slim}"
 # AGENT_IMAGE is the name agents run $IMAGE under (internal/imageref.Agent).
-AGENT_NAME="${IMAGE#lever.local/}"; AGENT_NAME="${AGENT_NAME#scionlocal/}"
+AGENT_NAME="${IMAGE#lever.local/}"
 SCION_VERSION="${SCION_VERSION:-$(sed -n 's/^const ReleasePin = "\(.*\)"/\1/p' "$REPO_ROOT/internal/provision/scionbin/release.go")}"
 SCION_MODULE=github.com/GoogleCloudPlatform/scion
 OPERATOR=operator@example.com
@@ -57,17 +63,21 @@ check() { local what=$1; shift; if "$@"; then ok "$what"; else bad "$what"; fi; 
 checkx() { local what=$1; shift; if eval "$*"; then ok "$what"; else bad "$what"; fi; }
 source <(sed -n '/^mask_secrets() {/,/^}/p' "$REPO_ROOT/tools/test/lima-e2e.sh")
 
+command -v limactl >/dev/null 2>&1 || { echo "limactl not found"; exit 1; }
+[ -x "$LEVER" ] || { echo "$LEVER not found (make install)"; exit 1; }
 # A short work dir: the broker's operator socket lives under the state dir,
 # and a UNIX socket path is limited to about 100 bytes.
 WORK="$(mktemp -d /tmp/ls.XXXXXX)"
 INST="$WORK/i"
+# Set by the clean slate: until then the VM by this name is not this run's.
+slate=0
 cleanup() {
 	rc=$?
 	if [ "${KEEP:-0}" = 1 ]; then echo "KEEP=1: leaving $VM and $WORK"; return; fi
 	# By the instance path, not the binary's name: LEVER may name a binary not
 	# called lever, and a daemon left behind keeps any lock this run holds.
 	pkill -f "(broker|remote) serve .*$INST/" 2>/dev/null
-	limactl delete --force "$VM" >/dev/null 2>&1
+	[ "$slate" = 1 ] && limactl delete --force "$VM" >/dev/null 2>&1
 	rm -rf "$WORK"
 	exit $rc
 }
@@ -82,8 +92,6 @@ JP=$(pick); AP=$(pick); RP=$(pick)
 while [ "$AP" = "$JP" ]; do AP=$(pick); done
 while [ "$RP" = "$JP" ] || [ "$RP" = "$AP" ]; do RP=$(pick); done
 
-command -v limactl >/dev/null 2>&1 || { echo "limactl not found"; exit 1; }
-[ -x "$LEVER" ] || { echo "$LEVER not found (make install)"; exit 1; }
 case "$(uname -m)" in arm64|aarch64) ARCH=arm64 ;; *) ARCH=amd64 ;; esac
 AGENT_IMAGE="lever.local/$AGENT_NAME:$ARCH"
 LEVER_VERSION="$(sed -n 's/^const Version = "\(.*\)"/\1/p' "$REPO_ROOT/internal/cli/root.go")"
@@ -202,6 +210,7 @@ row_ok() { local r; r=$(doctor_row "$1"); echo "      | ${r:-(no row)}" | cut -c
 up() { (cd "$INST" && timeout 3600 "$LEVER" apply 2>&1 | tee "$WORK/up.log" | mask_secrets | tail -${1:-25}); }
 
 say "clean slate"
+slate=1
 limactl delete --force "$VM" >/dev/null 2>&1 && echo "deleted stale $VM"
 (cd "$INST" && "$LEVER" init >/dev/null 2>&1)
 
@@ -240,7 +249,7 @@ if [ -z "${IMAGE_TAR:-}" ]; then
 	# podman names a local build of an unqualified ref localhost/<ref>; lever
 	# looks the archive up by the docker form of manager.image.
 	case "$IMAGE" in
-	lever.local/*) names="$IMAGE:$ARCH docker.io/scionlocal/${IMAGE#lever.local/}:$ARCH" ;;
+	lever.local/*) names="$IMAGE:$ARCH" ;;
 	*) names="docker.io/$IMAGE:$ARCH" ;;
 	esac
 	tagged=1
@@ -463,7 +472,7 @@ doctor_run
 checkx "doctor: hub container runtime fails on the agent's runtime" '! row_ok "hub container runtime"'
 up 5
 reg=$(hubreg 2>&1)
-checkx "apply set the hub's registry back to scionlocal ($reg)" '[ "$reg" = scionlocal ]'
+checkx "apply set the hub's registry back to lever.local ($reg)" '[ "$reg" = lever.local ]'
 checkx "apply set the hub's runtime back to podman ($(hubrt))" '[ "$(hubrt)" = podman ]'
 checkx "apply removed auto_inject_gcloud_adc" '! gcloudset'
 check "the manager runs after the repair" running
@@ -583,7 +592,10 @@ print(a[0].get("phase", "") if sys.argv[2] == "phase" else (a[0].get("appliedCon
 cmdlines() { P exec "lever--$NAME" sh -c 'for f in /proc/[0-9]*/cmdline; do tr "\000" " " < "$f"; echo; done' 2>/dev/null; }
 # claude_up: a claude process runs in the manager's container. Claude Code runs as
 # claude, as node with claude-code's cli, or behind scion's shell wrapper.
-claude_up() { cmdlines | grep -qE '(^|[/ ])claude( |$)|@anthropic-ai/claude-code/'; }
+# The list is read whole first: under pipefail, grep -q quitting at the first
+# match (claude starts early) leaves limactl writing to a closed pipe, and its
+# SIGPIPE failed the check with claude running.
+claude_up() { local c; c=$(cmdlines) || :; grep -qE '(^|[/ ])claude( |$)|@anthropic-ai/claude-code/' <<<"$c"; }
 # newest: the newest transcript in the manager's home (its claude session id).
 newest() { P exec --user scion "lever--$NAME" sh -c 'ls -t /home/scion/.claude/projects/*/*.jsonl 2>/dev/null | grep -v stack-e2e-old | head -1' 2>/dev/null; }
 P exec --user scion "lever--$NAME" sh -c 'mkdir -p /home/scion/.claude/projects/-workspace && echo stack-e2e-old > /home/scion/.claude/projects/-workspace/stack-e2e-old.jsonl'

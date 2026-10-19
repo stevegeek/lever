@@ -325,6 +325,21 @@ func TestHubStartScriptsRunForReal(t *testing.T) {
 	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
 		t.Fatalf("a pid file naming a dead pid was kept (stat err %v)", err)
 	}
+
+	// A pid file scion's Atoi refuses stops every later server start: an
+	// empty one (a guest killed between its create and its write), one with
+	// a trailing newline, and one with other bytes are removed.
+	for _, body := range []string{"", strconv.Itoa(os.Getpid()) + "\n", "12ab", " 1", strings.Repeat("1", 40)} {
+		if err := os.WriteFile(pidFile, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := run(serverPIDProbeScript, layout.ServerPIDRel, layout.ScionBin); got != "" {
+			t.Fatalf("probe of the pid file %q printed %q", body, got)
+		}
+		if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
+			t.Fatalf("the pid file %q was kept (stat err %v)", body, err)
+		}
+	}
 }
 
 // A process whose argv reads as a scion server counts only when it runs the

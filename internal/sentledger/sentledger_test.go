@@ -91,57 +91,19 @@ func TestByRefIsBoundToTheRecipient(t *testing.T) {
 	}
 }
 
-// TestWindowEdges: the envelope second may sit from trunc(before)-5s to
-// after+5s, and not a second beyond either edge.
-func TestWindowEdges(t *testing.T) {
-	l := open(t)
-	e := send(t, l, "manager", KindWorkerPrefix+"alpha", "x", t0, 2*time.Second)
-	lo := t0.Truncate(time.Second).Add(-ClockSkew)
-	hi := t0.Add(2 * time.Second).Add(ClockSkew).Truncate(time.Second)
-	now := t0.Add(time.Minute)
-	for _, tc := range []struct {
-		ts   time.Time
-		want int
-	}{
-		{lo, 1}, {lo.Add(-time.Second), 0}, {hi, 1}, {hi.Add(time.Second), 0},
-	} {
-		got, err := l.InWindow("manager", tc.ts, now)
-		if err != nil || len(got) != tc.want {
-			t.Fatalf("ts %s: %d matches (%v), want %d", tc.ts, len(got), err, tc.want)
-		}
-		if tc.want == 1 && got[0].ID != e.ID {
-			t.Fatalf("wrong match %+v", got[0])
-		}
-	}
-}
-
-// TestInFlightMatchesUntilMaxSendDuration: a send with no done line (a crash
-// mid-call, or a verify during the call) matches up to before+2m.
-func TestInFlightMatchesUntilMaxSendDuration(t *testing.T) {
-	l := open(t)
-	send(t, l, "manager", KindDirectiveNotice, "x", t0, -1)
-	late := t0.Add(MaxSendDuration)
-	if got, _ := l.InWindow("manager", late, t0.Add(time.Hour)); len(got) != 1 {
-		t.Fatalf("in flight at +2m: %d matches", len(got))
-	}
-	if got, _ := l.InWindow("manager", late.Add(ClockSkew+time.Second), t0.Add(time.Hour)); len(got) != 0 {
-		t.Fatalf("in flight past +2m+skew: %d matches", len(got))
-	}
-	// Before the call could have finished, now bounds it.
-	if got, _ := l.InWindow("manager", t0.Add(30*time.Second), t0.Add(10*time.Second)); len(got) != 0 {
-		t.Fatal("an envelope from the future matched")
-	}
-}
-
 // TestSameSecondSendsAreTwo: two identical bodies in one second are two
 // entries, each with its own id.
 func TestSameSecondSendsAreTwo(t *testing.T) {
 	l := open(t)
 	a := send(t, l, "manager", KindWorkerPrefix+"alpha", "same", t0, 0)
 	b := send(t, l, "manager", KindWorkerPrefix+"alpha", "same", t0.Add(100*time.Millisecond), 0)
-	got, err := l.InWindow("manager", t0.Truncate(time.Second), t0.Add(time.Minute))
-	if err != nil || len(got) != 2 || got[0].ID != a.ID || got[1].ID != b.ID {
-		t.Fatalf("got %+v %v", got, err)
+	if a.ID == b.ID {
+		t.Fatal("two sends share an id")
+	}
+	for _, e := range []Sent{a, b} {
+		if got, ok, err := l.ByRef("manager", e.ID); err != nil || !ok || got.Body != "same" {
+			t.Fatalf("%s: %+v %v %v", e.ID, got, ok, err)
+		}
 	}
 }
 

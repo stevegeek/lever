@@ -32,7 +32,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -443,55 +442,6 @@ func (l *Ledger) ByRef(recipient, id string) (Sent, bool, error) {
 		return *s, true, nil
 	}
 	return Sent{}, false, nil
-}
-
-// ClockSkew is how far the envelope's clock (the jail's or the hub's) may be
-// from the host clock that stamps Before and After, for InWindow.
-const ClockSkew = 5 * time.Second
-
-// MaxSendDuration bounds an in-flight send (no done line): scion's CLI call
-// and the hub's dispatch retry each stop well inside it.
-const MaxSendDuration = 2 * time.Minute
-
-// Matches reports whether an envelope timestamp ts (second resolution) can
-// name s, given the host clock now: from Before (truncated to the second)
-// less ClockSkew to After (or, in flight, min(now, Before+MaxSendDuration))
-// plus ClockSkew.
-func (s Sent) Matches(ts, now time.Time) bool {
-	lo := s.Before.Truncate(time.Second).Add(-ClockSkew)
-	hi := s.After
-	if hi.IsZero() {
-		hi = s.Before.Add(MaxSendDuration)
-		if now.Before(hi) {
-			hi = now
-		}
-	}
-	hi = hi.Add(ClockSkew)
-	return !ts.Before(lo) && !ts.After(hi)
-}
-
-// InWindow returns the sends to recipient that ts can name (Matches), oldest
-// first. It is the fallback for an agent image whose verify tool cannot pass
-// a ref.
-func (l *Ledger) InWindow(recipient string, ts, now time.Time) ([]Sent, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if err := l.refresh(recipient); err != nil {
-		return nil, err
-	}
-	var out []Sent
-	for _, s := range l.index {
-		if s.Recipient == recipient && s.Matches(ts, now) {
-			out = append(out, *s)
-		}
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if !out[i].Before.Equal(out[j].Before) {
-			return out[i].Before.Before(out[j].Before)
-		}
-		return out[i].ID < out[j].ID
-	})
-	return out, nil
 }
 
 // Count is the number of record files in dir (for doctor), or an error

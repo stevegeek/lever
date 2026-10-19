@@ -12,7 +12,7 @@ LEVER_INSTANCE ?= $(HOME)/lever-instance
 .PHONY: install
 install:
 	@mkdir -p $(PREFIX)
-	go build $(LEVER_BUILDVCS) -o $(PREFIX)/lever ./cmd/lever
+	go build $(LEVER_BUILDVCS) -ldflags "$(LEVER_STAMP_LDFLAGS)" -o $(PREFIX)/lever ./cmd/lever
 	@echo "installed $(PREFIX)/lever"; $(PREFIX)/lever version
 	go build -ldflags "-X main.Version=$(LEVER_VERSION)" -o $(PREFIX)/lever-tool-github ./cmd/lever-tool-github
 	@echo "installed $(PREFIX)/lever-tool-github"
@@ -25,9 +25,15 @@ install:
 # lever-agent cannot link internal/cli, so internal/agent.Version is stamped at
 # build time.
 LEVER_VERSION := $(shell sed -n 's/^const Version = "\(.*\)"/\1/p' internal/cli/root.go)
-LEVER_AGENT_LDFLAGS := -X github.com/stevegeek/lever/internal/agent.Version=$(LEVER_VERSION)
+# The commit every lever binary reports (internal/buildstamp). It wins over Go's
+# VCS stamp, which is wrong in a nested git worktree (see LEVER_BUILDVCS).
+# Lazy (`=`), so git only runs for the targets that build.
+LEVER_GIT_COMMIT = $(shell git rev-parse HEAD 2>/dev/null)
+LEVER_STAMP_LDFLAGS = -X github.com/stevegeek/lever/internal/buildstamp.revision=$(LEVER_GIT_COMMIT) \
+	-X github.com/stevegeek/lever/internal/buildstamp.modified=$(if $(LEVER_GIT_DIRTY),true,false)
+LEVER_AGENT_LDFLAGS = -X github.com/stevegeek/lever/internal/agent.Version=$(LEVER_VERSION) $(LEVER_STAMP_LDFLAGS)
 # lever-tool-db reports its version the same way (captool serverInfo).
-LEVER_TOOL_DB_LDFLAGS := -X main.Version=$(LEVER_VERSION)
+LEVER_TOOL_DB_LDFLAGS = -X main.Version=$(LEVER_VERSION) $(LEVER_STAMP_LDFLAGS)
 # The agent image's lever_version label: what `lever version` prints for this
 # source, so `lever doctor` can compare the image's binaries with the host
 # lever. Lazy (`=`), so git only runs for the targets that build an image.
@@ -35,8 +41,8 @@ LEVER_GIT_REV = $(shell git rev-parse --short=12 HEAD 2>/dev/null)
 LEVER_GIT_DIRTY = $(shell test -n "$$(git status --porcelain 2>/dev/null)" && echo -dirty)
 # Go's VCS stamping takes the first .git directory above the source, so in a
 # git worktree (where .git is a file) nested inside another checkout it stamps
-# that checkout's commit. There, build without it: lever then reports its
-# binary hash instead of a wrong commit.
+# that checkout's commit. There, build without it, so `go version -m` names no
+# wrong commit; LEVER_STAMP_LDFLAGS carries the right one.
 LEVER_BUILDVCS = $(if $(wildcard .git/HEAD),,-buildvcs=false)
 LEVER_IMAGE_VERSION = $(LEVER_VERSION)$(if $(LEVER_GIT_REV), ($(LEVER_GIT_REV)$(LEVER_GIT_DIRTY)))
 # The agent image's lever_jail_abi label (internal/jailabi), which `lever
@@ -53,7 +59,7 @@ LEVER_IMAGE_ARCH ?= $(shell go env GOARCH)
 lever-agent-linux:
 	@mkdir -p $(LEVER_INSTANCE)/vendor/bin
 	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 \
-		go build -ldflags "$(LEVER_AGENT_LDFLAGS)" -o $(LEVER_INSTANCE)/vendor/bin/lever-agent ./cmd/lever-agent
+		go build $(LEVER_BUILDVCS) -ldflags "$(LEVER_AGENT_LDFLAGS)" -o $(LEVER_INSTANCE)/vendor/bin/lever-agent ./cmd/lever-agent
 	@file $(LEVER_INSTANCE)/vendor/bin/lever-agent
 
 # The instance's lever-claude image build context.
@@ -65,11 +71,11 @@ LEVER_IMAGE_CTX ?= $(LEVER_INSTANCE)/image/lever-claude
 lever-image-bins:
 	@mkdir -p $(LEVER_IMAGE_CTX)/bin $(LEVER_IMAGE_CTX)/scionhook
 	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 \
-		go build -ldflags "$(LEVER_AGENT_LDFLAGS)" -o $(LEVER_IMAGE_CTX)/bin/lever-agent ./cmd/lever-agent
+		go build $(LEVER_BUILDVCS) -ldflags "$(LEVER_AGENT_LDFLAGS)" -o $(LEVER_IMAGE_CTX)/bin/lever-agent ./cmd/lever-agent
 	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 \
-		go build -ldflags "$(LEVER_TOOL_DB_LDFLAGS)" -o $(LEVER_IMAGE_CTX)/bin/lever-tool-db ./cmd/lever-tool-db
+		go build $(LEVER_BUILDVCS) -ldflags "$(LEVER_TOOL_DB_LDFLAGS)" -o $(LEVER_IMAGE_CTX)/bin/lever-tool-db ./cmd/lever-tool-db
 	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 \
-		go build -o $(LEVER_IMAGE_CTX)/bin/lever-manager ./cmd/lever-manager
+		go build $(LEVER_BUILDVCS) -ldflags "$(LEVER_STAMP_LDFLAGS)" -o $(LEVER_IMAGE_CTX)/bin/lever-manager ./cmd/lever-manager
 	cp cmd/lever-agent/scionhook/pre-start $(LEVER_IMAGE_CTX)/scionhook/pre-start
 	chmod +x $(LEVER_IMAGE_CTX)/scionhook/pre-start
 	@file $(LEVER_IMAGE_CTX)/bin/lever-agent $(LEVER_IMAGE_CTX)/bin/lever-tool-db $(LEVER_IMAGE_CTX)/bin/lever-manager
@@ -87,11 +93,11 @@ lever-image: framework-image-stage
 framework-image-stage:
 	@mkdir -p $(FRAMEWORK_IMAGE_CTX)/bin $(FRAMEWORK_IMAGE_CTX)/scionhook
 	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 \
-		go build -ldflags "$(LEVER_AGENT_LDFLAGS)" -o $(FRAMEWORK_IMAGE_CTX)/bin/lever-agent ./cmd/lever-agent
+		go build $(LEVER_BUILDVCS) -ldflags "$(LEVER_AGENT_LDFLAGS)" -o $(FRAMEWORK_IMAGE_CTX)/bin/lever-agent ./cmd/lever-agent
 	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 \
-		go build -ldflags "$(LEVER_TOOL_DB_LDFLAGS)" -o $(FRAMEWORK_IMAGE_CTX)/bin/lever-tool-db ./cmd/lever-tool-db
+		go build $(LEVER_BUILDVCS) -ldflags "$(LEVER_TOOL_DB_LDFLAGS)" -o $(FRAMEWORK_IMAGE_CTX)/bin/lever-tool-db ./cmd/lever-tool-db
 	GOOS=linux GOARCH=$(LEVER_IMAGE_ARCH) CGO_ENABLED=0 \
-		go build -o $(FRAMEWORK_IMAGE_CTX)/bin/lever-manager ./cmd/lever-manager
+		go build $(LEVER_BUILDVCS) -ldflags "$(LEVER_STAMP_LDFLAGS)" -o $(FRAMEWORK_IMAGE_CTX)/bin/lever-manager ./cmd/lever-manager
 	cp cmd/lever-agent/scionhook/pre-start $(FRAMEWORK_IMAGE_CTX)/scionhook/pre-start
 	chmod +x $(FRAMEWORK_IMAGE_CTX)/scionhook/pre-start
 
@@ -176,22 +182,49 @@ test-apikey-e2e: install lever-image-bins
 	LEVER_IMAGE_ARCH=$(LEVER_IMAGE_ARCH) LEVER_IMAGE_VERSION="$(LEVER_IMAGE_VERSION)" LEVER_JAIL_ABI="$(LEVER_JAIL_ABI)" bash $(LEVER_IMAGE_CTX)/build-lever-image.sh
 	bash tools/test/apikey-e2e.sh
 
+# The live Lima e2e targets run one at a time on a machine: each holds this
+# lock for its run and refuses at once while another holds it. e2e-lock-free
+# refuses before install replaces the binaries a running e2e uses (a run that
+# starts in between still can). -o keeps the lock out of the daemons a run
+# leaves behind, such as a KEEP=1 VM's.
+E2E_LOCK = $${XDG_CACHE_HOME:-$$HOME/.cache}/lever-e2e.lock
+E2E_LOCKED = command -v flock >/dev/null 2>&1 || { echo "flock not found: the live e2e targets need util-linux flock"; exit 1; }; \
+	mkdir -p "$$(dirname "$(E2E_LOCK)")" && flock -n -o -E 75 "$(E2E_LOCK)"
+E2E_HELD = { rc=$$?; [ "$$rc" != 75 ] || echo "another live e2e holds $(E2E_LOCK); wait for it to finish"; exit "$$rc"; }
+
+.NOTPARALLEL: test-lima-e2e test-lima-stack-e2e test-lima-chaos-e2e test-lima-hubauth-e2e
+
+.PHONY: e2e-lock-free
+e2e-lock-free:
+	@$(E2E_LOCKED) true || $(E2E_HELD)
+
 # Live e2e on a real Lima VM (Lima >= 2.0): acceptance checks under both
-# egress postures, port-forward suppression, re-bring-up and teardown.
+# egress postures, port-forward suppression, re-bring-up and teardown. The VM
+# is lever-<LIMA_E2E_NAME> (default lever-limae2e).
 .PHONY: test-lima-e2e
-test-lima-e2e: install
-	bash tools/test/lima-e2e.sh
+test-lima-e2e: e2e-lock-free install
+	@$(E2E_LOCKED) bash tools/test/lima-e2e.sh || $(E2E_HELD)
 
 # The whole stack on the pinned scion (agent image, manager, worker, remote
 # access, the experiment fence); see the script's header for what it needs.
 .PHONY: test-lima-stack-e2e
-test-lima-stack-e2e: install
-	bash tools/test/lima-stack-e2e.sh
+test-lima-stack-e2e: e2e-lock-free install
+	@$(E2E_LOCKED) bash tools/test/lima-stack-e2e.sh || $(E2E_HELD)
+
+# Live e2e of the lifecycle under races and faults on a real Lima VM: pairs of
+# lever commands at once, and the hub, the broker, lever or the guest killed
+# during an up, each followed by an up that must converge. Bounded by
+# CHAOS_BUDGET (default 30 min); a watchdog stops the whole run 90 min past
+# it. Needs IMAGE_TAR or IMAGE_CACHE (an archive the stack e2e saved); see the
+# script's header.
+.PHONY: test-lima-chaos-e2e
+test-lima-chaos-e2e: e2e-lock-free install
+	@$(E2E_LOCKED) bash tools/test/e2e-watchdog.sh $$(( $${CHAOS_BUDGET:-1800} + 5400 )) bash tools/test/lima-chaos-e2e.sh || $(E2E_HELD)
 
 # Live e2e of the hub's proxy auth on a real Lima VM: migrates an instance an
 # older lever brought up, binds and removes a contact while agents run,
 # rotates the controller PAT, then brings a fresh instance up. Needs
 # IMAGE_TAR (a docker archive of the agent image); see the script's header.
 .PHONY: test-lima-hubauth-e2e
-test-lima-hubauth-e2e: install
-	bash tools/test/lima-hubauth-e2e.sh
+test-lima-hubauth-e2e: e2e-lock-free install
+	@$(E2E_LOCKED) bash tools/test/lima-hubauth-e2e.sh || $(E2E_HELD)

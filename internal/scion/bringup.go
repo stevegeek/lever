@@ -5,11 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/progress"
 	"github.com/stevegeek/lever/internal/scion/layout"
 	"github.com/stevegeek/lever/internal/termsafe"
@@ -171,6 +171,11 @@ var errServerGone = errors.New("no scion server is running in the jail any more 
 // refused the credential, which happens whenever lever holds no working token
 // yet. Whoever needs the credential fails on it next, with the real error.
 //
+// A list stopped at lever's output cap counts as ready too: only an answering
+// hub sends that much, and every retry reads the same list. The callers that
+// need the list get ErrAgentListTooLarge from List; `lever up --fresh` deletes
+// the manager by name first.
+//
 // Every hubAliveEvery it runs serverPIDProbe, and stops with errServerGone
 // once no scion server is alive, so the long budget costs nothing when the
 // start failed. A probe that cannot run says nothing. notify, when non-nil,
@@ -208,7 +213,7 @@ func (c *Client) waitHubReady(ctx context.Context, notify func(format string, ar
 			}
 		}
 		_, lastErr = c.run(ctx, "", "list", "--all", "--format", "json", nonInteractive)
-		if lastErr == nil || isHubAuthRefusal(lastErr) {
+		if lastErr == nil || errors.Is(lastErr, proc.ErrOutputLimit) || isHubAuthRefusal(lastErr) {
 			return wait.Ready()
 		}
 		if now := time.Now(); now.Sub(lastAlive) >= c.hubAliveEvery {
@@ -248,8 +253,8 @@ while :; do
   i=$((i+1))
 done`
 
-// waitedExit is how both in-guest waits say they polled for their whole
-// window without success. A code of its own, so a jail transport failure or a
+// waitedExit is how the in-guest wait says it polled for its whole window
+// without success. A code of its own, so a jail transport failure or a
 // shell that could not start is never read as "not ready yet".
 const waitedExit = 3
 
@@ -287,115 +292,6 @@ func isHubAuthRefusal(err error) bool {
 // alongside it.
 var ErrHubNotReady = errors.New("hub not ready")
 
-// brokerPollEvery is how often the in-guest broker wait asks the hub.
-const brokerPollEvery = 200 * time.Millisecond
-
-// runtimeBroker: a broker registers with the hub before it finishes
-// connecting, so a row existing is not enough; readiness needs one that is
-// online or connected.
-type runtimeBroker struct {
-	Status          string `json:"status"`
-	ConnectionState string `json:"connectionState"`
-}
-
-func (b runtimeBroker) ready() bool {
-	return b.Status == "online" || b.ConnectionState == "connected"
-}
-
-// brokersOnline reports whether hub brokers output lists a ready broker. A
-// parse miss is "not ready".
-func brokersOnline(out string) bool {
-	var brokers []runtimeBroker
-	if parseJSON(out, &brokers) != nil {
-		return false
-	}
-	return slices.ContainsFunc(brokers, runtimeBroker.ready)
-}
-
-// brokerWaitScript polls scion hub brokers until its output names an online
-// or connected broker, and prints that output; waitedExit when none did. The
-// text match only decides when to stop: lever parses the output itself.
-const brokerWaitScript = `n=$1; shift
-i=0
-while :; do
-  if out=$("$@" 2>/dev/null); then
-    case $out in *'"online"'*|*'"connected"'*) printf '%s' "$out"; exit 0 ;; esac
-  fi
-  [ "$i" -ge "$n" ] && exit 3
-  sleep 0.2
-  i=$((i+1))
-done`
-
-// WaitRuntimeBrokerReady blocks until the hub reports at least one ONLINE
-// runtime broker, or the budget is exhausted; see RuntimeBrokerReady, whose
-// answer it drops.
-func (c *Client) WaitRuntimeBrokerReady(ctx context.Context, project string) error {
-	_, err := c.RuntimeBrokerReady(ctx, project)
-	return err
-}
-
-// RuntimeBrokerReady blocks until the hub reports at least one online runtime
-// broker, or the budget is exhausted, and reports whether it saw one. The
-// runtime broker registers and connects asynchronously after the Hub API
-// serves, and scion start and resume need it.
-//
-// The wait runs in the guest; when that cannot run, it polls from the host.
-//
-// Fail-soft: on budget exhaustion it returns (false, nil) and the caller
-// starts anyway, with the start path's IsBrokerUnavailable retry as the
-// backstop. Only ctx cancellation returns an error. project is passed only to
-// avoid scion's "no project" resolution failure; hub brokers is hub-wide.
-func (c *Client) RuntimeBrokerReady(ctx context.Context, project string) (bool, error) {
-	args := append([]string{"hub", "brokers", "--format", "json", nonInteractive}, projectFlag(project)...)
-	s := c.brokerReady
-	deadline := time.Now().Add(s.Budget)
-	for {
-		n := int(time.Until(deadline) / brokerPollEvery)
-		argv := append([]string{"-c", brokerWaitScript, "_", strconv.Itoa(max(n, 0)), c.bin}, args...)
-		res, err := c.r.RunIn(ctx, "", c.env(), "sh", argv...)
-		if cerr := ctx.Err(); cerr != nil {
-			return false, cerr
-		}
-		if err == nil && brokersOnline(res.Stdout) {
-			return true, nil
-		}
-		if err != nil && res.Code != waitedExit {
-			break // the in-guest wait cannot run here: poll from the host
-		}
-		if !time.Now().Before(deadline) {
-			return false, nil
-		}
-		// The guest matched text that lever's parse did not accept: keep
-		// waiting, without spinning.
-		select {
-		case <-ctx.Done():
-			return false, ctx.Err()
-		case <-time.After(brokerPollEvery):
-		}
-	}
-	// The host poll keeps the attempts the remaining time allows, so a slow
-	// CLI call cannot shorten it.
-	s.Budget = time.Until(deadline)
-	if s.Interval > 0 {
-		s.MinAttempts = max(1, int(s.Budget/s.Interval))
-	}
-	online := false
-	err := wait.For(ctx, s, func(ctx context.Context) wait.Result {
-		out, err := c.runValue(ctx, "", args...)
-		if err != nil {
-			return wait.NotYetErr(err)
-		}
-		if online = brokersOnline(out); online {
-			return wait.Ready()
-		}
-		return wait.NotYet("no online broker")
-	})
-	if errors.Is(err, wait.ErrTimeout) {
-		return false, nil
-	}
-	return online, err
-}
-
 // InitMachine seeds the machine-level scion dir and default harness configs.
 // Required before --harness claude resolves.
 func (c *Client) InitMachine(ctx context.Context) error {
@@ -403,7 +299,7 @@ func (c *Client) InitMachine(ctx context.Context) error {
 	return err
 }
 
-// ConfigSetGlobal sets a global scion config key (e.g. image_registry=scionlocal).
+// ConfigSetGlobal sets a global scion config key (e.g. image_registry=lever.local).
 func (c *Client) ConfigSetGlobal(ctx context.Context, key, value string) error {
 	_, err := c.run(ctx, "", "config", "set", "--global", nonInteractive, key, value)
 	return err
@@ -745,10 +641,24 @@ func (c *Client) ServerStop(ctx context.Context) error {
 // replaced the file under it) in the reader's own pid and user namespaces,
 // not a decoy in a container. The cmdline test matches scion's own daemon
 // argv (cmd/server_daemon.go).
+//
+// Scion writes only its pid's digits and reads the file back with Atoi, so
+// a file that holds anything else stops every later server start ("invalid
+// PID in file"): above all an empty one, left by a guest killed between the
+// file's create and its write. Such a file names no server and is removed,
+// with the same re-read. The size test catches a trailing newline, which the
+// command substitution drops but Atoi refuses.
 const serverPIDProbeScript = `f="$HOME/$1"
 [ -f "$f" ] || exit 0
-pid=$(tr -cd '0-9' < "$f")
-[ -n "$pid" ] || exit 0
+pid=$(head -c 32 -- "$f")
+case "$pid" in
+''|*[!0-9]*) bad=1 ;;
+*) [ "$(wc -c < "$f")" -eq "${#pid}" ] && bad= || bad=1 ;;
+esac
+if [ -n "$bad" ]; then
+  [ "$(head -c 32 -- "$f")" = "$pid" ] && rm -f -- "$f"
+  exit 0
+fi
 if [ ! -r "/proc/$pid/cmdline" ]; then
   [ "$(tr -cd '0-9' < "$f")" = "$pid" ] && rm -f -- "$f"
   exit 0

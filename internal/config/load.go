@@ -19,10 +19,6 @@ import (
 // `lever.yaml` planted in a parent directory is never picked up.
 const CanonicalName = "lever.yaml"
 
-// ManifestName is a legacy runtime manifest in the mount that `lever down`
-// removes when it finds one.
-const ManifestName = ".lever-manifest.yaml"
-
 // confinedRel reports whether p is a relative path strictly inside its base.
 // It does not keep a file out of the mounted tree; insideTree does that.
 func confinedRel(p string) bool {
@@ -185,6 +181,7 @@ func LoadNoHostChecks(path string) (*App, error) {
 	for _, g := range app.Workers {
 		bootFiles = append(bootFiles,
 			struct{ key, path string }{fmt.Sprintf("workers[%s].instructions_file", g.Name), app.WorkerInstructionsPath(g)},
+			struct{ key, path string }{fmt.Sprintf("workers[%s].task_file", g.Name), app.WorkerTaskPath(g)},
 			struct{ key, path string }{fmt.Sprintf("workers[%s].image_tar", g.Name), app.WorkerImageTarPath(g)})
 	}
 	for _, m := range bootFiles {
@@ -223,6 +220,7 @@ func LoadNoHostChecks(path string) (*App, error) {
 	app.Broker.APIKeyFile = resolvePath(app.Broker.APIKeyFile, app.dir)
 	app.Operator.SigningKey = resolvePath(app.Operator.SigningKey, app.dir)
 	app.injectLLMGrants()
+	app.markServiceHostTools()
 	if err := app.Validate(); err != nil {
 		return nil, err
 	}

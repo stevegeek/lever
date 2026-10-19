@@ -20,6 +20,7 @@ Developer notes for working on lever itself. For using lever, start at the
 | `internal/agentledger` | Host record of each contact message the broker authorized an agent to send. |
 | `internal/apply` | `lever apply`/`up` bring-up: the pure `Plan` and the `Run` executor. |
 | `internal/backend` | The containment `Backend` contract. `types` (stdlib-only leaf: the data types the contract carries for its guest-side verbs), `common` (shared machinery for reach-the-guest backends), `guest` (the in-guest half of provisioning: argv-prefix transport, in-guest scripts, installing what `internal/provision` built, scion state and hub-login settings surgery), `lima`, `orbstack`, `registry` (name → constructor, jail argv, and the `Candidates` guarantee matrix), `backendtest` (shared fakes for backend tests). |
+| `internal/buildstamp` | The build's provenance every lever binary reports: the commit (stamped with `-ldflags -X` by the Makefile and the release build, else Go's VCS stamp), dirty state and binary hash. Stdlib only. |
 | `internal/bridge` | Poll-based scion-event → events-file bridge the manager watches. |
 | `internal/broker` | The capability broker: enrol, request/delegate, MCP gateway, llm proxy, directives. `registry` (tool/operation registry and constraint mapping), `rules` (obtain/delegate policy), `brokertest` (test-only: a broker under test with its CA, server and mTLS clients). |
 | `internal/brokerctl` | Host-side controller for the broker daemon: keys, `serve`, tool supervisor, stop. |
@@ -48,6 +49,7 @@ Developer notes for working on lever itself. For using lever, start at the
 | `internal/hubauth` | lever's hub assertion key and ES256 signer: the identities lever asserts to the hub (admin, controller, remote sign-ins) and the reserved addresses. |
 | `internal/remoteproxy` | `lever remote serve`: the authenticating reverse proxy, the assertion sign-in, chat page, file exchange and web push. |
 | `internal/scion` | Client for the scion CLI (bring-up, lifecycle, hub tokens) and every predicate over scion's output wording. `layout` (pure: scion's `~/.scion` paths, settings.yaml keys and YAML edit helpers). |
+| `internal/servicehost` | `lever service-host`: the service host's config, its stdio bridge and upstream proxy behind pinned mutual TLS with a per-tool ceiling, and the pairing, transport and probe the broker and `lever doctor` use. |
 | `internal/sentledger` | Host record of every message lever itself sends to an agent. |
 | `internal/sessionrec` | Host record of when each agent's session last started fresh, and with which skill text. |
 | `internal/skills` | Framework-authored SKILL.md files scaffolded into instances. |
@@ -135,9 +137,16 @@ make test-integration  # `-tags integration` tests; each skips unless its env/to
 make test-apikey-e2e   # live api-key /llm path with a fake upstream; needs OrbStack + podman
 make test-lima-e2e     # live lima backend gate; needs Lima >= 2.0
 make test-lima-stack-e2e # live whole stack on the pinned scion (agent image, remote access); needs Lima >= 2.0
+make test-lima-chaos-e2e # live lifecycle races and faults (kill hub, broker, lever, guest mid-up); needs IMAGE_TAR or IMAGE_CACHE
 make test-lima-hubauth-e2e # live hub identities: migration from the older release, contacts while agents run; needs IMAGE_TAR
 lever acceptance       # six-check live gate against a running instance
 ```
+
+The four `test-lima-*` targets need util-linux `flock` and run one at a time: each holds
+`${XDG_CACHE_HOME:-~/.cache}/lever-e2e.lock` and refuses while another run holds it. Each script
+deletes and recreates its own VM, `lever-<name>`, where the name comes from `LIMA_E2E_NAME`,
+`STACK_NAME`, `CHAOS_NAME` or `HUBAUTH_NAME` (never `NAME`) and must end in `e2e`; `KEEP=1` leaves
+the VM for inspection.
 
 CI (`.github/workflows/ci.yml`) runs `gofmt -l .` (must be empty), `go vet ./...`, `go build ./...`
 and `go test -race ./...`. A release is a `v*` tag; the release workflow refuses a tag that does not

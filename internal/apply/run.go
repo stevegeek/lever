@@ -2,6 +2,7 @@ package apply
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/fsutil"
 	"github.com/stevegeek/lever/internal/hubauth"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/progress"
@@ -163,10 +165,18 @@ func (r *run) subjectName() string {
 // treeDir/.lever/bootstrap.json (0600), where lever-agent boot reads it. It is
 // the only staging path, shared by the mint step and Deps.RearmBootstrap.
 func StageBootstrapMaterial(treeDir string, m BootstrapMaterial) error {
+	raw, err := json.Marshal(m)
+	if err != nil {
+		return fmt.Errorf("stage bootstrap: marshal: %w", err)
+	}
 	// treeDir is the mount point, the one component the agent cannot replace.
-	// Everything below it is agent-writable, so wire.Stage refuses to follow a
-	// symlink planted at .lever.
-	return wire.Stage(treeDir, ".lever", m)
+	// Everything below it is agent-writable, so the write refuses a symlink at
+	// .lever and replaces bootstrap.json by rename rather than opening
+	// whatever the agent left there.
+	if err := fsutil.ReplaceInTreeNoLinks(treeDir, ".lever/bootstrap.json", raw, 0o700, 0o600); err != nil {
+		return fmt.Errorf("stage bootstrap: %w", err)
+	}
+	return nil
 }
 
 // Deps are the executor's collaborators, injected so Run is testable offline.

@@ -205,9 +205,10 @@ type DispatchConfig struct {
 	// MaxRunningWorkers is broker.max_running_workers. 0 = no cap.
 	MaxRunningWorkers int
 	// Tree is the instance tree, the confinement anchor for staging. It is
-	// agent-writable and the broker writes there as the operator, so
-	// wire.Stage confines every write to it and refuses agent-planted
-	// symlinks. Empty ⇒ the staging dir's parent (Broker.treePath).
+	// agent-writable and the broker writes there as the operator, so every
+	// staging write is confined to it, refuses agent-planted symlinks and
+	// replaces bootstrap.json by rename. Empty ⇒ the staging dir's parent
+	// (Broker.treePath).
 	Tree string
 	// LiveSettle is how long a started or resumed worker must STAY live
 	// before its dispatch is reported up (scion.LiveBudget.Settle). Zero is

@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -250,7 +251,14 @@ func (b *Broker) stageFreshTicket(cn, dir string) error {
 	if err != nil {
 		return fmt.Errorf("stage: %w", err)
 	}
-	if err := wire.Stage(root, rel, bs); err != nil {
+	raw, err := json.Marshal(bs)
+	if err != nil {
+		return fmt.Errorf("stage: marshal: %w", err)
+	}
+	// The manager can write everything below root: the write refuses any
+	// symlink on rel and replaces bootstrap.json by rename, never opening
+	// the hard link or FIFO the manager may have left there.
+	if err := fsutil.ReplaceInTreeNoLinks(root, path.Join(filepath.ToSlash(rel), "bootstrap.json"), raw, 0o700, 0o600); err != nil {
 		return fmt.Errorf("stage: %w", err)
 	}
 	return nil

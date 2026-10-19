@@ -729,3 +729,45 @@ func TestMachineStopped(t *testing.T) {
 		}
 	}
 }
+
+// ha.stderr.log carries text the guest chose; what the progress display
+// and a failure's tail show of it is bounded and inert.
+func TestLimaLogLinesAreBoundedAndInert(t *testing.T) {
+	long := "\x1b]0;owned\x07" + strings.Repeat("g", 60<<10)
+	path := filepath.Join(t.TempDir(), "ha.stderr.log")
+	content := `{"level":"info","msg":"` + long[len("\x1b]0;owned\x07"):] + `"}` + "\n" + long + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	msg, _ := latestLimaMsg(path, 0)
+	lines := lastLines(path, 15)
+	if len(lines) != 2 {
+		t.Fatalf("lastLines = %d lines", len(lines))
+	}
+	for _, s := range append(lines, msg, limaLine(`{"msg":"`+strings.Repeat("m", 1<<20)+`"}`)) {
+		if len([]rune(s)) > limaLineMax+1 || strings.ContainsAny(s, "\x1b\x07") {
+			t.Errorf("line of %d runes or with escapes: %.40q", len([]rune(s)), s)
+		}
+	}
+	if got := limaLine(`{"level":"warning","msg":"Waiting for the essential requirement 1 of 4: \"ssh\""}`); got != `warning: Waiting for the essential requirement 1 of 4: "ssh"` {
+		t.Errorf("limaLine = %q", got)
+	}
+}
+
+type limitRecorder struct {
+	*proc.FakeRunner
+	limit int
+}
+
+func (r *limitRecorder) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
+	r.limit, _ = proc.OutputLimit(ctx)
+	return r.FakeRunner.Run(ctx, env, name, args...)
+}
+
+func TestResolveHostAliasRunsUnderTheGuestOutputLimit(t *testing.T) {
+	r := &limitRecorder{FakeRunner: proc.NewFakeRunner()}
+	r.Script(limaGuest.User+" getent ahosts "+limaGuest.Alias, proc.Result{Stdout: "0.250.250.254   STREAM \n"})
+	if _, _, err := New(r, vm, common.Options{}).resolveHostAlias(context.Background()); err != nil || r.limit != guest.OutputLimit {
+		t.Fatalf("limit %d, err %v", r.limit, err)
+	}
+}

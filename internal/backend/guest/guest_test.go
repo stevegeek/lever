@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -699,5 +700,164 @@ func TestEnsureScionTakesTheEarlyBuild(t *testing.T) {
 				t.Fatalf("guest-step builds %d (want %d), early builds %d", own, tc.ownBuilds, len(early.Calls))
 			}
 		})
+	}
+}
+
+// limitRunner records the output cap each command ran under.
+type limitRunner struct {
+	*proc.FakeRunner
+	limits []int
+}
+
+func (l *limitRunner) note(ctx context.Context) {
+	n, _ := proc.OutputLimit(ctx)
+	l.limits = append(l.limits, n)
+}
+
+func (l *limitRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
+	l.note(ctx)
+	return l.FakeRunner.Run(ctx, env, name, args...)
+}
+
+func (l *limitRunner) RunStdin(ctx context.Context, stdin io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
+	l.note(ctx)
+	return l.FakeRunner.RunStdin(ctx, stdin, env, name, args...)
+}
+
+// Every way the guest helpers reach the guest carries the cap.
+func TestGuestCallsRunUnderTheOutputLimit(t *testing.T) {
+	r := &limitRunner{FakeRunner: proc.NewFakeRunner()}
+	r.Script("orb", proc.Result{})
+	g := orbGuest(r, "m")
+	ctx := context.Background()
+	_, _ = g.RootRun(ctx, "true")
+	_, _ = g.UserRun(ctx, "true")
+	_ = g.pipeInto(ctx, g.RootPrefix, strings.NewReader("x"), "cat")
+	_, _ = g.probeCall(ctx, g.UserPrefix, "true", nil)
+	_, _ = g.EnsureHubAuth(ctx, testHubAuth(false))
+	if len(r.limits) < 6 {
+		t.Fatalf("%d calls recorded", len(r.limits))
+	}
+	for i, n := range r.limits {
+		if n != OutputLimit {
+			t.Errorf("call %d (%s) ran with cap %d, want %d", i, r.Calls[i].Argv(), n, OutputLimit)
+		}
+	}
+}
+
+func TestLimitOutputKeepsASmallerCap(t *testing.T) {
+	if n, _ := proc.OutputLimit(LimitOutput(proc.WithOutputLimit(context.Background(), 64))); n != 64 {
+		t.Errorf("a 64-byte cap became %d", n)
+	}
+	if n, _ := proc.OutputLimit(LimitOutput(proc.WithOutputLimit(context.Background(), 1<<30))); n != OutputLimit {
+		t.Errorf("a 1 GiB cap became %d, want %d", n, OutputLimit)
+	}
+}
+
+// A guest that streams past the cap is killed and its step fails, through
+// the real runner.
+func TestHardeningStepFailsOnHugeGuestOutput(t *testing.T) {
+	for name, script := range map[string]string{
+		"stdout": "head -c 20000000 /dev/zero",
+		"stderr": "head -c 20000000 /dev/zero >&2",
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := Guest{Host: proc.RealRunner{}, RootPrefix: []string{"/bin/sh", "-c", script, "sh"}}
+			_, err := g.EnsureCrashRecovery(context.Background())
+			if !errors.Is(err, proc.ErrOutputLimit) || !strings.Contains(err.Error(), "guest crash recovery") {
+				t.Fatalf("err = %v, want the crash-recovery step failing with ErrOutputLimit", err)
+			}
+		})
+	}
+	g := Guest{Host: proc.RealRunner{}, RootPrefix: []string{"/bin/sh", "-c", "printf 'warn: hello\\n'", "sh"}}
+	rep, err := g.EnsureCrashRecovery(context.Background())
+	if err != nil || len(rep.Warn) != 1 || rep.Warn[0] != "hello" {
+		t.Fatalf("normal output: %+v %v", rep, err)
+	}
+}
+
+func TestValidRunUser(t *testing.T) {
+	for _, ok := range [][2]string{
+		{"alice", "1000"}, {"lima", "501"}, {"_svc", "999"}, {"first.last", "502"},
+		{"Alice", "501"}, {"a-b_c", "4294967294"}, {"u" + strings.Repeat("x", 31), "1"},
+	} {
+		if err := ValidRunUser(ok[0], ok[1]); err != nil {
+			t.Errorf("ValidRunUser(%q, %q) = %v", ok[0], ok[1], err)
+		}
+	}
+	for _, bad := range [][2]string{
+		{"", "1000"}, {"a b", "1000"}, {"a;id", "1000"}, {"a'b", "1000"}, {"$(id)", "1000"},
+		{"../etc", "1000"}, {"a/b", "1000"}, {"-rf", "1000"}, {".hidden", "1000"}, {"a:b", "1000"},
+		{"a\nb", "1000"}, {"\x1b]0;x\x07", "1000"}, {"é", "1000"}, {"u" + strings.Repeat("x", 32), "1"},
+		{"alice", ""}, {"alice", "0"}, {"alice", "-1"}, {"alice", "+5"}, {"alice", "01000"},
+		{"alice", "1000 "}, {"alice", "4294967295"}, {"alice", "4294967296"}, {"alice", "1e3"}, {"alice", "0x10"},
+	} {
+		if err := ValidRunUser(bad[0], bad[1]); err == nil {
+			t.Errorf("ValidRunUser(%q, %q) accepted", bad[0], bad[1])
+		} else if strings.ContainsAny(err.Error(), "\x1b\x07\n") {
+			t.Errorf("error carries control bytes: %q", err)
+		}
+	}
+}
+
+// A probe reporting a run user that does not validate is not used: the
+// caller resolves it in full, which refuses it.
+func TestSnapshotRunUserRefusesAnInvalidUser(t *testing.T) {
+	snap := &Snapshot{items: map[string]probeItem{"user": {out: "x;reboot"}, "uid": {out: "1000"}}}
+	if _, _, ok := snap.RunUser(); ok {
+		t.Fatal("an invalid probed run user was accepted")
+	}
+	snap.items["user"] = probeItem{out: "alice\n"}
+	if u, uid, ok := snap.RunUser(); !ok || u != "alice" || uid != "1000" {
+		t.Fatalf("RunUser = %q %q %v", u, uid, ok)
+	}
+}
+
+// Guest stderr quoted in an error is one bounded, printable line.
+func TestHardeningErrorsBoundGuestStderr(t *testing.T) {
+	huge := "\x1b]0;owned\x07" + strings.Repeat("e", 1<<20)
+	f := proc.NewFakeRunner()
+	f.Script("orb -u root -m m bash -c", proc.Result{Code: 1, Stderr: huge})
+	g := orbGuest(f, "m")
+	_, err1 := g.EnsureCrashRecovery(context.Background())
+	_, err2 := g.EnsureGuestKernel(context.Background(), GuestKernelGA, KernelOpts{})
+	_, err3 := g.EnsureGuestProfile(context.Background(), GuestProfileSmall)
+	for i, err := range []error{err1, err2, err3} {
+		if err == nil {
+			t.Fatalf("step %d: no error", i)
+		}
+		if len(err.Error()) > 4*stderrMax+200 || strings.ContainsAny(err.Error(), "\x1b\x07") {
+			t.Errorf("step %d: error is %d bytes or carries escapes", i, len(err.Error()))
+		}
+	}
+}
+
+func TestEnsureHubAuthBoundsGuestStderr(t *testing.T) {
+	r := &failingRunner{res: proc.Result{Code: 1, Stderr: "\x1b[2J" + strings.Repeat("e", 1<<20)}}
+	_, err := orbGuest(r, "m").EnsureHubAuth(context.Background(), testHubAuth(false))
+	if err == nil || len(err.Error()) > 4*stderrMax+200 || strings.Contains(err.Error(), "\x1b") {
+		t.Fatalf("error is %d bytes or carries escapes", len(err.Error()))
+	}
+}
+
+// failingRunner fails every command with res.
+type failingRunner struct{ res proc.Result }
+
+func (f *failingRunner) Run(context.Context, map[string]string, string, ...string) (proc.Result, error) {
+	return f.res, errors.New("exit status 1")
+}
+
+func (f *failingRunner) RunIn(context.Context, string, map[string]string, string, ...string) (proc.Result, error) {
+	return f.res, errors.New("exit status 1")
+}
+
+func (f *failingRunner) RunStdin(context.Context, io.Reader, map[string]string, string, ...string) (proc.Result, error) {
+	return f.res, errors.New("exit status 1")
+}
+
+func TestGOARCHBoundsTheUnameItQuotes(t *testing.T) {
+	_, err := goarchOf("\x1b]52;c;bad\x07" + strings.Repeat("x", 1<<20))
+	if err == nil || len(err.Error()) > 1000 || strings.ContainsAny(err.Error(), "\x1b\x07") {
+		t.Fatalf("error is %d bytes or carries escapes", len(err.Error()))
 	}
 }

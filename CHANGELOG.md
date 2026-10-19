@@ -27,6 +27,16 @@ version bump moves the block under the new version heading.
   report shows at most 16 lines of each kind and says how many more it left out. The first line of
   `limactl`, `loginctl` or `systemd-run` errors that bring-up messages quote is bounded the same
   way.
+- **Guest output and the guest's run user can no longer be used against the host.** A compromised
+  guest root could stream output without end into `lever up`, which held all of it in memory.
+  Every guest command of the bring-up (the guest hardening scripts, the provisioning steps, the
+  warm-path probe, the hub key install and the jail image commands) now stops at 8 MiB on stdout or
+  stderr: the command is killed and its step fails with an error that says the output passed its
+  limit. The run user and uid the guest reports are checked before use: a user name must be
+  letters, digits, `_`, `-` or `.` (up to 32, not starting with `-` or `.`), and the uid a plain
+  decimal number other than 0; anything else stops the bring-up. Guest stderr quoted in a bring-up
+  error, an unrecognised `uname -m`, unparsable `limactl --version` output and the Lima start
+  progress lines are made safe to print and cut to a few hundred characters.
 
 ### Changed
 

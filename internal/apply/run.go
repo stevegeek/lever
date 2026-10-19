@@ -18,6 +18,7 @@ import (
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/fsutil"
 	"github.com/stevegeek/lever/internal/hubauth"
+	"github.com/stevegeek/lever/internal/imageref"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/progress"
 	"github.com/stevegeek/lever/internal/scion"
@@ -1054,8 +1055,12 @@ func runCredential(ctx context.Context, s Step, d Deps) error {
 // ImageRegistry is the registry prefix scion rewrites an unqualified agent
 // image name to. Agents lever starts run a qualified name scion never rewrites
 // (imageref.Agent); the pin keeps an agent from pointing a record still on an
-// unqualified name at an image of its own.
-const ImageRegistry = "scionlocal"
+// unqualified name at an image of its own. scion keeps only the last path
+// component, so such a record on x or a/x runs lever.local/x: the name
+// load-image gives lever's freshly loaded x, or, with none loaded, a name no
+// registry serves, so the start fails instead of resolving through podman's
+// short-name path to a stale localhost/ image or a Docker Hub pull.
+const ImageRegistry = imageref.Registry
 
 // AgentRuntime is the container runtime the jail's scion starts agents with:
 // load-image fills rootless podman's store, and the warm-up builds podman's

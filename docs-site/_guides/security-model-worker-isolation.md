@@ -349,10 +349,12 @@ therefore starts every agent on a name with a registry host, `lever.local/<name>
 never rewrites: whatever the registry says, the agent runs the image `lever apply` loaded into the
 jail. No registry by that name exists, and the jail's podman refuses any pull from it, so a
 missing image fails instead of asking the network. As defence
-in depth, every `lever apply` also sets the registry back to `scionlocal` as lever-admin. An agent
+in depth, every `lever apply` also sets the registry back to `lever.local` as lever-admin. An agent
 record created by an older lever keeps its bare image name, and the registry still applies to it
-at each start; `lever doctor`'s `manager image` row lists such records, and recreating them closes
-it. The runtime route can likewise switch the hub's container runtime, which fails agent starts
+at each start: under lever's pin a record on `x` runs `lever.local/x`, the image lever loaded, or
+fails to start when there is none. `lever up` and `lever apply` refuse to keep or resume a manager
+on such a record and say to run `lever up --fresh --keep-conversation`; `lever doctor`'s `manager
+image` row lists such records, and recreating them closes it. The runtime route can likewise switch the hub's container runtime, which fails agent starts
 until the next `lever apply` sets it back to podman as lever-admin; doctor's `hub container
 runtime` row fails meanwhile. That pin stores the hub's profiles in its database, which from then
 on outranks `profiles:` in the jail's `settings.yaml`. The workstation settings route can turn on

@@ -462,7 +462,7 @@ doctor_run
 checkx "doctor: hub container runtime fails on the agent's runtime" '! row_ok "hub container runtime"'
 up 5
 reg=$(hubreg 2>&1)
-checkx "apply set the hub's registry back to scionlocal ($reg)" '[ "$reg" = scionlocal ]'
+checkx "apply set the hub's registry back to lever.local ($reg)" '[ "$reg" = lever.local ]'
 checkx "apply set the hub's runtime back to podman ($(hubrt))" '[ "$(hubrt)" = podman ]'
 checkx "apply removed auto_inject_gcloud_adc" '! gcloudset'
 check "the manager runs after the repair" running

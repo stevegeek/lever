@@ -299,7 +299,7 @@ func (c *Client) InitMachine(ctx context.Context) error {
 	return err
 }
 
-// ConfigSetGlobal sets a global scion config key (e.g. image_registry=scionlocal).
+// ConfigSetGlobal sets a global scion config key (e.g. image_registry=lever.local).
 func (c *Client) ConfigSetGlobal(ctx context.Context, key, value string) error {
 	_, err := c.run(ctx, "", "config", "set", "--global", nonInteractive, key, value)
 	return err

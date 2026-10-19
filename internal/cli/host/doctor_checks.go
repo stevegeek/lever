@@ -1150,7 +1150,8 @@ func activityAge(a *scionpkg.Agent, now time.Time) string {
 // else. Podman may qualify the ref (docker.io/, localhost/), so refs are
 // compared normalised.
 //
-// A record created on an unqualified name, by an older lever, is a warning:
+// A record created on an unqualified name, by an older lever, fails for the
+// manager, which lever up refuses to keep, and is a warning for a worker:
 // scion rewrites that name to the hub's image registry at every start, and
 // any agent can set the registry between applies.
 func checkManagerImage(ctx context.Context, project, name, configured string, list agentLister) checkResult {
@@ -1183,6 +1184,8 @@ func checkManagerImage(ctx context.Context, project, name, configured string, li
 		}
 		return checkResult{check, false, detail,
 			"run `lever up --fresh --keep-conversation` to recreate the manager on the configured image and keep its conversation (plain `--fresh` starts a new one; both back the old one up first)"}
+	case bareDetail != "" && a != nil && a.Image != "" && !strings.Contains(a.Image, "@") && !imageref.Qualified(a.Image):
+		return checkResult{check, false, bareDetail, bareFix}
 	case bareDetail != "":
 		return warnResult(check, bareDetail, bareFix)
 	case a == nil:

@@ -1574,7 +1574,7 @@ func TestCheckManagerImage(t *testing.T) {
 		{"same", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "lever.local/lever-claude:arm64"}), true, "lever.local/lever-claude:arm64", ""},
 		{"created by an older lever on the bare name", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "scionlocal/lever-claude:arm64"}), false, "assistant (scionlocal/lever-claude:arm64) created on an unqualified image name", "lever up --fresh --keep-conversation"},
 		{"same, podman-qualified bare", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "localhost/scionlocal/lever-claude:arm64"}), false, "unqualified", "--keep-conversation"},
-		{"unqualified, configured bare", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "lever-claude:arm64"}), true, "unqualified", "--keep-conversation"},
+		{"unqualified, configured bare", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "lever-claude:arm64"}), false, "unqualified", "--keep-conversation"},
 		{"a worker on a bare name", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "lever.local/lever-claude:arm64"}, scion.Agent{Slug: "w", Image: "scionlocal/lever-claude:arm64"}), true, "w (scionlocal/lever-claude:arm64)", "recycling"},
 		{"a worker on a digest", listing(scion.Agent{Slug: "assistant", Phase: "running", Image: "lever.local/lever-claude:arm64"}, scion.Agent{Slug: "w", Image: "x@sha256:aa"}), true, "as configured", ""},
 		{"drifted", listing(scion.Agent{Slug: "assistant", Phase: "suspended", Image: "scionlocal/lever-claude:v1"}), false, "scionlocal/lever-claude:v1", "lever up --fresh"},

@@ -289,6 +289,8 @@ type agentLifecycleRunner struct {
 
 	phase, containerStatus string
 	inited                 bool
+	// image is the record's image, when set.
+	image string
 
 	startCalls, resumeCalls, deleteCalls, listCalls int
 	resumeForceCalls                                int // subset of resumeCalls carrying --force
@@ -366,6 +368,9 @@ func (r *agentLifecycleRunner) RunIn(ctx context.Context, dir string, env map[st
 		}
 		if r.phase == "" {
 			return proc.Result{Stdout: "[]"}, nil
+		}
+		if r.image != "" {
+			return proc.Result{Stdout: fmt.Sprintf(`[{"slug":%q,"phase":%q,"containerStatus":%q,"image":%q}]`, r.slug, r.phase, r.containerStatus, r.image)}, nil
 		}
 		return proc.Result{Stdout: fmt.Sprintf(`[{"slug":%q,"phase":%q,"containerStatus":%q}]`, r.slug, r.phase, r.containerStatus)}, nil
 	case "start":
@@ -1452,7 +1457,7 @@ func TestRunDispatchesStepsInOrder(t *testing.T) {
 		t.Fatal("host step load-image not called")
 	}
 	j := joinedCalls(f)
-	for _, want := range []string{"init --machine", "config set --global --non-interactive image_registry scionlocal", "server start", "init --non-interactive", "hub link", "-- hello"} {
+	for _, want := range []string{"init --machine", "config set --global --non-interactive image_registry lever.local", "server start", "init --non-interactive", "hub link", "-- hello"} {
 		if !strings.Contains(j, want) {
 			t.Fatalf("missing scion call %q in: %q", want, j)
 		}
@@ -4260,27 +4265,53 @@ func TestStartManagerFreshAfterAnUnconfirmedDelete(t *testing.T) {
 	}
 }
 
+// A plain apply over a manager record on an unqualified image name changes
+// nothing: no suspend, resume or create.
+func TestApplyRefusesAManagerOnAnUnqualifiedImage(t *testing.T) {
+	for _, phase := range []string{"running", "suspended"} {
+		app, f := newObserveFirstApp(t)
+		r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: phase, initContainerStatus: "created", image: "scionlocal/lever-claude:arm64"}
+		err := runApply(app, Deps{
+			Scion:            scion.New(r, scion.Options{}),
+			GuestBoot:        &fakeGuestBoot{current: bootB, recorded: bootA},
+			ContainerRunning: podmanSays(false),
+		})
+		testutil.WantErrContaining(t, err, "unqualified image name")
+		testutil.WantErrContaining(t, err, "lever up --fresh --keep-conversation")
+		if r.suspendCalls != 0 || r.resumeCalls != 0 || r.startCalls != 0 || r.deleteCalls != 0 {
+			t.Errorf("%s: suspend=%d resume=%d start=%d delete=%d, want none", phase, r.suspendCalls, r.resumeCalls, r.startCalls, r.deleteCalls)
+		}
+	}
+}
+
 // A manager an older lever created keeps its unqualified image name, which
-// the hub's image registry still applies to: keeping or resuming it warns.
-func TestActUpWarnsOnAnUnqualifiedImage(t *testing.T) {
+// the hub's image registry still applies to: a keep refuses it before any
+// change, and only --fresh goes on.
+func TestRefuseUnqualifiedRecord(t *testing.T) {
 	for _, c := range []struct {
-		image string
-		warn  bool
+		image  string
+		fresh  bool
+		refuse bool
 	}{
-		{"scionlocal/lever-claude:arm64", true},
-		{"localhost/scionlocal/lever-claude:arm64", true},
-		{"lever.local/lever-claude:arm64", false},
-		{"", false},
+		{"scionlocal/lever-claude:arm64", false, true},
+		{"localhost/scionlocal/lever-claude:arm64", false, true},
+		{"lever-claude:arm64", false, true},
+		{"scionlocal/lever-claude:arm64", true, false},
+		{"lever.local/lever-claude:arm64", false, false},
+		{"scionlocal/x@sha256:abc", false, false},
+		{"", false, false},
 	} {
-		var logs []string
-		r := &run{app: &config.App{Name: "m"}, d: Deps{Log: func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }}}
+		r := &run{app: &config.App{Name: "m"}, fresh: c.fresh}
 		rec := &scion.Agent{Slug: "m", Phase: scion.PhaseRunning, Image: c.image}
-		if err := r.actUp(context.Background(), "/lever", rec, managerPlan{verb: verbNone}, scion.StartOpts{Image: "lever.local/lever-claude:arm64"}); err != nil {
-			t.Fatal(err)
+		err := r.refuseUnqualifiedRecord(rec, "lever.local/lever-claude:arm64")
+		if (err != nil) != c.refuse {
+			t.Errorf("%q fresh=%v: err = %v, want refused %v", c.image, c.fresh, err, c.refuse)
 		}
-		got := strings.Contains(strings.Join(logs, "\n"), "unqualified image name")
-		if got != c.warn {
-			t.Errorf("%q: warned = %v, want %v (%q)", c.image, got, c.warn, logs)
+		if err != nil {
+			testutil.WantErrContaining(t, err, "lever up --fresh --keep-conversation")
 		}
+	}
+	if err := (&run{app: &config.App{Name: "m"}}).refuseUnqualifiedRecord(nil, "lever.local/x:1"); err != nil {
+		t.Errorf("no record: %v", err)
 	}
 }

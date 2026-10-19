@@ -552,6 +552,9 @@ func (r *run) ensureUp(ctx context.Context, jp string, q ManagerRequest) (Manage
 	if err != nil {
 		return ManagerResult{}, err
 	}
+	if err := r.refuseUnqualifiedRecord(rec, opts.Image); err != nil {
+		return ManagerResult{}, err
+	}
 	p, err := planManager(q, r.app.Name, o)
 	if err == nil && p.recover {
 		r.suspendToRecover(ctx, jp, rec, o)
@@ -631,17 +634,23 @@ func (r *run) ensureUp(ctx context.Context, jp string, q ManagerRequest) (Manage
 	return res, nil
 }
 
+// refuseUnqualifiedRecord stops a keep before anything is changed when the
+// manager record was created on an unqualified image name, by an older lever.
+// scion keeps a record's image for life and rewrites an unqualified one to the
+// hub's image registry at every start, a setting any agent can change between
+// applies; only a fresh create moves the record to a qualified name.
+func (r *run) refuseUnqualifiedRecord(rec *scion.Agent, want string) error {
+	if rec == nil || r.fresh || rec.Image == "" || strings.Contains(rec.Image, "@") || imageref.Qualified(rec.Image) {
+		return nil
+	}
+	return fmt.Errorf("%s: manager %q was created on the unqualified image name %s, which the hub rewrites to its image registry at every start, a setting any agent can change; nothing was changed. Run `lever up --fresh --keep-conversation` to recreate it on %s and keep its conversation",
+		r.subjectName(), r.app.Name, termsafe.Sanitize(rec.Image), termsafe.Sanitize(want))
+}
+
 // actUp makes the plan's change to the record; the gate after it confirms
 // the container is up, so a kept running record over a dead container fails
 // loudly there.
 func (r *run) actUp(ctx context.Context, jp string, rec *scion.Agent, p managerPlan, opts scion.StartOpts) error {
-	if rec != nil && !r.fresh && rec.Image != "" && !strings.Contains(rec.Image, "@") && !imageref.Qualified(rec.Image) {
-		// scion keeps the image a record was created with and rewrites an
-		// unqualified one to the hub's image registry at every start, which an
-		// agent can set between applies.
-		r.d.Log("%s: WARNING: manager %q was created on the unqualified image name %s, which the hub rewrites to its image registry at every start, a setting any agent can change; recreate it on %s with `lever up --fresh --keep-conversation`",
-			r.subjectName(), r.app.Name, termsafe.Sanitize(rec.Image), opts.Image)
-	}
 	switch p.verb {
 	case verbCreate:
 		return r.startManagerCreate(ctx, opts, p.mustCreate)

@@ -136,8 +136,7 @@ version bump moves the block under the new version heading.
   `lever.local/<name>`: config refuses the old name and gives the `lever.local/` one, and `make
   lever-image` and `make lever-image-slim` tag only `lever.local/<name>:<arch>`. A host's docker
   can still hold a stale build under the old name, which a `lever.yaml` naming it would have loaded
-  and run. Every apply still pins the hub's image registry to `scionlocal`, which keeps an agent
-  from redirecting a record that is still on an unqualified name.
+  and run. Every apply now pins the hub's image registry to `lever.local` (see Security).
 
 ### Fixed
 
@@ -152,6 +151,15 @@ version bump moves the block under the new version heading.
   tool.
 
 ### Security
+
+- **Every apply pins the hub's image registry to `lever.local`, and `lever up` refuses a manager
+  on an unqualified image name.** scion rewrites an agent record's unqualified image name `x` (or
+  `a/x`) to `<registry>/x` at every start. Under the old `scionlocal` pin, with the
+  `scionlocal/` alias gone, that named a stale image in the jail or, through podman's short-name
+  path, a Docker Hub pull. Under `lever.local` it names the image lever just loaded, or none, and
+  the start fails. A plain `lever up` or `lever apply` now stops before it changes a manager whose
+  record is on an unqualified name, instead of warning, and says to run `lever up --fresh
+  --keep-conversation`; doctor's *manager image* row fails for it.
 
 - **A constraint on a renamed argument is checked against that argument only.** When a tool's
   `caveat_param` maps a constraint key to another argument name (`repo: repository`), the gateway
@@ -206,6 +214,11 @@ version bump moves the block under the new version heading.
   `lever.local/<name>:<arch>` tag: tag the image with it and save the archive again. A manager still
   running on the old name fails doctor's *manager image* row until `lever up --fresh
   --keep-conversation` recreates it.
+
+- **A manager created by an older lever on an unqualified image name must be recreated:** run
+  `lever up --fresh --keep-conversation` once. Plain `lever up` and `lever apply` refuse it until
+  then. A worker on such a name (doctor's *manager image* row warns) should be recycled. The
+  first apply sets the hub's image registry to `lever.local`.
 
 - **Host programs that called `/operator/wake` must run `lever worker resume NAME`** (or POST
   `/operator/worker/resume` without `for`). Run `lever reload` after upgrading: a broker of the

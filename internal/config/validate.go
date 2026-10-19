@@ -224,8 +224,13 @@ func (s Security) validateImage(field, ref string) error {
 		return fmt.Errorf("config: %s %q has invalid characters", field, ref)
 	}
 	// A host's docker can still hold a stale lever image under scionlocal/,
-	// which a config naming it would load and run.
-	if name, ok := strings.CutPrefix(ref, "scionlocal/"); ok {
+	// which a config naming it would load and run; docker and podman also
+	// spell that name with docker.io/, index.docker.io/ or localhost/.
+	bare := ref
+	for _, p := range []string{"docker.io/", "index.docker.io/", "localhost/"} {
+		bare = strings.TrimPrefix(bare, p)
+	}
+	if name, ok := strings.CutPrefix(bare, "scionlocal/"); ok {
 		return fmt.Errorf("config: %s %q: lever's images are named %s/<name>; use %s/%s (make lever-image builds it)", field, ref, imageref.Registry, imageref.Registry, name)
 	}
 	if len(s.AllowedImageRegistries) > 0 && !registryAllowed(ref, s.AllowedImageRegistries) {

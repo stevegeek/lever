@@ -166,16 +166,19 @@ func TestAgentImageNames(t *testing.T) {
 // with the name to use, for the manager and a worker alike.
 func TestScionlocalImageRefused(t *testing.T) {
 	for name, body := range map[string]string{
-		"manager": tarHeader + "manager:\n  image: scionlocal/lever-claude:arm64\n",
-		"worker":  tarHeader + "manager: {}\nworkers:\n  - name: w\n    dir: ws/w\n    image: scionlocal/lever-claude\n",
-		"digest":  tarHeader + "manager:\n  image: scionlocal/x@sha256:" + strings.Repeat("a", 64) + "\n",
+		"manager":         tarHeader + "manager:\n  image: scionlocal/lever-claude:arm64\n",
+		"worker":          tarHeader + "manager: {}\nworkers:\n  - name: w\n    dir: ws/w\n    image: scionlocal/lever-claude\n",
+		"digest":          tarHeader + "manager:\n  image: scionlocal/x@sha256:" + strings.Repeat("a", 64) + "\n",
+		"docker.io":       tarHeader + "manager:\n  image: docker.io/scionlocal/x:1\n",
+		"index.docker.io": tarHeader + "manager:\n  image: index.docker.io/scionlocal/x:1\n",
+		"localhost":       tarHeader + "manager:\n  image: localhost/scionlocal/x:1\n",
 	} {
 		_, err := LoadNoHostChecks(writeConfig(t, body))
 		if err == nil || !strings.Contains(err.Error(), "use lever.local/") {
 			t.Errorf("%s: want the scionlocal/ name refused, got %v", name, err)
 		}
 	}
-	for _, ok := range []string{"lever.local/lever-claude:arm64", "scionlocalevil/x:1", "docker.io/scionlocal/x:1"} {
+	for _, ok := range []string{"lever.local/lever-claude:arm64", "scionlocalevil/x:1", "ghcr.io/scionlocal/x:1"} {
 		if _, err := LoadNoHostChecks(writeConfig(t, tarHeader+"manager:\n  image: "+ok+"\n")); err != nil {
 			t.Errorf("%s: %v", ok, err)
 		}

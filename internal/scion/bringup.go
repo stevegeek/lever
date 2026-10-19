@@ -211,11 +211,13 @@ func (c *Client) waitHubReady(ctx context.Context, notify func(format string, ar
 			}
 		}
 		_, lastErr = c.run(ctx, "", "list", "--all", "--format", "json", nonInteractive)
-		if lastErr == nil || isHubAuthRefusal(lastErr) {
-			return wait.Ready()
-		}
+		// Before the auth check, which matches text: partial output under a
+		// cap the caller chose could carry agent-written words.
 		if errors.Is(lastErr, proc.ErrOutputLimit) {
 			return wait.Fatal(listErr(lastErr))
+		}
+		if lastErr == nil || isHubAuthRefusal(lastErr) {
+			return wait.Ready()
 		}
 		if now := time.Now(); now.Sub(lastAlive) >= c.hubAliveEvery {
 			lastAlive = now

@@ -873,7 +873,9 @@ func (r *run) newSession(ctx context.Context, jp string, q ManagerRequest) (res 
 			err = r.resumeAfterFailure(ctx, jp, err, "on its own conversation")
 		}
 	}()
-	if last, err := r.waitPhase(ctx, jp, scion.PhaseSuspended); err != nil {
+	if last, err := r.waitPhase(ctx, jp, scion.PhaseSuspended); errors.Is(err, scion.ErrAgentListTooLarge) {
+		return res, fmt.Errorf("could not see whether the manager suspended; nothing was changed: %w", err)
+	} else if err != nil {
 		return res, fmt.Errorf("the manager did not suspend (last seen %s); nothing was changed", scion.BoundedQuote(last))
 	}
 	if err := q.WhileSuspended(ctx); err != nil {
@@ -884,6 +886,10 @@ func (r *run) newSession(ctx context.Context, jp string, q ManagerRequest) (res 
 		return res, fmt.Errorf("stopping the manager failed, so its session was not ended: %s", termsafe.Sanitize(scion.ErrSummary(serr)))
 	}
 	if last, werr := r.waitPhase(ctx, jp, scion.PhaseStopped); werr != nil {
+		if errors.Is(werr, scion.ErrAgentListTooLarge) {
+			stopped = true
+			return res, markedError{fmt.Errorf("lever cannot tell whether the manager's session ended and started nothing: %w", werr), ErrStopUnconfirmed}
+		}
 		if r.stillSuspended(ctx, jp) {
 			return res, fmt.Errorf("the manager did not stop (last seen %s), so its session was not ended", scion.BoundedQuote(last))
 		}

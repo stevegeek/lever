@@ -350,7 +350,7 @@ func TestWaitHubReadyFailsAtOnceOnOversizedList(t *testing.T) {
 	if r.calls != 1 || time.Since(start) > time.Second {
 		t.Fatalf("calls = %d after %s, want one probe and an immediate failure", r.calls, time.Since(start))
 	}
-	for _, want := range []string{"agent list is too large", "lever worker purge", "lever up --fresh", "8388608-byte limit"} {
+	for _, want := range []string{"agent list is too large", "lever worker purge", "lever up --fresh", "GET /api/v1/agents", "8388608-byte limit"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error lacks %q: %v", want, err)
 		}
@@ -361,9 +361,10 @@ func TestServerStartFailsAtOnceOnOversizedList(t *testing.T) {
 	r := &cappedRunner{}
 	c := New(r, Options{})
 	c.hubReady.Budget, c.hubReady.Interval = 2*time.Second, time.Millisecond
-	c.hubRetryPause = time.Hour
+	c.hubRetryPause = time.Second
+	start := time.Now()
 	err := c.ServerStart(context.Background(), ServerOpts{})
-	if !errors.Is(err, ErrAgentListTooLarge) {
-		t.Fatalf("err = %v, want ErrAgentListTooLarge", err)
+	if !errors.Is(err, ErrAgentListTooLarge) || r.calls != 1 || time.Since(start) > time.Second {
+		t.Fatalf("err = %v after %d calls and %s, want ErrAgentListTooLarge at once", err, r.calls, time.Since(start))
 	}
 }

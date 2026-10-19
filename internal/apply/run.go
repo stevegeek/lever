@@ -750,7 +750,9 @@ func RestartHub(ctx context.Context, app *config.App, d Deps, reason string) err
 	}
 	opts := HubServerOpts(app, d.HubSessionSecret, d.HubAuthEnv)
 	opts.Progress = d.Log
-	if err := d.Scion.ServerStart(ctx, opts); err != nil {
+	if err := d.Scion.ServerStart(ctx, opts); errors.Is(err, scion.ErrAgentListTooLarge) {
+		return fmt.Errorf("restart the hub: it started again, but %w", err)
+	} else if err != nil {
 		return fmt.Errorf("the hub is stopped: it was stopped for a restart, and starting it again failed (%w); fix the cause and run `lever up`, which starts it again", err)
 	}
 	return hubBrokerOnline(ctx, d, hubRestartedBroker)
@@ -1930,7 +1932,7 @@ const NestedVirtRecreateFix = "recreate it to apply the change: `lever up --fres
 // reaches a phase planManager can act on, disappears (nil: a concurrent
 // delete; the caller then creates), or the budget runs out. Exhaustion is a
 // hard error that never touches the record. A list error mid-poll counts as
-// "not yet"; a phase neither transitional nor known stops the wait at once so
+// "not yet", except ErrAgentListTooLarge, which a retry reads again; a phase neither transitional nor known stops the wait at once so
 // planManager refuses it by name.
 func (r *run) settleManagerPhase(ctx context.Context, jp string, rec *scion.Agent) (*scion.Agent, error) {
 	b := r.phaseSettle
@@ -1956,6 +1958,9 @@ func (r *run) settleManagerPhase(ctx context.Context, jp string, rec *scion.Agen
 	})
 	if err == nil {
 		return cur, nil
+	}
+	if errors.Is(err, scion.ErrAgentListTooLarge) {
+		return nil, fmt.Errorf("start-manager: manager %q was in phase %q and could not be re-observed; nothing was changed: %w", r.app.Name, cur.Phase, err)
 	}
 	if !errors.Is(err, wait.ErrTimeout) {
 		return nil, err

@@ -55,7 +55,8 @@ type LiveBudget struct {
 // A mid-poll list error is consumed within the same budget and polling
 // continues; it is surfaced only if the budget exhausts. In the settle window
 // errors are skipped too, but a window with no successful observation is
-// reported (ErrAgentUnverified), not passed.
+// reported (ErrAgentUnverified), not passed. ErrAgentListTooLarge, which a
+// retry reads again, is returned at once from either.
 //
 // On exhaustion it returns an ErrAgentNotLive error with no subject prefix
 // (the caller adds one). A record that stops being live during the window
@@ -144,7 +145,7 @@ func waitLiveOnce(ctx context.Context, list func(context.Context) ([]Agent, erro
 // is stable across it. A pending strike keeps the window open for a bounded
 // few polls past its deadline; if no observation succeeds (a dying VM), the
 // window ends as unverified. A list error between two non-live readings does
-// not break the chain.
+// not break the chain; ErrAgentListTooLarge ends the hold.
 func holdLive(ctx context.Context, list func(context.Context) ([]Agent, error), slug string, interval, settle time.Duration, clk settleClock) error {
 	if interval <= 0 {
 		// Never spin on a zero interval.
@@ -246,7 +247,8 @@ func notLiveErr(lastPhase, lastContainer string) error {
 }
 
 // ObserveAgent returns the record for slug as scion lists it now, retrying a
-// failed list up to attempts times. Absent is (nil, nil). It judges nothing.
+// failed list up to attempts times (never ErrAgentListTooLarge). Absent is
+// (nil, nil). It judges nothing.
 // Exhaustion reports the last list error unwrapped (see waitLiveOnce); ctx
 // errors pass through.
 func ObserveAgent(ctx context.Context, list func(context.Context) ([]Agent, error), slug string, attempts int, interval time.Duration) (*Agent, error) {
@@ -514,8 +516,8 @@ func (c *Client) List(ctx context.Context, project string) ([]Agent, error) {
 // The manager's recovery goes through the hub API because `lever up --fresh`
 // lists the agents too, at the hub readiness wait, before it deletes anything.
 var ErrAgentListTooLarge = errors.New("the hub's agent list is too large for lever to read (scion's output passed lever's size limit), most likely because an agent's record carries an oversized status or activity; " +
-	"find that agent through the hub API (GET /api/v1/projects/{id}/agents?limit=1, page by page) and delete its record: " +
-	"for a worker, `lever worker purge NAME --force`; for the manager, DELETE /api/v1/projects/{id}/agents/NAME on the hub API, then `lever up --fresh`")
+	"find that agent through the hub API in the jail (GET /api/v1/agents?limit=1, page by page) and delete its record: " +
+	"for a worker, `lever worker purge NAME --force`; for the manager, DELETE /api/v1/projects/{id}/agents/NAME on the hub API, which skips the conversation backup `lever up --fresh` takes, then `lever up --fresh`")
 
 func listErr(err error) error {
 	if errors.Is(err, proc.ErrOutputLimit) && !errors.Is(err, ErrAgentListTooLarge) {

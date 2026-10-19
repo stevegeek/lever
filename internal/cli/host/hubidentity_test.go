@@ -43,6 +43,8 @@ type hiHub struct {
 	projects    []hubapi.Project
 	agents      []hiAgent
 	scopeActs   []string
+	// agentsTooLarge answers every agent list as over the reply cap.
+	agentsTooLarge bool
 	// registry is the hub's agent image registry, which any loopback caller,
 	// an agent included, can set through system/registry.
 	registry string
@@ -266,6 +268,9 @@ func (d hiDoer) DoBody(_ context.Context, method, path string, body []byte) (int
 		if c.secret == "" {
 			return 0, nil, fmt.Errorf("no controller PAT available for %s %s", method, path)
 		}
+	}
+	if d.h.agentsTooLarge && method == http.MethodGet && strings.HasPrefix(path, "/api/v1/agents?") {
+		return 0, nil, &hubapi.APIError{TooLarge: true, Msg: "GET /api/v1/agents: the hub's reply passed the 8 MiB lever accepts for this call"}
 	}
 	st, b := d.h.handle(c, method, path, body)
 	return st, b, nil
@@ -1740,16 +1745,46 @@ func TestHubIdentityProbeThatCannotReadDoesNotRollBack(t *testing.T) {
 	}
 }
 
-// TestHubIdentityProbeCountsAnOversizedListAsRead: a list over the output cap
-// is the hub answering it, so the probe passes and `lever up --fresh` can go
-// on to delete the oversized manager record.
-func TestHubIdentityProbeCountsAnOversizedListAsRead(t *testing.T) {
+// TestHubIdentityProbeDefersOnAnOversizedAgentRecord: agent reads over the cap
+// prove nothing, so the probe stays owed, but the run goes on so that
+// `lever up --fresh` can delete an oversized manager record.
+func TestHubIdentityProbeDefersOnAnOversizedAgentRecord(t *testing.T) {
 	e := newHIEnv(t, hiRemoteApp(false))
 	e.seedMigrated("scion@localhost", false)
+	e.hub.agentsTooLarge = true
 	e.sc.listErr = fmt.Errorf("%w (%w)", scion.ErrAgentListTooLarge, proc.ErrOutputLimit)
 	e.mustRun()
+	if rec := e.record(); !rec.ProbePending {
+		t.Fatalf("record = %+v, want the probe still pending", rec)
+	}
+	if !hiAnyContains(e.logs, "runs again at the next apply") {
+		t.Fatalf("logs %q, want the deferral named", e.logs)
+	}
+	// Another failure still stops the run.
+	e.sc.listErr = errors.New("scion list: connection reset")
+	if err := e.run(); err == nil || !strings.Contains(err.Error(), "could not complete") {
+		t.Fatalf("run = %v, want an incomplete probe", err)
+	}
+	e.hub.agentsTooLarge, e.sc.listErr = false, nil
+	e.mustRun()
 	if rec := e.record(); rec.ProbePending {
-		t.Fatalf("record = %+v, want the probe passed", rec)
+		t.Fatal("a passing probe must clear the pending flag")
+	}
+}
+
+// An oversized agent list page in the role check names the recovery; any
+// other error passes through, so the check still fails closed.
+func TestRoleCheckErrOnAnOversizedList(t *testing.T) {
+	big := fmt.Errorf("reading the hub's agent records: %w", &hubapi.APIError{TooLarge: true, Msg: "too large"})
+	if err := roleCheckErr("m", big); !errors.Is(err, scion.ErrAgentListTooLarge) || !strings.Contains(err.Error(), "lever up --fresh --keep-conversation") {
+		t.Fatalf("err = %v, want ErrAgentListTooLarge", err)
+	}
+	other := errors.New("no role stored")
+	if err := roleCheckErr("m", other); err != other {
+		t.Fatalf("err = %v, want %v unchanged", err, other)
+	}
+	if err := roleCheckErr("m", nil); err != nil {
+		t.Fatalf("err = %v, want nil", err)
 	}
 }
 

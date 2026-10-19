@@ -2291,13 +2291,14 @@ func (r *run) recoverDeleteAndCreate(ctx context.Context, jp string, opts scion.
 // manager's delete: if the delete went through, the oversized record is a
 // worker's. Nothing is created, as for any delete lever cannot confirm.
 func (r *run) listTooLargeAfterDelete(deleteFailReason string, derr error) error {
-	outcome := fmt.Sprintf("manager %q's record was deleted", r.app.Name)
 	if derr != nil {
-		outcome = fmt.Sprintf("the delete of manager %q reported %s", r.app.Name, scion.BoundedQuote(scion.ErrSummary(derr)))
+		return fmt.Errorf("start-manager: %s: the delete of manager %q reported %s, and the hub's agent list is still too large for lever to read; nothing was created. "+
+			"The manager's record may still be the oversized one: run `lever up --fresh` again. If its delete then goes through and the list is still too large, a worker's record is the oversized one: %w",
+			deleteFailReason, r.app.Name, scion.BoundedQuote(scion.ErrSummary(derr)), scion.ErrAgentListTooLarge)
 	}
-	return fmt.Errorf("start-manager: %s: %s, but the hub's agent list is still too large for lever to read, so a worker's record is oversized; nothing was created. "+
+	return fmt.Errorf("start-manager: %s: manager %q's record was deleted, but the hub's agent list is still too large for lever to read, so a worker's record is oversized; nothing was created. "+
 		"lever cannot read the list to tell which worker: run `lever worker purge NAME --force` for each worker that may be the one (its work product is kept), then `lever up`: %w",
-		deleteFailReason, outcome, scion.ErrAgentListTooLarge)
+		deleteFailReason, r.app.Name, scion.ErrAgentListTooLarge)
 }
 
 // ensureFreshBootstrap makes sure fresh, enrolable bootstrap material is staged

@@ -14,11 +14,13 @@ import (
 )
 
 // oversizedListRunner caps every scion list, the hub readiness probe's
-// included, the way the jail runner does past its output cap: until the
-// manager's record is deleted (owner "manager"), or always (owner "worker").
+// included, the way the jail runner does past its output cap: until a delete
+// of the manager's record succeeds (owner "manager"), or always (owner
+// "worker").
 type oversizedListRunner struct {
 	*agentLifecycleRunner
-	owner string
+	owner   string
+	deleted bool
 	// order is the scion verbs in the order they ran; a capped list is
 	// "list(capped)".
 	order []string
@@ -31,7 +33,7 @@ func (r *oversizedListRunner) RunIn(ctx context.Context, dir string, env map[str
 		if verb == "-g" && len(args) > 2 {
 			verb = args[2]
 		}
-		if verb == "list" && (r.owner == "worker" || r.deleteCalls == 0) {
+		if verb == "list" && (r.owner == "worker" || !r.deleted) {
 			r.order = append(r.order, "list(capped)")
 			if isObserveList(args) {
 				r.listCalls++
@@ -39,6 +41,11 @@ func (r *oversizedListRunner) RunIn(ctx context.Context, dir string, env map[str
 			return proc.Result{Code: -1, Stdout: `[{"slug":"hello","activity":"AAAA`}, fmt.Errorf("limactl: %w", proc.ErrOutputLimit)
 		}
 		r.order = append(r.order, verb)
+		res, err := r.agentLifecycleRunner.RunIn(ctx, dir, env, name, args...)
+		if verb == "delete" && err == nil {
+			r.deleted = true
+		}
+		return res, err
 	}
 	return r.agentLifecycleRunner.RunIn(ctx, dir, env, name, args...)
 }
@@ -99,8 +106,9 @@ func TestStartManagerFreshOversizedBackupFailureKeepsTheRecord(t *testing.T) {
 	if !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want the backup failure", err)
 	}
-	testutil.WantErrContaining(t, err, "NOT deleted")
+	testutil.WantErrContaining(t, err, "lever deleted nothing")
 	testutil.WantErrContaining(t, err, "stays suspended")
+	testutil.WantErrContaining(t, err, "--no-backup")
 	if r.deleteCalls != 0 || r.startCalls != 0 || r.resumeCalls != 0 {
 		t.Fatalf("delete/start/resume = %d/%d/%d, want 0/0/0", r.deleteCalls, r.startCalls, r.resumeCalls)
 	}
@@ -146,5 +154,23 @@ func TestStartManagerFreshOversizedWorkerGivesThePurgeAdvice(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "AAAA") {
 		t.Fatalf("the error carries the capped list's text: %v", err)
+	}
+}
+
+// A delete that fails with the list still too large may have left the
+// manager's own oversized record: the error says to retry --fresh, not to
+// purge workers.
+func TestStartManagerFreshOversizedFailedDeleteSaysRetry(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &oversizedListRunner{owner: "manager", agentLifecycleRunner: &agentLifecycleRunner{FakeRunner: f, slug: "hello",
+		initPhase: "suspended", initContainerStatus: "stopped", deleteErr: errors.New("hub: 500")}}
+	err := runApplyFresh(app, Deps{Scion: scion.New(r, scion.Options{})})
+	if !errors.Is(err, scion.ErrAgentListTooLarge) {
+		t.Fatalf("err = %v, want ErrAgentListTooLarge", err)
+	}
+	testutil.WantErrContaining(t, err, "may still be the oversized one")
+	testutil.WantErrContaining(t, err, "run `lever up --fresh` again")
+	if r.startCalls != 0 {
+		t.Fatalf("starts = %d, want none", r.startCalls)
 	}
 }

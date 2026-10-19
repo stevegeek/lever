@@ -47,7 +47,10 @@ version bump moves the block under the new version heading.
   readiness wait counts a capped list as the hub answering, so `lever up --fresh` (with or without
   `--keep-conversation`) recovers on its own from an oversized manager record: it suspends and
   backs up the manager, deletes its record by name, which needs no list, and creates it anew. A
-  plain `lever up` stops at start-manager and says to run `lever up --fresh --keep-conversation`.
+  plain `lever up` stops before it changes the manager (at the manager's role check or its first
+  agent list) and says to run `lever up --fresh --keep-conversation`. A pending controller
+  authority probe after the hub identity migration that cannot read the agents for this reason
+  stays pending and no longer stops the run.
   When the list is still too large once the manager's record is gone, a worker's record is the
   oversized one: `lever up --fresh` creates nothing and says to run `lever worker purge NAME
   --force` for each worker that may be the one, since lever cannot read the list to tell which.

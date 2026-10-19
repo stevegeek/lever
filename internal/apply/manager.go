@@ -650,7 +650,11 @@ func (r *run) actUp(ctx context.Context, jp string, rec *scion.Agent, p managerP
 		// after the hub is up, because after lever stop the record is invisible
 		// until this step. The create that follows is what puts a changed
 		// manager.image into effect (a resume keeps the record's image).
-		if err := r.backupBeforeDelete(ctx, jp, rec); err != nil {
+		if err := r.backupBeforeDelete(ctx, jp, rec); err != nil && r.unlisted {
+			// Unseen, the record may already be gone (an earlier --fresh deleted
+			// it), and with it the home the backup reads.
+			return fmt.Errorf("%s: --fresh: backing up manager %q's conversation failed, so lever deleted nothing: %w. If an earlier `lever up --fresh` already deleted the manager's record, there is no conversation left to back up: run `lever up --fresh --no-backup`. Otherwise fix the cause and run `lever up --fresh` again", r.subjectName(), r.app.Name, err)
+		} else if err != nil {
 			return fmt.Errorf("%s: --fresh: backing up manager %q's conversation failed, so the manager was NOT deleted (its record and conversation are kept): %w. Fix the cause and run `lever up --fresh` again, or run `lever up --fresh --no-backup` to discard the conversation without a backup", r.subjectName(), r.app.Name, err)
 		}
 		phase := "unread"

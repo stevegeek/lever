@@ -510,8 +510,12 @@ func (c *Client) List(ctx context.Context, project string) ([]Agent, error) {
 // when scion's agent list passed lever's output cap. Every agent can write
 // its own record's status and activity, so a hostile one can grow the list
 // past the cap; a retry reads the same list, so the error is final.
+//
+// The manager's recovery goes through the hub API because `lever up --fresh`
+// lists the agents too, at the hub readiness wait, before it deletes anything.
 var ErrAgentListTooLarge = errors.New("the hub's agent list is too large for lever to read (scion's output passed lever's size limit), most likely because an agent's record carries an oversized status or activity; " +
-	"find that agent through the hub API (GET /api/v1/agents) and delete its record: `lever worker purge NAME --force` for a worker, `lever up --fresh` for the manager")
+	"find that agent through the hub API (GET /api/v1/projects/{id}/agents?limit=1, page by page) and delete its record: " +
+	"for a worker, `lever worker purge NAME --force`; for the manager, DELETE /api/v1/projects/{id}/agents/NAME on the hub API, then `lever up --fresh`")
 
 func listErr(err error) error {
 	if errors.Is(err, proc.ErrOutputLimit) && !errors.Is(err, ErrAgentListTooLarge) {

@@ -37,11 +37,19 @@ version bump moves the block under the new version heading.
   and the broker stage `bootstrap.json` through `fsutil.ReplaceInTreeNoLinks`). No behaviour
   changes.
 
+### Security
+
+- **An agent that bloats its own hub record no longer stalls `lever up`.** Each agent can write its
+  record's status and activity without a size limit, so the hub's agent list can pass lever's cap
+  on scion's output. The hub readiness wait and every agent list now fail at once with an error
+  that names the cause and the recovery, instead of waiting out the whole budget and reporting
+  "hub not ready".
+
 ### Upgrade
 
 - **Jail ABI 7.** The in-jail code changed: `lever-agent` and `lever-manager` (the version
   commands), `internal/wire` (the `/version` route, `wire.Stage` removed), `internal/scion` (the
-  broker wait removed) and the new build stamp. Rebuild the agent image (`make lever-image` or
+  broker wait removed, the oversized agent list) and the new build stamp. Rebuild the agent image (`make lever-image` or
   `make lever-image-slim`, then any instance image built from it) and recreate the manager on it
   with `lever up --fresh --keep-conversation`. Doctor's *agent lever version* row says so.
 

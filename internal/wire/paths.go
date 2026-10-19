@@ -50,10 +50,6 @@ const (
 // Operator note (UDS) channel route: `lever msg send`.
 const PathOperatorNote = "/operator/note"
 
-// PathOperatorWake is the remote chat page's wake of a suspended or stopped
-// worker, on the same 0600 operator socket (never the admin listener).
-const PathOperatorWake = "/operator/wake"
-
 // PathOperatorAgentMessagesMatch asks which agent rows of a contact's history
 // the agent ledger recorded. It is served only on the 0600 operator socket,
 // never the jail or admin listener, because it binds ledger records.

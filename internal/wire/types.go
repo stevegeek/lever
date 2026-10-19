@@ -157,17 +157,6 @@ type OperatorNoteRequest struct {
 	Interrupt bool   `json:"interrupt"`
 }
 
-// OperatorWakeRequest is the body of POST /operator/wake: resume a suspended
-// or stopped worker that a permitted login messaged. Login is for the audit
-// line only; the socket's file mode is the authority. Only Tier "operator" may
-// wake a stopped worker; any other value reads as a contact, which wakes only
-// a suspended one.
-type OperatorWakeRequest struct {
-	Worker string `json:"worker"`
-	Login  string `json:"login"`
-	Tier   string `json:"tier"`
-}
-
 // OperatorNoteResponse is the reply of POST /operator/note: the sent-ledger
 // id of the note ("" when the ledger is off).
 type OperatorNoteResponse struct {

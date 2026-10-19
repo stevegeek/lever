@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -40,9 +41,24 @@ func tokenWatchBroker(t *testing.T, mode string, agents []scion.Agent, h *fakeHu
 	b, _, _ := reenrolBroker(t, rt, mode)
 	b.hubTokens = h
 	b.verifyRole = func(context.Context, string) error { return nil }
+	b.ensureManager = (&fakeLifecycle{rt: rt, reset: managerReset(b, h)}).ensure
 	var buf bytes.Buffer
 	b.log = slog.New(slog.NewTextHandler(&buf, nil))
 	return b, &buf
+}
+
+// managerReset is the manager's token reset as its lifecycle makes it: the
+// pre-role guard (refusing without one), then reset-auth, on h.
+func managerReset(b *Broker, h HubTokenHealer) func(ctx context.Context) error {
+	return func(ctx context.Context) error {
+		if b.verifyRole == nil {
+			return fmt.Errorf("%w: no pre-role record guard is wired", ErrManagerRefused)
+		}
+		if err := b.verifyRole(ctx, "appname"); err != nil {
+			return fmt.Errorf("%w: %v", ErrManagerRefused, err)
+		}
+		return h.ResetAuth(ctx, "appname")
+	}
 }
 
 var liveFleet = []scion.Agent{
@@ -185,6 +201,42 @@ func TestHealHubTokensSkipsABusyWorker(t *testing.T) {
 	b.healHubTokens(context.Background())
 	if strings.Join(h.resets, ",") != "scratch" {
 		t.Fatalf("resets after the lock freed = %v, want [scratch]", h.resets)
+	}
+}
+
+// The manager's reset takes lever's manager lock: while a new conversation,
+// a restore, up or stop holds it the reset is skipped without counting as an
+// attempt, and the reset holds it while it runs.
+func TestHealHubTokensSkipsTheManagerWhileLeverChangesIt(t *testing.T) {
+	h := &fakeHubTokens{expired: map[string]bool{"appname": true}}
+	b, _ := tokenWatchBroker(t, "all", liveFleet, h)
+	held, during := true, false
+	var whats []string
+	b.ensureManager = (&fakeLifecycle{reset: managerReset(b, h), lock: func(what string) (func(), error) {
+		whats = append(whats, what)
+		if held || during {
+			return nil, errors.New("locked")
+		}
+		during = true
+		return func() { during = false }, nil
+	}}).ensure
+	b.verifyRole = func(context.Context, string) error {
+		if !during {
+			t.Error("the manager's reset ran without the lock")
+		}
+		return nil
+	}
+	b.healHubTokens(context.Background())
+	if len(h.resets) != 0 {
+		t.Fatalf("the manager was reset under lever's lock: %v", h.resets)
+	}
+	held = false
+	b.healHubTokens(context.Background())
+	if strings.Join(h.resets, ",") != "appname" || during {
+		t.Fatalf("after release: resets %v, lock still held %v", h.resets, during)
+	}
+	if len(whats) != 2 || !strings.Contains(whats[0], "hub token reset of the manager") {
+		t.Fatalf("lock holder names = %q", whats)
 	}
 }
 

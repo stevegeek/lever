@@ -153,7 +153,7 @@ type remoteController struct {
 	startInterval time.Duration
 	log           logFunc // apply's user-facing line sink (applyWiring.log)
 	// stateInTree reports whether the state directory, which holds the stamp
-	// and remote.pid, is inside the tree.
+	// and remote.pid, is inside the tree. nil reads as inside.
 	stateInTree func() bool
 }
 
@@ -170,6 +170,8 @@ func newRemoteController(app *config.App, st state.State, configPath, selfExe st
 		stateInTree: func() bool { return brokerctl.StateInsideTree(app, st) },
 	}
 }
+
+func (rc *remoteController) inTree() bool { return rc.stateInTree == nil || rc.stateInTree() }
 
 func (rc *remoteController) addr() string {
 	return net.JoinHostPort(cmp.Or(rc.probeHost, "127.0.0.1"), strconv.Itoa(rc.port))
@@ -191,7 +193,9 @@ func (rc *remoteController) addr() string {
 func (rc *remoteController) Start(ctx context.Context) error {
 	hash := rc.cfgHash()
 	if _, found, alive := rc.state.RemoteStatus(); found && alive {
-		if rc.state.RemoteStampMatches(rc.version, hash) && tcpDial(rc.addr()) == nil {
+		// With the state directory inside the tree the stamp is the agents' to
+		// forge, so it vouches for nothing and the proxy is always replaced.
+		if !rc.inTree() && rc.state.RemoteStampMatches(rc.version, hash) && tcpDial(rc.addr()) == nil {
 			progress.From(ctx).Note("reused")
 			return nil // already serving: this binary, this config, this port
 		}
@@ -215,54 +219,19 @@ func (rc *remoteController) Start(ctx context.Context) error {
 	if err := rc.awaitListening(ctx, cmd); err != nil {
 		return err
 	}
-	// Stamp only once the proxy is proven listening. Best-effort: a write failure
-	// costs the next apply a redundant restart, never a stale process kept alive.
-	if err := rc.recordStamp(ctx, cmd.Process.Pid, hash); err != nil {
-		rc.log.printf("lever: could not record the remote proxy stamp (%v) — the next apply will restart it", err)
+	// Best-effort: a proxy with no matching stamp costs the next bring-up a
+	// restart, never a stale process kept alive.
+	if err := rc.awaitStamp(ctx, cmd.Process.Pid, hash); err != nil {
+		rc.log.printf("lever: the remote proxy runs, but it did not stamp this config (%v) — the next bring-up restarts it", err)
 	}
 	return nil
 }
 
-// errRemoteProxyNeedsApply: up does not converge a changed remote config or
-// binary itself, nor trusts a stamp an agent could write. Each wraps it.
-var (
-	errRemoteProxyNeedsApply  = errors.New("the proxy needs `lever apply`")
-	errRemoteProxyStale       = fmt.Errorf("%w: a proxy started with another remote config or lever binary is still running", errRemoteProxyNeedsApply)
-	errRemoteProxyNoStamp     = fmt.Errorf("%w: it is not running, and no proxy has run this lever binary with the current remote config", errRemoteProxyNeedsApply)
-	errRemoteProxyStateInTree = fmt.Errorf("%w: the state directory (%s) is inside the tree the agents mount, where an agent could write the proxy's stamp and pid file, so `lever up` does not start it", errRemoteProxyNeedsApply, state.DirName)
-)
-
-// EnsureForUp restarts the proxy on up's paths that skip apply.Run (a resume,
-// or a manager already running), as after a restart of the host or the VM.
-// A healthy current proxy is left alone. It starts one only when the stamp
-// records this binary and this remote config: a changed config is apply's to
-// converge (hub identity, broker, grants), and a stale proxy that is still
-// running stays fenced by the login grants rather than restarted here. With
-// the state directory inside the tree the stamp is the agent's to forge, so
-// up neither trusts nor acts on it.
-func (rc *remoteController) EnsureForUp(ctx context.Context) error {
-	if rc.stateInTree == nil || rc.stateInTree() {
-		return errRemoteProxyStateInTree
-	}
-	hash := rc.cfgHash()
-	_, found, alive := rc.state.RemoteStatus()
-	live := found && alive
-	if live && rc.state.RemoteStampMatches(rc.version, hash) && tcpDial(rc.addr()) == nil {
-		progress.From(ctx).Note("running")
-		return nil
-	}
-	if !rc.state.RemoteStampRecords(rc.version, hash) {
-		if live {
-			return errRemoteProxyStale
-		}
-		return errRemoteProxyNoStamp
-	}
-	return rc.Start(ctx)
-}
-
-// recordStamp waits until remote.pid names pid: the proxy binds its port
-// before it writes that file.
-func (rc *remoteController) recordStamp(ctx context.Context, pid int, hash string) error {
+// awaitStamp waits until remote.pid names pid and the proxy has stamped the
+// config apply converged. The proxy is the stamp's only writer: it records
+// the config it loaded, which an edit made since this apply hashed it would
+// make another.
+func (rc *remoteController) awaitStamp(ctx context.Context, pid int, hash string) error {
 	timeout := cmp.Or(rc.startTimeout, remoteProxyStartTimeout)
 	interval := cmp.Or(rc.startInterval, remoteProxyStartInterval)
 	var last error
@@ -273,16 +242,17 @@ func (rc *remoteController) recordStamp(ctx context.Context, pid int, hash strin
 			last = err
 		case got != pid:
 			last = fmt.Errorf("%s names pid %d, not the new proxy %d", rc.state.RemotePID(), got, pid)
+		case !rc.state.RemoteStampMatches(rc.version, hash):
+			last = errors.New("the proxy has not stamped the remote config this apply converged")
+		default:
+			return true, nil
 		}
-		return err == nil && got == pid, nil
+		return false, nil
 	})
 	if errors.Is(err, retry.ErrExhausted) {
 		return fmt.Errorf("after %s: %w", timeout, last)
 	}
-	if err != nil {
-		return err
-	}
-	return rc.state.WriteRemoteStamp(rc.version, hash)
+	return err
 }
 
 // remoteProxyStartTimeout/Interval are the default bounds on the waits for the
@@ -499,6 +469,7 @@ func applySignalContext(parent context.Context) (ctx context.Context, stop func(
 func newApplyCmd(bf BackendFactory) *cobra.Command {
 	var dryRun, resetHubIdentity bool
 	var progressMode string
+	var lockWait time.Duration
 	c := &cobra.Command{
 		Use:   "apply [CONFIG]",
 		Args:  cobra.MaximumNArgs(1),
@@ -526,7 +497,7 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 				}
 				return nil
 			}
-			unlock, err := lockLifecycle(app, stateFor(path), "lever apply")
+			unlock, err := lockLifecycle(cmd.Context(), app, stateFor(path), "lever apply", lockWait, lockNotice(cmd))
 			if err != nil {
 				return err
 			}
@@ -547,13 +518,14 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 			ctx, stop := applySignalContext(pctx)
 			defer stop()
 			run.rep.Group("jail", 0)
-			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd, Rep: run.rep, ResetHubIdentity: resetHubIdentity})
+			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd, Rep: run.rep, ResetHubIdentity: resetHubIdentity, Locked: true})
 			if err != nil {
 				return err
 			}
 			if err := apply.Run(ctx, app, w.deps, apply.PlanOpts{}); err != nil {
 				return err
 			}
+			recordConverge(app, stateFor(path), "apply", w.log)
 			run.finish(nil)
 			cmd.Printf("application %q is up.\n", app.Name)
 			return nil
@@ -562,6 +534,7 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 	c.Flags().BoolVar(&dryRun, "dry-run", false, "print the bring-up plan and exit")
 	c.Flags().StringVar(&progressMode, "progress", "", progressFlagUsage)
 	c.Flags().BoolVar(&resetHubIdentity, "reset-hub-identity", false, resetHubIdentityUsage)
+	addLockWaitFlag(c, &lockWait, 0)
 	return c
 }
 
@@ -769,9 +742,11 @@ type applyWiring struct {
 	state state.State
 	// hubKey signs every assertion; instanceID names the hub in iss and aud;
 	// clock is the guest's, read once per run.
-	hubKey           *hubauth.Key
-	instanceID       string
-	clock            hubauth.Clock
+	hubKey     *hubauth.Key
+	instanceID string
+	clock      hubauth.Clock
+	// runStart is clock.Now() when the run began.
+	runStart         time.Time
 	signer           *hubauth.Signer
 	resetHubIdentity bool
 	// ssh is this apply's `lever ssh` decision.
@@ -783,8 +758,6 @@ type applyWiring struct {
 	cmd        *cobra.Command // for Log; nil ⇒ stderr
 	// rep, when set, takes the Log lines so they print above its live line.
 	rep *progress.Reporter
-	// remote is Deps.StartRemoteProxy's controller, for up's EnsureForUp.
-	remote *remoteController
 }
 
 type applyOpts struct {
@@ -795,6 +768,10 @@ type applyOpts struct {
 	// ResetHubIdentity forgets the recorded hub identities and bootstraps the
 	// hub as new (`--reset-hub-identity`).
 	ResetHubIdentity bool
+	// Locked: the command holds the lifecycle lock for its whole run, so
+	// Deps.ManagerLock is apply.HeldManagerLock. Otherwise it is nil and
+	// apply.EnsureManager refuses.
+	Locked bool
 	// SelfExe is the executable re-exec'd as `broker serve` / `remote serve`;
 	// empty means os.Args[0]. Tests must set it: under `go test` os.Args[0] is the
 	// test binary, and the Setsid child outlives the run with nothing to reap it.
@@ -850,9 +827,11 @@ func buildApplyDeps(ctx context.Context, app *config.App, configPath string, bf 
 	}
 
 	rc := newRemoteController(app, st, configPath, selfExe, w.log)
-	w.remote = rc
 
 	w.deps = w.newDeps(bc, rc, sessionSecret)
+	if opts.Locked {
+		w.deps.ManagerLock = apply.HeldManagerLock
+	}
 	return w, nil
 }
 
@@ -874,6 +853,7 @@ func (w *applyWiring) initHubAuth(ctx context.Context) error {
 	w.hubKey, w.instanceID = k, id
 	w.clock = readGuestClock(ctx, w.jr, w.log)
 	w.signer = hubauth.NewSigner(k, id, w.clock)
+	w.runStart = w.clock.Now()
 	return nil
 }
 
@@ -949,6 +929,7 @@ func backendConfigFor(app *config.App, machine string) backend.Config {
 		CPUs:           app.CPUs,
 		Memory:         app.Memory,
 		NestedVirt:     app.NestedVirt,
+		HostSwap:       app.HostSwap,
 		GuestKernel:    app.EffectiveGuestKernel(),
 		GuestProfile:   app.EffectiveGuestProfile(),
 	}
@@ -971,6 +952,7 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		// WarmImage builds podman's id-mapped layer copy before scion's agent start
 		// needs it. Best-effort.
 		WarmImage:        b.WarmJailImage,
+		Fingerprints:     stepFingerprints(w.app, st),
 		Scion:            sc,
 		JailMount:        b.MountDest(),
 		HubSessionSecret: sessionSecret,
@@ -982,6 +964,7 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 
 		EnsureHubIdentity: w.ensureHubIdentity,
 		EnsureHubAuth:     w.ensureHubAuth,
+		BeforeHubRestart:  w.pinExperimentsBeforeRestart,
 		HubAuthEnv:        apply.HubEnv(w.instanceID, w.hubKey.Fingerprint(), w.app, w.ssh.controls),
 		HubConduitEnv: func(ctx context.Context) (map[string]string, error) {
 			live, err := conduit.ReadLiveHub(ctx, w.jr)
@@ -1009,7 +992,8 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 
 		// The runtime broker registers asynchronously after the Hub API, so a first
 		// create/resume would race it. Fail-soft: it never fails bring-up.
-		WaitBrokerReady: sc.RuntimeBrokerReady,
+		WaitBrokerReady: w.waitBrokerReady,
+		BrokerOnline:    w.brokerOnline,
 
 		RearmBootstrap: bc.Rearm,
 
@@ -1061,12 +1045,73 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		AgentRevoked:   agentRevoked(w.app, st),
 		// GuestBoot lets start-manager and up recover a manager record a hard VM kill
 		// left "running".
-		GuestBoot: jailGuestBoot{jr: b.JailRunner(), st: st},
+		GuestBoot: brokerctl.GuestBootFor(w.app, st, b.JailRunner()),
 
 		EnsureScionTelemetry: w.ensureScionTelemetry,
 		EnsureAgentTemplate:  w.ensureAgentTemplate,
 		Log:                  w.log,
 		StepTail:             w.stepTail,
+	}
+}
+
+// stepFingerprints is the lifecycle record's step fingerprints, or nil (a
+// converge skips nothing) with the state directory inside the tree, where an
+// agent could forge them.
+func stepFingerprints(app *config.App, st state.State) apply.StepFingerprints {
+	if brokerctl.StateInsideTree(app, st) {
+		return nil
+	}
+	return lifecycleSteps{st}
+}
+
+type lifecycleSteps struct{ st state.State }
+
+func (l lifecycleSteps) Matches(step, inputs string) bool { return l.st.StepMatches(step, inputs) }
+func (l lifecycleSteps) Record(step, inputs string) error {
+	return l.st.RecordStep(step, inputs, time.Now())
+}
+func (l lifecycleSteps) Forget(step string) error { return l.st.ForgetStep(step) }
+
+// convergeDigest is the config a bring-up converges on, as lever loaded it.
+func convergeDigest(app *config.App) string { return state.HashJSON(app) }
+
+// convergeNotice says, before up, what changed since the last bring-up that
+// ran the whole plan: up converges on the config as it is now, so an edit
+// takes effect without an apply, and this keeps that visible. "" when
+// nothing changed, nothing is recorded, or the state directory is inside
+// the tree (where an agent could write the record).
+func convergeNotice(app *config.App, st state.State) string {
+	if brokerctl.StateInsideTree(app, st) {
+		return ""
+	}
+	l, err := st.LoadLifecycle()
+	if err != nil || l.LastConverge == nil {
+		return ""
+	}
+	last := l.LastConverge
+	var changed []string
+	if last.Config != convergeDigest(app) {
+		changed = append(changed, "the config")
+	}
+	if last.Version != cli.VersionString() {
+		changed = append(changed, "the lever binary")
+	}
+	if len(changed) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("lever: %s changed since the last bring-up (`lever %s`, %s); this up applies it",
+		strings.Join(changed, " and "), termsafe.Sanitize(last.By), last.At.Local().Format("2006-01-02 15:04 MST"))
+}
+
+// recordConverge notes a bring-up that ran the whole plan, for the next
+// one's convergeNotice. A failure only warns: the record informs, it
+// guards nothing.
+func recordConverge(app *config.App, st state.State, by string, log func(string, ...any)) {
+	if brokerctl.StateInsideTree(app, st) {
+		return
+	}
+	if err := st.RecordConverge(by, convergeDigest(app), cli.VersionString(), time.Now()); err != nil {
+		log("lever: warning: could not record this bring-up in %s: %v", st.LifecycleFile(), err)
 	}
 }
 
@@ -1152,7 +1197,7 @@ func (w *applyWiring) verifyAgentRole(ctx context.Context, projectName, agentNam
 
 // ensureHubAuth installs the assertion public key and the hub's auth block
 // in the guest (see guest.EnsureHubAuth).
-func (w *applyWiring) ensureHubAuth(ctx context.Context) (bool, error) {
+func (w *applyWiring) ensureHubAuth(ctx context.Context) (string, error) {
 	return w.b.EnsureHubAuth(ctx, types.HubAuth{
 		PublicKeyPEM: w.hubKey.PublicPEM(),
 		Issuer:       hubauth.Issuer(w.instanceID),
@@ -1179,34 +1224,27 @@ func (w *applyWiring) ensureHubIdentity(ctx context.Context) error {
 		jailMount: w.b.MountDest(),
 		keyFP:     w.hubKey.Fingerprint(),
 		guestNow:  w.clock.Now,
+		runStart:  w.runStart,
 		reset:     w.resetHubIdentity,
 		ssh:       w.ssh,
 		restartHub: func(ctx context.Context) error {
-			if err := w.sc.ServerStop(ctx); err != nil {
-				return err
-			}
-			// Again here: agents can rewrite settings.yaml since the
-			// scion-server step converged it, and the hub reads it at start.
-			if _, err := w.ensureHubAuth(ctx); err != nil {
-				return fmt.Errorf("the hub is stopped: it was stopped for a restart, and converging its settings before the start failed (%w); fix the cause and run `lever apply`, which starts it again", err)
-			}
-			opts := apply.HubServerOpts(w.app, w.deps.HubSessionSecret, w.deps.HubAuthEnv)
-			opts.Progress = w.deps.Log
-			if err := w.sc.ServerStart(ctx, opts); err != nil {
-				return fmt.Errorf("the hub is stopped: it was stopped for a restart, and starting it again failed (%w); fix the cause and run `lever apply`, which starts it again", err)
-			}
-			online, err := w.sc.RuntimeBrokerReady(ctx, "global")
-			if err == nil && !online {
-				// start-manager trusts the scion-server step's broker wait.
-				err = errors.New("the hub's runtime broker did not come back online after the restart")
-			}
-			return err
+			return apply.RestartHub(ctx, w.app, w.deps, "")
 		},
 		linkBroker: w.ensureProjectProvider,
 		log:        w.log,
 		warn:       func(format string, args ...any) { w.log("lever: warning: "+format, args...) },
 	}
 	return h.run(ctx)
+}
+
+// pinExperimentsBeforeRestart pins scion's experiments on the hub the
+// scion-server step is about to restart (prePinExperiments).
+func (w *applyWiring) pinExperimentsBeforeRestart(ctx context.Context) error {
+	return prePinExperiments(ctx, experimentsPin{
+		admin: w.assertHub(w.signer.Admin), st: w.state, known: w.sc.KnowsUATScope, now: w.clock.Now,
+		conduitOn: w.ssh.on, conduitPolicyLive: w.ssh.policyLive,
+		log: w.log, warn: func(format string, args ...any) { w.log("lever: warning: "+format, args...) },
+	})
 }
 
 // projectLinked is the register-project soundness predicate's link half

@@ -384,7 +384,7 @@ func (o gateOpts) harnessSeen() {
 
 func gateManagerLiveSteps(ctx context.Context, d Deps, b RetryBudget, name, project string, prog *Progress, o gateOpts) error {
 	list := func(c context.Context) ([]scion.Agent, error) {
-		agents, err := d.Scion.List(c, project)
+		agents, err := d.managerScion().List(c, project)
 		if err == nil {
 			if a := scion.FindAgent(agents, name); a != nil {
 				prog.observe(a.Phase, a.ContainerStatus)

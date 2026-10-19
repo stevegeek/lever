@@ -3,6 +3,7 @@ package broker
 import (
 	"cmp"
 	"context"
+	"errors"
 	"slices"
 	"time"
 
@@ -105,10 +106,11 @@ func (b *Broker) healHubTokens(ctx context.Context) {
 }
 
 // healOneHubToken is gated like every hub mint for an agent: cooldown, the
-// worker's lifecycle lock (busy is skipped), revocation after the lock wait,
-// and the pre-role record guard. The hub mints from the record's stored role,
-// which on an old record can resolve to full, so the guard must refuse it as
-// the resume paths do; with no guard wired the reset is refused.
+// worker's lifecycle lock or lever's lifecycle lock (busy is skipped),
+// revocation after the lock wait, and the pre-role record guard. The hub
+// mints from the record's stored role, which on an old record can resolve
+// to full, so the guard must refuse it as the resume paths do; with no guard
+// wired the reset is refused.
 func (b *Broker) healOneHubToken(ctx context.Context, cn, slug string) {
 	now := b.reenrolNow()
 	b.reenrolMu.Lock()
@@ -119,15 +121,17 @@ func (b *Broker) healOneHubToken(ctx context.Context, cn, slug string) {
 	}
 	b.tokenHealLast[slug] = now
 	b.reenrolMu.Unlock()
+	if slug == b.managerSlug {
+		b.resetManagerToken(ctx, cn)
+		return
+	}
 	if _, isWorker := b.workerSpec(slug); isWorker {
 		lctx, cancel := context.WithTimeout(ctx, cmp.Or(b.reenrolLockWait, reenrolLockWaitDefault))
 		unlock, err := b.lockWorker(lctx, slug)
 		cancel()
 		if err != nil {
 			// Not an attempt: the next tick may try again.
-			b.reenrolMu.Lock()
-			delete(b.tokenHealLast, slug)
-			b.reenrolMu.Unlock()
+			b.forgetTokenHeal(slug)
 			return
 		}
 		defer unlock()
@@ -148,6 +152,45 @@ func (b *Broker) healOneHubToken(ctx context.Context, cn, slug string) {
 		return
 	}
 	b.audit("hub-token", cn, "allow", "expired agent hub token reset (scion reset-auth, the agent's own role)")
+}
+
+// resetManagerToken resets the manager's token through its lifecycle
+// (DispatchConfig.EnsureManager), which holds lever's lifecycle lock: a
+// reset under a new conversation, a restore or a stop would act on a record
+// lever is changing on purpose. Busy is not an attempt.
+func (b *Broker) resetManagerToken(ctx context.Context, cn string) {
+	if b.ensureManager == nil {
+		b.audit("hub-token", cn, "deny", "expired agent hub token NOT reset: no lifecycle of the manager is wired")
+		return
+	}
+	out, err := b.ensureManager(ctx, ManagerChange{
+		Kind: ManagerTokenReset, What: "the broker's hub token reset of the manager",
+		UnderLock: func() error {
+			if b.isRevoked(cn) {
+				return errHealRevoked
+			}
+			return nil
+		},
+	})
+	switch {
+	case errors.Is(err, ErrManagerBusy):
+		b.forgetTokenHeal(b.managerSlug)
+	case errors.Is(err, errHealRevoked):
+	case errors.Is(err, ErrManagerRefused):
+		b.audit("hub-token", cn, "deny", "expired agent hub token NOT reset: "+termsafe.Sanitize(err.Error()))
+	case err != nil:
+		b.audit("hub-token", cn, "error", "expired agent hub token: scion reset-auth failed: "+termsafe.Sanitize(scion.ErrSummary(err)))
+	case out.Verb != "":
+		b.audit("hub-token", cn, "allow", "expired agent hub token reset (scion reset-auth, the agent's own role)")
+	}
+}
+
+// forgetTokenHeal takes back a reset skipped for a busy lock: the next tick
+// may try again.
+func (b *Broker) forgetTokenHeal(slug string) {
+	b.reenrolMu.Lock()
+	delete(b.tokenHealLast, slug)
+	b.reenrolMu.Unlock()
 }
 
 const tokenWatchListTimeout = 30 * time.Second

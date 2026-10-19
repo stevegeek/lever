@@ -39,7 +39,7 @@ func serverBlock(t *testing.T, b []byte) map[string]any {
 
 func TestHubAuthSettingsWritesLeversKeysInAnEmptyFile(t *testing.T) {
 	out, oidc, changed, err := hubAuthSettingsConverged(nil, testHubAuth(false), false)
-	if err != nil || !changed || oidc {
+	if err != nil || !changed || oidc != "" {
 		t.Fatalf("changed=%v oidc=%v err=%v", changed, oidc, err)
 	}
 	server := serverBlock(t, out)
@@ -66,7 +66,7 @@ func TestHubAuthSettingsIsIdempotentAndIgnoresTheIdentityRouteKeys(t *testing.T)
 		t.Fatal(err)
 	}
 	again, oidc, changed, err := hubAuthSettingsConverged(out, testHubAuth(true), false)
-	if err != nil || changed || oidc || string(again) != string(out) {
+	if err != nil || changed || oidc != "" || string(again) != string(out) {
 		t.Fatalf("second pass changed=%v oidc=%v err=%v", changed, oidc, err)
 	}
 	// scion's system/identity route writes server.auth.email and display_name;
@@ -85,8 +85,8 @@ func TestHubAuthSettingsIsIdempotentAndIgnoresTheIdentityRouteKeys(t *testing.T)
 func TestHubAuthSettingsRemovesOIDCLoginAndDevAuthAndReportsIt(t *testing.T) {
 	existing := []byte("# keep me\nversion: 1\nserver:\n  oidc_login:\n    enabled: true\n    issuer_url: http://127.0.0.1:8446\n  auth:\n    dev_mode: true\n    mode: dev\n    user_access_mode: open\n  hub:\n    admin_emails: [someone@example.com]\n  broker:\n    port: 1\n")
 	out, oidc, changed, err := hubAuthSettingsConverged(existing, testHubAuth(false), false)
-	if err != nil || !changed || !oidc {
-		t.Fatalf("changed=%v oidc=%v err=%v", changed, oidc, err)
+	if err != nil || !changed || oidc != "server.oidc_login" {
+		t.Fatalf("changed=%v oidc=%q err=%v", changed, oidc, err)
 	}
 	server := serverBlock(t, out)
 	if _, ok := server["oidc_login"]; ok {
@@ -159,8 +159,8 @@ func TestEnsureHubAuthRemovesTheForwarderInstallsTheKeyAndReportsARestart(t *tes
 	f.Script("orb -m lever-x bash -c", proc.Result{})
 	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "lever-x"}, RootPrefix: []string{"orb", "-u", "root", "-m", "lever-x"}}
 	restart, err := g.EnsureHubAuth(context.Background(), testHubAuth(false))
-	if err != nil || !restart {
-		t.Fatalf("restart=%v err=%v", restart, err)
+	if err != nil || restart != HubAuthKeyPath {
+		t.Fatalf("restart=%q err=%v", restart, err)
 	}
 	if !slices.ContainsFunc(f.Calls, func(c proc.Call) bool { return c.Argv() == "orb -m lever-x /bin/bash -c "+removeDevTokenScript }) {
 		t.Fatalf("the dev token was not removed: %+v", f.Calls)
@@ -352,8 +352,8 @@ func writtenSettings(f *proc.FakeRunner) (written string, writes int) {
 func TestHubAuthSettingsDropsTheConduitBlock(t *testing.T) {
 	existing := []byte("server:\n  hub:\n    admin_emails: [lever-admin@lever.local]\n    conduit:\n      internal_listen: 0.0.0.0:9810\n      tcp_allowed_ports: [8462]\n")
 	out, restart, changed, err := hubAuthSettingsConverged(existing, testHubAuth(false), false)
-	if err != nil || !changed || !restart {
-		t.Fatalf("changed=%v restart=%v err=%v", changed, restart, err)
+	if err != nil || !changed || restart != "server.hub.conduit" {
+		t.Fatalf("changed=%v restart=%q err=%v", changed, restart, err)
 	}
 	if _, ok := serverBlock(t, out)["hub"].(map[string]any)["conduit"]; ok {
 		t.Fatalf("conduit block kept:\n%s", out)
@@ -374,8 +374,8 @@ func TestHubAuthSettingsConduitKeyCase(t *testing.T) {
 		"server:\n  hub:\n    !!str conduit: {}\n",
 	} {
 		out, restart, changed, err := hubAuthSettingsConverged([]byte(existing), testHubAuth(false), false)
-		if err != nil || !changed || !restart {
-			t.Fatalf("%q: changed=%v restart=%v err=%v", existing, changed, restart, err)
+		if err != nil || !changed || restart != "server.hub.conduit" {
+			t.Fatalf("%q: changed=%v restart=%q err=%v", existing, changed, restart, err)
 		}
 		if strings.Contains(strings.ToLower(string(out)), "conduit") {
 			t.Fatalf("%q: conduit block kept:\n%s", existing, out)

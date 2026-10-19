@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
@@ -42,6 +43,15 @@ func remoteNewConversation(app *config.App, st state.State, configPath string) f
 	}
 }
 
+// unattendedLockWait is how long a new conversation lever starts on its own
+// waits for another change to the manager to finish, rather than exit 6: the
+// chat page has already told its operator it is starting, and the daily
+// reset would otherwise retry only ten minutes later.
+var unattendedLockWait = map[string]time.Duration{
+	"chat":  3 * time.Minute,
+	"daily": 10 * time.Minute,
+}
+
 // startConversationNew is a seam: tests must not start a real `lever` process.
 var startConversationNew = runConversationNew
 
@@ -66,7 +76,7 @@ func runConversationNew(ctx context.Context, st state.State, configPath, by stri
 		return 0, err
 	}
 	defer logf.Close()
-	args := []string{"conversation", "new", "--by", by, "--progress", "plain"}
+	args := []string{"conversation", "new", "--by", by, "--progress", "plain", "--wait", unattendedLockWait[by].String()}
 	if force {
 		args = append(args, "--force")
 	}

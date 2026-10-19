@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/stevegeek/lever/internal/retry"
+	"github.com/stevegeek/lever/internal/wait"
 )
 
 // ContainerLive reports whether a scion containerStatus value describes a live
@@ -101,11 +101,11 @@ func waitLiveOnce(ctx context.Context, list func(context.Context) ([]Agent, erro
 	if attempts <= 0 {
 		return notLiveErr(lastPhase, lastContainer)
 	}
-	err := retry.Until(ctx, attempts, interval, func() (bool, error) {
+	err := wait.For(ctx, wait.Attempts(wait.ManagerRunning.Name, attempts, interval), func(ctx context.Context) wait.Result {
 		agents, err := list(ctx)
 		if err != nil {
 			lastErr = err
-			return false, nil
+			return wait.NotYetErr(err)
 		}
 		lastErr = nil
 		// Reset first so a record that vanished mid-poll reports "", not a
@@ -114,9 +114,12 @@ func waitLiveOnce(ctx context.Context, list func(context.Context) ([]Agent, erro
 		if a := FindAgent(agents, slug); a != nil {
 			lastPhase, lastContainer = a.Phase, a.ContainerStatus
 		}
-		return lastPhase == "running" && ContainerLive(lastContainer), nil
+		if lastPhase == "running" && ContainerLive(lastContainer) {
+			return wait.Ready()
+		}
+		return wait.NotYet(PhaseLabel(lastPhase) + "/" + ContainerLabel(lastContainer))
 	})
-	if !errors.Is(err, retry.ErrExhausted) {
+	if !errors.Is(err, wait.ErrTimeout) {
 		return err
 	}
 	if lastErr != nil {
@@ -245,19 +248,19 @@ func ObserveAgent(ctx context.Context, list func(context.Context) ([]Agent, erro
 	}
 	var lastErr error
 	var found *Agent
-	err := retry.Until(ctx, attempts, interval, func() (bool, error) {
+	err := wait.For(ctx, wait.Attempts("the agent listing", attempts, interval), func(ctx context.Context) wait.Result {
 		agents, err := list(ctx)
 		if err != nil {
 			lastErr = err
-			return false, nil
+			return wait.NotYetErr(err)
 		}
 		if a := FindAgent(agents, slug); a != nil {
 			copied := *a
 			found = &copied
 		}
-		return true, nil
+		return wait.Ready()
 	})
-	if errors.Is(err, retry.ErrExhausted) {
+	if errors.Is(err, wait.ErrTimeout) {
 		return nil, fmt.Errorf("observing agents: %v", lastErr)
 	}
 	if err != nil {

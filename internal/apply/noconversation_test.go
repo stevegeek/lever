@@ -399,7 +399,9 @@ func TestAttachResumeWithoutConversationStartsFresh(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Run: %v", err)
 			}
-			want := []string{"resume", "proof", "backup", "delete", "start"}
+			// The dead resume left the record running: it is suspended before the
+			// backup, so the copy is the conversation as it ends.
+			want := []string{"resume", "proof", "suspend", "backup", "delete", "start"}
 			if strings.Join(order, ",") != strings.Join(want, ",") {
 				t.Fatalf("order = %v, want %v (the resume's death was not caught before the attach)", order, want)
 			}

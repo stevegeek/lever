@@ -145,8 +145,8 @@ func stubDetachOthers(t *testing.T, n int, err error) *[]string {
 	return &refs
 }
 
-// noAttachBinary empties PATH, so runAttach returns before it starts the
-// attach.
+// noAttachBinary empties PATH, so the attach fails before it starts
+// anything.
 func noAttachBinary(t *testing.T) {
 	t.Helper()
 	t.Setenv("PATH", t.TempDir())
@@ -195,7 +195,10 @@ func TestAttachDetachesOnlyWhenAsked(t *testing.T) {
 			sb := &stubBackend{runner: proc.NewFakeRunner()}
 			sc := scion.New(proc.NewFakeRunner(), scion.Options{HubEndpoint: scion.DefaultHubEndpoint})
 			var out bytes.Buffer
-			err := runAttach(context.Background(), &out, sb, sc, "assistant", "/lever", detachOthers)
+			argv, err := prepareAttach(context.Background(), &out, sb, sc, "assistant", "/lever", detachOthers)
+			if err == nil {
+				err = attachChild(argv, nil, nil, nil)
+			}
 			testutil.WantErrContaining(t, err, "stub-attach")
 			if got := len(*refs) == 1 && (*refs)[0] == "lever--assistant"; got != detachOthers || len(*refs) > 1 {
 				t.Fatalf("detach refs = %q with --detach-others=%t", *refs, detachOthers)

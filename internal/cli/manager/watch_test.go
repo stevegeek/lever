@@ -3,7 +3,9 @@ package manager
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -69,5 +71,16 @@ func TestWatchCmd_requiresEventsFile(t *testing.T) {
 	root.SetArgs([]string{"watch"})
 	if err := root.Execute(); err == nil {
 		t.Fatal("expected error for missing --events-file")
+	}
+}
+
+func TestWatchRejectsIntervalBelowOne(t *testing.T) {
+	for _, iv := range []string{"0", "-3"} {
+		cmd := newWatchCmd(nil)
+		cmd.SetArgs([]string{"--events-file", filepath.Join(t.TempDir(), "e.jsonl"), "--interval", iv})
+		cmd.SilenceUsage, cmd.SilenceErrors = true, true
+		if err := cmd.Execute(); !errors.Is(err, errBadInterval) {
+			t.Fatalf("--interval %s: err = %v, want errBadInterval", iv, err)
+		}
 	}
 }

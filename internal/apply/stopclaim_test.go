@@ -91,12 +91,12 @@ func TestStopClaimOtherErrorsPassThrough(t *testing.T) {
 	var logs []string
 	other := errors.New("failed to start agent via Hub: start_in_progress: A start is already in progress for this agent (a user start, since 06:14). (status: 409)")
 	n := 0
-	err := ResumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, other))
+	err := resumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, other))
 	if err != other || n != 1 || len(j.calls) != 0 {
 		t.Fatalf("a refusal that is not a stop claim must come back untouched with podman never asked: err %v, resumes %d, calls %v", err, n, j.calls)
 	}
 	n = 0
-	if err := ResumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n)); err != nil || n != 1 || len(j.calls) != 0 {
+	if err := resumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n)); err != nil || n != 1 || len(j.calls) != 0 {
 		t.Fatalf("a resume that works: err %v, resumes %d, calls %v", err, n, j.calls)
 	}
 }
@@ -106,7 +106,7 @@ func TestStopClaimHappyPath(t *testing.T) {
 	var logs []string
 	n := 0
 	held := errors.New(stopClaimMsg)
-	err := ResumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, held, held))
+	err := resumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, held, held))
 	if err != nil {
 		t.Fatalf("err %v", err)
 	}
@@ -136,7 +136,7 @@ func TestStopClaimRemoveFailure(t *testing.T) {
 	j := &fakeJanitor{states: []jail.ContainerState{created(staleID)}, removeErr: errors.New("cannot remove container as it is running")}
 	var logs []string
 	n := 0
-	err := ResumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, errors.New(stopClaimMsg)))
+	err := resumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, errors.New(stopClaimMsg)))
 	if !errors.Is(err, ErrStopClaimHeld) {
 		t.Fatalf("err %v, calls %v", err, j.calls)
 	}
@@ -168,7 +168,7 @@ func TestStopClaimNeverRemovesARunningContainer(t *testing.T) {
 		var logs []string
 		n := 0
 		held := errors.New(stopClaimMsg)
-		err := ResumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, held, held, held, held, held))
+		err := resumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, held, held, held, held, held))
 		if !errors.Is(err, ErrStopClaimHeld) || j.did("rm ") {
 			t.Fatalf("%+v: err %v, calls %v", st, err, j.calls)
 		}
@@ -183,7 +183,7 @@ func TestStopClaimNotReleasedInTime(t *testing.T) {
 	var logs []string
 	n := 0
 	held := errors.New(stopClaimMsg)
-	err := ResumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, held, held, held, held, held, held))
+	err := resumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, held, held, held, held, held, held))
 	if !errors.Is(err, ErrStopClaimHeld) || !strings.Contains(err.Error(), "broker may be offline") {
 		t.Fatalf("err %v", err)
 	}
@@ -196,13 +196,13 @@ func TestStopClaimContainerReplacedMeanwhile(t *testing.T) {
 	j := &fakeJanitor{states: []jail.ContainerState{created(staleID), created(otherID)}}
 	var logs []string
 	n := 0
-	err := ResumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, errors.New(stopClaimMsg)))
+	err := resumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, errors.New(stopClaimMsg)))
 	if !errors.Is(err, ErrStopClaimHeld) || j.did("rm ") {
 		t.Fatalf("a container that changed between the looks must not be removed: err %v, calls %v", err, j.calls)
 	}
 	j = &fakeJanitor{states: []jail.ContainerState{created(staleID), {ID: staleID, Name: "proj--m", Status: "running", Running: true}}}
 	n = 0
-	err = ResumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, errors.New(stopClaimMsg)))
+	err = resumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, errors.New(stopClaimMsg)))
 	if !errors.Is(err, ErrStopClaimHeld) || j.did("rm ") {
 		t.Fatalf("a container that started between the looks must not be removed: err %v, calls %v", err, j.calls)
 	}
@@ -223,7 +223,7 @@ func TestStopClaimStateMustPersist(t *testing.T) {
 		j := &fakeJanitor{states: seq}
 		var logs []string
 		n := 0
-		err := ResumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, errors.New(stopClaimMsg)))
+		err := resumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, errors.New(stopClaimMsg)))
 		if !errors.Is(err, ErrStopClaimHeld) || j.did("rm ") || !strings.Contains(err.Error(), "a start may be under way") {
 			t.Fatalf("%v: a container that changed between the looks must not be removed: err %v, calls %v", seq, err, j.calls)
 		}
@@ -236,7 +236,7 @@ func TestStopClaimStateMustPersist(t *testing.T) {
 		j := &fakeJanitor{states: []jail.ContainerState{c.st}}
 		var logs []string
 		n := 0
-		if err := ResumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, errors.New(stopClaimMsg))); err != nil || !j.did("rm ") {
+		if err := resumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, errors.New(stopClaimMsg))); err != nil || !j.did("rm ") {
 			t.Fatalf("%s: err %v calls %v", c.st.Status, err, j.calls)
 		}
 		if all := strings.Join(logs, "\n"); !strings.Contains(all, c.want) {
@@ -253,7 +253,7 @@ func TestStopClaimNoContainerWaits(t *testing.T) {
 	var logs []string
 	n := 0
 	held := errors.New(stopClaimMsg)
-	if err := ResumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, held, held)); err != nil {
+	if err := resumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, held, held)); err != nil {
 		t.Fatal(err)
 	}
 	if len(j.calls) != 1 {
@@ -262,27 +262,27 @@ func TestStopClaimNoContainerWaits(t *testing.T) {
 	// Any other podman failure removes nothing and stops at once.
 	j = &fakeJanitor{stateErr: errors.New("cannot connect to podman")}
 	n = 0
-	if err := ResumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, held)); !errors.Is(err, ErrStopClaimHeld) || n != 1 {
+	if err := resumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, held)); !errors.Is(err, ErrStopClaimHeld) || n != 1 {
 		t.Fatalf("err %v resumes %d", err, n)
 	}
 	// Unwired: the manual fix, nothing else.
 	n = 0
 	d := stopClaimDeps(nil, &logs)
 	d.StaleContainer = nil
-	if err := ResumeClearingStopClaim(context.Background(), d, "m", "/x/proj", "up", resumes(&n, held)); !errors.Is(err, ErrStopClaimHeld) || !strings.Contains(err.Error(), "podman rm proj--m") {
+	if err := resumeClearingStopClaim(context.Background(), d, "m", "/x/proj", "up", resumes(&n, held)); !errors.Is(err, ErrStopClaimHeld) || !strings.Contains(err.Error(), "podman rm proj--m") {
 		t.Fatalf("err %v", err)
 	}
 }
 
 func TestResumeErrorKeepsTheStopClaimRefusal(t *testing.T) {
 	sc := stopClaimFailure("up", "proj--m", "why", errors.New(stopClaimMsg))
-	if got := ResumeError("resume", sc); got != sc {
-		t.Fatalf("ResumeError rewrapped the stop-claim refusal: %v", got)
+	if got := resumeError("resume", sc); got != sc {
+		t.Fatalf("resumeError rewrapped the stop-claim refusal: %v", got)
 	}
-	if got := ResumeError("resume", errors.New("container state corrupt")); !strings.Contains(got.Error(), "transient failure clears") {
+	if got := resumeError("resume", errors.New("container state corrupt")); !strings.Contains(got.Error(), "transient failure clears") {
 		t.Fatalf("other failures keep ResumeFailed: %v", got)
 	}
-	if got := ResumeError("resume", errors.New("forbidden (status: 403)")); !strings.Contains(got.Error(), "hub refused") {
+	if got := resumeError("resume", errors.New("forbidden (status: 403)")); !strings.Contains(got.Error(), "hub refused") {
 		t.Fatalf("a hub refusal keeps HubRefusedResume: %v", got)
 	}
 }
@@ -344,7 +344,7 @@ func TestStopClaimLateRemovalRestartsTheWait(t *testing.T) {
 	n := 0
 	held := errors.New(stopClaimMsg)
 	errs := []error{held, held, held, held, held}
-	if err := ResumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, errs...)); err != nil {
+	if err := resumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, errs...)); err != nil {
 		t.Fatalf("a removal on the last attempt must still be followed by a full wait: %v (resumes %d, calls %v)", err, n, j.calls)
 	}
 	if !j.did("rm ") || n != 6 {

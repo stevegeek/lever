@@ -9,15 +9,16 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/convbackup"
 	"github.com/stevegeek/lever/internal/hostledger"
-	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/sessionrec"
 	"github.com/stevegeek/lever/internal/state"
 	"github.com/stevegeek/lever/internal/termsafe"
+	"github.com/stevegeek/lever/internal/wait"
 )
 
 // newConvRequest is one new conversation. Reason names it in the backup list.
@@ -71,8 +72,8 @@ const (
 	// `restore`, `up`, `apply`, `stop`, `reload`) is running; nothing was
 	// changed.
 	exitConversationLocked = 6
-	// exitConversationNotRunning: --by daily found the manager not running;
-	// nothing was changed.
+	// exitConversationNotRunning: --by found the manager, or the jail, not
+	// running; nothing was changed.
 	exitConversationNotRunning = 7
 )
 
@@ -81,32 +82,15 @@ var errConvBusy = errors.New("the manager is in the middle of a turn; nothing wa
 
 var errConvNotRunning = errors.New("the manager is not running; nothing was changed")
 
-// managerBusy reads the hub's activity for a turn in progress. The activity
-// is the agent's own report: an agent can hold off a reset this way, never
-// bring one about.
-func managerBusy(activity string) bool {
-	switch activity {
-	case scion.ActivityWorking, "thinking", "executing":
-		return true
-	}
-	return false
-}
-
 // newConversation backs the manager's conversation up and starts it again in
 // a fresh claude session on the same record and container image, with its
-// boot prompt. It returns the backup (saved is false when the home held no
-// conversation).
+// boot prompt (apply.ManagerNewSession). It returns the backup (saved is
+// false when the home held no conversation).
 //
-// The hub resumes a suspended record with claude --continue and a stopped one
-// in a fresh session, so: suspend (nothing writes the transcripts while they
-// are copied), back up, stop, then resume. The hub gives that fresh session
-// the boot prompt: manager.prompt_file as it is now. Up to the stop
-// every failure resumes the manager, when this call suspended it, on its own
-// conversation. After the stop no resume can continue the old session, so a
-// failure leaves the manager stopped and names the backup.
-//
-// A real stop, not a second claude process, ends the old session: the shared
-// SessionEnd hook then reports a phase that is true.
+// The backup runs while the manager is suspended, so nothing writes the
+// transcripts while they are copied; a failed backup resumes it on its own
+// conversation. After the stop a failure leaves the manager stopped and
+// names the backup.
 func (o convOps) newConversation(ctx context.Context, req newConvRequest) (m convbackup.Meta, saved bool, err error) {
 	if _, err := o.store(); err != nil {
 		return m, false, err
@@ -120,125 +104,45 @@ func (o convOps) newConversation(ctx context.Context, req newConvRequest) (m con
 	if err != nil {
 		return m, false, fmt.Errorf("%w; nothing was changed", err)
 	}
-	project := o.guest.Workspace
-	agents, err := o.sc.List(ctx, project)
-	if err != nil {
-		return m, false, fmt.Errorf("the hub does not answer (%s); nothing was changed", termsafe.Sanitize(scion.ErrSummary(err)))
-	}
-	rec := scion.FindAgent(agents, o.app.Name)
-	if rec == nil {
-		return m, false, errors.New("there is no manager record; run `lever up` first")
-	}
-	suspended, stopped := false, false
-	switch rec.Phase {
-	case scion.PhaseRunning:
-		if !req.Force && managerBusy(rec.Activity) {
-			return m, false, cli.WithExitCode(errConvBusy, exitConversationBusy)
-		}
-		o.log("conversation: suspending manager %q to back up its conversation", o.app.Name)
-		if err := o.sc.Suspend(ctx, o.app.Name, project); err != nil {
-			return m, false, fmt.Errorf("suspending the manager failed, nothing was changed: %s", termsafe.Sanitize(scion.ErrSummary(err)))
-		}
-		suspended = true
-	case scion.PhaseSuspended:
-		if req.RunningOnly {
-			return m, false, cli.WithExitCode(errConvNotRunning, exitConversationNotRunning)
-		}
-	default:
-		if req.RunningOnly {
-			return m, false, cli.WithExitCode(errConvNotRunning, exitConversationNotRunning)
-		}
-		return m, false, fmt.Errorf("manager %q is in phase %s; a new conversation needs it running or suspended (`lever up` first)", o.app.Name, scion.BoundedQuote(rec.Phase))
-	}
-	defer func() {
-		if err != nil && suspended && !stopped {
-			err = o.resumeAfterFailure(ctx, err, "on its own conversation")
-		}
-	}()
-	if last, err := o.waitPhase(ctx, scion.PhaseSuspended); err != nil {
-		return m, false, fmt.Errorf("the manager did not suspend (last seen %s); nothing was changed", scion.BoundedQuote(last))
-	}
-	// skipEmpty: a manager that empties its own transcripts must not rotate the
-	// real backups out one reset at a time.
-	m, saved, err = o.backupIf(ctx, req.Reason, true)
-	if errors.Is(err, convbackup.ErrNoHome) {
-		err = fmt.Errorf("%w, so it cannot tell whether the conversation would be lost", err)
-	}
-	if err != nil {
-		return m, false, fmt.Errorf("backing up the conversation failed, nothing was changed: %w", err)
-	}
-	if !saved {
-		o.log("conversation: manager %q's home holds no conversation; nothing to back up", o.app.Name)
-	}
-	begin := o.session()
-
-	o.log("conversation: stopping manager %q to end its session", o.app.Name)
-	if serr := o.sc.Stop(ctx, o.app.Name, project); serr != nil && o.stillSuspended(ctx) {
-		return m, saved, fmt.Errorf("stopping the manager failed, so its session was not ended: %s", termsafe.Sanitize(scion.ErrSummary(serr)))
-	}
-	if last, werr := o.waitPhase(ctx, scion.PhaseStopped); werr != nil {
-		if o.stillSuspended(ctx) {
-			return m, saved, fmt.Errorf("the manager did not stop (last seen %s), so its session was not ended", scion.BoundedQuote(last))
-		}
-		stopped = true
+	var begin sessionBegin
+	_, err = o.ensure(ctx, apply.ManagerRequest{
+		Intent: apply.ManagerNewSession, Task: task, Force: req.Force, RunningOnly: req.RunningOnly,
+		WhileSuspended: func(ctx context.Context) error {
+			var berr error
+			// skipEmpty: a manager that empties its own transcripts must not rotate
+			// the real backups out one reset at a time.
+			m, saved, berr = o.backupIf(ctx, req.Reason, true)
+			if errors.Is(berr, convbackup.ErrNoHome) {
+				berr = fmt.Errorf("%w, so it cannot tell whether the conversation would be lost", berr)
+			}
+			if berr != nil {
+				return fmt.Errorf("backing up the conversation failed, nothing was changed: %w", berr)
+			}
+			if !saved {
+				o.log("conversation: manager %q's home holds no conversation; nothing to back up", o.app.Name)
+			}
+			begin = o.session()
+			return nil
+		},
+		BeginSession: func() (func() error, error) { return begin() },
+	})
+	switch {
+	case err == nil:
+		return m, saved, nil
+	case errors.Is(err, apply.ErrManagerBusy):
+		return m, false, cli.WithExitCode(errConvBusy, exitConversationBusy)
+	case errors.Is(err, apply.ErrManagerNotRunning):
+		return m, false, cli.WithExitCode(errConvNotRunning, exitConversationNotRunning)
+	case errors.Is(err, apply.ErrStopUnconfirmed):
 		where := "its home held no conversation to back up"
 		if saved {
 			where = "the conversation is in backup " + m.ID
 		}
-		return m, saved, fmt.Errorf("the manager did not stop in time (last seen %s), so lever cannot tell whether its session ended and started nothing; %s. `lever doctor` shows the manager, `lever up` brings it up", scion.BoundedQuote(last), where)
-	}
-	stopped = true
-
-	commit, err := begin()
-	if err != nil {
-		return m, saved, o.afterStop(m, saved, fmt.Errorf("recording the new session failed: %w", err))
-	}
-	if err := o.verifyRole(ctx); err != nil {
+		return m, saved, fmt.Errorf("%w; %s. `lever doctor` shows the manager, `lever up` brings it up", err, where)
+	case errors.Is(err, apply.ErrSessionEnded):
 		return m, saved, o.afterStop(m, saved, err)
 	}
-	guard, err := o.startResume(ctx)
-	if err != nil {
-		return m, saved, o.afterStop(m, saved, err)
-	}
-	o.log("conversation: starting manager %q in a new session", o.app.Name)
-	if err := o.resumeFresh(ctx, task); err != nil {
-		// Not apply.ResumeFailed: its exit code and its "conversation kept" are
-		// not true once the old session has ended.
-		err = fmt.Errorf("starting the manager failed: %s", termsafe.Sanitize(scion.ErrSummary(err)))
-		return m, saved, o.afterStop(m, saved, guard.AfterFailure(ctx, err))
-	}
-	if err := guard.Resumed(ctx); err != nil {
-		return m, saved, o.afterStop(m, saved, err)
-	}
-	if err := commit(); err != nil {
-		o.log("conversation: warning: the new session was not recorded on a skill (%v); contacts cannot post to the manager until it next starts fresh", err)
-	}
-	if err := o.gate(ctx); err != nil {
-		return m, saved, o.afterStop(m, saved, guard.AfterFailure(ctx, err))
-	}
-	return m, saved, guard.Live(ctx)
-}
-
-// resumeFresh starts the stopped record in a new session on task, the
-// current manager.prompt_file, which the hub also stores as the record's task.
-// With no prompt_file the hub falls back to the task it stored at the last
-// fresh create or new conversation; it offers no way to clear that.
-func (o convOps) resumeFresh(ctx context.Context, task string) error {
-	if task == "" {
-		return o.sc.Resume(ctx, o.app.Name, o.guest.Workspace)
-	}
-	return o.sc.ResumeTask(ctx, o.app.Name, o.guest.Workspace, task)
-}
-
-// stillSuspended reports whether the hub reads the manager suspended: a stop
-// that did not land left the old session resumable.
-func (o convOps) stillSuspended(ctx context.Context) bool {
-	agents, err := o.sc.List(ctx, o.guest.Workspace)
-	if err != nil {
-		return false
-	}
-	rec := scion.FindAgent(agents, o.app.Name)
-	return rec != nil && rec.Phase == scion.PhaseSuspended
+	return m, saved, err
 }
 
 // afterStop says where things stand when a step after the stop failed: the
@@ -253,22 +157,23 @@ func (o convOps) afterStop(m convbackup.Meta, saved bool, cause error) error {
 // lockConversation keeps the changes to one instance's manager record apart:
 // new and restore suspend, swap or stop it; up, apply, stop and reload
 // resume, suspend or recreate it. verb and from (where the command came from, or "")
-// name the caller to the one it turns away.
-func lockConversation(app *config.App, st state.State, verb, from string) (func(), error) {
+// name the caller to the one it turns away; maxWait is lockWait's.
+func lockConversation(ctx context.Context, app *config.App, st state.State, verb, from string, maxWait time.Duration, notice func(string)) (func(), error) {
 	if brokerctl.StateInsideTree(app, st) {
 		return nil, errConvStateInTree
 	}
-	return takeManagerLock(st, verb, from)
+	return takeManagerLock(ctx, st, verb, from, maxWait, notice)
 }
 
-// lockLifecycle is lockConversation for up, apply, stop and reload. With the state
-// directory inside the tree there is no new or restore to keep apart from,
-// and a lock file there would be the agents' to hold.
-func lockLifecycle(app *config.App, st state.State, verb string) (func(), error) {
+// lockLifecycle is lockConversation for the other commands that change the
+// instance. With the state directory inside the tree there is no new or
+// restore to keep apart from, and a lock file there would be the agents' to
+// hold.
+func lockLifecycle(ctx context.Context, app *config.App, st state.State, verb string, maxWait time.Duration, notice func(string)) (func(), error) {
 	if brokerctl.StateInsideTree(app, st) {
 		return func() {}, nil
 	}
-	return takeManagerLock(st, verb, "")
+	return takeManagerLock(ctx, st, verb, "", maxWait, notice)
 }
 
 // managerLockHolder names the command that holds the manager lock now, or ""
@@ -286,25 +191,68 @@ func managerLockHolder(app *config.App, st state.State) string {
 	if !errors.Is(err, hostledger.ErrLocked) {
 		return ""
 	}
+	return lockHolderName(p)
+}
+
+func lockHolderName(p string) string {
 	return cmp.Or(termsafe.Sanitize(hostledger.LockHolder(p)), "another lever command")
 }
 
-// takeManagerLock never waits: a new conversation can hold the lock for
-// minutes, and a command that waited on it silently would look hung. The
-// one it turns away exits 6 and names the holder.
-func takeManagerLock(st state.State, verb, from string) (func(), error) {
+// lockWaitFlagUsage is --wait's help on the commands that take the lock.
+const lockWaitFlagUsage = "when another lever command is changing this instance, wait up to this long for it to finish (e.g. 5m) instead of exiting 6 at once"
+
+func addLockWaitFlag(c *cobra.Command, d *time.Duration, def time.Duration) {
+	c.Flags().DurationVar(d, "wait", def, lockWaitFlagUsage)
+}
+
+// lockNotice prints a lock wait's notice on the command's stderr.
+func lockNotice(cmd *cobra.Command) func(string) {
+	return func(msg string) { cmd.PrintErrln(msg) }
+}
+
+// lockPoll is how often a waiting command tries the lock again.
+var lockPoll = time.Second
+
+// takeManagerLock turns the caller away at once (exit 6, naming the holder)
+// unless maxWait is set: then it waits up to maxWait for the holder to
+// finish, saying once what it waits for (notice). Only scripts and lever's
+// own unattended callers wait by default: a command that waited silently
+// would look hung.
+func takeManagerLock(ctx context.Context, st state.State, verb, from string, maxWait time.Duration, notice func(string)) (func(), error) {
 	if err := os.MkdirAll(st.Dir, 0o700); err != nil {
 		return nil, fmt.Errorf("locking the manager record: %w", err)
 	}
 	p := st.ConversationLock()
-	holder := fmt.Sprintf("`%s`%s (pid %d, since %s)", verb, from, os.Getpid(), time.Now().UTC().Format("15:04:05 UTC"))
-	unlock, err := hostledger.TryLockFileAs(p, holder)
+	try := func() (func(), error) {
+		holder := fmt.Sprintf("`%s`%s (pid %d, since %s)", verb, from, os.Getpid(), time.Now().UTC().Format("15:04:05 UTC"))
+		return hostledger.TryLockFileAs(p, holder)
+	}
+	unlock, err := try()
+	if errors.Is(err, hostledger.ErrLocked) && maxWait > 0 {
+		if notice != nil {
+			notice(fmt.Sprintf("lever: %s is changing this instance; waiting up to %s for it to finish (--wait)", lockHolderName(p), maxWait))
+		}
+		werr := wait.For(ctx, wait.Spec{Name: "the lifecycle lock", Budget: maxWait, Interval: lockPoll}, func(context.Context) wait.Result {
+			unlock, err = try()
+			if errors.Is(err, hostledger.ErrLocked) {
+				return wait.NotYet("held")
+			}
+			return wait.Ready()
+		})
+		if werr != nil && !errors.Is(werr, wait.ErrTimeout) {
+			return nil, werr
+		}
+	}
 	if errors.Is(err, hostledger.ErrLocked) {
 		other := termsafe.Sanitize(hostledger.LockHolder(p))
 		if other == "" {
-			other = "another `lever conversation new`, `conversation restore`, `up`, `apply`, `stop` or `reload`"
+			other = "another `lever conversation new`, `conversation restore`, `conversation backup`, `up`, `apply`, `stop`, `reload`, `destroy`, `attach` or `acceptance`"
 		}
-		return nil, cli.WithExitCode(fmt.Errorf("%s is changing this instance's manager; nothing was changed. Run `%s` again once it has finished", other, verb), exitConversationLocked)
+		waited := ""
+		if maxWait > 0 {
+			waited = fmt.Sprintf(" (waited %s)", maxWait)
+		}
+		return nil, cli.WithExitCode(fmt.Errorf("%s is changing this instance's manager; nothing was changed%s. Run `%s` again once it has finished, or pass --wait", other, waited, verb), exitConversationLocked)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("locking the manager record: %w", err)
@@ -328,6 +276,7 @@ var newConvBy = map[string]newConvRequest{
 func newConversationNewCmd(bf BackendFactory) *cobra.Command {
 	var force bool
 	var by, progressMode string
+	var lockWait time.Duration
 	c := &cobra.Command{
 		Use:   "new [CONFIG]",
 		Args:  cobra.MaximumNArgs(1),
@@ -357,11 +306,22 @@ func newConversationNewCmd(bf BackendFactory) *cobra.Command {
 			case "daily":
 				from = " for the daily reset"
 			}
-			unlock, err := lockConversation(app, st, "lever conversation new", from)
+			unlock, err := lockConversation(cmd.Context(), app, st, "lever conversation new", from, lockWait, lockNotice(cmd))
 			if err != nil {
 				return err
 			}
 			defer unlock()
+			if by != "" {
+				// lever's own callers may have waited for the lock behind a stop or
+				// a destroy: they must not boot, or create, the jail that undid.
+				b, err := bf(app.Backend, machineName(app.Name))
+				if err != nil {
+					return err
+				}
+				if err := b.ResolveRunUser(cmd.Context()); err != nil {
+					return cli.WithExitCode(fmt.Errorf("the jail is not up (%v): nothing was started or changed", err), exitConversationNotRunning)
+				}
+			}
 			// The daily reset keeps no bring-up record: a manager that reports
 			// busy at every retry would otherwise rotate the operator's own
 			// records out each day. Its output is in conversation-new.log.
@@ -380,7 +340,7 @@ func newConversationNewCmd(bf BackendFactory) *cobra.Command {
 			ctx, cancel := context.WithTimeout(ctx, conversationNewDeadline)
 			defer cancel()
 			rep.Group("jail", 0)
-			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd, Rep: rep})
+			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd, Rep: rep, Locked: true})
 			if err != nil {
 				return err
 			}
@@ -405,5 +365,6 @@ func newConversationNewCmd(bf BackendFactory) *cobra.Command {
 	c.Flags().StringVar(&by, "by", "", "the caller that asks (chat, daily); for lever's own use")
 	_ = c.Flags().MarkHidden("by")
 	c.Flags().StringVar(&progressMode, "progress", "", progressFlagUsage)
+	addLockWaitFlag(c, &lockWait, 0)
 	return c
 }

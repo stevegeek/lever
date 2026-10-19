@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/wait"
 )
 
 // DefaultHubEndpoint is the hub endpoint on the loopback of whatever runs the
@@ -55,14 +56,11 @@ type Client struct {
 	r              proc.Runner
 	warnLog        *warnLog
 
-	// Poll budgets for waitHubReady and WaitRuntimeBrokerReady; tests shrink
-	// them.
-	hubReadyTimeout     time.Duration
-	hubReadyInterval    time.Duration
-	hubReadyNotice      time.Duration
-	hubAliveEvery       time.Duration
-	brokerReadyAttempts int
-	brokerReadyInterval time.Duration
+	// Wait budgets; tests shrink them.
+	hubReady      wait.Spec
+	hubAliveEvery time.Duration
+	brokerReady   wait.Spec
+	hubRetryPause time.Duration
 }
 
 func New(r proc.Runner, o Options) *Client {
@@ -78,12 +76,10 @@ func New(r proc.Runner, o Options) *Client {
 		r:              r,
 		warnLog:        &warnLog{sink: o.SettingsWarnLog},
 
-		hubReadyTimeout:     hubReadyTimeout,
-		hubReadyInterval:    hubReadyInterval,
-		hubReadyNotice:      hubReadyNotice,
-		hubAliveEvery:       hubAliveEvery,
-		brokerReadyAttempts: brokerReadyAttempts,
-		brokerReadyInterval: brokerReadyInterval,
+		hubReady:      wait.HubReady,
+		hubAliveEvery: hubAliveEvery,
+		brokerReady:   wait.RuntimeBrokerOnline,
+		hubRetryPause: wait.HubStartRetryPause,
 	}
 }
 

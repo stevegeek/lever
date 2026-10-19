@@ -295,6 +295,36 @@ func ensureHubExperiments(ctx context.Context, p experimentsPin) (conduitOn bool
 	return conduitOn, nil
 }
 
+// prePinExperiments pins scion's experiments, as ensureHubExperiments
+// would, on a hub that is about to restart, so the restart takes the pin and
+// ensureHubExperiments then finds nothing to restart for. It keeps conduit
+// on only where the hub serves it now and `lever ssh` wants it: turning it
+// on needs the proof only the restarted hub can give, so that stays
+// ensureHubExperiments' own restart. It writes nothing on a hub it cannot
+// ask first.
+func prePinExperiments(ctx context.Context, p experimentsPin) error {
+	rec, found, err := p.st.LoadHubExperimentsRecord()
+	if err != nil {
+		return fmt.Errorf("hub experiments before the restart: %w", err)
+	}
+	if has, sure := hubExperimentsSupport(ctx, p.known, rec, found); !has || !sure {
+		return nil
+	}
+	on, err := liveExperiments(ctx, p.admin)
+	if err != nil {
+		return fmt.Errorf("hub experiments before the restart: %w", err)
+	}
+	keepConduit := p.conduitOn && slices.Contains(on, conduitExperiment)
+	pinned, err := pinExperiments(ctx, p.admin, p.now(), keepConduit)
+	if err != nil {
+		return fmt.Errorf("hub experiments before the restart: pinning as lever-admin: %w", err)
+	}
+	if err := p.st.SaveHubExperimentsRecord(pinned); err != nil {
+		return fmt.Errorf("hub experiments before the restart: persisting hub-experiments.json: %w", err)
+	}
+	return nil
+}
+
 // strayExperiments are the served experiments lever does not want on.
 func strayExperiments(served []string, conduitOn bool) []string {
 	var out []string

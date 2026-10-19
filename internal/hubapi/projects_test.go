@@ -74,7 +74,7 @@ func TestRuntimeBrokers(t *testing.T) {
 	f := &fakeDoer{replies: map[string]reply{"GET /api/v1/runtime-brokers": {status: 200,
 		body: `{"brokers":[{"id":"b-1","name":"lever","status":"online","connectionState":"connected"}],"totalCount":1}`}}}
 	got, err := (&Client{T: f}).RuntimeBrokers(context.Background())
-	if err != nil || !reflect.DeepEqual(got, []RuntimeBroker{{ID: "b-1", Name: "lever", Status: "online"}}) {
+	if err != nil || !reflect.DeepEqual(got, []RuntimeBroker{{ID: "b-1", Name: "lever", Status: "online", ConnectionState: "connected"}}) {
 		t.Fatalf("got %+v err=%v", got, err)
 	}
 	f.replies["GET /api/v1/runtime-brokers"] = reply{status: 200, body: `[]`}

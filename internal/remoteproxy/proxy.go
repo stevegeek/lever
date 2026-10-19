@@ -689,6 +689,7 @@ type gate struct {
 	voice    *voiceState   // nil unless Config.Voice and ChatAgent are set
 	speak    *speakState   // nil unless Config.Voice.Speech is set too
 	wakes    wakeLimiter   // the chat page's wake route, one per agent a minute
+	activity activityLimiter
 	// wakeWaitFor overrides wakeAnswerWait (tests).
 	wakeWaitFor time.Duration
 	live        liveRequests

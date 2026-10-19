@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/hostledger"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
@@ -50,7 +51,7 @@ func TestStopSuspendsManager(t *testing.T) {
 	if !sb.stopped {
 		t.Fatal("stop must call Backend.Stop")
 	}
-	// A list (healStoppedManager's phase check), then the suspend.
+	// A list (the park's phase check), then the suspend.
 	if len(f.Calls) != 2 || f.Calls[0].Args[0] != "list" {
 		t.Fatalf("expected a list then the suspend, got %+v", f.Calls)
 	}
@@ -384,7 +385,7 @@ func TestSuspendRunningWorkersReportsInConfigOrder(t *testing.T) {
 	}
 }
 
-// reportProbe is an apply.AgentSessionProbe for healStoppedManager: a valid
+// reportProbe is an apply.AgentSessionProbe for parkManager's heal: a valid
 // token, a live harness, and a count of session reports.
 type reportProbe struct{ reports int }
 
@@ -398,11 +399,11 @@ func (p *reportProbe) ReportSessionRunning(context.Context, string) error {
 	return nil
 }
 
-// TestHealStoppedManagerBeforeSuspend: a manager whose hub phase reads
+// TestParkHealsAStoppedManagerBeforeSuspend: a manager whose hub phase reads
 // stopped while its claude still runs is reported running before `lever
 // stop` suspends it, so the next `lever up` resumes the conversation; any
 // other phase is left to the suspend alone.
-func TestHealStoppedManagerBeforeSuspend(t *testing.T) {
+func TestParkHealsAStoppedManagerBeforeSuspend(t *testing.T) {
 	for _, tc := range []struct {
 		list        string
 		wantReports int
@@ -418,7 +419,7 @@ func TestHealStoppedManagerBeforeSuspend(t *testing.T) {
 		var out bytes.Buffer
 		cmd.SetErr(&out)
 		p := &reportProbe{}
-		healStoppedManager(context.Background(), cmd, scion.New(f, scion.Options{}), p, nil, nil, "demo", "/lever")
+		_ = parkManager(context.Background(), cmd, &config.App{Name: "demo", Tree: t.TempDir()}, scion.New(f, scion.Options{}), p, nil, nil, "/lever")
 		if p.reports != tc.wantReports {
 			t.Fatalf("%s: reports = %d, want %d (%s)", tc.list, p.reports, tc.wantReports, out.String())
 		}
@@ -516,10 +517,10 @@ func (p *expiredThenReportProbe) ReportSessionRunning(context.Context, string) e
 	return nil
 }
 
-// TestHealStoppedManagerResetsAnExpiredTokenFirst: an expired token is reset
+// TestParkResetsAnExpiredTokenFirst: an expired token is reset
 // (behind the role guard) before the session report, which the hub would
 // otherwise refuse; a guard refusal resets nothing.
-func TestHealStoppedManagerResetsAnExpiredTokenFirst(t *testing.T) {
+func TestParkResetsAnExpiredTokenFirst(t *testing.T) {
 	for _, refuse := range []bool{false, true} {
 		f := proc.NewFakeRunner()
 		f.Script("scion list", proc.Result{Stdout: `[{"slug":"demo","phase":"stopped","containerStatus":"Up 2 hours"}]`})
@@ -536,7 +537,7 @@ func TestHealStoppedManagerResetsAnExpiredTokenFirst(t *testing.T) {
 		cmd := &cobra.Command{}
 		var out bytes.Buffer
 		cmd.SetErr(&out)
-		healStoppedManager(context.Background(), cmd, scion.New(f, scion.Options{}), p, verify, nil, "demo", "/lever")
+		_ = parkManager(context.Background(), cmd, &config.App{Name: "demo", Tree: t.TempDir()}, scion.New(f, scion.Options{}), p, verify, nil, "/lever")
 		if len(guarded) != 1 || guarded[0] != "lever/demo" {
 			t.Fatalf("refuse=%v: guard calls %v", refuse, guarded)
 		}
@@ -779,5 +780,47 @@ func TestReportManagerSuspendErrorQuietWhenSuspended(t *testing.T) {
 		if got := strings.Contains(errOut.String(), "warning"); got != c.warn {
 			t.Errorf("phase %q: warned=%v (stderr %q, stdout %q)", c.phase, got, errOut.String(), out.String())
 		}
+	}
+}
+
+// TestStopEndsTheBrokersHold: while the broker holds the lifecycle lock (a
+// heal of the manager the manager can draw out), stop stops the broker
+// first, which ends its hold; any other holder still turns stop away.
+func TestStopEndsTheBrokersHold(t *testing.T) {
+	for _, c := range []struct {
+		holder      string
+		stopsBroker bool
+	}{
+		{"the broker's certificate heal of the manager (pid 1)", true},
+		{"`lever up` (pid 1, since 10:00:00 UTC)", false},
+	} {
+		dir := writeInstance(t, managerYAML)
+		t.Chdir(dir)
+		st := state.ForConfig(dir)
+		if err := os.MkdirAll(st.Dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		unlock, err := hostledger.TryLockFileAs(st.ConversationLock(), c.holder)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := brokerHoldsLock(st); got != c.stopsBroker {
+			t.Fatalf("%s: brokerHoldsLock = %v", c.holder, got)
+		}
+		sb := &stubBackend{runner: scionOKRunner()}
+		root := stubRoot(sb)
+		var out bytes.Buffer
+		root.SetOut(&out)
+		root.SetErr(&out)
+		root.SetArgs([]string{"stop"})
+		// The lock stays held here (this process holds it, not a broker), so
+		// stop is still refused; what differs is that it tried the broker.
+		if err := root.Execute(); err == nil || sb.stopped {
+			t.Fatalf("%s: stop went on under a held lock: %v", c.holder, err)
+		}
+		if strings.Contains(out.String(), "stopping the broker first") != c.stopsBroker {
+			t.Fatalf("%s: output %q", c.holder, out.String())
+		}
+		unlock()
 	}
 }

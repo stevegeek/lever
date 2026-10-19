@@ -50,6 +50,10 @@ const (
 	ServerLogRel = Dir + "/server.log"
 )
 
+// ScionBin is where lever installs the jail's scion, root-owned. A process
+// counts as the hub only when it runs this file.
+const ScionBin = "/usr/local/bin/scion"
+
 // ProjectMarker is the in-tree marker scion writes under a registered
 // project's workspace (<workspace>/.scion) to record that the project is
 // initialized.

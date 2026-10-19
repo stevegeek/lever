@@ -58,7 +58,16 @@ func (b *Broker) runHealer(ctx context.Context) {
 	}
 }
 
-const reenrolHealTimeout = 5 * time.Minute
+// reenrolHealTimeout bounds a whole heal. The manager's bounce may wait out
+// a hub stop claim (the manager's stop-claim recovery): about 3 minutes, started
+// again after a removal that can come up to 3 minutes in, then its
+// liveness gate (up to 2 minutes for claude's pane and 2 for its session
+// start); the bound leaves room for those and the steps around them. A heal
+// cut short after a removal would leave the manager down until `lever up`.
+const reenrolHealTimeout = 13 * time.Minute
+
+// errHealRevoked: a revoke landed before the heal held its lock.
+var errHealRevoked = errors.New("revoked")
 
 func (b *Broker) healLapse(ctx context.Context, cn string) {
 	stage, slug, ok := b.healTarget(cn)
@@ -73,54 +82,38 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 		b.audit("reenrol", cn, "deny", "revoked identity presented an expired leaf — not healing")
 		return
 	}
+	if _, isWorker := b.workerSpec(cn); !isWorker {
+		b.healLapsedManager(ctx, cn, slug, stage)
+		return
+	}
 	// Before a ticket is staged: a refused heal must not leave a fresh
 	// ticket behind. bounceForReenrol checks again before the resume.
-	if spec, isWorker := b.workerSpec(cn); isWorker {
-		if err := b.verifyStrictWorkspace(spec); err != nil {
-			b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+spec.Name+": workspace dir: "+err.Error())
-			return
-		}
-		if err := b.checkSharedAccess(ctx, spec, true); err != nil {
-			b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+spec.Name+": "+err.Error())
-			return
-		}
+	spec, _ := b.workerSpec(cn)
+	if err := b.verifyStrictWorkspace(spec); err != nil {
+		b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+spec.Name+": workspace dir: "+err.Error())
+		return
+	}
+	if err := b.checkSharedAccess(ctx, spec, true); err != nil {
+		b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+spec.Name+": "+err.Error())
+		return
 	}
 	// A worker's heal holds its lifecycle lock from the stage to the end of
 	// the bounce, so it cannot undo a stop or race a wake. The wait is
 	// bounded since this goroutine heals every agent; a busy lock skips the
 	// heal without counting it, and the next lapse retries.
-	if _, isWorker := b.workerSpec(cn); isWorker {
-		lctx, cancel := context.WithTimeout(ctx, cmp.Or(b.reenrolLockWait, reenrolLockWaitDefault))
-		unlock, err := b.lockWorker(lctx, cn)
-		cancel()
-		if err != nil {
-			// Not below zero: a resume that held the lock may have reset it.
-			b.reenrolMu.Lock()
-			b.reenrolTries[cn] = max(0, b.reenrolTries[cn]-1)
-			b.reenrolMu.Unlock()
-			b.audit("reenrol", cn, "error", "natural lapse: worker busy (another start, resume, wake, stop or suspend of it is under way); heal skipped, the next lapse retries")
-			return
-		}
-		defer unlock()
-		// A revoke that landed during the lock wait must still win.
-		if b.isRevoked(cn) {
-			b.audit("reenrol", cn, "deny", "revoked identity presented an expired leaf — not healing")
-			return
-		}
-	} else if b.lockManager != nil {
-		// The manager's own heal would resume a record a new conversation or
-		// a restore has suspended or stopped on purpose (and a resume of a
-		// stopped one runs the hub's stored task, not the operator's current
-		// prompt). Busy skips the heal without counting it.
-		unlock, err := b.lockManager()
-		if err != nil {
-			b.reenrolMu.Lock()
-			b.reenrolTries[cn] = max(0, b.reenrolTries[cn]-1)
-			b.reenrolMu.Unlock()
-			b.audit("reenrol", cn, "error", "natural lapse: lever is changing the manager (a new conversation, a restore, up, apply, stop or reload); heal skipped, the next lapse retries")
-			return
-		}
-		defer unlock()
+	lctx, cancel := context.WithTimeout(ctx, cmp.Or(b.reenrolLockWait, reenrolLockWaitDefault))
+	unlock, err := b.lockWorker(lctx, cn)
+	cancel()
+	if err != nil {
+		b.uncountReenrol(cn)
+		b.audit("reenrol", cn, "error", "natural lapse: worker busy (another start, resume, wake, stop or suspend of it is under way); heal skipped, the next lapse retries")
+		return
+	}
+	defer unlock()
+	// A revoke that landed during the lock wait must still win.
+	if b.isRevoked(cn) {
+		b.audit("reenrol", cn, "deny", "revoked identity presented an expired leaf — not healing")
+		return
 	}
 	// Bounded: the scion CLI has no timeout, and a hung hub would otherwise
 	// hold the worker's lifecycle lock for good.
@@ -134,38 +127,72 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 		b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+slug+": "+err.Error())
 		return
 	}
-	// The manager's bounce gets apply's resume checks, the first before the
-	// stage.
-	var afterResume ManagerResumeCheck
-	if _, isWorker := b.workerSpec(cn); !isWorker {
-		if b.managerResumeGuard == nil {
-			b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+slug+": no check of the manager's tree mounts is wired; run `lever up`")
-			return
-		}
-		after, err := b.managerResumeGuard(hctx)
-		if err == nil && after == nil {
-			err = errors.New("no post-resume check")
-		}
-		if err != nil {
-			b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+slug+": "+err.Error())
-			return
-		}
-		afterResume = after
-	}
 	if err := stage(hctx); err != nil {
 		b.audit("reenrol", cn, "error", err.Error())
 		return
 	}
-	verb, ok := b.bounceForReenrol(hctx, cn, slug, afterResume)
+	verb, ok := b.bounceForReenrol(hctx, cn, slug)
 	if !ok {
 		return
-	}
-	if afterResume != nil && !afterResume.Verified() {
-		verb += "; warning: the manager's tree mounts could not be checked after the resume, run `lever doctor` (row \"manager read-only paths\")"
 	}
 	// The cap only bounds consecutive failures.
 	b.resetReenrolTries(cn)
 	b.audit("reenrol", cn, "allow", "natural lapse: ticket re-staged, healed via "+verb)
+}
+
+// healLapsedManager bounces the manager through its lifecycle
+// (DispatchConfig.EnsureManager), which takes lever's lifecycle lock: the
+// heal would otherwise resume a record a new conversation or a restore has
+// suspended or stopped on purpose (and a resume of a stopped one runs the
+// hub's stored task, not the operator's current prompt). Busy skips the
+// heal without counting it.
+func (b *Broker) healLapsedManager(ctx context.Context, cn, slug string, stage func(context.Context) error) {
+	if b.ensureManager == nil {
+		b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+slug+": no lifecycle of the manager is wired; run `lever up`")
+		return
+	}
+	hctx, cancel := context.WithTimeout(ctx, reenrolHealTimeout)
+	defer cancel()
+	out, err := b.ensureManager(hctx, ManagerChange{
+		Kind: ManagerReenrol, What: "the broker's certificate heal of the manager",
+		// A revoke that landed before the lock was held must still win.
+		UnderLock: func() error {
+			if b.isRevoked(cn) {
+				return errHealRevoked
+			}
+			return nil
+		},
+		StageTicket: stage,
+	})
+	switch {
+	case errors.Is(err, ErrManagerBusy):
+		b.uncountReenrol(cn)
+		b.audit("reenrol", cn, "error", "natural lapse: lever is changing the manager (a new conversation, a restore, up, apply, stop or reload); heal skipped, the next lapse retries")
+		return
+	case errors.Is(err, errHealRevoked):
+		b.audit("reenrol", cn, "deny", "revoked identity presented an expired leaf — not healing")
+		return
+	case errors.Is(err, ErrManagerRefused):
+		b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+slug+": "+err.Error())
+		return
+	case err != nil:
+		b.audit("reenrol", cn, "error", "natural lapse: the manager's bounce failed: "+err.Error())
+		return
+	}
+	verb := out.Verb
+	if out.MountsUnverified {
+		verb += "; warning: the manager's tree mounts could not be checked after the resume, run `lever doctor` (row \"manager read-only paths\")"
+	}
+	b.resetReenrolTries(cn)
+	b.audit("reenrol", cn, "allow", "natural lapse: ticket re-staged, healed via "+verb)
+}
+
+// uncountReenrol takes back a heal attempt that was skipped for a busy lock.
+// Not below zero: a resume that held the lock may have reset the count.
+func (b *Broker) uncountReenrol(cn string) {
+	b.reenrolMu.Lock()
+	b.reenrolTries[cn] = max(0, b.reenrolTries[cn]-1)
+	b.reenrolMu.Unlock()
 }
 
 // resetReenrolTries is also called by any start or resume that saw the worker
@@ -228,9 +255,9 @@ func (b *Broker) admitReenrol(cn string) bool {
 	return true
 }
 
-// bounceForReenrol restarts slug by its observed phase so boot re-enrols with
-// the staged ticket. It audits every failure itself.
-func (b *Broker) bounceForReenrol(ctx context.Context, cn, slug string, afterResume ManagerResumeCheck) (verb string, ok bool) {
+// bounceForReenrol restarts the worker slug by its observed phase so boot
+// re-enrols with the staged ticket. It audits every failure itself.
+func (b *Broker) bounceForReenrol(ctx context.Context, cn, slug string) (verb string, ok bool) {
 	agents, err := b.runtime.List(ctx, b.instanceProject)
 	if err != nil {
 		b.audit("reenrol", cn, "error", "list: "+err.Error())
@@ -286,17 +313,8 @@ func (b *Broker) bounceForReenrol(ctx context.Context, cn, slug string, afterRes
 		return "", false
 	}
 	if err != nil {
-		if afterResume != nil {
-			err = afterResume.AfterFailure(ctx, err)
-		}
 		b.audit("reenrol", cn, "error", "natural lapse: "+verb+" failed: "+err.Error())
 		return "", false
-	}
-	if afterResume != nil {
-		if err := afterResume.After(ctx); err != nil {
-			b.audit("reenrol", cn, "deny", "natural lapse: "+verb+" done, then the manager's tree mounts failed their check: "+err.Error())
-			return "", false
-		}
 	}
 	return verb, true
 }

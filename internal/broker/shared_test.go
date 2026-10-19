@@ -149,7 +149,7 @@ func TestWorkerResume_refusesStaleSharedMount(t *testing.T) {
 		t.Fatalf("no ticket, resume or purge for a stale record")
 	}
 	// The healer's bounce refuses it too.
-	if _, ok := b.bounceForReenrol(context.Background(), "worker", "worker", nil); ok {
+	if _, ok := b.bounceForReenrol(context.Background(), "worker", "worker"); ok {
 		t.Fatal("the healer must not bounce a worker with a stale shared mount")
 	}
 
@@ -295,7 +295,7 @@ func TestWorkerResume_leftoverSharesWithoutFolders(t *testing.T) {
 			if rec.Code != http.StatusForbidden || len(rt.resumed)+len(rt.staged) != 0 || !strings.Contains(rec.Body.String(), "lever worker purge worker") {
 				t.Fatalf("status=%d resumed=%d, want 403 naming the purge (%s)", rec.Code, len(rt.resumed), rec.Body.String())
 			}
-			if _, ok := b.bounceForReenrol(context.Background(), "worker", "worker", nil); ok {
+			if _, ok := b.bounceForReenrol(context.Background(), "worker", "worker"); ok {
 				t.Fatal("the healer must not bounce a worker with a leftover shared mount")
 			}
 		})

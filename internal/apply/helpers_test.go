@@ -117,3 +117,11 @@ func sawScionCall(f *proc.FakeRunner, fragment string) bool {
 	}
 	return false
 }
+
+// WaitManagerLive is the full gate (live, harness running, settle window)
+// for a manager just resumed, with the default budget and the harness-death
+// hint, as EnsureManager's gateResumed runs it. prog may be nil.
+func WaitManagerLive(ctx context.Context, d Deps, name, project string, prog *Progress) error {
+	err := gateManagerLive(ctx, d, d.ManagerLiveRetry.or(defaultManagerLiveRetry), name, project, "up", prog, gateOpts{})
+	return withHarnessDeathHint(ctx, d, err, project, name)
+}

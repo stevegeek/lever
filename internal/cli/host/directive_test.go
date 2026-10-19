@@ -86,6 +86,7 @@ func (r *reqRecorder) has(method, path string) bool {
 type canned struct {
 	status int // 0 => 200
 	body   string
+	header map[string]string
 }
 
 // startDirectiveUDS serves canned routes on a real socket at the path
@@ -117,6 +118,9 @@ func startUDSAt(t *testing.T, sock string, routes map[string]canned) *reqRecorde
 				status = http.StatusOK
 			}
 			w.Header().Set("Content-Type", "application/json")
+			for k, v := range resp.header {
+				w.Header().Set(k, v)
+			}
 			w.WriteHeader(status)
 			_, _ = w.Write([]byte(resp.body))
 		})

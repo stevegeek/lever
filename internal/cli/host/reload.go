@@ -1,6 +1,8 @@
 package host
 
 import (
+	"time"
+
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/brokerctl"
@@ -12,6 +14,7 @@ import (
 // apply plan. The VM stays up and the running manager is kept, so its
 // conversation is preserved.
 func newReloadCmd(bf BackendFactory) *cobra.Command {
+	var lockWait time.Duration
 	c := &cobra.Command{
 		Use:   "reload [CONFIG]",
 		Args:  cobra.MaximumNArgs(1),
@@ -23,7 +26,7 @@ func newReloadCmd(bf BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			unlock, err := lockLifecycle(app, stateFor(path), "lever reload")
+			unlock, err := lockLifecycle(cmd.Context(), app, stateFor(path), "lever reload", lockWait, lockNotice(cmd))
 			if err != nil {
 				return err
 			}
@@ -35,16 +38,18 @@ func newReloadCmd(bf BackendFactory) *cobra.Command {
 			}
 			ctx, stop := applySignalContext(cmd.Context())
 			defer stop()
-			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd})
+			w, err := buildApplyDeps(ctx, app, path, bf, applyOpts{Cmd: cmd, Locked: true})
 			if err != nil {
 				return err
 			}
 			if err := apply.Run(ctx, app, w.deps, apply.PlanOpts{}); err != nil {
 				return err
 			}
+			recordConverge(app, stateFor(path), "reload", w.log)
 			cmd.Printf("application %q reloaded (broker restarted on the current config).\n", app.Name)
 			return nil
 		},
 	}
+	addLockWaitFlag(c, &lockWait, 0)
 	return c
 }

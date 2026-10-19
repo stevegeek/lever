@@ -317,7 +317,7 @@ func (b *Base) InstallGuestBinary(ctx context.Context, localPath, destPath strin
 	return b.Guest().InstallRootBinary(ctx, localPath, destPath)
 }
 
-func (b *Base) EnsureHubAuth(ctx context.Context, spec types.HubAuth) (bool, error) {
+func (b *Base) EnsureHubAuth(ctx context.Context, spec types.HubAuth) (string, error) {
 	return b.Guest().EnsureHubAuth(ctx, spec)
 }
 

@@ -3,7 +3,8 @@
 # contacts bound before first sign-in). It brings an instance up with an
 # OLDER lever (the dev-auth window flow), renames the dev user to
 # lever-admin's address from the manager (the R1 hazard), migrates it with
-# this lever while the manager and a worker run, adds and removes a contact
+# this lever while the manager and a worker run (revoking the tokens the older
+# lever minted and never recorded), adds and removes a contact
 # while they run, removes one while the manager loops that rename with a token
 # due, forces a controller PAT rotation, checks what an agent can
 # and cannot do, and finally brings a fresh instance up with this lever. The
@@ -217,6 +218,17 @@ X cp /tmp/r1.py "lever--$NAME:/tmp/r1.py"
 checkx "an agent can rename the dev user (the hazard R1 repairs)" '[ "$(X exec -e E2E_EMAIL=lever-admin@lever.local "lever--$NAME" python3 /tmp/r1.py)" = 200 ]'
 
 say "migrate with this lever (scion $SCION_VERSION) while the manager and the worker run"
+# The older lever kept no record of the tokens it minted. The migration
+# re-mints them; the old ones carry the controller's authority, so it must
+# revoke them although it never recorded them. Their values stay in files.
+install -m 600 "$INST/.lever-state/controller.pat" "$WORK/old-controller.pat"
+[ -s "$INST/.lever-state/remote.pat" ] && install -m 600 "$INST/.lever-state/remote.pat" "$WORK/old-remote.pat"
+echo "      | older lever's token records: $(ls "$INST/.lever-state/"*.pat.json 2>/dev/null | wc -l)"
+# tokcode <file>: the hub's status for /api/v1/auth/me with the token in
+# file (over stdin).
+tokcode() { G sh -c 'read -r t; curl -sS -m 20 -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $t" http://127.0.0.1:8080/api/v1/auth/me' < "$1"; }
+code=$(tokcode "$WORK/old-controller.pat")
+checkx "the older lever's controller token works before the migration ($code)" '[ "$code" = 200 ]'
 pid0=$(hubpid)
 mgr0=$(X inspect -f '{{.State.StartedAt}}' "lever--$NAME")
 CUR_SCION="$SCION_VERSION"
@@ -231,6 +243,17 @@ checkx "the manager container was not restarted" '[ "$mgr0" = "$(X inspect -f "{
 check "R1 was repaired" grep -q "dev user carries lever-admin's address" "$WORK/migrate.log"
 check "the dev user was demoted" grep -q "demoting hub admin" "$WORK/migrate.log"
 check "the record says migrated" grep -q '"mode": *"migrated"' "$INST/.lever-state/hub-identity.json"
+check "the migration revoked a controller token it had no record of" grep -q "revoked hub token .* lever had no record of it" "$WORK/migrate.log"
+check "the migration names no token value" sh -c '! grep -qFf "$1" "$2"' _ "$WORK/old-controller.pat" "$WORK/migrate.log"
+code=$(tokcode "$WORK/old-controller.pat")
+checkx "the older lever's controller token is refused after the migration ($code)" '[ "$code" = 401 ]'
+if [ -s "$WORK/old-remote.pat" ]; then
+	code=$(tokcode "$WORK/old-remote.pat")
+	checkx "the older lever's remote token is refused after the migration ($code)" '[ "$code" = 401 ]'
+fi
+code=$(tokcode "$INST/.lever-state/controller.pat")
+checkx "the controller token lever holds now works ($code)" '[ "$code" = 200 ]'
+check "the controller token lever holds now has a record" test -s "$INST/.lever-state/controller.pat.json"
 check "doctor: hub authentication" row_ok "hub authentication"
 check "doctor: hub identities" row_ok "hub identities"
 check "doctor: remote web role" row_ok "remote web role"

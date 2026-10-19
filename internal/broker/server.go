@@ -124,6 +124,7 @@ func (b *Broker) OperatorHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+wire.PathOperatorNote, b.handleOperatorNote)
 	mux.HandleFunc("POST "+wire.PathOperatorWake, b.handleOperatorWake)
+	mux.HandleFunc("POST "+PathOperatorWorkerResume, b.handleOperatorWorkerResume)
 	mux.HandleFunc("POST "+wire.PathOperatorAgentMessagesMatch, b.handleAgentMessagesMatch)
 	return mux
 }

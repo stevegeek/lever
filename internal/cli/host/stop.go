@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/hostledger"
 	"github.com/stevegeek/lever/internal/hubapi"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
@@ -33,6 +35,7 @@ var errNoHub = errors.New("the jail did not answer")
 func newStopCmd(factory BackendFactory) *cobra.Command {
 	var machine, backendFlag *string
 	var keepVM, noTreeBackup bool
+	var lockWait time.Duration
 	cmd := &cobra.Command{
 		Use:   "stop",
 		Short: "Power off the jail, keeping its disk (fast `lever up` resume)",
@@ -53,7 +56,16 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 			if ia.app != nil {
 				st = stateFor(ia.path)
 				appName = ia.app.Name
-				unlock, err := lockLifecycle(ia.app, st, "lever stop")
+				unlock, err := lockLifecycle(cmd.Context(), ia.app, st, "lever stop", 0, nil)
+				if err != nil {
+					if *machine == "" && brokerHoldsLock(st) {
+						// The broker heals the manager under the lock: the power-off must
+						// not wait on it. Stopping the broker ends its hold.
+						cmd.PrintErrln("lever: the broker is changing the manager (a certificate heal or a token reset); stopping the broker first.")
+						stopHostDaemons(cmd, st)
+					}
+					unlock, err = lockLifecycle(cmd.Context(), ia.app, st, "lever stop", lockWait, lockNotice(cmd))
+				}
 				if err != nil {
 					return err
 				}
@@ -89,18 +101,11 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 					// role: only start emits --role.
 					sc := brokerctl.HostScionClient(b.JailRunner(), st, "")
 					hub = sc
-					// The heal has its own budget, so a slow one cannot cost the manager its
-					// suspend.
-					hctx, hcancel := context.WithTimeout(cmd.Context(), stopHealBudget)
-					healStoppedManager(hctx, cmd, sc, stopSessionProbe(b.JailRunner()), stopRoleVerifier(b.JailRunner(), st, sc), agentRevoked(ia.app, st), appName, b.MountDest())
-					hcancel()
-					sctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
-					if serr := sc.Suspend(sctx, appName, b.MountDest()); serr != nil {
+					if serr := parkManager(cmd.Context(), cmd, ia.app, sc, stopSessionProbe(b.JailRunner()), stopRoleVerifier(b.JailRunner(), st, sc), agentRevoked(ia.app, st), b.MountDest()); serr != nil {
 						if !reportManagerSuspendError(cmd, sc, appName, b.MountDest(), serr) {
 							suspended = false
 						}
 					}
-					cancel()
 					// After the manager, under its own budget, so a slow worker pass cannot cost
 					// the manager its suspend.
 					if !suspendRunningWorkers(cmd, sc, ia.app, b.MountDest()) {
@@ -134,6 +139,7 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 	}
 	machine, backendFlag = addJailTargetFlags(cmd)
 	cmd.Flags().BoolVar(&noTreeBackup, "no-tree-backup", false, "do not take the tree snapshot this stop would take (tree_backup.at_stop)")
+	addLockWaitFlag(cmd, &lockWait, 0)
 	cmd.Flags().BoolVar(&keepVM, "keep-vm", false, "suspend the agents and stop the hub and the broker, but leave the VM running (it keeps its memory on the host); the next `lever up` skips the VM boot")
 	return cmd
 }
@@ -193,27 +199,24 @@ func reportManagerSuspendError(cmd *cobra.Command, sc workerSuspender, name, pro
 	return false
 }
 
-// healStoppedManager runs before the manager's suspend. A manager whose hub
-// phase reads stopped while claude still runs (another claude fired the shared
-// SessionEnd hook) cannot be suspended, and scion resumes a stopped record
-// with a fresh session, losing the conversation. Reporting the session running
-// first lets the suspend keep it (apply.HealAgentSession). Best-effort.
-//
-// The report travels on the agent's hub token, often expired by then, so an
-// expired token is reset first (scion reset-auth, behind verifyRole, the
-// pre-role record guard). verifyRole nil means no reset.
-func healStoppedManager(ctx context.Context, cmd *cobra.Command, sc *scion.Client, probe apply.AgentSessionProbe, verifyRole func(ctx context.Context, project, agent string) error, revoked func(agent string) bool, name, project string) {
-	agents, err := sc.List(ctx, project)
-	if err != nil {
-		return // the suspend that follows reports a hub that cannot answer
+// parkManager suspends the manager before the power-off, through its
+// lifecycle (apply.ManagerPark), under the lifecycle lock stop holds. A
+// manager whose hub phase reads stopped while claude still runs (another
+// claude fired the shared SessionEnd hook) cannot be suspended, and scion
+// resumes a stopped record with a fresh session, losing the conversation:
+// it is reported running first (apply.HealAgentSession), within
+// stopHealBudget. The report travels on the agent's hub token, often expired
+// by then, so an expired token is reset first (scion reset-auth, behind
+// verifyRole, the pre-role record guard); verifyRole nil means no reset. It
+// returns the suspend's error.
+func parkManager(ctx context.Context, cmd *cobra.Command, app *config.App, sc *scion.Client, probe apply.AgentSessionProbe, verifyRole func(ctx context.Context, project, agent string) error, revoked func(agent string) bool, project string) error {
+	d := apply.Deps{
+		Scion: sc, AgentSession: probe, VerifyAgentRole: verifyRole, AgentRevoked: revoked,
+		JailMount: project, ManagerLock: apply.HeldManagerLock,
+		Log: func(format string, args ...any) { logLine(cmd.ErrOrStderr(), "lever stop: "+format, args...) },
 	}
-	rec := scion.FindAgent(agents, name)
-	if rec == nil || rec.Phase != scion.PhaseStopped {
-		return
-	}
-	apply.HealAgentSession(ctx, apply.SessionHealer{Scion: sc, Probe: probe, VerifyRole: verifyRole, Revoked: revoked, Log: func(format string, args ...any) {
-		logLine(cmd.ErrOrStderr(), "lever stop: "+format, args...)
-	}}, project, rec)
+	_, err := apply.EnsureManager(ctx, app, d, apply.ManagerRequest{Intent: apply.ManagerPark, Subject: "lever stop", HealBudget: stopHealBudget})
+	return err
 }
 
 // stopRoleVerifier is apply's pre-role record guard (hubapi.VerifyAgentRole),
@@ -225,7 +228,7 @@ func stopRoleVerifier(jr proc.Runner, st state.State, sc *scion.Client) func(ctx
 	}
 }
 
-// stopHealBudget bounds healStoppedManager. A var so a test can shrink it.
+// stopHealBudget bounds parkManager's heal. A var so a test can shrink it.
 var stopHealBudget = 20 * time.Second
 
 var stopSessionProbe = func(r proc.Runner) apply.AgentSessionProbe { return jail.AgentProbe{R: r} }
@@ -318,4 +321,11 @@ func stopHostDaemons(cmd *cobra.Command, st state.State) {
 	if err := brokerctl.StopRemoteProxy(st); err != nil {
 		cmd.PrintErrf("lever: warning: stopping remote proxy: %v\n", err)
 	}
+}
+
+// brokerHoldsLock reports whether the lifecycle lock's holder is the broker
+// (brokerctl's managerLock names it so). Only lever processes write the
+// holder: the lock file is in the state directory, outside the tree.
+func brokerHoldsLock(st state.State) bool {
+	return strings.HasPrefix(hostledger.LockHolder(st.ConversationLock()), "the broker's ")
 }

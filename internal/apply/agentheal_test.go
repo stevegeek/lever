@@ -260,7 +260,7 @@ func TestStartManagerFreshSkipsTheHeal(t *testing.T) {
 	}
 }
 
-func TestHealSessionsCoversWorkers(t *testing.T) {
+func TestHealNamedSessionsCoversWorkers(t *testing.T) {
 	f := proc.NewFakeRunner()
 	f.Script("scion list", proc.Result{Stdout: `[{"slug":"hello","phase":"running","containerStatus":"Up 1 hour"},` +
 		`{"slug":"scratch","phase":"running","containerStatus":"Up 5 minutes"},` +
@@ -269,8 +269,8 @@ func TestHealSessionsCoversWorkers(t *testing.T) {
 	app := helloApp(t.TempDir())
 	app.Workers = []config.Worker{{Name: "scratch", Dir: "workers/scratch"}, {Name: "idle", Dir: "workers/idle"}}
 	probe := &fakeSessionProbe{tok: expiredToken()}
-	HealSessions(context.Background(), Deps{Scion: scion.New(f, scion.Options{}), AgentSession: probe, Log: (&logSink{}).logf,
-		VerifyAgentRole: func(context.Context, string, string) error { return nil }}, app, "/lever")
+	healNamedSessions(context.Background(), Deps{Scion: scion.New(f, scion.Options{}), AgentSession: probe, Log: (&logSink{}).logf,
+		VerifyAgentRole: func(context.Context, string, string) error { return nil }}, "/lever", append([]string{app.Name}, workerNames(app)...))
 	if !sawScionCall(f, "reset-auth hello") || !sawScionCall(f, "reset-auth scratch") || sawScionCall(f, "reset-auth stray") {
 		t.Fatalf("calls %q", joinedCalls(f))
 	}

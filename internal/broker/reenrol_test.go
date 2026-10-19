@@ -117,6 +117,21 @@ func TestHealLapsedManager(t *testing.T) {
 	}
 }
 
+// A worker's heal never goes through the manager's lifecycle (which alone
+// clears a stop claim or records the guest boot).
+func TestHealLapsedWorkerSkipsTheManagersLifecycle(t *testing.T) {
+	rt := &fakeRuntime{staticPhases: true, agents: map[string][]scion.Agent{
+		testInstanceProject: {{Slug: "scratch", Phase: "suspended", ContainerStatus: "stopped"}},
+	}}
+	b, _, _ := reenrolBroker(t, rt, "all")
+	lc := &fakeLifecycle{rt: rt}
+	b.ensureManager = lc.ensure
+	b.healLapse(context.Background(), "scratch")
+	if len(rt.resumed) != 1 || len(lc.calls) != 0 {
+		t.Fatalf("resumed %v, lifecycle calls %d; want the worker resumed on its own", rt.resumed, len(lc.calls))
+	}
+}
+
 // Gate: revoked identities are NEVER healed — expiry stays a kill-switch.
 func TestHealRefusesRevoked(t *testing.T) {
 	rt := &fakeRuntime{staticPhases: true, agents: map[string][]scion.Agent{
@@ -490,6 +505,8 @@ func TestHealRefusedForRoleStagesNoTicket(t *testing.T) {
 		checked = append(checked, agent)
 		return errors.New("stored role reads as full")
 	}
+	// The manager's role is checked by its lifecycle, before the stage.
+	b.ensureManager = (&fakeLifecycle{rt: rt, refuse: errors.New("stored role reads as full")}).ensure
 	var buf bytes.Buffer
 	b.log = slog.New(slog.NewTextHandler(&buf, nil))
 	b.healLapse(context.Background(), "scratch")
@@ -504,8 +521,8 @@ func TestHealRefusedForRoleStagesNoTicket(t *testing.T) {
 	if len(rt.suspend) != 0 || len(rt.resumed) != 0 {
 		t.Fatalf("a role-refused heal bounced: suspend=%v resume=%v", rt.suspend, rt.resumed)
 	}
-	if len(checked) != 2 || checked[0] != "scratch" || checked[1] != "appname" {
-		t.Fatalf("role checked for %v, want [scratch appname] (one check each, by scion slug)", checked)
+	if len(checked) != 1 || checked[0] != "scratch" {
+		t.Fatalf("role checked for %v, want [scratch] (the manager's is its lifecycle's)", checked)
 	}
 	if strings.Count(buf.String(), "refusing to bounce") != 2 {
 		t.Fatalf("want two deny lines:\n%s", buf.String())
@@ -530,45 +547,30 @@ func TestFreshStartResetsTheAttemptCount(t *testing.T) {
 	}
 }
 
-// The manager's bounce is a resume: the manager-resume checks run around it
-// (DispatchConfig.ManagerResumeGuard). Unwired, or refusing before, the
-// manager is neither staged a ticket nor bounced; refusing after the
-// resume, the heal fails (the guard suspended the manager); a failed
-// resume is checked too; a check that never ran is said in the audit.
-func TestHealManagerResumeGuard(t *testing.T) {
-	guardOf := func(c *fakeResumeCheck, err error) func(context.Context) (ManagerResumeCheck, error) {
-		return func(context.Context) (ManagerResumeCheck, error) {
-			if err != nil {
-				return nil, err
-			}
-			return c, nil
-		}
-	}
+// The manager's heal is its lifecycle's (DispatchConfig.EnsureManager):
+// unwired, nothing is staged or bounced; a check's refusal is a deny, a
+// failure an error, and only a heal resets the count and says how it
+// healed, with a warning when the mounts could not be read back.
+func TestHealManagerLifecycleOutcomes(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
-		check      *fakeResumeCheck
-		guardErr   error
+		lc         *fakeLifecycle
 		unwired    bool
-		resumeErr  error
 		wantStaged bool
-		wantResume bool
-		wantHeal   bool
 		wantAudit  string
+		wantHeal   bool
 	}{
-		{name: "unwired", unwired: true, wantAudit: "no check of the manager's tree mounts is wired"},
-		{name: "refused before", guardErr: errors.New("kb mounted by the manager record but no longer on the host"),
-			wantAudit: "refusing to bounce appname: kb mounted"},
-		{name: "refused after", check: &fakeResumeCheck{afterErr: errors.New("kb is mounted from another place")},
-			wantStaged: true, wantResume: true, wantAudit: "tree mounts failed their check: kb is mounted from another place"},
-		{name: "resume failed, started anyway", check: &fakeResumeCheck{failErr: errors.New("kb is mounted from another place")},
-			resumeErr: errors.New("hook failed"), wantStaged: true, wantResume: true, wantAudit: "resume failed: hook failed"},
-		{name: "unverified", check: &fakeResumeCheck{}, wantStaged: true, wantResume: true, wantHeal: true,
+		{name: "unwired", unwired: true, wantAudit: "no lifecycle of the manager is wired"},
+		{name: "refused", lc: &fakeLifecycle{refuse: errors.New("kb mounted by the manager record but no longer on the host")},
+			wantAudit: "refusing to bounce appname: the manager's checks refused the change: kb mounted"},
+		{name: "failed", lc: &fakeLifecycle{fail: errors.New("resume failed: hook failed")}, wantStaged: true,
+			wantAudit: "the manager's bounce failed: resume failed: hook failed"},
+		{name: "unverified", lc: &fakeLifecycle{unverified: true}, wantStaged: true, wantHeal: true,
 			wantAudit: "could not be checked after the resume"},
-		{name: "verified", check: &fakeResumeCheck{verified: true}, wantStaged: true, wantResume: true, wantHeal: true,
-			wantAudit: "healed via resume"},
+		{name: "verified", lc: &fakeLifecycle{}, wantStaged: true, wantHeal: true, wantAudit: "healed via resume"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			rt := &fakeRuntime{staticPhases: true, resumeErr: tc.resumeErr, agents: map[string][]scion.Agent{
+			rt := &fakeRuntime{staticPhases: true, agents: map[string][]scion.Agent{
 				testInstanceProject: {{Slug: "appname", Phase: "suspended", ContainerStatus: "stopped"}},
 			}}
 			var buf bytes.Buffer
@@ -577,29 +579,33 @@ func TestHealManagerResumeGuard(t *testing.T) {
 				func(c *Config) {
 					c.Dispatch.AutoReenrol, c.Dispatch.ManagerBootstrapDir = "all", managerDir
 					if !tc.unwired {
-						c.Dispatch.ManagerResumeGuard = guardOf(tc.check, tc.guardErr)
+						tc.lc.rt = rt
+						c.Dispatch.EnsureManager = tc.lc.ensure
 					}
 				}))
+			b.reenrolMu.Lock()
+			b.reenrolTries["test-manager"] = 1
+			b.reenrolMu.Unlock()
 			b.healLapse(context.Background(), "test-manager")
 			if staged := stagedCN(t, managerDir) != ""; staged != tc.wantStaged {
 				t.Fatalf("staged = %v, want %v", staged, tc.wantStaged)
 			}
-			if resumed := len(rt.resumed) > 0; resumed != tc.wantResume {
-				t.Fatalf("resumed = %v, want %v", resumed, tc.wantResume)
-			}
 			if !strings.Contains(buf.String(), tc.wantAudit) || strings.Contains(buf.String(), "healed via") != tc.wantHeal {
 				t.Fatalf("audit %q, want %q (healed %v)", buf.String(), tc.wantAudit, tc.wantHeal)
 			}
-			if tc.resumeErr != nil && (tc.check.failedWith == nil || !strings.Contains(buf.String(), "kb is mounted from another place")) {
-				t.Fatal("a failed resume must be checked too")
+			if tries := reenrolTriesOf(b, "test-manager"); (tries == 0) != tc.wantHeal {
+				t.Fatalf("attempt count %d after the heal (healed %v)", tries, tc.wantHeal)
+			}
+			if !tc.unwired && tc.lc.calls[0].What == "" {
+				t.Fatal("the lifecycle's lock is not told who asks")
 			}
 		})
 	}
 }
 
-// The manager's heal never bounces it while lever holds the manager lock (a
-// new conversation, a restore, up, stop): busy skips it without a ticket or
-// a counted attempt, and the heal holds the lock while it bounces.
+// The manager's heal never bounces it while lever holds the lifecycle lock
+// (a new conversation, a restore, up, stop): busy skips it without a ticket
+// or a counted attempt. A revoke that lands before the lock is held wins.
 func TestHealSkipsTheManagerWhileLeverChangesIt(t *testing.T) {
 	rt := &fakeRuntime{staticPhases: true, agents: map[string][]scion.Agent{
 		testInstanceProject: {{Slug: "appname", Phase: "stopped", ContainerStatus: "Exited (0)"}},
@@ -608,13 +614,13 @@ func TestHealSkipsTheManagerWhileLeverChangesIt(t *testing.T) {
 	var buf bytes.Buffer
 	b.log = slog.New(slog.NewTextHandler(&buf, nil))
 	held, during := true, false
-	b.lockManager = func() (func(), error) {
+	b.ensureManager = (&fakeLifecycle{rt: rt, lock: func(string) (func(), error) {
 		if held || during {
 			return nil, errors.New("locked")
 		}
 		during = true
 		return func() { during = false }, nil
-	}
+	}}).ensure
 	b.healLapse(context.Background(), "test-manager")
 	if len(rt.staged) != 0 || len(rt.resumed) != 0 || stagedCN(t, managerDir) != "" {
 		t.Fatalf("a heal ran under lever's lock: staged=%d resume=%v", len(rt.staged), rt.resumed)
@@ -633,5 +639,19 @@ func TestHealSkipsTheManagerWhileLeverChangesIt(t *testing.T) {
 	b.healLapse(context.Background(), "test-manager")
 	if len(rt.resumed) != 1 || during {
 		t.Fatalf("after release: resume=%v, lock still held %v", rt.resumed, during)
+	}
+
+	// Revoked while the heal waited for the lock: UnderLock refuses.
+	b.reenrolMu.Lock()
+	delete(b.reenrolLast, "test-manager")
+	b.reenrolMu.Unlock()
+	b.ensureManager = (&fakeLifecycle{rt: rt, lock: func(string) (func(), error) {
+		b.Revoke("test-manager")
+		return func() {}, nil
+	}}).ensure
+	buf.Reset()
+	b.healLapse(context.Background(), "test-manager")
+	if len(rt.resumed) != 1 || !strings.Contains(buf.String(), "revoked identity") {
+		t.Fatalf("resume=%v audit %q: a revoke during the lock wait must win", rt.resumed, buf.String())
 	}
 }

@@ -75,6 +75,10 @@ type Config struct {
 	// NestedVirtUnknown says the caller has no lever.yaml (`lever provision`):
 	// EnsureUp leaves the guest's /dev/kvm setup as it is.
 	NestedVirtUnknown bool
+	// HostSwap lets the host swap the Lima VM's memory out. False starts the
+	// VM in a systemd user scope with MemorySwapMax=0 on a Linux host where
+	// that works (lima.NoSwapScopePrefix). Lima only.
+	HostSwap bool
 	// GuestKernel is the Lima guest kernel flavour to converge on ("hwe" or
 	// "ga"). "" installs nothing and only reports a pending reboot. Lima only.
 	GuestKernel string
@@ -147,10 +151,11 @@ type Backend interface {
 	// EnsureHubAuth installs the hub's assertion public key root-owned in the
 	// guest and converges the hub's auth block in ~/.scion/settings.yaml (the
 	// running hub takes its auth settings from env; the file is for readers),
-	// dropping any oidc_login block. It reports whether the hub must restart:
-	// the key file changed or an oidc_login block was removed, both read only
-	// at hub startup. See guest.EnsureHubAuth.
-	EnsureHubAuth(ctx context.Context, spec types.HubAuth) (bool, error)
+	// dropping any oidc_login block. It names what the hub reads only at
+	// startup that changed (the key file, a removed oidc_login or conduit
+	// block), "" when nothing did; a running hub must restart to read it. See
+	// guest.EnsureHubAuth.
+	EnsureHubAuth(ctx context.Context, spec types.HubAuth) (string, error)
 	// EnsureLeverTemplate creates lever's overlay agent template in the guest,
 	// reporting whether it wrote anything. See guest.EnsureLeverTemplate.
 	EnsureLeverTemplate(ctx context.Context) (bool, error)

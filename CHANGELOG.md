@@ -7,6 +7,224 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **`--wait <duration>` on every command that changes an instance.** While another lever command
+  holds the instance's lifecycle lock, `lever up`, `apply`, `reload`, `stop`, `destroy`,
+  `acceptance` and `conversation new`, `restore` and `backup` exit `6` at once, naming the holder,
+  as before; with `--wait 5m`, say, they wait up to that long for it to finish, saying once what
+  they wait for, and only then exit `6`. Use it in scripts and scheduled runs. A new conversation
+  from the chat page now waits up to 3 minutes and the daily reset up to 10, instead of failing
+  and trying again 10 minutes later. Either one starts nothing when the jail is not up once it has
+  the lock (after a `lever stop` it waited behind, say): it exits as "not running".
+
+- **Recent activity on the chat page (lever#232).** An operator's chat has a new header button
+  (the pulse line) that opens a read-only panel with the last lines of the agent's terminal, so a
+  phone shows what a "working" agent is doing without the hub's terminal view, which cannot scroll
+  back on a touch screen. The proxy runs one fixed `tmux capture-pane` through the hub's exec
+  route with the operator login's own hub session (the `agent.attach` the Terminal link already
+  uses), cleans the text of escape sequences and control and format characters, and bounds it to 400 lines and
+  64 KiB; the page writes it as text. Contacts get no button, and the route
+  (`POST /lever/api/agents/<name>/activity`) refuses them; it takes the page's own origin, a
+  running agent, and one read per agent every 2 seconds.
+
+- **`lever worker resume NAME [--json]`: resume a worker from the host (lever#235).** It resumes a
+  declared worker that is not running (suspended, stopped, completed, or in phase `error`, with a
+  forced resume) through the broker's operator socket and waits until it is live: the manager's
+  `agent resume` verb, with the same checks and per-worker lock, run by the host operator. A running
+  worker is left alone. It cannot resume the manager or start a worker with no record. Exit codes
+  `0`, `3`, `4`, `8`, `10`, `11`, `75` and `--json` reasons are in the CLI reference. Operator
+  socket only; no new authority for the manager or any worker.
+- **Machine-readable refusal reasons (lever#239).** Worker refusals on the operator socket (and the
+  manager's worker resume) carry an `X-Lever-Reason` header, and `X-Lever-Phase` where the phase
+  matters, with stable names listed in the CLI reference. The text bodies are unchanged.
+
+### Changed
+
+- **`lever up` applies config changes: every `up` runs the whole bring-up, as `lever apply` does,
+  then attaches.** `up` used to look at the manager first: when the hub had survived (`lever stop
+  --keep-vm`, a guest that restarted under a running hub) it kept or resumed the manager on a path
+  of its own, and left a changed config "for `lever apply`" (a changed `remote:` config kept the
+  proxy down until then). Each fix to the bring-up had to be made on that path too. Now `up`
+  converges the instance on `lever.yaml` as it is now (the hub, lever's hub identities, the
+  broker, the images, the manager and the remote proxy) and then attaches, so an edited config
+  takes effect at the next `up`. Before it starts, `up` says when the config or the lever binary
+  changed since the last bring-up. A step whose own check finds it done is skipped: a broker of
+  this binary and config, a hub started with these settings, an image already loaded. The image
+  warm-up, which can take minutes on a large image, now runs only when no finished warm-up of the
+  same image archive and lever binary is recorded and the jail still holds the image. The
+  security fences (removed logins, the hub's runtime and registry pins, unrecorded hub tokens) run
+  on every `up`. A manager record that is gone is created again, as `apply` does. `lever apply`
+  is `up` without the attach.
+- **At most one hub restart per bring-up, and a hub lever starts must have its runtime broker
+  online.** A bring-up could restart the hub twice: once for its auth settings and once more to
+  pin scion's experiments. lever now pins the experiments before the first restart, so that
+  restart takes them, and restarts again only to turn conduit on for `lever ssh`, which needs the
+  restarted hub's proof. After lever starts the hub, the step waits up to 5 minutes for its
+  runtime broker (2 after a restart) and fails if it does not come online, naming what the hub
+  last listed or the error it last answered, instead of going on and failing the manager's start
+  later. lever asks the hub as lever-admin: the scion CLI it asked before holds no token on the
+  first `lever up`, and the controller token sees no broker, so that wait never saw one and always
+  ran out its time.
+- **lever's lifecycle record is `.lever-state/lifecycle.json`.** It holds the guest boot the
+  manager last ran in (formerly `guest-boot.json`, taken over and removed on the first write), the
+  image warm-up records and the last full bring-up. Only the command holding the lifecycle lock
+  writes it; `lever destroy` removes it; with the state directory inside the tree lever neither
+  reads nor writes it. A record lever cannot read counts as none: a manager left running in an
+  ended VM boot is still recognised by its container's start time. A warm-up record lever cannot
+  remove before it reloads an image fails the load, so it never vouches for the new image. The remote proxy's `remote.stamp` now has a single writer, the proxy.
+- **`lever attach`, `lever conversation backup` and `lever acceptance` take the lifecycle lock.**
+  `attach` holds it only while it detaches other terminals and stages its token, waiting up to 2
+  minutes for another command by default; the attach itself holds no lock. `lever destroy
+  --machine` naming the instance's own machine takes it too. The broker's certificate heal of the
+  manager lets go of the lock once the resumed manager's mounts are checked, before it waits for
+  claude, which can take minutes.
+
+- **One lifecycle for the manager.** `lever apply`, `lever up`, `lever conversation new` and
+  `restore`, `lever stop`, and the broker's certificate heal and hub token reset of the manager now
+  all create, resume, suspend and recreate it through one function, which takes the lifecycle lock,
+  reads the manager once and decides from that reading. The decisions are the ones each command
+  made before, except for the fixes below.
+- **`lever msg send` to a worker that is not running exits `9`** (it exited `1`), with nothing
+  sent, so a host program can resume the worker and send again. Its refusal text now names
+  `lever worker resume NAME` instead of asking the manager to resume the worker, and a broker
+  refusal is printed as the broker's text without the `POST …: status 409:` prefix. A manager
+  that is not running also exits `9`. `lever directive send` to a worker that is not running
+  names `lever worker resume NAME` the same way.
+
+### Fixed
+
+- **The Lima VM stays out of host swap, and its guest kernel no longer uses KVM async page faults
+  (lever#240).** A Linux host had swapped 19 GiB of the 24 GiB VM out; a nested VM start touched
+  those pages, and guest tasks (`claude`, a nested QEMU, `ssh`) sat in D state in
+  `kvm_async_pf_task_wait_schedule` for over an hour, waiting for a "page ready" notice that never
+  came. On a Linux host every bring-up (`lever up`, `apply`, `conversation new`) now starts a
+  stopped VM inside `systemd-run --user --scope --property=MemorySwapMax=0`, when your user lingers
+  (`loginctl enable-linger`; without it the user manager would kill the VM at your last logout) and
+  a probe scope really gets `memory.swap.max` 0; otherwise the VM starts as before and apply warns
+  why. New `host_swap: true` keeps the old start without the warning. A running VM gets the limit at
+  its next start (`lever stop`, then `lever up`), and each bring-up says so until then. The guest
+  crash-recovery GRUB drop-in adds `no-kvmapf` on x86_64 guests, so a fault on swapped-out memory
+  stalls the vCPU instead of parking a task for good; existing VMs get it on the next apply or up,
+  which reports a reboot pending. New doctor rows: *VM host swap* (the QEMU process's `VmSwap` and
+  cgroup `memory.swap.max`; warns above 1 GiB or while the host may swap the VM) and *guest async
+  page faults* (tasks stuck in that wait, sampled twice 5 s apart, and the kernel's hung-task
+  traces; fix: `lever stop` or `limactl stop -f`, then `lever up`). *guest crash recovery* also
+  warns while an x86_64 guest runs without `no-kvmapf`.
+
+- **`lever-manager watch` no longer dies on a passing broker error (lever#233).** One failed poll
+  (for example a 502 "inbox unavailable" while the broker could not resolve the manager's agent
+  id) ended the watcher for good, and the manager stopped getting worker events without noticing.
+  A poll the broker does not answer, or answers with 5xx, 408 or 429, is now logged to stderr and
+  retried, waiting twice as long after each failure in a row, up to a minute, and the
+  `--interval` again once a poll succeeds. A 4xx refusal, a bad bootstrap or identity, a
+  certificate either side rejects, a body that does not decode, and an events-file error still
+  end the command. `--interval` below 1 is refused.
+
+- **No enrolment ticket for a manager record lever refuses to keep.** The mint step staged the
+  manager's ticket in the tree before start-manager checked the record's stored role, so a record
+  lever then refused (one a roles-aware scion reads as full authority) could still read a fresh
+  ticket. The role check now runs first, and a refused record gets no ticket. `lever up --fresh`,
+  which discards the record, is not affected.
+- **`lever up` and `lever apply` bring back a manager whose container died under a record the hub
+  still reads running.** They kept such a record and then refused it ("its container is ... —
+  `lever stop` then `lever up` resumes it"); only a VM restart under the manager was recovered.
+  Now, when podman shows the manager's container exited, stopped or gone, they suspend and resume
+  it, keeping the conversation. A container podman lists as `created` (a start under way) does not
+  count, and a suspend that does not take is still refused by the liveness gate.
+- **`lever up` on a manager the hub still runs gets the whole start-manager step.** When the hub
+  survived (`lever stop --keep-vm`, a guest that restarted under a running hub), `up` resumed or
+  kept the manager on a path of its own. It now runs what `apply` runs for the manager: the wait
+  for the runtime broker and its retry, the workers' session heal and the mount and settings
+  warnings. A running manager is gated as `apply` gates it: a container column the hub leaves blank is waited
+  on, and refused if it stays blank.
+- **The broker's certificate heal of the manager waits for the manager to come up.** The bounce
+  read the tree mounts back but did not check that claude started. It now passes the same liveness
+  gate as `lever up` before it is audited as healed; the heal's bound grows from 9 to 13 minutes. Since the manager can make such a
+  heal last minutes, `lever stop` no longer refuses while the broker holds the lifecycle lock: it
+  stops the broker first, which ends the hold. A `lever revoke` that lands while
+  the heal waits for the lifecycle lock now stops it, as it already did for workers, and the
+  manager's hub token reset is skipped when the manager no longer runs once the lock is held.
+
+- **The first `lever up` after a VM reboot no longer fails because a stale hub pid file names a
+  reused pid.** After a reboot, `~/.scion/server.pid` still names the hub's old pid, and scion
+  counts any live process with that pid as a running hub. lever removed such a file only when the
+  pid was alive at its own check; a pid that a new process took a moment later (a reboot repeats
+  the pid sequence, so this can be lever's own `scion server start`) made scion answer "already
+  running" and start nothing, and `up` failed with "no scion server is running in the jail any
+  more" and nothing new in `server.log`. lever now also removes a pid file that names a dead pid,
+  checks an "already running" answer against a live scion server, and starts a hub that exited
+  during start-up (or was falsely reported running) once more after 3 s. A second failure ends the
+  step, and the error quotes what each attempt added to `server.log` (redacted, made safe to
+  print), or says it added nothing. (lever#231)
+- **`lever up` brings up the host broker when it only resumes the manager or finds it running.**
+  These two paths skip `apply`, and so never started or checked the capability broker: a broker
+  that had died under a live hub stayed down, and the manager and its workers had no tools, until
+  the next `lever apply`. They now run apply's broker step: a broker that is not serving is
+  started, a healthy one of this binary and broker config is kept, and one of another binary or
+  config is restarted. A broker started this way has its manager enrolment ticket minted and staged
+  at once, as `apply` does, so its single-use latch is never left open.
+- **A manager that `lever up` resumes can re-enrol after its certificate lapsed.** The manager's
+  short-lived certificate cannot renew while it is suspended, and its boot re-enrols only with an
+  unspent enrolment ticket. `lever apply` stages a fresh one before every resume; `lever up`'s own
+  resume did not, so a manager suspended past its certificate's life came back with no tools. `up`
+  now re-arms the broker's ticket before it resumes the manager, as `apply` does.
+- **`lever conversation new`, `lever conversation restore` and the broker's certificate heal of the
+  manager record the guest boot.** lever keeps the guest boot the manager last ran in, to tell a
+  manager record a VM restart left behind from a live one. `apply` and `up` recorded it; these three
+  start the manager too and did not, so a later `lever up` could compare against an older boot.
+  Each now records the boot once the manager passed its checks.
+- **`lever destroy` and the broker's hub token reset of the manager take the lifecycle lock.**
+  `destroy` tore the jail down while an `up`, `apply`, `stop` or new conversation could be acting on
+  it, and the broker could reset the manager's expired hub token in the middle of a new
+  conversation or a stop. `destroy` from the instance root now holds the lock for the teardown and,
+  while another command holds it, exits `6`, names that command and its pid, and destroys nothing.
+  It stays the last resort: `lever destroy --force` destroys the jail anyway, after a warning that
+  names the holder, for a command that is stuck (a `lever stop` hung in the guest), and also when the
+  lock cannot be taken at all. The broker's
+  reset of the manager's token is skipped while the lock is held, as its certificate heal already
+  was, and retried at the next check.
+- **The broker's certificate heal of the manager gets past a hub stop claim.** When the manager's
+  certificate lapses the broker bounces it so its boot re-enrols. That resume did not have the
+  stop-claim recovery `lever up`, `apply` and `conversation restore` gained in 0.42.0, so after a
+  VM power-off during a manager start the heal failed on every lapse with the hub's
+  `start_in_progress` refusal. It now resumes through the same recovery: it removes the manager's
+  own container, by the name lever derives, only when podman shows no process in it and a second
+  look shows it unchanged, and retries for about three minutes; when the claim stays held its audit
+  line names the claim and the fix. Only the manager's own lapsed certificate starts this bounce.
+  Worker resumes are still not covered: the manager asks for those.
+- **`lever apply` revokes the controller's hub tokens that lever did not record (lever#229).** On an
+  instance migrated to 0.39 or later, PATs an older lever minted before it kept token records stayed
+  valid with the controller's authority, and doctor's *hub identities* row stayed red: the 0.39
+  re-mint revoked only tokens it had a record of, and the documented fix (`scion hub token revoke`)
+  cannot work, since a token cannot manage tokens. Every apply now lists the controller's tokens,
+  as the controller through lever's assertion, and revokes each one lever neither recorded
+  (`controller.pat.json`, `remote.pat.json`, the `lever ssh` records) nor holds, printing its id and
+  name, never its value. On a migrated hub the controller is scion's dev user, so this also revokes
+  any PAT minted as that user by hand (with the scion CLI, say): each carries the controller's
+  authority. It tells the tokens it holds by the prefix the hub lists of each against
+  `controller.pat` and `remote.pat`, so the tokens lever uses are never revoked, recorded or not;
+  a `lever ssh` token still in its life is left alone, and a token listed without a prefix is
+  reported, not revoked. It revokes nothing, with a warning, when it cannot read its own records or
+  token files, when the controller assertion does not resolve to the recorded controller, or when
+  the hub's list does not show the controller token lever holds. Doctor's row now names
+  `lever apply` as the fix.
+
+### Deprecated
+
+- **The broker's `/operator/wake` route, for host programs.** Use `lever worker resume NAME`. The
+  route works exactly as before (the remote chat page uses it) and now answers with
+  `Deprecation: true` and a `Link` to `/operator/worker/resume`. It stays at least until the
+  release after this one; any change to it will be announced here.
+
+### Upgrade
+
+- **Jail ABI 6.** `internal/scion`, which `lever-manager` imports, changed (the hub start and the
+  shared wait code), and so did `internal/bridge` (the watcher's retry, lever#233). Rebuild the agent image
+  (`make lever-image` or `make lever-image-slim`, then any instance image built from it) and
+  recreate the manager on it with `lever up --fresh --keep-conversation`. Doctor's *agent lever
+  version* row says so.
+
 ## [0.42.0] - 2026-10-16
 
 ### Added

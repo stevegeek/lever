@@ -112,12 +112,12 @@ func (s State) remoteProxyPID() (int, error) {
 
 // WriteRemoteStamp records what the proxy that owns remote.pid is running.
 //
-//   - The running proxy writes it (remoteproxy.Serve via ServeConfig.Stamp,
-//     once bound), so every `lever remote serve`, hand-started ones
-//     included, stamps the config it loaded. The state dir is keyed on the
-//     config file's directory, so a second config beside lever.yaml shares
-//     both files; a stamp written by anyone else could vouch for a proxy
-//     enforcing another config's allowed_users.
+//   - Only the running proxy writes it (remoteproxy.Serve via
+//     ServeConfig.Stamp, once bound), so every `lever remote serve`,
+//     hand-started ones included, stamps the config it loaded. The state dir
+//     is keyed on the config file's directory, so a second config beside
+//     lever.yaml shares both files; a stamp written by anyone else could
+//     vouch for a proxy enforcing another config's allowed_users.
 //   - It names its pid, compared against remote.pid: a proxy that takes
 //     over the pid file without stamping invalidates the match instead of
 //     inheriting it, and a stamp left after the proxy exits is inert.
@@ -151,17 +151,4 @@ func (s State) RemoteStampMatches(version, hash string) bool {
 		return false
 	}
 	return strings.TrimSpace(string(b)) == strings.TrimSpace(remoteStampContent(version, hash, pid))
-}
-
-// RemoteStampRecords reports whether the stamp records this version and
-// remote config, whatever pid it names: the stamp outlives its proxy until
-// `lever down`, so after a restart it is the config the last proxy enforced.
-// Unlike RemoteStampMatches it vouches for no running process.
-func (s State) RemoteStampRecords(version, hash string) bool {
-	b, err := os.ReadFile(s.RemoteStamp())
-	if err != nil {
-		return false
-	}
-	lines := strings.Split(string(b), "\n")
-	return len(lines) >= 3 && version != "" && hash != "" && lines[0] == version && lines[1] == hash
 }

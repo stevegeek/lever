@@ -16,6 +16,7 @@ import (
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/convbackup"
+	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/sessionrec"
@@ -36,6 +37,25 @@ type fakeConvScion struct {
 	stopLands bool
 	// task is the last task ResumeTask passed ("" for none).
 	task string
+	// container, when set, is the container status List reports until a
+	// verb changes the phase; otherwise it follows the phase.
+	container string
+	// deadAfterResume: a resume's container exits at once.
+	deadAfterResume bool
+}
+
+// The verbs no conversation command makes.
+func (f *fakeConvScion) Start(context.Context, scion.StartOpts) error {
+	return errors.New("fake: no create here")
+}
+func (f *fakeConvScion) ResumeForce(context.Context, string, string) error {
+	return errors.New("fake: no forced resume here")
+}
+func (f *fakeConvScion) Delete(context.Context, string, string) error {
+	return errors.New("fake: no delete here")
+}
+func (f *fakeConvScion) ResetAuth(context.Context, string, string) error {
+	return errors.New("fake: no token reset here")
 }
 
 func (f *fakeConvScion) List(context.Context, string) ([]scion.Agent, error) {
@@ -48,6 +68,9 @@ func (f *fakeConvScion) List(context.Context, string) ([]scion.Agent, error) {
 	if f.phase == scion.PhaseRunning {
 		cs = "Up 1 minute"
 	}
+	if f.container != "" {
+		cs = f.container
+	}
 	return []scion.Agent{{Slug: "mgr", Phase: f.phase, Activity: f.activity, ContainerStatus: cs}}, nil
 }
 
@@ -55,6 +78,7 @@ func (f *fakeConvScion) Stop(context.Context, string, string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "stop")
+	f.container = ""
 	if f.stopErr == nil || f.stopLands {
 		f.phase = scion.PhaseStopped
 	}
@@ -65,6 +89,7 @@ func (f *fakeConvScion) Suspend(context.Context, string, string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "suspend")
+	f.container = ""
 	if f.suspendErr != nil {
 		return f.suspendErr
 	}
@@ -77,6 +102,7 @@ func (f *fakeConvScion) Suspend(context.Context, string, string) error {
 func (f *fakeConvScion) Resume(context.Context, string, string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.container = ""
 	if f.phase == scion.PhaseStopped {
 		f.calls = append(f.calls, "resume-fresh")
 	} else {
@@ -86,6 +112,9 @@ func (f *fakeConvScion) Resume(context.Context, string, string) error {
 		return f.resumeErr
 	}
 	f.phase = scion.PhaseRunning
+	if f.deadAfterResume {
+		f.container = "Exited (1) 1 second ago"
+	}
 	return nil
 }
 
@@ -105,47 +134,60 @@ func (f *fakeConvScion) ResumeTask(ctx context.Context, w, p, task string) error
 
 // convFixture is an instance and a fake jail HOME laid out as scion lays out
 // the run user's, with the manager "mgr"'s home. The guest scripts run with
-// the real bash and GNU tar.
+// the real bash and GNU tar. The manager holds one tree mount, kb, read-only.
 type convFixture struct {
 	ops       convOps
 	sc        *fakeConvScion
 	agentHome string
 	home      string
+	tree      string
 	logs      []string
-	gated     int
-	guard     *fakeResumeGuard
+	mounts    *fakeMountChecks
+	boots     *fakeConvBoot
+	roleErr   error
 }
 
-// fakeResumeGuard records the checks around a resume, in order, and fails the
-// step named in failAt.
-type fakeResumeGuard struct {
-	steps  []string
-	failAt string
+// fakeMountChecks is the guest's read-back of the manager's tree mounts: one
+// self-mount, kb, and the live check's answers in turn ("ok", "notrunning",
+// "elsewhere"; the last repeats, none is ok).
+type fakeMountChecks struct {
+	mu      sync.Mutex
+	answers []string
+	checks  int
 }
 
-func (g *fakeResumeGuard) step(name string) error {
-	g.steps = append(g.steps, name)
-	if g.failAt == name {
-		return errors.New(name + " refused")
-	}
-	return nil
+func (m *fakeMountChecks) inspect(context.Context, string) ([]jail.Mount, error) {
+	return []jail.Mount{{Source: "/lever/kb", Destination: "/workspace/kb"}}, nil
 }
 
-func (g *fakeResumeGuard) begin(context.Context) (managerResume, error) {
-	if err := g.step("begin"); err != nil {
-		return nil, err
+func (m *fakeMountChecks) check(context.Context, string, []jail.LiveMount) ([]jail.LiveMountProblem, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	a := "ok"
+	if len(m.answers) > 0 {
+		a = m.answers[min(m.checks, len(m.answers)-1)]
 	}
-	return g, nil
-}
-func (g *fakeResumeGuard) Resumed(context.Context) error { return g.step("resumed") }
-func (g *fakeResumeGuard) Live(context.Context) error    { return g.step("live") }
-func (g *fakeResumeGuard) Settle(context.Context) error  { return g.step("settle") }
-func (g *fakeResumeGuard) AfterFailure(_ context.Context, cause error) error {
-	if err := g.step("after-failure"); err != nil {
-		return errors.Join(cause, err)
+	m.checks++
+	switch a {
+	case "notrunning":
+		return nil, jail.ErrContainerNotRunning
+	case "elsewhere":
+		return []jail.LiveMountProblem{{Target: "/workspace/kb", Reason: jail.LiveMountElsewhere}}, nil
 	}
-	return cause
+	return nil, nil
 }
+
+// fakeConvBoot records the guest boots the manager was seen live in.
+type fakeConvBoot struct{ records []string }
+
+func (b *fakeConvBoot) Current(context.Context) (string, error) { return "boot-1", nil }
+func (b *fakeConvBoot) Recorded() (string, error) {
+	if len(b.records) == 0 {
+		return "", nil
+	}
+	return b.records[len(b.records)-1], nil
+}
+func (b *fakeConvBoot) Record(id string) error { b.records = append(b.records, id); return nil }
 
 func newConvFixture(t *testing.T) *convFixture {
 	t.Helper()
@@ -171,17 +213,28 @@ func newConvFixture(t *testing.T) *convFixture {
 	if err := os.MkdirAll(ah, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	f := &convFixture{sc: &fakeConvScion{phase: scion.PhaseRunning}, agentHome: ah, home: home, guard: &fakeResumeGuard{}}
+	if err := os.Mkdir(filepath.Join(tree, "kb"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f := &convFixture{sc: &fakeConvScion{phase: scion.PhaseRunning}, agentHome: ah, home: home, tree: tree,
+		mounts: &fakeMountChecks{}, boots: &fakeConvBoot{}}
+	app := &config.App{Name: "mgr", Tree: tree}
+	app.Manager.ReadOnly = []string{"kb"}
+	log := func(format string, a ...any) { f.logs = append(f.logs, fmt.Sprintf(format, a...)) }
 	f.ops = convOps{
-		app:         &config.App{Name: "mgr", Tree: tree},
-		st:          state.State{Dir: stDir},
-		guest:       convbackup.Guest{R: proc.RealRunner{}, Workspace: "/lever", Agent: "mgr"},
-		sc:          f.sc,
-		log:         func(format string, a ...any) { f.logs = append(f.logs, fmt.Sprintf(format, a...)) },
-		verifyRole:  func(context.Context) error { return nil },
-		gate:        func(context.Context) error { f.gated++; return nil },
-		beginResume: f.guard.begin,
-		suspendWait: apply.RetryBudget{Attempts: 3, Interval: time.Millisecond},
+		app:   app,
+		st:    state.State{Dir: stDir},
+		guest: convbackup.Guest{R: proc.RealRunner{}, Workspace: "/lever", Agent: "mgr"},
+		log:   log,
+		deps: apply.Deps{
+			ManagerVerbs: f.sc, JailMount: "/lever", ManagerLock: apply.HeldManagerLock, Log: log,
+			VerifyAgentRole:        func(context.Context, string, string) error { return f.roleErr },
+			InspectContainerMounts: f.mounts.inspect, CheckLiveMounts: f.mounts.check,
+			GuestBoot:        f.boots,
+			ManagerLiveRetry: apply.RetryBudget{Attempts: 3, Interval: time.Millisecond},
+			ManagerPhaseWait: apply.RetryBudget{Attempts: 3, Interval: time.Millisecond},
+			BrokerStartRetry: apply.RetryBudget{Attempts: 1, Interval: time.Millisecond},
+		},
 	}
 	return f
 }
@@ -210,10 +263,11 @@ func (f *convFixture) latestSkill(t *testing.T) string {
 }
 
 // TestFreshBackupThenRestore is the whole --keep-conversation path on one
-// home: the backup before the delete suspends the running manager and
-// stores its transcripts with the session's skill; the fresh record's
-// session is moved aside, the old one restored, the restored session
-// recorded with the old skill, and the manager resumed and gated.
+// home: the backup before the delete stores the transcripts with the
+// session's skill (the lifecycle suspended the manager before it); the fresh
+// record's session is moved aside, the old one restored, the restored
+// session recorded with the old skill, and the manager resumed through its
+// mount read-back, gated, and its guest boot recorded.
 func TestFreshBackupThenRestore(t *testing.T) {
 	f := newConvFixture(t)
 	writeConvFile(t, f.transcript("old.jsonl"), "{\"old\":1}\n")
@@ -229,8 +283,8 @@ func TestFreshBackupThenRestore(t *testing.T) {
 	if saved == nil || saved.Files != 1 || saved.SkillHash != "skill-v1" || saved.Reason != "up --fresh" {
 		t.Fatalf("saved = %+v", saved)
 	}
-	if strings.Join(f.sc.calls, ",") != "suspend" {
-		t.Fatalf("calls = %v, want the running manager suspended before the copy", f.sc.calls)
+	if len(f.sc.calls) != 0 {
+		t.Fatalf("calls = %v, want none: the lifecycle suspends, the hook only copies", f.sc.calls)
 	}
 	fi, err := os.Stat(filepath.Join(f.ops.st.Dir, convbackup.DirName, saved.ID))
 	if err != nil || fi.Mode().Perm() != 0o700 {
@@ -251,11 +305,11 @@ func TestFreshBackupThenRestore(t *testing.T) {
 	if err := f.ops.restore(context.Background(), saved.ID, false); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(f.sc.calls, ",") != "suspend,resume" || f.gated != 1 {
-		t.Fatalf("calls = %v, gated %d", f.sc.calls, f.gated)
+	if strings.Join(f.sc.calls, ",") != "suspend,resume" {
+		t.Fatalf("calls = %v", f.sc.calls)
 	}
-	if got := strings.Join(f.guard.steps, ","); got != "begin,resumed,live" {
-		t.Fatalf("resume checks = %q, want begin,resumed,live (lever#158)", got)
+	if f.mounts.checks != 1 || len(f.boots.records) != 1 {
+		t.Fatalf("mount checks %d, boots %v: want the mounts read back after the resume, then the guest boot recorded", f.mounts.checks, f.boots.records)
 	}
 	if b, err := os.ReadFile(f.transcript("old.jsonl")); err != nil || string(b) != "{\"old\":1}\n" {
 		t.Fatalf("restored: %q %v", b, err)
@@ -295,11 +349,11 @@ func TestRestoreFailureResumesAndKeepsRecord(t *testing.T) {
 	if !errors.Is(err, convbackup.ErrNotPlainDir) {
 		t.Fatalf("err = %v", err)
 	}
-	if strings.Join(f.sc.calls, ",") != "suspend,resume" || f.gated != 0 {
-		t.Fatalf("calls = %v gated %d, want the manager resumed after the failure", f.sc.calls, f.gated)
+	if strings.Join(f.sc.calls, ",") != "suspend,resume" {
+		t.Fatalf("calls = %v, want the manager resumed after the failure", f.sc.calls)
 	}
-	if got := strings.Join(f.guard.steps, ","); got != "begin,resumed,settle" {
-		t.Fatalf("resume checks = %q, want begin,resumed,settle: no gate follows that resume (lever#158)", got)
+	if f.mounts.checks != 1 || len(f.boots.records) != 0 {
+		t.Fatalf("mount checks %d boots %v: want the mounts read back, and no gate (no boot recorded) after that resume", f.mounts.checks, f.boots.records)
 	}
 	if got := f.latestSkill(t); got != "current" {
 		t.Fatalf("session record = %q, want it put back to current", got)
@@ -361,7 +415,7 @@ func TestRestoreRefusals(t *testing.T) {
 
 	guard := errors.New("pre-role record")
 	f.sc.phase = scion.PhaseRunning
-	f.ops.verifyRole = func(context.Context) error { return guard }
+	f.roleErr = guard
 	if err := f.ops.restore(context.Background(), m.ID, false); !errors.Is(err, guard) {
 		t.Fatalf("guard: %v", err)
 	}
@@ -430,96 +484,69 @@ func TestRestoreUnsureInstallRefusesContacts(t *testing.T) {
 }
 
 // TestFreshBackupNoHomeFailsClosed: a record whose home lever cannot find
-// stops the fresh start, and the manager the hook suspended is resumed
-// through the role guard; a guard refusal leaves it suspended.
+// stops the fresh start; the hook changes nothing itself.
 func TestFreshBackupNoHomeFailsClosed(t *testing.T) {
 	f := newConvFixture(t)
 	f.ops.guest.Agent = "elsewhere"
 	var saved *convbackup.Meta
 	err := f.ops.backupBeforeDelete(&saved)(context.Background(), &scion.Agent{Slug: "mgr", Phase: scion.PhaseRunning})
-	if !errors.Is(err, convbackup.ErrNoHome) || saved != nil {
-		t.Fatalf("err = %v saved %v", err, saved)
-	}
-	if strings.Join(f.sc.calls, ",") != "suspend,resume" {
-		t.Fatalf("calls = %v", f.sc.calls)
-	}
-
-	f.sc.phase, f.sc.calls = scion.PhaseRunning, nil
-	guard := errors.New("pre-role record")
-	f.ops.verifyRole = func(context.Context) error { return guard }
-	err = f.ops.backupBeforeDelete(&saved)(context.Background(), &scion.Agent{Slug: "mgr", Phase: scion.PhaseRunning})
-	if !errors.Is(err, guard) || strings.Join(f.sc.calls, ",") != "suspend" {
-		t.Fatalf("guard: err %v calls %v", err, f.sc.calls)
+	if !errors.Is(err, convbackup.ErrNoHome) || saved != nil || len(f.sc.calls) != 0 {
+		t.Fatalf("err = %v saved %v calls %v", err, saved, f.sc.calls)
 	}
 }
 
 // TestRestoreResumeChecks: every resume a restore makes passes the tree-mount
 // checks. A refused pre-check leaves the manager suspended, and a failed check
-// after the resume fails the restore before the gate reports it up.
+// after the resume, right after it or once live, suspends it and fails the
+// restore before the gate reports it up.
 func TestRestoreResumeChecks(t *testing.T) {
 	for _, tc := range []struct {
-		failAt    string
+		name      string
+		noDir     bool
+		answers   []string
+		wantErr   string
 		wantCalls string
-		wantSteps string
-		wantGated int
 	}{
-		{"begin", "suspend", "begin", 0},
-		{"resumed", "suspend,resume", "begin,resumed", 0},
-		{"live", "suspend,resume", "begin,resumed,live", 1},
+		{name: "before the resume", noDir: true, wantErr: "the manager stays suspended", wantCalls: "suspend"},
+		{name: "after the resume", answers: []string{"elsewhere"}, wantErr: "mounted from another place", wantCalls: "suspend,resume,suspend"},
+		{name: "once live", answers: []string{"notrunning", "elsewhere"}, wantErr: "mounted from another place", wantCalls: "suspend,resume,suspend"},
 	} {
-		t.Run(tc.failAt, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			f := newConvFixture(t)
 			writeConvFile(t, f.transcript("old.jsonl"), "old\n")
 			m, found, err := f.ops.backup(context.Background(), "manual")
 			if err != nil || !found {
 				t.Fatalf("backup: %v %v", found, err)
 			}
-			f.guard.failAt = tc.failAt
+			if tc.noDir {
+				if err := os.Remove(filepath.Join(f.tree, "kb")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.mounts.answers = tc.answers
 			err = f.ops.restore(context.Background(), m.ID, false)
-			if err == nil || !strings.Contains(err.Error(), tc.failAt+" refused") {
-				t.Fatalf("err = %v, want the %s refusal", err, tc.failAt)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %v, want %q", err, tc.wantErr)
 			}
 			if got := strings.Join(f.sc.calls, ","); got != tc.wantCalls {
 				t.Fatalf("calls = %q, want %q", got, tc.wantCalls)
 			}
-			if got := strings.Join(f.guard.steps, ","); got != tc.wantSteps || f.gated != tc.wantGated {
-				t.Fatalf("checks = %q gated %d, want %q gated %d", got, f.gated, tc.wantSteps, tc.wantGated)
+			if len(f.boots.records) != 0 {
+				t.Fatalf("boot recorded for a manager that failed its checks: %v", f.boots.records)
 			}
 		})
 	}
 	// A failed resume is checked too: the container may run all the same.
-	f0 := newConvFixture(t)
-	writeConvFile(t, f0.transcript("old.jsonl"), "old\n")
-	m0, _, err0 := f0.ops.backup(context.Background(), "manual")
-	if err0 != nil {
-		t.Fatal(err0)
-	}
-	f0.sc.resumeErr = errors.New("hook failed")
-	if err := f0.ops.restore(context.Background(), m0.ID, false); err == nil || strings.Join(f0.guard.steps, ",") != "begin,after-failure" || f0.gated != 0 {
-		t.Fatalf("err = %v checks %q gated %d, want begin,after-failure", err, f0.guard.steps, f0.gated)
-	}
-	// The resume after a failed restore: a refused pre-check keeps the
-	// manager suspended and says so.
 	f := newConvFixture(t)
-	f.sc.phase = scion.PhaseSuspended
-	f.guard.failAt = "begin"
-	err := f.ops.resumeAfterFailure(context.Background(), errors.New("cause"), "")
-	if err == nil || !strings.Contains(err.Error(), "the manager stays suspended: begin refused") || len(f.sc.calls) != 0 {
-		t.Fatalf("err = %v calls %v", err, f.sc.calls)
+	writeConvFile(t, f.transcript("old.jsonl"), "old\n")
+	m, _, err := f.ops.backup(context.Background(), "manual")
+	if err != nil {
+		t.Fatal(err)
 	}
-	// A check after it fails: the error says the manager was resumed and
-	// what the check found (the guard suspended it).
-	f = newConvFixture(t)
-	f.guard.failAt = "settle"
-	err = f.ops.resumeAfterFailure(context.Background(), errors.New("cause"), "")
-	if err == nil || !strings.Contains(err.Error(), "settle refused") || strings.Join(f.sc.calls, ",") != "resume" {
-		t.Fatalf("err = %v calls %v", err, f.sc.calls)
-	}
-	f = newConvFixture(t)
-	f.ops.beginResume = nil
-	err = f.ops.resumeAfterFailure(context.Background(), errors.New("cause"), "")
-	if err == nil || len(f.sc.calls) != 0 {
-		t.Fatalf("err = %v calls %v, want no resume without the checks", err, f.sc.calls)
+	f.sc.resumeErr = errors.New("hook failed")
+	f.mounts.answers = []string{"elsewhere"}
+	if err := f.ops.restore(context.Background(), m.ID, false); err == nil || !strings.Contains(err.Error(), "mounted from another place") || f.mounts.checks != 1 {
+		t.Fatalf("err = %v checks %d, want the failed resume's container checked", err, f.mounts.checks)
 	}
 }
 

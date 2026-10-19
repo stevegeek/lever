@@ -15,6 +15,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion/layout"
+	"github.com/stevegeek/lever/internal/wait"
 )
 
 func TestWaitHubReadySucceeds(t *testing.T) {
@@ -22,7 +23,7 @@ func TestWaitHubReadySucceeds(t *testing.T) {
 	// "scion" prefix covers both "server start" and "list --all ...".
 	f.Script("scion", proc.Result{Stdout: "ok"})
 	c := New(f, Options{})
-	c.hubReadyInterval = 0
+	c.hubReady.Interval = 0
 	if err := c.ServerStart(context.Background(), ServerOpts{WebPort: 8080, DevAuth: false}); err != nil {
 		t.Fatalf("ServerStart should succeed when hub is ready: %v", err)
 	}
@@ -32,7 +33,7 @@ func TestWaitHubReadyTimesOut(t *testing.T) {
 	f := proc.NewFakeRunner()
 	// Leave "list --all" unscripted so the probe errors every attempt.
 	c := New(f, Options{})
-	c.hubReadyTimeout, c.hubReadyInterval = 20*time.Millisecond, time.Millisecond
+	c.hubReady.Budget, c.hubReady.Interval = 20*time.Millisecond, time.Millisecond
 	err := c.waitHubReady(context.Background(), nil)
 	if !errors.Is(err, ErrHubNotReady) {
 		t.Fatalf("expected ErrHubNotReady when hub never comes up, got %v", err)
@@ -61,7 +62,7 @@ func assertBrokerGateStopsAtOnline(t *testing.T, out string) {
 	f := proc.NewFakeRunner()
 	f.Script("scion hub brokers", proc.Result{Stdout: out})
 	c := New(f, Options{})
-	c.brokerReadyInterval = 0
+	c.brokerReady.Interval = 0
 	if err := c.WaitRuntimeBrokerReady(context.Background(), "/lever"); err != nil {
 		t.Fatalf("WaitRuntimeBrokerReady should return nil when a broker is online: %v", err)
 	}
@@ -83,7 +84,7 @@ func TestWaitRuntimeBrokerReadyOfflineIsNotReadyThenFailSoft(t *testing.T) {
 	f := proc.NewFakeRunner()
 	f.Script("scion hub brokers", proc.Result{Stdout: `[{"status":"offline","connectionState":"disconnected"}]`})
 	c := New(f, Options{})
-	c.brokerReadyAttempts, c.brokerReadyInterval = 3, 0
+	c.brokerReady = wait.Spec{MinAttempts: 3}
 	if err := c.WaitRuntimeBrokerReady(context.Background(), "/lever"); err != nil {
 		t.Fatalf("gate must be fail-soft (nil) on exhaustion, got: %v", err)
 	}
@@ -98,7 +99,7 @@ func TestWaitRuntimeBrokerReadyCtxCancel(t *testing.T) {
 	f := proc.NewFakeRunner()
 	f.Script("scion hub brokers", proc.Result{Stdout: `[]`}) // never ready
 	c := New(f, Options{})
-	c.brokerReadyAttempts, c.brokerReadyInterval = 30, time.Hour
+	c.brokerReady = wait.Spec{Budget: 30 * time.Hour, MinAttempts: 30, Interval: time.Hour}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := c.WaitRuntimeBrokerReady(ctx, "/lever"); err == nil {
@@ -131,7 +132,7 @@ func (r *refusingRunner) RunStdin(ctx context.Context, _ io.Reader, env map[stri
 func TestWaitHubReadyAcceptsAuthRefusal(t *testing.T) {
 	r := &refusingRunner{stderr: "Error: authentication failed, login to hub with 'scion hub auth login'\n"}
 	c := New(r, Options{})
-	c.hubReadyInterval = 0
+	c.hubReady.Interval = 0
 	if err := c.waitHubReady(context.Background(), nil); err != nil {
 		t.Fatalf("a hub refusing the credential is up; got %v", err)
 	}
@@ -144,7 +145,7 @@ func TestWaitHubReadyAcceptsAuthRefusal(t *testing.T) {
 func TestWaitHubReadyOtherErrorsNotReady(t *testing.T) {
 	r := &refusingRunner{stderr: "Error: hub at http://127.0.0.1:8080 is not responding\n"}
 	c := New(r, Options{})
-	c.hubReadyTimeout, c.hubReadyInterval = 20*time.Millisecond, time.Millisecond
+	c.hubReady.Budget, c.hubReady.Interval = 20*time.Millisecond, time.Millisecond
 	if err := c.waitHubReady(context.Background(), nil); !errors.Is(err, ErrHubNotReady) {
 		t.Fatalf("want ErrHubNotReady, got %v", err)
 	}
@@ -155,7 +156,7 @@ func TestWaitHubReadyOtherErrorsNotReady(t *testing.T) {
 func TestWaitHubReadyOutlastsAColdStart(t *testing.T) {
 	r := &coldHubRunner{failures: 40}
 	c := New(r, Options{})
-	c.hubReadyInterval = 0
+	c.hubReady.Interval = 0
 	var lines []string
 	start := time.Now()
 	err := c.waitHubReady(context.Background(), func(format string, args ...any) {
@@ -167,7 +168,7 @@ func TestWaitHubReadyOutlastsAColdStart(t *testing.T) {
 	if r.probes != 41 {
 		t.Fatalf("probes = %d, want 41", r.probes)
 	}
-	if time.Since(start) < c.hubReadyNotice && len(lines) != 0 {
+	if time.Since(start) < c.hubReady.NoticeAfter && len(lines) != 0 {
 		t.Fatalf("progress before the notice delay: %q", lines)
 	}
 }
@@ -177,7 +178,7 @@ func TestWaitHubReadyOutlastsAColdStart(t *testing.T) {
 func TestWaitHubReadyPrintsProgress(t *testing.T) {
 	r := &coldHubRunner{failures: 1 << 30, slow: 5 * time.Millisecond}
 	c := New(r, Options{})
-	c.hubReadyTimeout, c.hubReadyInterval, c.hubReadyNotice = 60*time.Millisecond, 0, 10*time.Millisecond
+	c.hubReady.Budget, c.hubReady.Interval, c.hubReady.NoticeAfter = 60*time.Millisecond, 0, 10*time.Millisecond
 	var lines []string
 	err := c.waitHubReady(context.Background(), func(format string, args ...any) {
 		lines = append(lines, fmt.Sprintf(format, args...))
@@ -199,7 +200,7 @@ func TestWaitHubReadyStopsWhenTheServerIsGone(t *testing.T) {
 	// A budget long enough that only the liveness check can end the wait
 	// early, short enough that a regression fails here, not at go test's
 	// timeout: running it out reads as "after 2s", without "server.log".
-	c.hubReadyTimeout, c.hubReadyInterval, c.hubAliveEvery = 2*time.Second, time.Millisecond, 0
+	c.hubReady.Budget, c.hubReady.Interval, c.hubAliveEvery = 2*time.Second, time.Millisecond, 0
 	start := time.Now()
 	err := c.waitHubReady(context.Background(), nil)
 	if !errors.Is(err, ErrHubNotReady) || !strings.Contains(err.Error(), "server.log") {
@@ -218,7 +219,7 @@ func TestWaitHubReadyKeepsWaitingOnALiveServer(t *testing.T) {
 			f.Script("sh -c f=", proc.Result{Stdout: "4242"})
 		} // else unscripted: the fake fails the probe, as a failed jail shell would
 		c := New(f, Options{})
-		c.hubReadyTimeout, c.hubReadyInterval, c.hubAliveEvery = 30*time.Millisecond, time.Millisecond, 0
+		c.hubReady.Budget, c.hubReady.Interval, c.hubAliveEvery = 30*time.Millisecond, time.Millisecond, 0
 		err := c.waitHubReady(context.Background(), nil)
 		if !errors.Is(err, ErrHubNotReady) || strings.Contains(err.Error(), "server.log") {
 			t.Fatalf("live=%v: err = %v, want the budget to run out", live, err)
@@ -351,7 +352,7 @@ func TestRuntimeBrokerReadyParsesWhatTheGuestPrinted(t *testing.T) {
 func TestRuntimeBrokerReadyInGuestTimeoutIsFailSoft(t *testing.T) {
 	r := &inGuestRunner{FakeRunner: proc.NewFakeRunner()}
 	c := New(r, Options{})
-	c.brokerReadyAttempts, c.brokerReadyInterval = 1, 0
+	c.brokerReady = wait.Spec{MinAttempts: 1}
 	online, err := c.RuntimeBrokerReady(context.Background(), "global")
 	if err != nil || online {
 		t.Fatalf("online=%v err=%v", online, err)
@@ -380,7 +381,7 @@ func TestWaitHubReadyPollsHealthzInTheGuest(t *testing.T) {
 		lists: []proc.Result{{Code: 1, Stderr: "Error: hub at http://127.0.0.1:8080 is not responding"}}}
 	r.Script("scion list --all", proc.Result{Stdout: "[]"})
 	c := New(r, Options{HubEndpoint: "http://127.0.0.1:8080/"})
-	c.hubReadyInterval = time.Hour // must not be slept between guest waits
+	c.hubReady.Interval = time.Hour // must not be slept between guest waits
 	if err := c.waitHubReady(context.Background(), nil); err != nil {
 		t.Fatalf("waitHubReady: %v", err)
 	}
@@ -401,7 +402,7 @@ func TestWaitHubReadyPollsHealthzInTheGuest(t *testing.T) {
 func TestWaitHubReadyWithoutCurlPollsTheCLI(t *testing.T) {
 	r := &inGuestRunner{FakeRunner: proc.NewFakeRunner(), waits: []proc.Result{{Code: 127}}}
 	c := New(r, Options{HubEndpoint: "http://127.0.0.1:8080"})
-	c.hubReadyTimeout, c.hubReadyInterval = 30*time.Millisecond, time.Millisecond
+	c.hubReady.Budget, c.hubReady.Interval = 30*time.Millisecond, time.Millisecond
 	if err := c.waitHubReady(context.Background(), nil); !errors.Is(err, ErrHubNotReady) {
 		t.Fatalf("want ErrHubNotReady, got %v", err)
 	}

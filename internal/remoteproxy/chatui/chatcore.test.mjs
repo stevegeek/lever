@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  ACTIVITY_MAX,
+  activityErrorText,
+  activityOffered,
+  activityPath,
+  activityText,
   MAX_MESSAGE,
   SPEECH_FIRST,
   pickServerVoice,
@@ -654,4 +659,36 @@ test('new conversation: the operator\'s manager only, and fixed text', () => {
   assert.equal(newConversationText(500, { error: '<b>own</b>' }, 'boss'), "boss's new conversation could not be started (HTTP 500).");
   assert.equal(newConversationText(500, { error: 'constructor' }, 'boss'), "boss's new conversation could not be started (HTTP 500).");
   assert.match(newConversationText(0, null, 'boss'), /may have started/);
+});
+
+test('activityText: text only, controls and bidi gone, the tail kept', () => {
+  assert.equal(activityText(null), null);
+  assert.equal(activityText({ text: 7 }), null);
+  assert.equal(activityText('text'), null);
+  assert.deepEqual(activityText({ text: 'a\r\n\tb\u0000c\u001b[0m\u009b\u202ed\u2066e\u200ff' }), { text: 'a\n\tbc[0mdef', truncated: false });
+  assert.deepEqual(activityText({ text: 'x', truncated: true }), { text: 'x', truncated: true });
+  assert.equal(activityText({ text: 'a\u00adb\u200dc\u{e0041}d' }).text, 'abcd');
+  const long = activityText({ text: 'a'.repeat(ACTIVITY_MAX) + 'end' });
+  assert.equal(long.text.length, ACTIVITY_MAX);
+  assert.ok(long.text.endsWith('end') && long.truncated);
+  // A cut never leaves half a surrogate pair at the start.
+  const emoji = activityText({ text: '😀'.repeat(ACTIVITY_MAX) });
+  assert.ok(!/^[\udc00-\udfff]/.test(emoji.text));
+});
+
+test('activityPath and activityOffered', () => {
+  assert.equal(activityPath('w-1'), '/lever/api/agents/w-1/activity');
+  assert.equal(activityPath('a/../b?c'), '/lever/api/agents/a%2F..%2Fb%3Fc/activity');
+  const a = { access: 'message', id: 'x' };
+  assert.equal(activityOffered({ tier: 'operator' }, a), true);
+  assert.equal(activityOffered({ tier: 'contact' }, a), false);
+  assert.equal(activityOffered({ tier: 'operator' }, { ...a, access: 'see' }), false);
+  assert.equal(activityOffered({ tier: 'operator' }, { ...a, id: '' }), false);
+  assert.equal(activityOffered(null, a), false);
+});
+
+test('activityErrorText: fixed words', () => {
+  assert.equal(activityErrorText(409, { error: 'not-running', state: 'stopped' }, 'w1'), 'w1 is not running (stopped)');
+  assert.equal(activityErrorText(403, { error: 'not-allowed' }, 'w1'), 'this login may not read the terminal');
+  assert.equal(activityErrorText(500, 'boom', 'w1'), 'boom (HTTP 500)');
 });

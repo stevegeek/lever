@@ -8,9 +8,9 @@ import (
 
 	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/jail"
-	"github.com/stevegeek/lever/internal/retry"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/termsafe"
+	"github.com/stevegeek/lever/internal/wait"
 )
 
 // AgentSessionProbe reads an agent's session from inside its container and
@@ -23,9 +23,7 @@ type AgentSessionProbe interface {
 	ReportSessionRunning(ctx context.Context, ref string) error
 }
 
-// sessionHealSettle is short because sciontool's hub call is synchronous, so
-// the first list normally shows the new phase.
-var sessionHealSettle = RetryBudget{Attempts: 3, Interval: time.Second}
+var sessionHealSettle = budgetOf(wait.SessionHealed)
 
 // HealAgentSession repairs two faults of an agent whose container is live,
 // both of which leave every other signal green, and returns the record as it
@@ -87,16 +85,19 @@ func HealAgentSession(ctx context.Context, h SessionHealer, project string, rec 
 	}
 	healed := rec
 	b := sessionHealSettle
-	_ = retry.Until(ctx, b.Attempts, b.Interval, func() (bool, error) {
+	_ = wait.For(ctx, b.spec(wait.SessionHealed.Name), func(ctx context.Context) wait.Result {
 		agents, err := sc.List(ctx, project)
 		if err != nil {
-			return false, nil
+			return wait.NotYetErr(err)
 		}
 		if a := scion.FindAgent(agents, rec.Slug); a != nil {
 			healed = a
-			return a.Phase == scion.PhaseRunning, nil
+			if a.Phase == scion.PhaseRunning {
+				return wait.Ready()
+			}
+			return wait.NotYet(a.Phase)
 		}
-		return false, nil
+		return wait.NotYet("no record")
 	})
 	if healed.Phase == scion.PhaseRunning {
 		log("agent %q: session reported running again; its conversation continues", rec.Slug)
@@ -109,7 +110,10 @@ func HealAgentSession(ctx context.Context, h SessionHealer, project string, rec 
 
 // SessionHealer is what HealAgentSession acts with.
 type SessionHealer struct {
-	Scion *scion.Client
+	Scion interface {
+		List(ctx context.Context, project string) ([]scion.Agent, error)
+		ResetAuth(ctx context.Context, agent, project string) error
+	}
 	Probe AgentSessionProbe
 	// VerifyRole is the pre-role record guard (Deps.VerifyAgentRole). The hub
 	// mints a reset token from the record's stored role, and an old record's
@@ -155,12 +159,6 @@ func healHubToken(ctx context.Context, h SessionHealer, project, slug, ref strin
 	log("lever: warning: agent %q: scion reset-auth answered, but its token file does not show a valid token yet; re-run `lever doctor` in a minute", slug)
 }
 
-// HealSessions runs HealAgentSession over the manager and every configured
-// worker, from one listing.
-func HealSessions(ctx context.Context, d Deps, app *config.App, project string) {
-	healNamedSessions(ctx, d, project, append([]string{app.Name}, workerNames(app)...))
-}
-
 // healNamedSessions runs without the broker's per-worker lifecycle lock, so
 // it can race a lifecycle op the manager ordered. Both heals are safe: a
 // reset-auth on a dying container fails or writes a token the next start
@@ -170,7 +168,7 @@ func healNamedSessions(ctx context.Context, d Deps, project string, names []stri
 	if d.AgentSession == nil || d.Log == nil || len(names) == 0 {
 		return
 	}
-	agents, err := d.Scion.List(ctx, project)
+	agents, err := d.managerScion().List(ctx, project)
 	if err != nil {
 		d.Log("lever: warning: could not list agents to check their hub sessions: %s", termsafe.Sanitize(scion.ErrSummary(err)))
 		return
@@ -189,5 +187,5 @@ func workerNames(app *config.App) []string {
 }
 
 func (d Deps) sessionHealer() SessionHealer {
-	return SessionHealer{Scion: d.Scion, Probe: d.AgentSession, VerifyRole: d.VerifyAgentRole, Revoked: d.AgentRevoked, Log: d.Log}
+	return SessionHealer{Scion: d.managerScion(), Probe: d.AgentSession, VerifyRole: d.VerifyAgentRole, Revoked: d.AgentRevoked, Log: d.Log}
 }

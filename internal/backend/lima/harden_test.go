@@ -204,3 +204,20 @@ func TestHWEStampSkipWithoutPackageName(t *testing.T) {
 		t.Errorf("want the generic package name, got:\n%s", all)
 	}
 }
+
+// A running VM is never started, so the crash-recovery step is what brings
+// no-kvmapf to a guest created before it: it must run on that path too.
+func TestEnsureUpRunningVMStillGetsNoKVMAPF(t *testing.T) {
+	f := proc.NewFakeRunner()
+	scriptedVM(f) // "lever-x Running"
+	l := New(f, vm, common.Options{})
+	if err := l.EnsureUp(context.Background(), backend.Config{MachineName: vm, ProjectTree: tree}); err != nil {
+		t.Fatalf("EnsureUp: %v", err)
+	}
+	if f.Called(proc.Subcommand("limactl", "start")) {
+		t.Fatal("a running VM must not be started")
+	}
+	if rootBashScript(f, "no-kvmapf") < 0 {
+		t.Fatalf("the crash-recovery script with no-kvmapf did not run on a running VM; calls=%+v", f.Calls)
+	}
+}

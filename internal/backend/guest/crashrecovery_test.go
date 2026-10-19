@@ -51,7 +51,8 @@ func newCrashSandbox(t *testing.T) *crashSandbox {
 	s.stub("sysctl", `echo "sysctl $*" >> `+shellSingleQuote(s.log))
 	s.stub("systemctl", systemctlStub(s.log, filepath.Join(root, "apport.masked")))
 	s.stub("modprobe", `echo "modprobe $*" >> `+shellSingleQuote(s.log)+`; rm -rf `+shellSingleQuote(filepath.Join(s.paths.SysModule, "efi_pstore")))
-	s.stub("update-grub", `echo "update-grub" >> `+shellSingleQuote(s.log)+`; grep -o 'efi_pstore[^"]*' `+shellSingleQuote(s.paths.GrubDropIn)+` > `+shellSingleQuote(s.paths.GrubCfg))
+	s.stub("update-grub", `echo "update-grub" >> `+shellSingleQuote(s.log)+`; sed -n 's/^GRUB_CMDLINE_LINUX=.*:-} \(.*\)"$/\1/p' `+shellSingleQuote(s.paths.GrubDropIn)+` > `+shellSingleQuote(s.paths.GrubCfg))
+	s.setArch("x86_64")
 	s.write(s.paths.Cmdline, "BOOT_IMAGE=/vmlinuz root=LABEL=cloudimg-rootfs ro console=ttyS0\n")
 	return s
 }
@@ -61,6 +62,17 @@ func (s *crashSandbox) stub(name, body string) {
 	if err := os.WriteFile(filepath.Join(s.bin, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
 		s.t.Fatal(err)
 	}
+}
+
+// setArch fakes the guest architecture: the sandbox host's own would
+// decide the drop-in otherwise. "" makes uname -m fail.
+func (s *crashSandbox) setArch(arch string) {
+	s.t.Helper()
+	if arch == "" {
+		s.stub("uname", "exit 1")
+		return
+	}
+	s.stub("uname", `if [ "$1" = -m ]; then echo `+shellSingleQuote(arch)+`; else exit 1; fi`)
 }
 
 func (s *crashSandbox) write(path, body string) {
@@ -111,14 +123,14 @@ func TestCrashRecoveryScriptFirstRunWritesEverything(t *testing.T) {
 		t.Errorf("a loaded efi_pstore must be unloaded; calls:\n%s", calls)
 	}
 	grub, _ := os.ReadFile(s.paths.GrubDropIn)
-	if !strings.Contains(string(grub), `GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX:-} efi_pstore.pstore_disable=1"`) {
+	if !strings.Contains(string(grub), `GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX:-} efi_pstore.pstore_disable=1 no-kvmapf"`) {
 		t.Errorf("grub drop-in:\n%s", grub)
 	}
 	if !strings.Contains(calls, "update-grub") {
 		t.Errorf("a new drop-in must run update-grub; calls:\n%s", calls)
 	}
 	// The module was unloaded, so only the command line waits for a reboot.
-	if len(rep.Reboot) != 1 || !strings.Contains(rep.Reboot[0], "kernel command line") {
+	if len(rep.Reboot) != 1 || rep.Reboot[0] != "the kernel command line gets efi_pstore.pstore_disable=1 no-kvmapf at the next boot" {
 		t.Errorf("reboot = %q, want the command line only", rep.Reboot)
 	}
 	if len(rep.Warn) != 0 {
@@ -130,7 +142,7 @@ func TestCrashRecoveryScriptIdempotent(t *testing.T) {
 	s := newCrashSandbox(t)
 	s.run()
 	// After a reboot the command line carries the parameter.
-	s.write(s.paths.Cmdline, "BOOT_IMAGE=/vmlinuz ro console=ttyS0 efi_pstore.pstore_disable=1\n")
+	s.write(s.paths.Cmdline, "BOOT_IMAGE=/vmlinuz ro console=ttyS0 efi_pstore.pstore_disable=1 no-kvmapf\n")
 	before := map[string]os.FileInfo{}
 	for _, p := range []string{s.paths.Sysctl, s.paths.Modprobe, s.paths.GrubDropIn} {
 		fi, err := os.Stat(p)
@@ -229,11 +241,77 @@ func TestCrashRecoveryScriptModuleInUseNeedsReboot(t *testing.T) {
 
 func TestCrashRecoveryScriptDisabledBackendIsOff(t *testing.T) {
 	s := newCrashSandbox(t)
-	s.write(s.paths.Cmdline, "ro efi_pstore.pstore_disable=1\n")
+	s.write(s.paths.Cmdline, "ro efi_pstore.pstore_disable=1 no-kvmapf\n")
 	s.write(filepath.Join(s.paths.SysModule, "efi_pstore/parameters/pstore_disable"), "Y\n")
 	rep, _ := s.run()
 	if len(rep.Reboot) != 0 {
 		t.Errorf("a backend loaded with pstore_disable=Y is off: reboot = %q", rep.Reboot)
+	}
+}
+
+// Only the x86 KVM guest code knows no-kvmapf.
+func TestCrashRecoveryScriptNoKVMAPFOnX86Only(t *testing.T) {
+	s := newCrashSandbox(t)
+	s.setArch("aarch64")
+	rep, _ := s.run()
+	grub, _ := os.ReadFile(s.paths.GrubDropIn)
+	if strings.Contains(string(grub), "no-kvmapf") || !strings.Contains(string(grub), `:-} efi_pstore.pstore_disable=1"`) {
+		t.Errorf("an aarch64 drop-in must not carry no-kvmapf:\n%s", grub)
+	}
+	if len(rep.Reboot) != 1 || rep.Reboot[0] != "the kernel command line gets efi_pstore.pstore_disable=1 at the next boot" {
+		t.Errorf("reboot = %q", rep.Reboot)
+	}
+	s.write(s.paths.Cmdline, "ro efi_pstore.pstore_disable=1\n")
+	if rep, _ := s.run(); len(rep.Reboot) != 0 {
+		t.Errorf("a converged aarch64 guest waits for no reboot, got %q", rep.Reboot)
+	}
+}
+
+// A guest converged before no-kvmapf existed: the drop-in is rewritten,
+// grub.cfg regenerated, and only the new parameter waits for a reboot.
+func TestCrashRecoveryScriptAddsNoKVMAPFToConvergedGuest(t *testing.T) {
+	s := newCrashSandbox(t)
+	s.setArch("aarch64")
+	s.run()
+	s.write(s.paths.Cmdline, "ro efi_pstore.pstore_disable=1\n")
+	s.setArch("x86_64")
+	rep, calls := s.run()
+	if !strings.Contains(calls, "update-grub") {
+		t.Errorf("a changed drop-in must run update-grub; calls:\n%s", calls)
+	}
+	cfg, _ := os.ReadFile(s.paths.GrubCfg)
+	if !strings.Contains(string(cfg), "no-kvmapf") {
+		t.Errorf("grub.cfg = %q", cfg)
+	}
+	if len(rep.Reboot) != 1 || rep.Reboot[0] != "the kernel command line gets no-kvmapf at the next boot" {
+		t.Errorf("reboot = %q", rep.Reboot)
+	}
+}
+
+func TestCrashRecoveryScriptUnknownArchKeepsDropIn(t *testing.T) {
+	s := newCrashSandbox(t)
+	s.run()
+	before, _ := os.ReadFile(s.paths.GrubDropIn)
+	s.setArch("")
+	rep, _ := s.run()
+	after, _ := os.ReadFile(s.paths.GrubDropIn)
+	if string(before) != string(after) || !strings.Contains(string(after), "no-kvmapf") {
+		t.Errorf("drop-in changed:\n%s\n->\n%s", before, after)
+	}
+	if len(rep.Warn) != 1 || !strings.Contains(rep.Warn[0], "guest architecture") {
+		t.Errorf("warn = %q", rep.Warn)
+	}
+}
+
+// A grub.cfg that lost a parameter (regenerated without the drop-in) is
+// regenerated although the drop-in is unchanged.
+func TestCrashRecoveryScriptStaleGrubCfgRunsUpdateGrub(t *testing.T) {
+	s := newCrashSandbox(t)
+	s.run()
+	s.write(s.paths.GrubCfg, "efi_pstore.pstore_disable=1\n")
+	_, calls := s.run()
+	if !strings.Contains(calls, "update-grub") {
+		t.Errorf("a grub.cfg without no-kvmapf must run update-grub; calls:\n%s", calls)
 	}
 }
 

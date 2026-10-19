@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -135,6 +136,9 @@ func TestCrashRecoveryScriptFirstRunWritesEverything(t *testing.T) {
 	}
 	if len(rep.Warn) != 0 {
 		t.Errorf("warn = %q", rep.Warn)
+	}
+	if want := []string{EFIPstoreCmdline, NoKVMAPFCmdline}; !slices.Equal(rep.Cmdline, want) {
+		t.Errorf("cmdline = %q, want %q", rep.Cmdline, want)
 	}
 }
 
@@ -315,12 +319,35 @@ func TestCrashRecoveryScriptStaleGrubCfgRunsUpdateGrub(t *testing.T) {
 	}
 }
 
+// A grub.cfg without the parameters cannot be applied by a reboot, so
+// none is reported as staged.
 func TestCrashRecoveryScriptUpdateGrubFailureWarns(t *testing.T) {
 	s := newCrashSandbox(t)
 	s.stub("update-grub", "exit 1")
 	rep, _ := s.run()
 	if len(rep.Warn) != 1 || !strings.Contains(rep.Warn[0], "update-grub failed") {
 		t.Errorf("warn = %q", rep.Warn)
+	}
+	if len(rep.Reboot) != 1 || len(rep.Cmdline) != 0 {
+		t.Errorf("reboot = %q, cmdline = %q; want the pending line and nothing staged", rep.Reboot, rep.Cmdline)
+	}
+}
+
+func TestCrashRecoveryScriptBootedWithParamsStagesNothing(t *testing.T) {
+	s := newCrashSandbox(t)
+	s.run()
+	s.write(s.paths.Cmdline, "ro efi_pstore.pstore_disable=1 no-kvmapf\n")
+	if rep, _ := s.run(); len(rep.Cmdline) != 0 || len(rep.Reboot) != 0 {
+		t.Errorf("report = %+v", rep)
+	}
+}
+
+// The guest's output reaches host messages and decides a reboot: only
+// lever's own parameters count.
+func TestParseGuestReportCmdlineKnownParamsOnly(t *testing.T) {
+	rep := parseGuestReport("cmdline-staged: no-kvmapf \x1b[2Jevil no-kvmapf init=/bin/sh efi_pstore.pstore_disable=1\n")
+	if want := []string{NoKVMAPFCmdline, EFIPstoreCmdline}; !slices.Equal(rep.Cmdline, want) {
+		t.Errorf("cmdline = %q, want %q", rep.Cmdline, want)
 	}
 }
 

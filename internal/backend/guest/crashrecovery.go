@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/stevegeek/lever/internal/egress"
@@ -34,7 +35,7 @@ const egressChain = egress.Chain
 //
 // Lima only: kernel.* sysctls are not namespaced, and an OrbStack machine
 // shares OrbStack's one kernel (the caller gates). Nothing here reboots the
-// guest; the caller reports what waits for a reboot.
+// guest; the caller decides what to do about what waits for a reboot.
 
 const (
 	CrashSysctlPath   = "/etc/sysctl.d/99-lever-crash-recovery.conf"
@@ -75,6 +76,11 @@ var CrashSysctls = []struct{ Key, Value string }{
 type GuestReport struct {
 	Reboot []string
 	Warn   []string
+	// Cmdline lists the kernel command-line parameters that the guest's
+	// grub.cfg already carries but its running kernel does not: one reboot
+	// applies them. Only lever's own parameters are accepted, so a guest
+	// cannot put anything else in a host message.
+	Cmdline []string
 }
 
 func parseGuestReport(out string) GuestReport {
@@ -82,6 +88,12 @@ func parseGuestReport(out string) GuestReport {
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
 		switch {
+		case strings.HasPrefix(line, "cmdline-staged: "):
+			for _, p := range strings.Fields(strings.TrimPrefix(line, "cmdline-staged: ")) {
+				if slices.Contains(crashCmdline(NoKVMAPFArch), p) && !slices.Contains(r.Cmdline, p) {
+					r.Cmdline = append(r.Cmdline, p)
+				}
+			}
 		case strings.HasPrefix(line, "reboot: "):
 			r.Reboot = append(r.Reboot, strings.TrimPrefix(line, "reboot: "))
 		case strings.HasPrefix(line, "warn: "):
@@ -206,6 +218,9 @@ fi
 missing=
 for p in $params; do grep -qwF -- "$p" %[2]s 2>/dev/null || missing="${missing:+$missing }$p"; done
 if [ -n "$missing" ]; then echo "reboot: the kernel command line gets $missing at the next boot"; fi
+staged=
+for p in $missing; do grep -qwF -- "$p" %[1]s 2>/dev/null && staged="${staged:+$staged }$p"; done
+if [ -n "$staged" ]; then echo "cmdline-staged: $staged"; fi
 `, q(p.GrubCfg), q(p.Cmdline))
 	fmt.Fprintf(&b, "if efi_pstore_active %s; then echo %s; fi\n", q(p.SysModule),
 		q("reboot: the EFI pstore backend is still registered (built in, or efi_pstore could not be unloaded); it is off from the next boot"))

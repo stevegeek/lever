@@ -12,7 +12,7 @@ LEVER_INSTANCE ?= $(HOME)/lever-instance
 .PHONY: install
 install:
 	@mkdir -p $(PREFIX)
-	go build -o $(PREFIX)/lever ./cmd/lever
+	go build $(LEVER_BUILDVCS) -o $(PREFIX)/lever ./cmd/lever
 	@echo "installed $(PREFIX)/lever"; $(PREFIX)/lever version
 	go build -ldflags "-X main.Version=$(LEVER_VERSION)" -o $(PREFIX)/lever-tool-github ./cmd/lever-tool-github
 	@echo "installed $(PREFIX)/lever-tool-github"
@@ -33,6 +33,11 @@ LEVER_TOOL_DB_LDFLAGS := -X main.Version=$(LEVER_VERSION)
 # lever. Lazy (`=`), so git only runs for the targets that build an image.
 LEVER_GIT_REV = $(shell git rev-parse --short=12 HEAD 2>/dev/null)
 LEVER_GIT_DIRTY = $(shell test -n "$$(git status --porcelain 2>/dev/null)" && echo -dirty)
+# Go's VCS stamping takes the first .git directory above the source, so in a
+# git worktree (where .git is a file) nested inside another checkout it stamps
+# that checkout's commit. There, build without it: lever then reports its
+# binary hash instead of a wrong commit.
+LEVER_BUILDVCS = $(if $(wildcard .git/HEAD),,-buildvcs=false)
 LEVER_IMAGE_VERSION = $(LEVER_VERSION)$(if $(LEVER_GIT_REV), ($(LEVER_GIT_REV)$(LEVER_GIT_DIRTY)))
 # The agent image's lever_jail_abi label (internal/jailabi), which `lever
 # doctor` compares with the host lever. A test in internal/jailabi keeps this

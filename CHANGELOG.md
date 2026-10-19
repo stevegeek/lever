@@ -13,6 +13,14 @@ version bump moves the block under the new version heading.
   that names it must drop the tool and its grants; a ticket board can be wired in as an external
   broker tool instead. Config load now refuses a `broker.tools` entry that runs `lever-tool-fizzy`.
 
+### Fixed
+
+- **`lever --version` no longer names a wrong commit when built in a git worktree.** Go's own VCS
+  stamping looks for the first `.git` directory above the source, so `make install` in a worktree
+  inside another checkout stamped that checkout's commit, dirty state and last tag. In a worktree
+  `make install` now builds `lever` without VCS stamping, so `--version` shows the binary's hash
+  (`0.51.0 (bin …)`) instead. Builds from an ordinary checkout and release builds are unchanged.
+
 ### Upgrade
 
 - **Drop the fizzy tool before you upgrade.** Remove its `broker.tools` entry and its `fizzy`

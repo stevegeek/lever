@@ -125,7 +125,10 @@ func runGate(t *testing.T, col plannerColumn, w gateWorld) string {
 	}
 	q := col.q
 	q.WhileSuspended = func(context.Context) error { spy.verbs = append(spy.verbs, "swap"); return nil }
-	q.BeginSession = func() (func() error, error) { return func() error { return nil }, nil }
+	q.BeginSession = func() (func() error, error) {
+		spy.verbs = append(spy.verbs, "begin")
+		return func() error { return nil }, nil
+	}
 	q.StageTicket = func(context.Context) error { spy.verbs = append(spy.verbs, "ticket"); return nil }
 	_, err := EnsureManager(context.Background(), app, d, q)
 	end := "ok"
@@ -152,8 +155,8 @@ var gateColumns = []plannerColumn{
 // record (VerifyAgentRole refuses it), an agent list too large to read and
 // a guest that booted anew under a running record. Each cell is the changes
 // made, in order ("ticket" is a staged enrolment ticket, "swap" the caller's
-// work while suspended), then ok or refused. A change here is a behaviour
-// change, to make on purpose.
+// work while suspended, "begin" the new session recorded), then ok or
+// refused. A change here is a behaviour change, to make on purpose.
 func TestPlannerGates(t *testing.T) {
 	const unqualified = "scionlocal/lever-claude:arm64"
 	preRole := errors.New("stored role reads as full")
@@ -163,10 +166,10 @@ func TestPlannerGates(t *testing.T) {
 		want []string // in gateColumns' order
 	}{
 		{"running", gateWorld{phase: "running", container: "Up 5 minutes"}, []string{
-			"ok", "suspend backup delete ticket create ok", "suspend swap stop resume-task ok", "suspend swap resume ok",
+			"ok", "suspend backup delete ticket create ok", "suspend swap stop begin resume-task ok", "suspend swap resume ok",
 			"suspend ok", "ticket suspend resume ok", "reset-auth ok"}},
 		{"suspended", gateWorld{phase: "suspended", container: "stopped"}, []string{
-			"ticket resume ok", "backup delete ticket create ok", "swap stop resume-task ok", "swap resume ok",
+			"ticket resume ok", "backup delete ticket create ok", "swap stop begin resume-task ok", "swap resume ok",
 			"suspend ok", "ticket resume ok", "ok"}},
 		// A stale record is refused before any change by every path that
 		// resumes it; --fresh is the remedy. The token reset and the park
@@ -180,12 +183,13 @@ func TestPlannerGates(t *testing.T) {
 		// A pre-role record is never resumed and its token never reset. up and
 		// the broker refuse it before any change; a new conversation and a
 		// restore read the role only once the conversation was saved or
-		// swapped, and leave the manager stopped or suspended.
+		// swapped (and the new session recorded), and leave the manager
+		// stopped or suspended.
 		{"pre-role-running", gateWorld{phase: "running", container: "Up 5 minutes", roleErr: preRole}, []string{
-			"refused", "suspend backup delete ticket create ok", "suspend swap stop refused", "suspend swap refused",
+			"refused", "suspend backup delete ticket create ok", "suspend swap stop begin refused", "suspend swap refused",
 			"suspend ok", "refused", "refused"}},
 		{"pre-role-suspended", gateWorld{phase: "suspended", container: "stopped", roleErr: preRole}, []string{
-			"refused", "backup delete ticket create ok", "swap stop refused", "swap refused",
+			"refused", "backup delete ticket create ok", "swap stop begin refused", "swap refused",
 			"suspend ok", "refused", "ok"}},
 		// Only --fresh (which deletes by name) and the park (which suspends
 		// by name) act on a record the list hides.
@@ -195,7 +199,7 @@ func TestPlannerGates(t *testing.T) {
 		// The guest's boot id is read by up and apply alone: they suspend the
 		// record over the dead container and resume it on its conversation.
 		{"guest-rebooted", gateWorld{phase: "running", container: "created", rebooted: true}, []string{
-			"suspend ticket resume ok", "suspend backup delete ticket create ok", "suspend swap stop resume-task ok", "suspend swap resume ok",
+			"suspend ticket resume ok", "suspend backup delete ticket create ok", "suspend swap stop begin resume-task ok", "suspend swap resume ok",
 			"suspend ok", "ticket suspend resume ok", "ok"}},
 	}
 	for _, row := range rows {

@@ -73,6 +73,8 @@ WORK="$(mktemp -d /tmp/lc.XXXXXX)"
 INST="$WORK/i"
 cleanup() {
 	rc=$?
+	# A race or the lock holder may still run when the run is cut short.
+	jobs -p | xargs -r kill 2>/dev/null
 	if [ "${KEEP:-0}" = 1 ]; then echo "KEEP=1: leaving $VM and $WORK"; return; fi
 	pkill -f "(broker|remote) serve .*$INST/" 2>/dev/null
 	limactl delete --force "$VM" >/dev/null 2>&1
@@ -150,7 +152,7 @@ lock_free() { python3 -c 'import fcntl,sys; f=open(sys.argv[1],"a"); fcntl.flock
 # the manager's, so a ticket there is one the agent can read.
 ticket() {
 	local f="$INST/workspace/.lever/bootstrap.json"
-	if [ -e "$f" ]; then sha256sum "$f" | cut -c1-16; else echo none; fi
+	if [ -e "$f" ]; then python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest()[:16])' "$f" || echo unreadable; else echo none; fi
 }
 # mgrid: the hub record id of the manager ("none" with no record). A changed
 # id means the record was deleted and created again.
@@ -241,22 +243,24 @@ cmd() {
 }
 # stages <key>: the command may stage a manager enrolment ticket.
 stages() { [ "$1" = up ] || [ "$1" = apply ]; }
-# outcome <key> <log> <rc>: ok, refused (cleanly) or bad.
+# outcome <key> <log> <rc> <other>: ok, refused (cleanly) or bad.
 outcome() {
-	local key=$1 log=$2 rc=$3
+	local key=$1 log=$2 rc=$3 other=$4 allowed="busy no-operator-socket runtime-unavailable"
+	# A stop takes the hub and the broker away under a worker verb.
+	[ "$other" = stop ] && allowed="$allowed hub-refused not-live runtime-error"
 	[ "$rc" = 0 ] && { echo ok; return; }
 	case $key in
 	wresume|wnew)
-		# A worker verb refuses with its reason in one JSON line: a
-		# per-worker lock (75), a broker that is restarting (11), or a hub the
-		# other command stopped.
+		# A worker verb refuses with its reason in one JSON line. Only the
+		# reasons a race can bring about count: a role, revocation or
+		# workspace refusal is a failure whatever ran alongside.
 		if python3 -c 'import json,sys
 for l in open(sys.argv[1]):
     l = l.strip()
     if l.startswith("{"):
         d = json.loads(l)
-        sys.exit(0 if d.get("ok") is False and d.get("reason") and d.get("exit") == int(sys.argv[2]) else 1)
-sys.exit(1)' "$log" "$rc" 2>/dev/null; then echo refused; else echo bad; fi ;;
+        sys.exit(0 if d.get("ok") is False and d.get("reason") in sys.argv[3].split() and d.get("exit") == int(sys.argv[2]) else 1)
+sys.exit(1)' "$log" "$rc" "$allowed" 2>/dev/null; then echo refused; else echo bad; fi ;;
 	*)
 		if [ "$rc" = 6 ] && holder_named "$log"; then echo refused; else echo bad; fi ;;
 	esac
@@ -276,7 +280,7 @@ race() {
 	pb=$!
 	reap "$pa" 900; ra=$?
 	reap "$pb" 900; rb=$?
-	oa=$(outcome "$a" "$la" "$ra"); ob=$(outcome "$b" "$lb" "$rb")
+	oa=$(outcome "$a" "$la" "$ra" "$b"); ob=$(outcome "$b" "$lb" "$rb" "$a")
 	echo "      | $a: $oa ($ra): $(tail -1 "$la" | mask_secrets | cut -c1-200)"
 	echo "      | $b: $ob ($rb): $(tail -1 "$lb" | mask_secrets | cut -c1-200)"
 	checkx "$a/$b: each ends done or refused cleanly ($oa, $ob)" '[ "$oa" != bad ] && [ "$ob" != bad ]'
@@ -305,7 +309,7 @@ step_started() { grep -qE "\] $2 \.\.\.( |$)" "$1"; }
 # stop --keep-vm), and once <step> has begun and <delay> seconds passed,
 # kill <kind>; then the next up must converge.
 fault() {
-	local kind=$1 step=$2 delay=$3 log="$WORK/fault-$1-$2.log" pid rc reached=0 i
+	local kind=$1 step=$2 delay=$3 log="$WORK/fault-$1-$2.log" pid rc reached=0 i killed
 	say "fault: kill the $kind once $step has begun (+${delay}s)"
 	lv "$WORK/fault-stop.log" 900 stop --keep-vm || { bad "$kind@$step: stop --keep-vm before the fault"; return; }
 	(cd "$INST" && exec timeout 1800 "$LEVER" up --no-attach > "$log" 2>&1) &
@@ -323,13 +327,20 @@ fault() {
 		return
 	fi
 	sleep "$delay"
-	case $kind in
-	hub) G sh -c 'kill -9 "$(tr -cd 0-9 < ~/.scion/server.pid)"' ;;
-	broker) pkill -9 -f "broker serve .*$INST/" ;;
-	lever) pkill -9 -P "$pid" ;;
-	guest) limactl stop -f "$VM" >/dev/null 2>&1 ;;
-	esac
-	ok "$kind@$step: killed the $kind"
+	# A fault after the up ended tests nothing: that is a failure of the
+	# scenario, not a pass.
+	if ! kill -0 "$pid" 2>/dev/null; then
+		bad "$kind@$step: the up ended before the fault (${delay}s after $step began); lower the delay"
+	else
+		killed=1
+		case $kind in
+		hub) G sh -c 'p=$(tr -cd 0-9 < ~/.scion/server.pid); [ -n "$p" ] && kill -9 "$p"' || killed=0 ;;
+		broker) pkill -9 -f "broker serve .*$INST/" || killed=0 ;;
+		lever) pkill -9 -P "$pid" || killed=0 ;;
+		guest) limactl stop -f "$VM" >/dev/null 2>&1 || killed=0 ;;
+		esac
+		if [ "$killed" = 1 ]; then ok "$kind@$step: killed the $kind"; else bad "$kind@$step: found no $kind to kill"; fi
+	fi
 	reap "$pid" 300; rc=$?
 	echo "      | the faulted up ended with $rc: $(tail -1 "$log" | mask_secrets | cut -c1-200)"
 	converged "$kind@$step" "$WORK/fault-$kind-$step.up.log" "$ID"

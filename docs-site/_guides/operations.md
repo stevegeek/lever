@@ -1343,9 +1343,11 @@ The same apply loads the agent image again and tags it `lever.local/<name>`, the
 starts agents on, which the hub's image registry setting cannot redirect (see [worker
 isolation](/security-model/worker-isolation/)). A `manager.image` of `scionlocal/<name>` must
 become `lever.local/<name>` first: lever refuses the old name. The manager and any worker the older lever created keep their unqualified name until
-they are recreated. `lever up` refuses such a manager, and doctor's `manager image` row fails for
-it (and warns for such a worker) until then: `lever up --fresh --keep-conversation` recreates the
-manager.
+they are recreated. `lever up` refuses such a manager, the broker refuses to resume, start, heal
+or wake such a worker, and doctor's `manager image` row fails for either until then. `lever up
+--fresh --keep-conversation` recreates the manager, and `lever worker recycle NAME` (or `lever
+worker purge NAME --force`, then `lever worker start NAME`) a worker. A record with no image is
+refused the same way.
 
 Lever finds the controller by its user ID, through the controller PAT, so an agent renaming the dev
 user does not stop an apply. Only minting or revoking a controller token needs the address: lever

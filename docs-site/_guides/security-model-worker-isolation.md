@@ -352,9 +352,14 @@ missing image fails instead of asking the network. As defence
 in depth, every `lever apply` also sets the registry back to `lever.local` as lever-admin. An agent
 record created by an older lever keeps its bare image name, and the registry still applies to it
 at each start: under lever's pin a record on `x` runs `lever.local/x`, the image lever loaded, or
-fails to start when there is none. `lever up`, `lever apply`, a conversation restore or new conversation and the broker's
-re-enrol refuse to keep or resume a manager on such a record and say to run `lever up --fresh --keep-conversation`; `lever doctor`'s `manager
-image` row lists such records, and recreating them closes it. The runtime route can likewise switch the hub's container runtime, which fails agent starts
+fails to start when there is none, but an agent can change the registry before the next apply.
+A record with no image runs the template's or harness's default name, which is rewritten the
+same way. So lever refuses to start either kind. `lever up`, `lever apply`, a conversation
+restore or new conversation and the broker's re-enrol refuse to keep or resume such a manager and
+say to run `lever up --fresh --keep-conversation`. The broker refuses to resume, start, heal or
+wake such a worker, for the manager, the operator (`lever worker resume`, `start`, `new-session`,
+autostart) and the chat page alike, and says to run `lever worker recycle NAME`. `lever doctor`'s
+`manager image` row fails while any such record exists, and recreating them clears it. The runtime route can likewise switch the hub's container runtime, which fails agent starts
 until the next `lever apply` sets it back to podman as lever-admin; doctor's `hub container
 runtime` row fails meanwhile. That pin stores the hub's profiles in its database, which from then
 on outranks `profiles:` in the jail's `settings.yaml`. The workstation settings route can turn on

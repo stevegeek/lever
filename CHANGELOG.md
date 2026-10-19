@@ -152,15 +152,21 @@ version bump moves the block under the new version heading.
 
 ### Security
 
-- **Every apply pins the hub's image registry to `lever.local`, and `lever up` refuses a manager
-  on an unqualified image name.** scion rewrites an agent record's unqualified image name `x` (or
-  `a/x`) to `<registry>/x` at every start. Under the old `scionlocal` pin, with the
-  `scionlocal/` alias gone, that named a stale image in the jail or, through podman's short-name
-  path, a Docker Hub pull. Under `lever.local` it names the image lever just loaded, or none, and
-  the start fails. A plain `lever up` or `lever apply`, a conversation restore, a new conversation
-  (the daily one too) and the broker's re-enrol now stop before they change a manager whose record
-  is on an unqualified name, instead of warning, and say to run `lever up --fresh
-  --keep-conversation`; doctor's *manager image* row fails for it.
+- **Every apply pins the hub's image registry to `lever.local`, and lever refuses to start a
+  manager or worker record on an unqualified image name or none.** scion rewrites an agent
+  record's unqualified image name `x` (or `a/x`) to `<registry>/x` at every start, and a record
+  with no image runs the template's or harness's default name, rewritten the same way. Under the
+  old `scionlocal` pin, with the `scionlocal/` alias gone, that named a stale image in the jail
+  or, through podman's short-name path, a Docker Hub pull. Under `lever.local` it names the image
+  lever just loaded, or none, and the start fails; but an agent can point the registry at its own
+  before the next apply, and scion pulls from there. A plain `lever up` or `lever apply`, a
+  conversation restore, a new conversation (the daily one too) and the broker's re-enrol now stop
+  before they change such a manager, instead of warning, and say to run `lever up --fresh
+  --keep-conversation`. The broker refuses to resume, start, heal or wake such a worker, for the
+  manager's `agent resume` and `agent start`, `lever worker resume`, `start` and `new-session`,
+  autostart, the chat page's resume and the certificate heal, before it stages a ticket or stops
+  anything, with the new reason `image-unqualified` (exit 10) and the advice to run `lever worker
+  recycle NAME`. Doctor's *manager image* row fails for any such record, a worker's included.
 
 - **Two spellings of one image name are one image to config and to `image_tar`.** `x:arm64` and
   `docker.io/library/x:arm64` are one name in the jail's podman, but config load compared them as
@@ -230,12 +236,14 @@ version bump moves the block under the new version heading.
   running on the old name fails doctor's *manager image* row until `lever up --fresh
   --keep-conversation` recreates it.
 
-- **A manager created by an older lever on an unqualified image name must be recreated:** run
-  `lever up --fresh --keep-conversation` once. Plain `lever up`, `lever apply`, conversation
-  restores, new conversations and the broker's re-enrol refuse it until then. Recycle a worker
-  on such a name (doctor's *manager image* row warns): the broker still resumes and heals it,
-  and an agent can point the hub's registry at its own between applies. The first apply sets
-  the hub's image registry to `lever.local`.
+- **A manager or worker created by an older lever on an unqualified image name, or with none,
+  must be recreated** (doctor's *manager image* row lists them). For the manager run `lever up
+  --fresh --keep-conversation` once; plain `lever up`, `lever apply`, conversation restores, new
+  conversations and the broker's re-enrol refuse it until then. Recycle each such worker before
+  upgrading with `lever worker recycle NAME` (or `lever worker purge NAME --force`, then `lever
+  worker start NAME`; both work after the upgrade too): the new broker refuses to resume, heal or
+  wake it, and an autostart of it only warns. The first apply sets the hub's
+  image registry to `lever.local`.
 
 - **Fix any `caveat_param` that config load now refuses** (see Security): bind each constraint
   key directly to its argument.

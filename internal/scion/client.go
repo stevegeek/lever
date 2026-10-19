@@ -165,14 +165,23 @@ func (c *Client) runStdin(ctx context.Context, stdin io.Reader, args ...string) 
 }
 
 // runErr quotes scion's output, not err, which is only the exit status. An
-// output-limit kill is wrapped as well, so callers can tell a reply too large
-// to read from a hub that did not answer.
+// output-limit kill still unwraps to proc.ErrOutputLimit, so callers can tell
+// a reply too large to read from a hub that did not answer.
 func runErr(args []string, out string, err error) error {
+	msg := fmt.Sprintf("scion %s: %s", redactArgs(args), cleanErr(out))
 	if errors.Is(err, proc.ErrOutputLimit) {
-		return fmt.Errorf("scion %s: %s: %w", redactArgs(args), cleanErr(out), proc.ErrOutputLimit)
+		if strings.TrimSpace(out) == "" {
+			msg += proc.ErrOutputLimit.Error()
+		}
+		return &outputLimitError{msg: msg}
 	}
-	return fmt.Errorf("scion %s: %s", redactArgs(args), cleanErr(out))
+	return errors.New(msg)
 }
+
+type outputLimitError struct{ msg string }
+
+func (e *outputLimitError) Error() string { return e.msg }
+func (e *outputLimitError) Unwrap() error { return proc.ErrOutputLimit }
 
 // runSecret is run for a command whose argv carries a credential. It scrubs
 // the literal value from the whole error, which position-based redaction

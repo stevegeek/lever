@@ -310,3 +310,60 @@ func TestInGuestWaitScriptRunsForReal(t *testing.T) {
 		t.Fatalf("healthz 404: %v, want exit 4", err)
 	}
 }
+
+// cappedRunner answers every command the way the jail runner does once a
+// command's output passes its cap: the output swapped for a line naming the
+// cap, and an error that wraps proc.ErrOutputLimit. Only list is capped.
+type cappedRunner struct{ calls int }
+
+func (r *cappedRunner) RunIn(_ context.Context, _ string, _ map[string]string, _ string, args ...string) (proc.Result, error) {
+	if len(args) == 0 || args[0] != "list" {
+		return proc.Result{}, nil
+	}
+	r.calls++
+	return proc.Result{Code: -1, Stderr: "the command's output passed lever's 8388608-byte limit for a jail command; it was killed"},
+		fmt.Errorf("limactl: %w", proc.ErrOutputLimit)
+}
+
+func (r *cappedRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
+func (r *cappedRunner) RunStdin(ctx context.Context, _ io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
+// An agent list over the cap is the hub answering with a list a retry reads
+// again: the wait must end on the first probe, not run out its budget.
+func TestWaitHubReadyFailsAtOnceOnOversizedList(t *testing.T) {
+	r := &cappedRunner{}
+	c := New(r, Options{})
+	c.hubReady.Budget, c.hubReady.Interval = 2*time.Second, time.Millisecond
+	start := time.Now()
+	err := c.waitHubReady(context.Background(), nil)
+	if !errors.Is(err, ErrAgentListTooLarge) || !errors.Is(err, proc.ErrOutputLimit) {
+		t.Fatalf("err = %v, want ErrAgentListTooLarge wrapping proc.ErrOutputLimit", err)
+	}
+	if errors.Is(err, ErrHubNotReady) {
+		t.Fatalf("the hub answered; err must not read as not ready: %v", err)
+	}
+	if r.calls != 1 || time.Since(start) > time.Second {
+		t.Fatalf("calls = %d after %s, want one probe and an immediate failure", r.calls, time.Since(start))
+	}
+	for _, want := range []string{"agent list is too large", "lever worker purge", "lever up --fresh", "8388608-byte limit"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error lacks %q: %v", want, err)
+		}
+	}
+}
+
+func TestServerStartFailsAtOnceOnOversizedList(t *testing.T) {
+	r := &cappedRunner{}
+	c := New(r, Options{})
+	c.hubReady.Budget, c.hubReady.Interval = 2*time.Second, time.Millisecond
+	c.hubRetryPause = time.Hour
+	err := c.ServerStart(context.Background(), ServerOpts{})
+	if !errors.Is(err, ErrAgentListTooLarge) {
+		t.Fatalf("err = %v, want ErrAgentListTooLarge", err)
+	}
+}

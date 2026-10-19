@@ -5,6 +5,8 @@
 package fsutil
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -319,6 +321,125 @@ func CreateInTreeNoLinks(tree, rel string, dirPerm, perm os.FileMode) (*os.File,
 		return nil, err
 	}
 	return f, nil
+}
+
+// afterReplaceWrite is a test seam run between ReplaceInTreeNoLinks's temp
+// file write and its rename.
+var afterReplaceWrite func(dir *os.Root, tmp string)
+
+// ReplaceInTreeNoLinks writes data as a new regular file at rel below tree
+// (mode perm, umask aside) and renames it over whatever entry rel names,
+// making missing parents with dirPerm. No component below tree may be a
+// symbolic link.
+//
+// The existing entry is never opened: the agent can make it a hard link to
+// another file (an in-place write would land in that file), a FIFO (an open
+// would block for ever), or a link swapped in after any check. The rename
+// replaces the entry itself; a directory there makes it fail. The temp file
+// is created O_EXCL under a random name in the same directory, so the agent
+// cannot pre-plant it, and is removed on any failure.
+//
+// The directory is held open from the walk on, so the file lands in the
+// directory the walk checked even if the agent renames it away meanwhile;
+// moving its own directory gains the agent nothing it could not do with a
+// copy.
+func ReplaceInTreeNoLinks(tree, rel string, data []byte, dirPerm, perm os.FileMode) error {
+	dir, leaf, err := splitNoLinks(rel)
+	if err != nil {
+		return err
+	}
+	r, err := rootNoLinks(tree, dir, true, dirPerm)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	f, tmp, err := createTempIn(r, leaf, perm)
+	if err != nil {
+		return err
+	}
+	// f stays open until the check after the rename: a closed and unlinked
+	// inode's number can be reused at once, which would defeat SameFile.
+	defer f.Close()
+	renamed := false
+	defer func() {
+		if !renamed {
+			_ = r.Remove(tmp)
+		}
+	}()
+	st, err := writeSynced(f, data, perm)
+	if err != nil {
+		return fmt.Errorf("%s: %w", filepath.Join(tree, dir, tmp), err)
+	}
+	if afterReplaceWrite != nil {
+		afterReplaceWrite(r, tmp)
+	}
+	if err := r.Rename(tmp, leaf); err != nil {
+		return err
+	}
+	renamed = true
+	// The temp name sits in an agent-writable directory: an entry swapped in
+	// for it before the rename is now at leaf instead of the data written.
+	now, err := r.Lstat(leaf)
+	if err != nil {
+		return fmt.Errorf("%s after the replace: %w", filepath.Join(tree, rel), err)
+	}
+	if !now.Mode().IsRegular() || !os.SameFile(now, st) {
+		return fmt.Errorf("%s changed while it was replaced: %w", filepath.Join(tree, rel), ErrSymlink)
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	// Best effort, as in syncDir: some file systems refuse a directory sync.
+	if d, err := r.Open("."); err == nil {
+		_ = d.Sync()
+		d.Close()
+	}
+	return nil
+}
+
+// createTempIn creates a new regular file in r named after leaf with a
+// random suffix. O_EXCL never follows a link and fails on any existing
+// entry, so a name the agent planted is skipped, never reused.
+func createTempIn(r *os.Root, leaf string, perm os.FileMode) (*os.File, string, error) {
+	var err error
+	for range 8 {
+		var b [8]byte
+		if _, err = rand.Read(b[:]); err != nil {
+			return nil, "", err
+		}
+		name := "." + leaf + ".tmp-" + hex.EncodeToString(b[:])
+		var f *os.File
+		f, err = r.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NONBLOCK, perm)
+		if err == nil {
+			return f, name, nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return nil, "", err
+		}
+	}
+	return nil, "", err
+}
+
+// writeSynced writes data to f, sets perm and syncs it, and returns the
+// file's info as written. The caller closes f.
+func writeSynced(f *os.File, data []byte, perm os.FileMode) (fs.FileInfo, error) {
+	if _, err := f.Write(data); err != nil {
+		return nil, err
+	}
+	if err := f.Chmod(perm); err != nil {
+		return nil, err
+	}
+	if err := f.Sync(); err != nil {
+		return nil, err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !st.Mode().IsRegular() {
+		return nil, ErrNotRegularFile
+	}
+	return st, nil
 }
 
 // OpenInTreeNoLinks opens the regular file at rel below tree for reading,

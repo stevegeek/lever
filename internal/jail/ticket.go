@@ -25,7 +25,7 @@ import (
 // workerTicketRoot must match WorkerTicketDir.
 const workerTicketRoot = "$XDG_RUNTIME_DIR/lever/tickets"
 
-// workerTicketFile is the name lever-agent boot reads (wire.Stage's deposit).
+// workerTicketFile is the name lever-agent boot reads.
 const workerTicketFile = "bootstrap.json"
 
 // stageWorkerTicketScript removes the old file first so the write never

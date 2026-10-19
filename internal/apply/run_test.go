@@ -18,6 +18,7 @@ import (
 
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/scion/layout"
@@ -3585,7 +3586,26 @@ func TestRunRefusesMissingTarDeps(t *testing.T) {
 // runApplyFresh carries --fresh into the plan: `up` cannot delete a record
 // while the hub is down, so the converge step does it once the hub is up.
 func runApplyFresh(app *config.App, deps Deps) error {
-	return Run(context.Background(), app, fillDeps(deps), PlanOpts{Fresh: true})
+	return Run(context.Background(), app, fillDeps(withContainerGone(deps)), PlanOpts{Fresh: true})
+}
+
+// goneContainer is podman knowing no container by any name.
+type goneContainer struct{}
+
+func (goneContainer) State(context.Context, string) (jail.ContainerState, error) {
+	return jail.ContainerState{}, jail.ErrNoContainer
+}
+func (goneContainer) Remove(context.Context, string) error { return nil }
+
+// withContainerGone wires podman, when the test left it out, as showing the
+// discarded manager's container gone, which a fresh start needs before it
+// stages a ticket. Only for a run that discards the manager: a kept running
+// record over no container is recovered, not kept.
+func withContainerGone(d Deps) Deps {
+	if d.StaleContainer == nil {
+		d.StaleContainer = goneContainer{}
+	}
+	return d
 }
 
 // TestStartManagerFreshDiscardsPresentRecord: with Fresh set, any present

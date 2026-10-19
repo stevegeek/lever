@@ -137,6 +137,7 @@ make test-integration  # `-tags integration` tests; each skips unless its env/to
 make test-apikey-e2e   # live api-key /llm path with a fake upstream; needs OrbStack + podman
 make test-lima-e2e     # live lima backend gate; needs Lima >= 2.0
 make test-lima-stack-e2e # live whole stack on the pinned scion (agent image, remote access); needs Lima >= 2.0
+make test-lima-chaos-e2e # live lifecycle races and faults (kill hub, broker, lever, guest mid-up); needs IMAGE_TAR or IMAGE_CACHE
 make test-lima-hubauth-e2e # live hub identities: migration from the older release, contacts while agents run; needs IMAGE_TAR
 lever acceptance       # six-check live gate against a running instance
 ```

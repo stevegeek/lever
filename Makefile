@@ -194,6 +194,15 @@ test-lima-e2e: install
 test-lima-stack-e2e: install
 	bash tools/test/lima-stack-e2e.sh
 
+# Live e2e of the lifecycle under races and faults on a real Lima VM: pairs of
+# lever commands at once, and the hub, the broker, lever or the guest killed
+# during an up, each followed by an up that must converge. Bounded by
+# CHAOS_BUDGET (default 30 min). Needs IMAGE_TAR or IMAGE_CACHE (an archive
+# the stack e2e saved); see the script's header.
+.PHONY: test-lima-chaos-e2e
+test-lima-chaos-e2e: install
+	bash tools/test/lima-chaos-e2e.sh
+
 # Live e2e of the hub's proxy auth on a real Lima VM: migrates an instance an
 # older lever brought up, binds and removes a contact while agents run,
 # rotates the controller PAT, then brings a fresh instance up. Needs

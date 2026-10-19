@@ -100,8 +100,8 @@ func TestWhisperToolValidation(t *testing.T) {
 		"too big":            {withPort("70000"), "not a port"},
 		"own backend":        {withPort("3212"), "backend port"},
 		"other backend": {func(a *App) {
-			a.Broker.Tools = append(a.Broker.Tools, Tool{Name: "fizzy", Command: []string{"/x"}, Backend: "http://127.0.0.1:8448"})
-		}, "broker tool \"fizzy\""},
+			a.Broker.Tools = append(a.Broker.Tools, Tool{Name: "notes", Command: []string{"/x"}, Backend: "http://127.0.0.1:8448"})
+		}, "broker tool \"notes\""},
 		"other tree": {func(a *App) {
 			c := slices.Clone(a.Broker.Tools[0].Command)
 			c[slices.Index(c, "-tree")+1] = "/elsewhere"
@@ -147,7 +147,7 @@ func TestWhisperToolValidation(t *testing.T) {
 
 func TestWhisperToolsAndVoiceTool(t *testing.T) {
 	a := voiceApp()
-	a.Broker.Tools = append([]Tool{{Name: "fizzy", Command: []string{"/x", "-state", "/s"}, Backend: "127.0.0.1:3211"}},
+	a.Broker.Tools = append([]Tool{{Name: "notes", Command: []string{"/x", "-state", "/s"}, Backend: "127.0.0.1:3211"}},
 		whisperTool("--model=large-v3-turbo-q5_0", "-max-seconds", "120"))
 	ws := a.WhisperTools()
 	if len(ws) != 1 {

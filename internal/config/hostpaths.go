@@ -50,9 +50,8 @@ type hostPath struct {
 // is, so no other flag is checked.
 var toolPathFlags = map[string]hostPathKind{
 	"app-key":    hostSecret,    // github: the GitHub App private key
-	"token-file": hostSecret,    // fizzy: the personal access token
-	"state":      hostSecret,    // github, fizzy: the tool's private state dir
-	"fizzy":      hostProgram,   // fizzy: the fizzy CLI it runs
+	"token-file": hostSecret,    // a tool's API token
+	"state":      hostSecret,    // github and others: the tool's private state dir
 	"tree":       hostUnchecked, // github, whisper: the tree, to refuse paths inside it
 	"dsn":        hostUnchecked, // db: its sqlite data
 	"csv":        hostUnchecked, // todo (example): the agent-editable todo list

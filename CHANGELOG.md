@@ -7,6 +7,12 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Removed
+
+- **The `lever-tool-fizzy` broker tool.** It is no longer built or released. An instance config
+  that names it must drop the tool and its grants; a ticket board can be wired in as an external
+  broker tool instead.
+
 ## [0.50.0] - 2026-10-19
 
 ### Added

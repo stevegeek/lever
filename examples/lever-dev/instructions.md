@@ -41,14 +41,6 @@ Follow these rules in every session.
   heredoc and use `git commit -F`.
 - Ask an independent subagent to review each significant change before you push.
 
-## Fizzy
-
-- Use the `fizzy` tool for the configured board only.
-- Move a card to the in-progress column when you start work.
-- Ask the operator for the in-progress column id, or read it from a `move_card` refusal.
-- Comment on the card with the compare URL when you push.
-- Never close a card. The operator closes cards after the release.
-
 ## Operator only
 
 - Releases, tags, workflow changes, upstream PR comments, and installs on any

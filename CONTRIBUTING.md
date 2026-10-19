@@ -12,7 +12,6 @@ Developer notes for working on lever itself. For using lever, start at the
 | `cmd/lever-agent` | In-jail capability helper. Baked into the agent image; the container pre-start hook runs it to enrol the agent's mTLS identity and serve the capability MCP tool. `cmd/lever-agent/scionhook/` holds that `pre-start` shell hook (copied into the image by `make lever-image`) and a test that pins its contract. |
 | `cmd/lever-tool-db` | Reference first-party capability tool (optional). |
 | `cmd/lever-tool-github` | Host-side broker tool: pushes an agent's git bundle to one `agent/*` branch with a short-lived GitHub App token; opt-in PR, merge and release operations (`-ops`). |
-| `cmd/lever-tool-fizzy` | Host-side broker tool: a fixed set of operations on one Fizzy board, through the `fizzy` CLI. |
 | `cmd/lever-tool-whisper` | Host-side broker tool: runs whisper.cpp's `whisper-server` for the chat page's dictation (over a Unix socket) and an optional agent `transcribe` operation. |
 | `cmd/lever-tool-tts` | Host-side broker tool: runs sherpa-onnx's `sherpa-onnx-offline-tts` once per text for the chat page's read-aloud with server voices (over a Unix socket). |
 | `captool/` | Public SDK for first-party capability tools (independent token verification + backstop). Imported by `examples/`; the only non-`internal` package. |
@@ -35,7 +34,6 @@ Developer notes for working on lever itself. For using lever, start at the
 | `internal/config` | `lever.yaml` schema, loading and validation. |
 | `internal/egress` | Jail egress allowlist as iptables/ip6tables rules. |
 | `internal/fileledger` | Host record of chat-page uploads and agent-shared files, with sha256 and size. |
-| `internal/fizzytool` | Host side of `lever-tool-fizzy`: board-confined operations through the `fizzy` CLI. |
 | `internal/fsutil` | File helpers (`WriteFileAtomic`, tree-confined access, `InsideByIdentity`); stdlib only, plus `golang.org/x/sys/unix` for the identity check. |
 | `internal/ghpush` | Host side of `lever-tool-github`: request checks, bundle import into a host mirror, the push, and the opt-in PR and release operations over the GitHub REST API. |
 | `internal/hostledger` | Safe JSON-lines file handling shared by the host-side ledgers. |
@@ -113,7 +111,7 @@ unchanged, and otherwise builds the image and saves it there, so a rerun skips t
 ## Build
 
 ```bash
-make install          # host `lever`, `lever-tool-github`, `lever-tool-fizzy`, `lever-tool-whisper`, `lever-tool-tts` → $PREFIX (default ~/.local/bin)
+make install          # host `lever`, `lever-tool-github`, `lever-tool-whisper`, `lever-tool-tts` → $PREFIX (default ~/.local/bin)
 make lever-image      # cross-compile in-jail binaries + docker build the agent image (LEVER_IMAGE_ARCH, default: host Go arch)
 make lever-image-bins # cross-compile in-jail binaries into an instance's image build context only
 make lever-image-slim # the slim agent image (SCION_VERSION or SCION_SRC: the scion the jail runs)

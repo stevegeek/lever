@@ -14,7 +14,7 @@ and the program itself stay on the host.
 - **The broker supervises it.** You register the tool in `broker.tools` with a `command`. The
   broker starts it as a subprocess on host loopback and fronts it over mTLS at `/mcp/<name>/`.
   The jail cannot reach the tool's port directly.
-- **The tool's settings are flags.** Credential files, repositories, the board, models and state
+- **The tool's settings are flags.** Credential files, repositories, models and state
   directories go in the tool's `command`, not in `lever.yaml` keys. Config load refuses the
   program, credential and state paths of these tools when they resolve inside the tree, which the
   agent can read. See the [config reference](/reference/config/).
@@ -35,11 +35,10 @@ hand-written `.mcp.json`. After you change `broker.tools` or grants on a running
 | Tool | Program | What it gives an agent |
 |---|---|---|
 | [github](/github-tool/) | `lever-tool-github` | Push a branch from a git bundle, with no GitHub credential in the jail. |
-| [fizzy](/fizzy-tool/) | `lever-tool-fizzy` | Work on one Fizzy board, with no Fizzy token in the jail. |
 | [whisper](/whisper-tool/) | `lever-tool-whisper` | Speech to text on the host, for the chat page's dictation and, if granted, an agent's audio file. |
 | [tts](/tts-tool/) | `lever-tool-tts` | Text to speech on the host, a natural voice for the chat page's read-aloud; agents get only a read-only list of the voices. |
 
-`make install` builds all four into `~/.local/bin`. lever also ships `lever-tool-db`, a reference
+`make install` builds all three into `~/.local/bin`. lever also ships `lever-tool-db`, a reference
 tool for writing your own.
 
 To register any MCP server as a broker tool, including third-party servers that are already

@@ -63,7 +63,6 @@ func TestHostPathsRefusedInsideTree(t *testing.T) {
 		{"tree itself as state", "manager: {}\n" + supervisedTool("[/usr/bin/true, -state, ROOT/ws]"), "broker.tools[t] -state"},
 		{"app-key", "manager: {}\n" + supervisedTool("[/usr/bin/true, -app-key, ROOT/ws/secret]"), "broker.tools[t] -app-key"},
 		{"token-file with =", "manager: {}\n" + supervisedTool("[/usr/bin/true, --token-file=ws/secret]"), "broker.tools[t] -token-file"},
-		{"fizzy cli", "manager: {}\n" + supervisedTool("[/usr/bin/true, -fizzy, ROOT/ws/tools/bin]"), "broker.tools[t] -fizzy"},
 		{"script argument", "manager: {}\n" + supervisedTool("[/usr/bin/ruby, ROOT/ws/tools/bin]"), "broker.tools[t] script"},
 		{"sh -c command", "manager: {}\n" + supervisedTool("[sh, -c, \"exec ROOT/ws/tools/bin --x\"]"), "broker.tools[t] -c code"},
 		{"whisper models", "manager: {}\n" + supervisedTool(whisperCmd(", -models, ROOT/ws/models")), "broker.tools[t] -models"},
@@ -218,14 +217,13 @@ func TestToolHostPaths(t *testing.T) {
 	// The shipped tools' path flags in every spelling; -tree, -csv and -dsn
 	// are consumed, not checked; other flags and arguments are not read.
 	check("shipped flags", paths("lever-tool-github", "-tree", "/a/ws", "-app-key", "k.pem", "--state=/s",
-		"-repos", "o/n", "-branch-prefix=agent", "-fizzy=/bin/fizzy", "--token-file", "/t", "-tree=/a/ws",
+		"-repos", "o/n", "-branch-prefix=agent", "--token-file", "/t", "-tree=/a/ws",
 		"-csv", "ws/x.csv", "-dsn", "file:ws/x.db", "-key-file", "/k", "plain/path",
 		// lever-tool-github's opt-in operation flags are not paths.
 		"-ops", "push,pr_open,release", "-merge-methods", "squash", "-merge-checks", "ci/test",
 		"-release-tag", `^v[0-9]+\.[0-9]+\.[0-9]+$`, "-text-max", "8000"), []got{
 		{"broker.tools[t] -app-key", "k.pem", hostSecret},
 		{"broker.tools[t] -state", "/s", hostSecret},
-		{"broker.tools[t] -fizzy", "/bin/fizzy", hostProgram},
 		{"broker.tools[t] -token-file", "/t", hostSecret},
 	})
 	// lever-tool-whisper: the program it runs, its models and its socket;

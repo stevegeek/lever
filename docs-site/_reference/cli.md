@@ -9,8 +9,8 @@ from an instance root, and **`lever-manager`**, the in-jail orchestration CLI th
 runs inside its container. (The other binaries have no operator-facing commands: `lever-agent`,
 baked into agent images and run by the container pre-start hook, and the capability-aware MCP
 tools the broker launches and supervises when a `broker.tools:` entry names them in its `command`:
-`lever-tool-db` (the reference tool), [`lever-tool-github`](/github-tool/),
-[`lever-tool-fizzy`](/fizzy-tool/) and [`lever-tool-whisper`](/whisper-tool/). Those tools take their settings as flags in that `command`.)
+`lever-tool-db` (the reference tool), [`lever-tool-github`](/github-tool/)
+and [`lever-tool-whisper`](/whisper-tool/). Those tools take their settings as flags in that `command`.)
 
 All `lever` commands read `./lever.yaml` from the current directory when the config argument is
 omitted — there is no walk-up discovery, so run them from the instance root.

@@ -7,6 +7,13 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Changed
+
+- **The sizing guide says what fixes the async page fault panic.** "Host injected async #PF in
+  kernel mode" comes from the host swapping the VM out, which 0.50.0's no-swap start and
+  `no-kvmapf` address; `manager.resources` is still recommended on a nested-virt dev instance so
+  that a guest out-of-memory kill stays inside the manager's container.
+
 ### Removed
 
 - **The `lever-tool-fizzy` broker tool.** It is no longer built or released. An instance config
@@ -55,6 +62,36 @@ version bump moves the block under the new version heading.
   caller without a valid client certificate still gets `403` on every path under the tool route.
   Agents already use `/mcp/<tool>/`, so nothing
   changes for them.
+
+- **One `lever stop`, then `lever up`, is enough to apply `no-kvmapf` after the upgrade.** The
+  crash-recovery step writes the kernel command line only once the VM is up, so the first start
+  after 0.50.0 booted without it and reported a reboot pending: the setting took a second restart.
+  Now, when the bring-up started the VM itself (it was stopped, or new) and `grub.cfg` already
+  holds parameters the running kernel lacks, lever reboots the guest once before it provisions
+  anything in it (`limactl stop`, then the same start, in the no-swap scope where it applies) and prints
+  `jail: rebooted the guest once to apply no-kvmapf`. A new `guest_kernel: hwe` kernel boots in the
+  same reboot. At most one reboot per bring-up; a VM that was already running is never rebooted
+  and still reports the reboot pending. A stop that fails while the VM still runs leaves it running
+  with the pending line; any other failure fails the bring-up, and the next `lever up` starts the
+  VM with the parameters.
+- **What the guest hardening scripts report is bounded.** The `jail: warning:` and `jail: reboot
+  pending:` lines quote text from the guest, such as a kernel version. Each quoted line is now made
+  safe to print where it is read (escape sequences, control characters and bidi or other invisible
+  characters removed or replaced), not only when it is printed, and is cut to 300 characters. A
+  report shows at most 16 lines of each kind and says how many more it left out. The first line of
+  `limactl`, `loginctl` or `systemd-run` errors that bring-up messages quote is bounded the same
+  way.
+- **Guest output and the guest's run user can no longer be used against the host.** A compromised
+  guest root could stream output without end into `lever up`, which held all of it in memory. The
+  guest commands that provision and harden the VM (the guest hardening scripts, the provisioning
+  steps, the warm-path probe, the hub key install, the host alias lookup, `limactl start` and
+  `stop`, and the jail image commands) now stop at 8 MiB on stdout or stderr: the command is killed
+  and its step fails with an error that says the output passed its limit. The run user and uid the
+  guest reports are checked before use: a user name must be letters, digits, `_`, `-` or `.` (up to
+  32, starting with a letter or `_`), and the uid a plain decimal number other than 0; anything
+  else stops the bring-up. Guest stderr quoted in a bring-up error, an unrecognised `uname -m`,
+  unparsable `limactl --version` output, the Lima start progress lines and the guest firewall
+  listing an egress error quotes are made safe to print and cut to a few hundred characters.
 
 ### Upgrade
 

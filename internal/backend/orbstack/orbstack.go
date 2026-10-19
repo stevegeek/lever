@@ -147,7 +147,7 @@ func (o *OrbStack) ensureMachine(ctx context.Context, projectTree string) (skip 
 func (o *OrbStack) waitMachineReachable(ctx context.Context) error {
 	var lastErr error
 	err := retry.Until(ctx, o.probeAttempts, o.probeInterval, func() (bool, error) {
-		_, lastErr = o.Runner().Run(ctx, nil, "orb", "-m", o.Machine(), "true")
+		_, lastErr = o.Runner().Run(guest.LimitOutput(ctx), nil, "orb", "-m", o.Machine(), "true")
 		return lastErr == nil, nil
 	})
 	if errors.Is(err, retry.ErrExhausted) {

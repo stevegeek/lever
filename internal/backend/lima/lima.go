@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -92,14 +93,15 @@ func (l *Lima) EnsureUp(ctx context.Context, cfg backend.Config) error {
 			return err
 		}
 	}
-	if err := l.ensureVM(ctx, cfg); err != nil {
+	boot, err := l.ensureVM(ctx, cfg)
+	if err != nil {
 		return err
 	}
 	// Before Provision: on a fresh VM no egress chain exists yet, so the
 	// HWE kernel install can reach the mirrors.
 	rep := progress.From(ctx)
 	s := rep.Start("guest hardening")
-	err = l.hardenGuest(ctx, cfg)
+	err = l.hardenGuest(ctx, cfg, boot)
 	s.Done(err)
 	if err != nil {
 		return err
@@ -126,13 +128,20 @@ func (l *Lima) EnsureUp(ctx context.Context, cfg backend.Config) error {
 	return err
 }
 
+// vmBoot is what ensureVM did. started: this bring-up booted the VM (it
+// was stopped or new), so nothing of the jail runs in it yet.
+type vmBoot struct {
+	started bool
+	instDir string
+}
+
 // ensureVM: the project tree mount is set only at `limactl create` time;
 // changing it on an existing VM requires Teardown+EnsureUp.
-func (l *Lima) ensureVM(ctx context.Context, cfg backend.Config) error {
+func (l *Lima) ensureVM(ctx context.Context, cfg backend.Config) (vmBoot, error) {
 	rep := progress.From(ctx)
 	status, err := l.vmStatus(ctx)
 	if err != nil {
-		return err
+		return vmBoot{}, err
 	}
 	created := status == ""
 	if created {
@@ -140,7 +149,7 @@ func (l *Lima) ensureVM(ctx context.Context, cfg backend.Config) error {
 		err := l.createVM(ctx, cfg)
 		s.Done(err)
 		if err != nil {
-			return err
+			return vmBoot{}, err
 		}
 		status = "Stopped" // freshly created, not yet started
 	}
@@ -150,7 +159,7 @@ func (l *Lima) ensureVM(ctx context.Context, cfg backend.Config) error {
 	// fixed at `limactl create` time.
 	inst, err := l.verifyRealizedConfig(ctx, cfg.ProjectTree)
 	if err != nil {
-		return err
+		return vmBoot{}, err
 	}
 	if !created && cfg.Warn != nil {
 		for _, d := range inst.sizingDrift(cfg.CPUs, cfg.Memory) {
@@ -166,7 +175,7 @@ func (l *Lima) ensureVM(ctx context.Context, cfg backend.Config) error {
 			warnRunningVMSwap(cfg.HostSwap, l.instanceDir(inst), cfg.Warn)
 		}
 		s.Skip("already running")
-		return nil
+		return vmBoot{}, nil
 	}
 	if !created {
 		l.saveGuestLogs(cfg, inst, false)
@@ -186,7 +195,10 @@ func (l *Lima) ensureVM(ctx context.Context, cfg backend.Config) error {
 		err = fmt.Errorf("limactl start: %w", err)
 	}
 	s.Done(err)
-	return err
+	if err != nil {
+		return vmBoot{}, err
+	}
+	return vmBoot{started: true, instDir: l.instanceDir(inst)}, nil
 }
 
 // saveGuestLogs never fails the bring-up: the logs are evidence for the
@@ -433,7 +445,7 @@ func (l *Lima) Stop(ctx context.Context) error {
 // resolveHostAlias resolves the alias FROM INSIDE the VM; both addresses
 // forward to the host's 127.0.0.1.
 func (l *Lima) resolveHostAlias(ctx context.Context) (v4, v6 string, err error) {
-	res, err := l.Runner().Run(ctx, nil, "limactl", "shell", l.Machine(), "getent", "ahosts", hostAlias)
+	res, err := l.Runner().Run(guest.LimitOutput(ctx), nil, "limactl", "shell", l.Machine(), "getent", "ahosts", hostAlias)
 	if err != nil {
 		return "", "", fmt.Errorf("getent %s: %w", hostAlias, err)
 	}
@@ -522,9 +534,12 @@ func (l *Lima) ensureGuestProfile(ctx context.Context, cfg backend.Config) error
 
 // hardenGuest converges the guest's crash recovery and kernel flavour on every
 // bring-up. A failed crash-recovery write fails the bring-up; what only a
-// reboot applies, and a kernel install that could not run, are warnings:
-// lever never reboots the guest itself.
-func (l *Lima) hardenGuest(ctx context.Context, cfg backend.Config) error {
+// reboot applies, and a kernel install that could not run, are warnings.
+// When this bring-up booted the VM and grub.cfg holds kernel parameters the
+// running kernel lacks, it reboots the guest once (a new kernel shares that
+// reboot). A VM that was already running is never rebooted: the manager may
+// be working in it.
+func (l *Lima) hardenGuest(ctx context.Context, cfg backend.Config, boot vmBoot) error {
 	warn := cfg.Warn
 	if warn == nil {
 		warn = func(string, ...any) {}
@@ -549,13 +564,71 @@ func (l *Lima) hardenGuest(ctx context.Context, cfg backend.Config) error {
 	if cfg.GuestKernel == guest.GuestKernelHWE {
 		l.keepHWEStamp(cfg.HWEFailStamp, stamp, kernel, warn)
 	}
-	for _, w := range append(crash.Warn, kernel.Warn...) {
+	kernelReboot := kernel.Reboot
+	if boot.started && len(crash.Cmdline) > 0 {
+		params := strings.Join(crash.Cmdline, " ")
+		rebooted, err := l.rebootGuest(ctx, cfg, boot.instDir, params, warn)
+		if err != nil {
+			return err
+		}
+		if rebooted {
+			warn("jail: rebooted the guest once to apply %s", params)
+			first := crash.Warn
+			if crash, err = l.Guest().EnsureCrashRecovery(ctx); err != nil {
+				return err
+			}
+			// A warning such as a failed update-grub may not recur once the
+			// reboot applied the parameters, and still needs saying.
+			for _, w := range first {
+				if !slices.Contains(crash.Warn, w) {
+					crash.Warn = append(crash.Warn, w)
+				}
+			}
+			crash.Warn = guest.CapReport(crash.Warn, "warnings")
+			// Report only: the install, if any, ran before the reboot.
+			after, err := l.Guest().EnsureGuestKernel(ctx, "", guest.KernelOpts{})
+			if err != nil {
+				warn("jail: warning: %v", err)
+			}
+			kernelReboot = after.Reboot
+		}
+	}
+	for _, w := range slices.Concat(crash.Warn, kernel.Warn) {
 		warn("jail: warning: %s", w)
 	}
-	for _, r := range append(crash.Reboot, kernel.Reboot...) {
+	for _, r := range slices.Concat(crash.Reboot, kernelReboot) {
 		warn("jail: reboot pending: %s; %s", r, RebootAdvice)
 	}
 	return nil
+}
+
+// rebootGuest stops the VM and starts it again the way ensureVM does
+// (startVM, so the no-swap scope applies). One attempt, never retried. A
+// stop that fails with the VM still running is a warning: the bring-up goes
+// on with a reboot pending. A VM left down, or in a state lever cannot
+// read, fails the bring-up. Only a VM seen stopped is started again, so
+// "rebooted" is never reported for a start that found it still running.
+func (l *Lima) rebootGuest(ctx context.Context, cfg backend.Config, instDir, params string, warn func(string, ...any)) (bool, error) {
+	s := progress.From(ctx).Current()
+	s.Detail("rebooting the VM to apply " + params)
+	res, err := l.Runner().Run(guest.LimitOutput(ctx), nil, "limactl", "stop", l.Machine())
+	if err = exitErr(err, res); err != nil {
+		stopErr := briefErr(err, res)
+		status, serr := l.vmStatus(ctx)
+		switch {
+		case serr == nil && status == "Running":
+			warn("jail: warning: rebooting the guest to apply %s failed: limactl stop: %s; the VM keeps running without it", params, stopErr)
+			return false, nil
+		case serr != nil:
+			return false, fmt.Errorf("rebooting the guest to apply %s: limactl stop: %s; the VM's state is unknown: %v (run `lever up` again)", params, stopErr, serr)
+		case status != "Stopped":
+			return false, fmt.Errorf("rebooting the guest to apply %s: limactl stop: %s; the VM is %q (run `lever up` again)", params, stopErr, status)
+		}
+	}
+	if err = l.startVM(ctx, cfg.HostSwap, instDir, warn); err != nil {
+		return false, fmt.Errorf("rebooting the guest to apply %s: limactl start: %w (run `lever up` again: the VM's next boot applies %s)", params, err, params)
+	}
+	return true, nil
 }
 
 // hweStamp records a failed guest_kernel hwe install. MachineID is the

@@ -1619,7 +1619,8 @@ The same step sets up the guest's capture of tmux server cores (see [tmux server
 crashes](#tmux-server-crashes)); a failure there is a warning and does not stop the bring-up.
 
 Each file is written only when its content differs, and `update-grub` runs only when the drop-in
-changed or `grub.cfg` lacks one of the parameters. lever never reboots the guest.
+changed or `grub.cfg` lacks one of the parameters. lever reboots the guest only as described under
+[what needs a reboot](#what-needs-a-reboot) below.
 
 **What a panic does to the VM.** The guest kernel asks for a reboot 10 s after a panic. What the
 VM then does depends on Lima's driver: under **qemu** the guest reboots, unless Lima starts QEMU
@@ -1653,12 +1654,27 @@ kernel again. `sudo sysctl -w kernel.softlockup_panic=0` in the guest turns it o
 apply or up. If it bites repeatedly, give the VM fewer vCPUs than the host has free, keep the host
 awake while agents run, and open an issue: a switch would be the fix.
 
-**What needs a reboot:** the kernel command line (always, the first time, and once more on a VM
-converged before `no-kvmapf` was added: the reboot-pending line names only what is missing), and the EFI pstore
-backend when it could not be unloaded (built in, or in use). The sysctls and the unload take
-effect at once. Apply prints `jail: reboot pending: …` for each; `lever stop`, then `lever up`,
-reboots the VM and keeps the manager conversation. Doctor's *guest crash recovery* row reads
-`/proc/sys/kernel/*`, `/proc/cmdline` and `/sys/module` and warns until all of it is in place.
+#### What needs a reboot
+
+The kernel command line (always, the first time, and once more on a VM converged before
+`no-kvmapf` was added), and the EFI pstore backend when it could not be unloaded (built in, or in
+use). The sysctls and the unload take effect at once.
+
+When the bring-up started the VM itself (it was stopped, or new) and `grub.cfg` already holds
+parameters the running kernel lacks, lever reboots the guest once, before it provisions anything in
+it: `limactl stop`, then the same start (in the no-swap scope where it applies), then the check
+again. It prints `jail: rebooted the guest once to apply no-kvmapf` (the parameters it applied).
+A new kernel from `guest_kernel: hwe` boots in the same reboot. So after an upgrade one `lever
+stop`, then `lever up`, is enough. There is at most one such reboot per bring-up, and a VM that
+was already running is never rebooted, since agents may be working in it.
+
+What is still pending after that, or on a running VM, prints `jail: reboot pending: …` (the line
+names only what is missing); `lever stop`, then `lever up`, reboots the VM and keeps the manager
+conversation. A reboot whose `limactl stop` fails while the VM still runs leaves it running with
+the line printed; any other failure fails the bring-up, and the next `lever up` starts the VM with
+the parameters.
+Doctor's *guest crash recovery* row reads `/proc/sys/kernel/*`, `/proc/cmdline` and `/sys/module`
+and warns until all of it is in place.
 
 On **OrbStack** none of this applies: an OrbStack machine shares OrbStack's one kernel with every
 other machine and container on the Mac, `kernel.*` sysctls are not namespaced, and that kernel is
@@ -1845,7 +1861,9 @@ does. The scope is used only when both hold:
 Otherwise, or when `systemd-run` cannot start the scope, the VM starts the old way and apply
 warns why; the limit is never a reason not to start the VM. A running VM is not moved: restart it
 (`lever stop`, then `lever up`) to get the limit; until then each bring-up warns that the running
-VM's QEMU is outside such a scope. `lever provision` does not read `lever.yaml`, so a VM it
+VM's QEMU is outside such a scope. After an upgrade that one restart also brings `no-kvmapf`: the
+bring-up reboots the guest once more by itself to apply it (see [what needs a
+reboot](#what-needs-a-reboot)). `lever provision` does not read `lever.yaml`, so a VM it
 starts always gets the scope when the host can give one. `host_swap: true` in `lever.yaml` starts it the
 old way without the warning. A host with no swap device (`/proc/swaps` lists none) starts it the
 old way silently, and doctor does not warn there. On macOS nothing changes.

@@ -13,10 +13,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"unicode/utf8"
 
+	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/fsutil"
-	"github.com/stevegeek/lever/internal/termsafe"
 )
 
 // guestLogFiles are the instance logs Lima recreates on every VM start, so a
@@ -375,13 +374,5 @@ func PanicLineIn(set string) string {
 }
 
 func boundLine(s string) string {
-	if len(s) > 4*panicLineMax {
-		s = s[:4*panicLineMax]
-	}
-	s = strings.TrimRight(s, "\r\n")
-	s = strings.TrimSpace(termsafe.Sanitize(strings.ToValidUTF8(s, "�")))
-	if utf8.RuneCountInString(s) > panicLineMax {
-		s = string([]rune(s)[:panicLineMax]) + "…"
-	}
-	return s
+	return guest.SafeLine(strings.TrimRight(s, "\r\n"), panicLineMax)
 }

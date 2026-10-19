@@ -3,7 +3,6 @@ package guest
 import (
 	"context"
 	"fmt"
-	"strings"
 )
 
 // KVMUdevRulePath makes /dev/kvm usable by the rootless run user in the
@@ -50,7 +49,7 @@ func (g Guest) EnsureNestedVirt(ctx context.Context, on bool) error {
 	}
 	if res, err := g.RootRun(ctx, "bash", "-lc", rootScript); err != nil || res.Code != 0 {
 		if err == nil {
-			err = fmt.Errorf("exit %d: %s", res.Code, strings.TrimSpace(res.Stderr))
+			err = fmt.Errorf("exit %d: %s", res.Code, quoteStderr(res))
 		}
 		if on {
 			return fmt.Errorf("nested_virt: the jail VM has no usable /dev/kvm: it was created before nested_virt, or the host nested module is off; recreate the VM: `lever conversation backup`, then `lever destroy` (alias `down`; deletes the VM and the conversation) and `lever up`, then `lever conversation restore`: %w", err)
@@ -59,7 +58,7 @@ func (g Guest) EnsureNestedVirt(ctx context.Context, on bool) error {
 	}
 	if res, err := g.UserRun(ctx, "bash", "-lc", kvmUserScript); err != nil || res.Code != 0 {
 		if err == nil {
-			err = fmt.Errorf("exit %d: %s", res.Code, strings.TrimSpace(res.Stderr))
+			err = fmt.Errorf("exit %d: %s", res.Code, quoteStderr(res))
 		}
 		return fmt.Errorf("nested_virt: remove the legacy podman devices drop-in: %w", err)
 	}

@@ -140,8 +140,9 @@ so it gives no agent anything new:
 - `lever msg send "…" --to NAME` gives a running worker its next piece of work. The worker verifies
   it as an `operator-note`. Exit `9` means the worker was not running and nothing was sent.
 - `lever worker recycle NAME [--task-file F]` discards a worker's record and starts it fresh (any
-  declared worker: `recyclable: true` is only the manager's authority), for a slot that needs a fresh context; the workspace is kept and the conversation is lost.
-  `lever worker suspend NAME` and `lever worker stop NAME` take a worker down.
+  declared worker: `recyclable: true` is only the manager's authority), for a slot that needs a
+  fresh context; the workspace is kept and the conversation is lost. `lever worker suspend NAME` and
+  `lever worker stop NAME` take a worker down.
 - `lever worker new-session NAME [--task-file F]` keeps the worker's record and workspace and drops
   its conversation, for a long-lived worker whose context is full or stale: the broker stops it,
   then resumes the stopped record in a new session with the task in `F`, else its `task_file`.
@@ -149,9 +150,10 @@ so it gives no agent anything new:
   up. A message can't do this: lever never lets a message become a slash command such as `/clear`.
 
 Each verb but `new-session` is the manager's own (`lever-manager agent start`, `resume`, `recycle`,
-`suspend`, `stop`) run with the operator as the actor, and `new-session` is a stop and a resume: the same per-worker lock, the same checks, the same
-running-worker cap, and one recycle a minute per worker, a count you and the manager share. The
-broker's audit log names the operator (`caller=operator`).
+`suspend`, `stop`) run with the operator as the actor, and `new-session` is a stop and a resume: the
+same per-worker lock, the same checks, the same running-worker cap, and one recycle a minute per
+worker, a count you and the manager share. The broker's audit log names the operator
+(`caller=operator`).
 
 To bring workers up with the instance, set `autostart: true` on them in `lever.yaml`. After the
 manager is up, `lever up` and `lever apply` then resume or start each one (a `worker-autostart NAME`
@@ -1341,13 +1343,13 @@ way.
 
 The same apply loads the agent image again and tags it `lever.local/<name>`, the name lever now
 starts agents on, which the hub's image registry setting cannot redirect (see [worker
-isolation](/security-model/worker-isolation/)). A `manager.image` of `scionlocal/<name>` must
-become `lever.local/<name>` first: lever refuses the old name. The manager and any worker the older lever created keep their unqualified name until
-they are recreated. `lever up` refuses such a manager, the broker refuses to resume, start, heal
-or wake such a worker, and doctor's `manager image` row fails for either until then. `lever up
---fresh --keep-conversation` recreates the manager, and `lever worker recycle NAME` (or `lever
-worker purge NAME --force`, then `lever worker start NAME`) a worker. A record with no image is
-refused the same way.
+isolation](/security-model/worker-isolation/)). A `manager.image` or `workers[].image` of
+`scionlocal/<name>` must become `lever.local/<name>` first: config refuses the old name. The manager
+and any worker the older lever created keep their unqualified name until they are recreated. `lever
+up` refuses such a manager, the broker refuses to resume, start, heal or wake such a worker, and
+doctor's `manager image` row fails for either until then. `lever up --fresh --keep-conversation`
+recreates the manager, and `lever worker recycle NAME` (or `lever worker purge NAME --force`, then
+`lever worker start NAME`) a worker. A record with no image is refused the same way.
 
 Lever finds the controller by its user ID, through the controller PAT, so an agent renaming the dev
 user does not stop an apply. Only minting or revoking a controller token needs the address: lever

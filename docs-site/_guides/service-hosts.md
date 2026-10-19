@@ -123,11 +123,11 @@ a new one, then update `fingerprint` in `lever.yaml` and run `lever apply`.
 ### On the service host
 
 The service host reads only its own file. Keep it, and every file it names, writable by you alone:
-`serve` refuses a config, certificate or key that another user owns (root aside) or that group
-or others can write, and a key they can read. Keep the directories that hold them yours alone
-too: the checks are on the files. A secret file (`env_files`, `header_files`) is read, and refused on the same terms, each time
-a stdio server starts or an upstream call is made, so a rotated secret needs no restart of `serve`
-(a running stdio server keeps the value it started with).
+`serve` refuses a config, certificate or key that another user owns (root aside) or that group or
+others can write, and a key they can read. Keep the directories that hold them yours alone too: the
+checks are on the files. A secret file (`env_files`, `header_files`) is read, and refused on the
+same terms, each time a stdio server starts or an upstream call is made, so a rotated secret needs
+no restart of `serve` (a running stdio server keeps the value it started with).
 
 ```yaml
 # service-host.yaml

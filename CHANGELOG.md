@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [0.60.0] - 2026-10-19
+
 ### Added
 
 - **Agents can check that their image matches the host lever.** `lever-manager version` prints the

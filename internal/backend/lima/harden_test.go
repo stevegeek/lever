@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/backend/backendtest"
 	"github.com/stevegeek/lever/internal/backend/common"
 	"github.com/stevegeek/lever/internal/backend/guest"
 	"github.com/stevegeek/lever/internal/proc"
@@ -219,5 +220,219 @@ func TestEnsureUpRunningVMStillGetsNoKVMAPF(t *testing.T) {
 	}
 	if rootBashScript(f, "no-kvmapf") < 0 {
 		t.Fatalf("the crash-recovery script with no-kvmapf did not run on a running VM; calls=%+v", f.Calls)
+	}
+}
+
+// seqRunner answers the calls each rule matches with its results in turn,
+// the last one repeating, and delegates every other call to the fake.
+type seqRunner struct {
+	*proc.FakeRunner
+	rules []*seqRule
+}
+
+type seqRule struct {
+	match   func(argv string) bool
+	results []proc.Result
+	n       int
+}
+
+func (r *seqRunner) on(match func(argv string) bool, results ...proc.Result) {
+	r.rules = append(r.rules, &seqRule{match: match, results: results})
+}
+
+func (r *seqRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
+	argv := proc.Call{Name: name, Args: args}.Argv()
+	for _, rule := range r.rules {
+		if rule.match(argv) {
+			r.FakeRunner.Calls = append(r.FakeRunner.Calls, proc.Call{Name: name, Args: args})
+			res := rule.results[min(rule.n, len(rule.results)-1)]
+			rule.n++
+			return res, nil
+		}
+	}
+	return r.FakeRunner.Run(ctx, env, name, args...)
+}
+
+func contains(s string) func(string) bool {
+	return func(argv string) bool { return strings.Contains(argv, s) }
+}
+
+const (
+	stagedOut  = "reboot: the kernel command line gets no-kvmapf at the next boot\ncmdline-staged: no-kvmapf\n"
+	newKernOut = "reboot: the guest runs kernel 6.8.0-146-generic; the next boot starts 6.17.0-5-generic\n"
+)
+
+// rebootRig is a stopped VM whose scoped start succeeds and whose first
+// crash-recovery run reports no-kvmapf staged in grub.cfg.
+func rebootRig(t *testing.T, list string) (*proc.FakeRunner, *seqRunner) {
+	t.Helper()
+	onLinux(t)
+	f := proc.NewFakeRunner()
+	limaVersionScript(f)
+	scriptList(f, list)
+	scriptRealizedConfig(f, vm, matchingRealizedConfigJSON(vm, tree))
+	limaGuest.ScriptProvision(f, "501", backendtest.AhostsV4)
+	f.Script(lingerKey, proc.Result{Stdout: "yes\n"})
+	f.Script(probeKey, proc.Result{Stdout: "0\n"})
+	f.Script(scopedStart, proc.Result{})
+	f.Script("limactl stop "+vm, proc.Result{})
+	r := &seqRunner{FakeRunner: f}
+	r.on(contains(guest.CrashSysctlPath), proc.Result{Stdout: stagedOut}, proc.Result{})
+	r.on(contains(guest.BootKernelFunc), proc.Result{Stdout: newKernOut}, proc.Result{})
+	return f, r
+}
+
+func ensureUpRig(r proc.Runner) ([]string, error) {
+	var lines []string
+	l := New(r, vm, common.Options{})
+	err := l.EnsureUp(context.Background(), backend.Config{MachineName: vm, ProjectTree: tree, GuestKernel: guest.GuestKernelHWE,
+		Warn: func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }})
+	return lines, err
+}
+
+func callsMatching(f *proc.FakeRunner, s string) []int {
+	var out []int
+	for i, c := range f.Calls {
+		if strings.Contains(c.Argv(), s) {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+func TestEnsureUpStoppedVMRebootsOnceForStagedCmdline(t *testing.T) {
+	f, r := rebootRig(t, listStopped)
+	lines, err := ensureUpRig(r)
+	if err != nil {
+		t.Fatalf("EnsureUp: %v", err)
+	}
+	stops, starts := callsMatching(f, "limactl stop"), callsMatching(f, "limactl start")
+	if len(stops) != 1 || len(starts) != 2 {
+		t.Fatalf("stops=%v starts=%v, want one stop and two starts", stops, starts)
+	}
+	for _, i := range starts {
+		if f.Calls[i].Argv() != scopedStart {
+			t.Errorf("start %q is not the scoped one", f.Calls[i].Argv())
+		}
+	}
+	if !(starts[0] < stops[0] && stops[0] < starts[1]) {
+		t.Errorf("order: starts=%v stop=%v", starts, stops)
+	}
+	// Nothing but hardening runs in the guest before the reboot.
+	for i := starts[0] + 1; i < stops[0]; i++ {
+		a := f.Calls[i].Argv()
+		if !strings.Contains(a, guest.CrashSysctlPath) && !strings.Contains(a, guest.BootKernelFunc) {
+			t.Errorf("call %q ran in the guest before the reboot", a)
+		}
+	}
+	if p := callsMatching(f, "podman"); len(p) > 0 && p[0] < starts[1] {
+		t.Errorf("podman ran before the reboot finished: %q", f.Calls[p[0]].Argv())
+	}
+	crash, kernel := callsMatching(f, guest.CrashSysctlPath), callsMatching(f, guest.BootKernelFunc)
+	if len(crash) != 2 || len(kernel) != 2 || crash[1] < starts[1] {
+		t.Fatalf("crash=%v kernel=%v: want both re-checked after the reboot", crash, kernel)
+	}
+	if after := f.Calls[kernel[1]].Argv(); strings.Contains(after, guest.HWEPackage("26.04")) {
+		t.Error("the re-check after the reboot must not run the HWE install again")
+	}
+	all := strings.Join(lines, "\n")
+	if !strings.Contains(all, "jail: rebooted the guest once to apply no-kvmapf") {
+		t.Errorf("missing the reboot report in:\n%s", all)
+	}
+	if strings.Contains(all, "reboot pending") {
+		t.Errorf("nothing should stay pending (the new kernel shared the reboot):\n%s", all)
+	}
+}
+
+// A guest that still lacks the parameter after the reboot is reported, not
+// rebooted again.
+func TestEnsureUpRebootsAtMostOnce(t *testing.T) {
+	f, r := rebootRig(t, listStopped)
+	r.rules[0].results = []proc.Result{{Stdout: stagedOut}}
+	lines, err := ensureUpRig(r)
+	if err != nil {
+		t.Fatalf("EnsureUp: %v", err)
+	}
+	if stops := callsMatching(f, "limactl stop"); len(stops) != 1 {
+		t.Fatalf("stops=%v, want one", stops)
+	}
+	if all := strings.Join(lines, "\n"); !strings.Contains(all, "jail: reboot pending: the kernel command line gets no-kvmapf") {
+		t.Errorf("want the pending line kept:\n%s", all)
+	}
+}
+
+func TestEnsureUpRunningVMIsNeverRebooted(t *testing.T) {
+	f, r := rebootRig(t, listRunning)
+	lines, err := ensureUpRig(r)
+	if err != nil {
+		t.Fatalf("EnsureUp: %v", err)
+	}
+	if n := callsMatching(f, "limactl stop"); len(n) != 0 {
+		t.Fatalf("a running VM was stopped: %v", n)
+	}
+	if n := callsMatching(f, "limactl start"); len(n) != 0 {
+		t.Fatalf("a running VM was started: %v", n)
+	}
+	all := strings.Join(lines, "\n")
+	if !strings.Contains(all, "jail: reboot pending: the kernel command line gets no-kvmapf at the next boot; "+RebootAdvice) || strings.Contains(all, "rebooted") {
+		t.Errorf("want the pending line only:\n%s", all)
+	}
+}
+
+func TestEnsureUpNothingStagedNoReboot(t *testing.T) {
+	f, r := rebootRig(t, listStopped)
+	r.rules[0].results = []proc.Result{{Stdout: "reboot: the kernel command line gets no-kvmapf at the next boot\nwarn: update-grub failed\n"}}
+	lines, err := ensureUpRig(r)
+	if err != nil {
+		t.Fatalf("EnsureUp: %v", err)
+	}
+	if n := callsMatching(f, "limactl stop"); len(n) != 0 {
+		t.Fatalf("stopped without a staged parameter: %v", n)
+	}
+	if n := callsMatching(f, "limactl start"); len(n) != 1 {
+		t.Fatalf("starts=%v, want one", n)
+	}
+	if all := strings.Join(lines, "\n"); !strings.Contains(all, "jail: reboot pending") || strings.Contains(all, "rebooted") {
+		t.Errorf("want the pending lines and no reboot:\n%s", all)
+	}
+}
+
+func TestEnsureUpFailedStopKeepsVMAndPendingMessage(t *testing.T) {
+	f, r := rebootRig(t, listStopped)
+	r.on(contains("limactl stop"), proc.Result{Code: 1, Stderr: "level=fatal msg=\"stop timed out\"\n"})
+	r.on(contains("limactl list --format"), proc.Result{Stdout: listStopped}, proc.Result{Stdout: listRunning})
+	lines, err := ensureUpRig(r)
+	if err != nil {
+		t.Fatalf("EnsureUp: %v", err)
+	}
+	if n := callsMatching(f, "limactl start"); len(n) != 1 {
+		t.Fatalf("starts=%v, want only the first", n)
+	}
+	all := strings.Join(lines, "\n")
+	for _, want := range []string{
+		"jail: warning: rebooting the guest to apply no-kvmapf failed: limactl stop: level=fatal",
+		"jail: reboot pending: the kernel command line gets no-kvmapf at the next boot; " + RebootAdvice,
+	} {
+		if !strings.Contains(all, want) {
+			t.Errorf("missing %q in:\n%s", want, all)
+		}
+	}
+	if strings.Contains(all, "rebooted the guest") {
+		t.Errorf("no reboot happened:\n%s", all)
+	}
+}
+
+func TestEnsureUpFailedRestartFailsOnce(t *testing.T) {
+	f, r := rebootRig(t, listStopped)
+	r.on(contains("limactl start"), proc.Result{}, proc.Result{Code: 1, Stderr: "level=fatal msg=boom\n"})
+	_, err := ensureUpRig(r)
+	if err == nil || !strings.Contains(err.Error(), "rebooting the guest to apply no-kvmapf") || !strings.Contains(err.Error(), "lever up") {
+		t.Fatalf("err = %v", err)
+	}
+	if stops, starts := callsMatching(f, "limactl stop"), callsMatching(f, "limactl start"); len(stops) != 1 || len(starts) != 2 {
+		t.Fatalf("stops=%v starts=%v, want one of each after the first start", stops, starts)
+	}
+	if p := callsMatching(f, "podman"); len(p) != 0 {
+		t.Errorf("provisioning ran after a failed reboot: %q", f.Calls[p[0]].Argv())
 	}
 }

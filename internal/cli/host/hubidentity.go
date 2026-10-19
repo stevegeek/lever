@@ -1005,7 +1005,10 @@ func probeControllerAuthority(ctx context.Context, pat *hubapi.Client, sc identi
 			}
 		}
 	}
-	if _, err := sc.List(ctx, jp); err != nil {
+	// A list over the cap is the hub answering it with agents: the authority
+	// is there, and failing here would stop `lever up --fresh` before it can
+	// delete an oversized manager record.
+	if _, err := sc.List(ctx, jp); err != nil && !errors.Is(err, scion.ErrAgentListTooLarge) {
 		failed = append(failed, "scion list: "+err.Error())
 	}
 	slices.Sort(missing)

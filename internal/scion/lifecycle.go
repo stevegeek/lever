@@ -508,20 +508,21 @@ func (c *Client) List(ctx context.Context, project string) ([]Agent, error) {
 	return agents, nil
 }
 
-// ErrAgentListTooLarge is wrapped by List, and by the hub readiness wait,
-// when scion's agent list passed lever's output cap. Every agent can write
-// its own record's status and activity, so a hostile one can grow the list
-// past the cap; a retry reads the same list, so the error is final.
-//
-// The manager's recovery goes through the hub API because `lever up --fresh`
-// lists the agents too, at the hub readiness wait, before it deletes anything.
-var ErrAgentListTooLarge = errors.New("the hub's agent list is too large for lever to read (scion's output passed lever's size limit), most likely because an agent's record carries an oversized status or activity; " +
-	"find that agent through the hub API in the jail (GET /api/v1/agents?limit=1, page by page) and delete its record: " +
-	"for a worker, `lever worker purge NAME --force`; for the manager, DELETE /api/v1/projects/{id}/agents/NAME on the hub API, which skips the conversation backup `lever up --fresh` takes, then `lever up --fresh`")
+// ErrAgentListTooLarge is wrapped by List when scion's agent list passed
+// lever's output cap. Every agent can write its own record's status and
+// activity, so a hostile one can grow the list past the cap; a retry reads the
+// same list, so the error is final. scion delete and suspend name one agent and
+// never list, which is what both recoveries rely on.
+var ErrAgentListTooLarge = errors.New("the hub's agent list is too large for lever to read (scion's output passed lever's size limit), most likely because an agent's record carries an oversized status or activity. " +
+	"If it is the manager's record, `lever up --fresh --keep-conversation` backs up its conversation, deletes the record by name and brings the manager back on that conversation. " +
+	"If it is a worker's, `lever worker purge NAME --force` deletes that worker's record (its work product is kept). " +
+	"lever cannot read the list to tell which agent it is: `lever up --fresh` says so when the list is still too large once the manager's record is gone, and then purge each worker that may be the one")
 
+// listErr keeps none of the capped output: it is agent-written, up to the cap
+// in size, and text matches such as IsBrokerUnavailable run on the error.
 func listErr(err error) error {
 	if errors.Is(err, proc.ErrOutputLimit) && !errors.Is(err, ErrAgentListTooLarge) {
-		return fmt.Errorf("%w: %w", ErrAgentListTooLarge, err)
+		return fmt.Errorf("%w (%w)", ErrAgentListTooLarge, proc.ErrOutputLimit)
 	}
 	return err
 }

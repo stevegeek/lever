@@ -41,9 +41,16 @@ version bump moves the block under the new version heading.
 
 - **An agent that bloats its own hub record no longer stalls `lever up`.** Each agent can write its
   record's status and activity without a size limit, so the hub's agent list can pass lever's cap
-  on scion's output. The hub readiness wait, and the host's agent lists and the waits on them, now
-  fail at once with an error that names the cause and the recovery, instead of waiting out the
-  whole budget and reporting "hub not ready".
+  on scion's output. The host's agent lists and the waits on them now fail at once with an error
+  that names the cause and the recovery, instead of waiting out the whole budget and reporting
+  "hub not ready", and the error no longer quotes the capped, agent-written output. The hub
+  readiness wait counts a capped list as the hub answering, so `lever up --fresh` (with or without
+  `--keep-conversation`) recovers on its own from an oversized manager record: it suspends and
+  backs up the manager, deletes its record by name, which needs no list, and creates it anew. A
+  plain `lever up` stops at start-manager and says to run `lever up --fresh --keep-conversation`.
+  When the list is still too large once the manager's record is gone, a worker's record is the
+  oversized one: `lever up --fresh` creates nothing and says to run `lever worker purge NAME
+  --force` for each worker that may be the one, since lever cannot read the list to tell which.
 
 ### Upgrade
 

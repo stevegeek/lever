@@ -1740,6 +1740,19 @@ func TestHubIdentityProbeThatCannotReadDoesNotRollBack(t *testing.T) {
 	}
 }
 
+// TestHubIdentityProbeCountsAnOversizedListAsRead: a list over the output cap
+// is the hub answering it, so the probe passes and `lever up --fresh` can go
+// on to delete the oversized manager record.
+func TestHubIdentityProbeCountsAnOversizedListAsRead(t *testing.T) {
+	e := newHIEnv(t, hiRemoteApp(false))
+	e.seedMigrated("scion@localhost", false)
+	e.sc.listErr = fmt.Errorf("%w (%w)", scion.ErrAgentListTooLarge, proc.ErrOutputLimit)
+	e.mustRun()
+	if rec := e.record(); rec.ProbePending {
+		t.Fatalf("record = %+v, want the probe passed", rec)
+	}
+}
+
 // TestHubIdentityResetOnAHubWithTheDevUserMigrates: a reset of a hub whose
 // database was kept finds scion's dev user still owning everything, so the
 // hub is migrated (and the controller probed), not bootstrapped as new.

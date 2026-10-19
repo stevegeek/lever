@@ -1066,6 +1066,21 @@ func TestListOversizedIsAgentListTooLarge(t *testing.T) {
 	if !errors.Is(err, ErrAgentListTooLarge) || !errors.Is(err, proc.ErrOutputLimit) {
 		t.Fatalf("err = %v, want ErrAgentListTooLarge wrapping proc.ErrOutputLimit", err)
 	}
+	for _, want := range []string{"agent list is too large", "lever up --fresh --keep-conversation", "lever worker purge NAME --force", "cannot read the list to tell which"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error lacks %q: %v", want, err)
+		}
+	}
+	// The capped output is agent-written: none of it reaches the error, where
+	// IsBrokerUnavailable would match it.
+	for _, bad := range []string{"AGENT-WRITTEN", "/api/v1"} {
+		if strings.Contains(err.Error(), bad) {
+			t.Errorf("error carries %q: %v", bad, err)
+		}
+	}
+	if IsBrokerUnavailable(err) {
+		t.Errorf("the capped list reads as broker unavailable: %v", err)
+	}
 }
 
 func TestListOtherErrorIsNotAgentListTooLarge(t *testing.T) {

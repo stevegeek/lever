@@ -458,6 +458,13 @@ func planManager(q ManagerRequest, name string, o managerObservation) (managerPl
 // healed and, for a running record, podman's word on its container.
 func (r *run) observeUp(ctx context.Context, jp string) (*scion.Agent, managerObservation, error) {
 	rec, err := r.observeManager(ctx, jp)
+	if r.fresh && errors.Is(err, scion.ErrAgentListTooLarge) {
+		// The delete and the suspend before the backup name the manager and
+		// need no list, so --fresh still discards a record the list hides.
+		r.d.Log("%s: --fresh: the hub's agent list is too large to read; treating manager %q as present and deleting it by name", r.subjectName(), r.app.Name)
+		r.unlisted = true
+		return nil, managerObservation{present: true}, nil
+	}
 	if err != nil {
 		return nil, managerObservation{}, err
 	}
@@ -646,8 +653,12 @@ func (r *run) actUp(ctx context.Context, jp string, rec *scion.Agent, p managerP
 		if err := r.backupBeforeDelete(ctx, jp, rec); err != nil {
 			return fmt.Errorf("%s: --fresh: backing up manager %q's conversation failed, so the manager was NOT deleted (its record and conversation are kept): %w. Fix the cause and run `lever up --fresh` again, or run `lever up --fresh --no-backup` to discard the conversation without a backup", r.subjectName(), r.app.Name, err)
 		}
+		phase := "unread"
+		if rec != nil {
+			phase = scion.BoundedQuote(rec.Phase)
+		}
 		return r.recoverDeleteAndCreate(ctx, jp, opts,
-			fmt.Sprintf("%s: --fresh — deleting manager %q (phase %s) and starting FRESH (previous session discarded)", r.subjectName(), r.app.Name, scion.BoundedQuote(rec.Phase)),
+			fmt.Sprintf("%s: --fresh — deleting manager %q (phase %s) and starting FRESH (previous session discarded)", r.subjectName(), r.app.Name, phase),
 			"--fresh delete")
 	case verbResume:
 		if rec.Phase == scion.PhaseStopped {
@@ -824,23 +835,34 @@ const backupSuspendTimeout = 30 * time.Second
 
 // backupBeforeDelete runs Deps.BackupManagerConversation before a delete. A
 // running record is suspended first, so the copy is the conversation as it
-// ends; a failed backup resumes a record it suspended, which is then kept.
+// ends; a failed backup resumes a record it suspended, which is then kept. An
+// unlisted record (rec nil) is suspended too, and is left suspended on a
+// failed backup.
 func (r *run) backupBeforeDelete(ctx context.Context, jp string, rec *scion.Agent) error {
 	if r.d.BackupManagerConversation == nil {
 		return nil
 	}
 	suspended := false
-	if rec != nil && rec.Phase == scion.PhaseRunning {
+	if (rec != nil && rec.Phase == scion.PhaseRunning) || r.unlisted {
 		sctx, cancel := context.WithTimeout(ctx, backupSuspendTimeout)
 		if err := r.d.managerScion().Suspend(sctx, r.app.Name, jp); err != nil {
-			r.d.Log("conversation: could not suspend manager %q before the backup (%s); copying it while it runs", r.app.Name, termsafe.Sanitize(scion.ErrSummary(err)))
+			how := "copying it while it runs"
+			if r.unlisted {
+				how = "it may not be running; copying it as it is"
+			}
+			r.d.Log("conversation: could not suspend manager %q before the backup (%s); %s", r.app.Name, termsafe.Sanitize(scion.ErrSummary(err)), how)
 		} else {
 			suspended = true
 		}
 		cancel()
 	}
 	err := r.d.BackupManagerConversation(ctx, rec)
-	if err != nil && suspended {
+	switch {
+	case err != nil && suspended && r.unlisted:
+		// Unseen, the record may have been suspended already: a resume could
+		// start a manager that was not running.
+		err = fmt.Errorf("%w; manager %q was suspended for the backup and stays suspended", err, r.app.Name)
+	case err != nil && suspended:
 		err = r.resumeAfterFailure(ctx, jp, err, "")
 	}
 	return err

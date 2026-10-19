@@ -171,8 +171,10 @@ var errServerGone = errors.New("no scion server is running in the jail any more 
 // refused the credential, which happens whenever lever holds no working token
 // yet. Whoever needs the credential fails on it next, with the real error.
 //
-// A list stopped at lever's output cap ends the wait at once with
-// ErrAgentListTooLarge: the hub answered, and every retry reads the same list.
+// A list stopped at lever's output cap counts as ready too: only an answering
+// hub sends that much, and every retry reads the same list. The callers that
+// need the list get ErrAgentListTooLarge from List; `lever up --fresh` deletes
+// the manager by name first.
 //
 // Every hubAliveEvery it runs serverPIDProbe, and stops with errServerGone
 // once no scion server is alive, so the long budget costs nothing when the
@@ -211,12 +213,7 @@ func (c *Client) waitHubReady(ctx context.Context, notify func(format string, ar
 			}
 		}
 		_, lastErr = c.run(ctx, "", "list", "--all", "--format", "json", nonInteractive)
-		// Before the auth check, which matches text: partial output under a
-		// cap the caller chose could carry agent-written words.
-		if errors.Is(lastErr, proc.ErrOutputLimit) {
-			return wait.Fatal(listErr(lastErr))
-		}
-		if lastErr == nil || isHubAuthRefusal(lastErr) {
+		if lastErr == nil || errors.Is(lastErr, proc.ErrOutputLimit) || isHubAuthRefusal(lastErr) {
 			return wait.Ready()
 		}
 		if now := time.Now(); now.Sub(lastAlive) >= c.hubAliveEvery {

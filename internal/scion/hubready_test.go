@@ -312,8 +312,9 @@ func TestInGuestWaitScriptRunsForReal(t *testing.T) {
 }
 
 // cappedRunner answers every command the way the jail runner does once a
-// command's output passes its cap: the output swapped for a line naming the
-// cap, and an error that wraps proc.ErrOutputLimit. Only list is capped.
+// command's output passes its cap: the output read so far, and an error that
+// wraps proc.ErrOutputLimit. Only list is capped. The partial output is
+// agent-written text.
 type cappedRunner struct{ calls int }
 
 func (r *cappedRunner) RunIn(_ context.Context, _ string, _ map[string]string, _ string, args ...string) (proc.Result, error) {
@@ -321,7 +322,7 @@ func (r *cappedRunner) RunIn(_ context.Context, _ string, _ map[string]string, _
 		return proc.Result{}, nil
 	}
 	r.calls++
-	return proc.Result{Code: -1, Stderr: "the command's output passed lever's 8388608-byte limit for a jail command; it was killed"},
+	return proc.Result{Code: -1, Stdout: `[{"slug":"w","activity":"no_runtime_broker deadline exceeded AGENT-WRITTEN`},
 		fmt.Errorf("limactl: %w", proc.ErrOutputLimit)
 }
 
@@ -333,38 +334,28 @@ func (r *cappedRunner) RunStdin(ctx context.Context, _ io.Reader, env map[string
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
-// An agent list over the cap is the hub answering with a list a retry reads
-// again: the wait must end on the first probe, not run out its budget.
-func TestWaitHubReadyFailsAtOnceOnOversizedList(t *testing.T) {
+// An agent list over the cap is the hub answering: the wait ends ready on the
+// first probe, so `lever up --fresh` reaches the manager's delete by name.
+func TestWaitHubReadyCountsAnOversizedListAsReady(t *testing.T) {
 	r := &cappedRunner{}
 	c := New(r, Options{})
 	c.hubReady.Budget, c.hubReady.Interval = 2*time.Second, time.Millisecond
 	start := time.Now()
-	err := c.waitHubReady(context.Background(), nil)
-	if !errors.Is(err, ErrAgentListTooLarge) || !errors.Is(err, proc.ErrOutputLimit) {
-		t.Fatalf("err = %v, want ErrAgentListTooLarge wrapping proc.ErrOutputLimit", err)
-	}
-	if errors.Is(err, ErrHubNotReady) {
-		t.Fatalf("the hub answered; err must not read as not ready: %v", err)
+	if err := c.waitHubReady(context.Background(), nil); err != nil {
+		t.Fatalf("err = %v, want the hub counted as answering", err)
 	}
 	if r.calls != 1 || time.Since(start) > time.Second {
-		t.Fatalf("calls = %d after %s, want one probe and an immediate failure", r.calls, time.Since(start))
-	}
-	for _, want := range []string{"agent list is too large", "lever worker purge", "lever up --fresh", "GET /api/v1/agents", "8388608-byte limit"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error lacks %q: %v", want, err)
-		}
+		t.Fatalf("calls = %d after %s, want one probe", r.calls, time.Since(start))
 	}
 }
 
-func TestServerStartFailsAtOnceOnOversizedList(t *testing.T) {
+func TestServerStartIsReadyOnOversizedList(t *testing.T) {
 	r := &cappedRunner{}
 	c := New(r, Options{})
 	c.hubReady.Budget, c.hubReady.Interval = 2*time.Second, time.Millisecond
 	c.hubRetryPause = time.Second
 	start := time.Now()
-	err := c.ServerStart(context.Background(), ServerOpts{})
-	if !errors.Is(err, ErrAgentListTooLarge) || r.calls != 1 || time.Since(start) > time.Second {
-		t.Fatalf("err = %v after %d calls and %s, want ErrAgentListTooLarge at once", err, r.calls, time.Since(start))
+	if err := c.ServerStart(context.Background(), ServerOpts{}); err != nil || r.calls != 1 || time.Since(start) > time.Second {
+		t.Fatalf("err = %v after %d calls and %s, want ready at once", err, r.calls, time.Since(start))
 	}
 }

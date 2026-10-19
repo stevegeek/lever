@@ -445,7 +445,7 @@ func (l *Lima) Stop(ctx context.Context) error {
 // resolveHostAlias resolves the alias FROM INSIDE the VM; both addresses
 // forward to the host's 127.0.0.1.
 func (l *Lima) resolveHostAlias(ctx context.Context) (v4, v6 string, err error) {
-	res, err := l.Runner().Run(ctx, nil, "limactl", "shell", l.Machine(), "getent", "ahosts", hostAlias)
+	res, err := l.Runner().Run(guest.LimitOutput(ctx), nil, "limactl", "shell", l.Machine(), "getent", "ahosts", hostAlias)
 	if err != nil {
 		return "", "", fmt.Errorf("getent %s: %w", hostAlias, err)
 	}

@@ -280,7 +280,7 @@ func (g Guest) EnsureCrashRecovery(ctx context.Context) (GuestReport, error) {
 	res, err := g.RootRun(ctx, "bash", "-c", crashRecoveryScript(realCrashPaths))
 	if err != nil || res.Code != 0 {
 		if err == nil {
-			err = fmt.Errorf("exit %d: %s", res.Code, strings.TrimSpace(res.Stderr))
+			err = fmt.Errorf("exit %d: %s", res.Code, quoteStderr(res))
 		}
 		return GuestReport{}, fmt.Errorf("guest crash recovery (sysctls, EFI pstore off): %w", err)
 	}
@@ -462,7 +462,7 @@ func (g Guest) EnsureGuestKernel(ctx context.Context, kernel string, opts Kernel
 	res, err := g.RootRun(ctx, "bash", "-c", guestKernelScript(kernel, opts, realKernelPaths))
 	if err != nil || res.Code != 0 {
 		if err == nil {
-			err = fmt.Errorf("exit %d: %s", res.Code, strings.TrimSpace(res.Stderr))
+			err = fmt.Errorf("exit %d: %s", res.Code, quoteStderr(res))
 		}
 		return KernelReport{}, fmt.Errorf("guest kernel (%s): %w", kernel, err)
 	}

@@ -129,12 +129,16 @@ func (b *Base) ReadRunUser(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("resolve run user: %w", err)
 	}
-	b.user = strings.TrimSpace(res.Stdout)
+	user := strings.TrimSpace(res.Stdout)
 	res, err = g.UserRun(ctx, "id", "-u")
 	if err != nil {
 		return fmt.Errorf("resolve run uid: %w", err)
 	}
-	b.uid = strings.TrimSpace(res.Stdout)
+	uid := strings.TrimSpace(res.Stdout)
+	if err := guest.ValidRunUser(user, uid); err != nil {
+		return fmt.Errorf("resolve run user: %w", err)
+	}
+	b.user, b.uid = user, uid
 	return nil
 }
 
@@ -288,29 +292,29 @@ func (b *Base) AttachArgv(inner []string) []string {
 }
 
 func (b *Base) LoadImage(ctx context.Context, imageRef string) error {
-	return jail.LoadImage(ctx, b.r, b.jailPrefix(), b.RunUID(), imageRef)
+	return jail.LoadImage(guest.LimitOutput(ctx), b.r, b.jailPrefix(), b.RunUID(), imageRef)
 }
 
 // ImageLoaded is fail-open; see backend.Backend.
 func (b *Base) ImageLoaded(ctx context.Context, imageRef string) bool {
-	return jail.ImageLoaded(ctx, b.r, b.jailPrefix(), b.RunUID(), imageRef)
+	return jail.ImageLoaded(guest.LimitOutput(ctx), b.r, b.jailPrefix(), b.RunUID(), imageRef)
 }
 
 func (b *Base) LoadImageTar(ctx context.Context, imageRef, tarPath string, allowTag func(ref string) error) error {
-	return jail.LoadImageTar(ctx, b.r, b.jailPrefix(), b.RunUID(), imageRef, tarPath, allowTag)
+	return jail.LoadImageTar(guest.LimitOutput(ctx), b.r, b.jailPrefix(), b.RunUID(), imageRef, tarPath, allowTag)
 }
 
 // ImageLoadedTar is fail-open like ImageLoaded.
 func (b *Base) ImageLoadedTar(ctx context.Context, imageRef, tarPath string) bool {
-	return jail.ImageLoadedTar(ctx, b.r, b.jailPrefix(), b.RunUID(), imageRef, tarPath)
+	return jail.ImageLoadedTar(guest.LimitOutput(ctx), b.r, b.jailPrefix(), b.RunUID(), imageRef, tarPath)
 }
 
 func (b *Base) PruneJailImages(ctx context.Context) error {
-	return jail.PruneImages(ctx, b.r, b.jailPrefix(), b.RunUID())
+	return jail.PruneImages(guest.LimitOutput(ctx), b.r, b.jailPrefix(), b.RunUID())
 }
 
 func (b *Base) WarmJailImage(ctx context.Context, imageRef string) error {
-	return jail.WarmImage(ctx, b.r, b.jailPrefix(), b.RunUID(), imageRef)
+	return jail.WarmImage(guest.LimitOutput(ctx), b.r, b.jailPrefix(), b.RunUID(), imageRef)
 }
 
 func (b *Base) InstallGuestBinary(ctx context.Context, localPath, destPath string) error {

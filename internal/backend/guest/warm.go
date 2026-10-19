@@ -77,7 +77,7 @@ func (s *Snapshot) RunUser() (user, uid string, ok bool) {
 	u, ok1 := s.item("user")
 	id, ok2 := s.item("uid")
 	u, id = strings.TrimSpace(u), strings.TrimSpace(id)
-	if !ok1 || !ok2 || u == "" || id == "" {
+	if !ok1 || !ok2 || ValidRunUser(u, id) != nil {
 		return "", "", false
 	}
 	return u, id, true
@@ -292,7 +292,7 @@ func (g Guest) probeCall(ctx context.Context, prefix []string, script string, ke
 		return nil, err
 	}
 	argv := append(append([]string{}, prefix[1:]...), "/bin/bash", "-c", script, "lever-probe", nonce)
-	res, err := g.Host.Run(ctx, nil, prefix[0], argv...)
+	res, err := g.Host.Run(LimitOutput(ctx), nil, prefix[0], argv...)
 	if err != nil {
 		return nil, fmt.Errorf("guest probe: %w", err)
 	}

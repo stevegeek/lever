@@ -8,6 +8,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/stevegeek/lever/internal/backend/guest"
 )
 
 func (l *Lima) instanceDir(inst realizedInstance) string {
@@ -44,11 +46,15 @@ func lastLines(path string, n int) []string {
 	return lines
 }
 
+// limaLineMax bounds a line of ha.stderr.log shown on the progress display:
+// the host agent relays text from the guest.
+const limaLineMax = 300
+
 // limaLine: Lima writes logrus JSON lines; anything else is kept as is.
 func limaLine(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if !strings.HasPrefix(raw, "{") {
-		return raw
+		return guest.SafeLine(raw, limaLineMax)
 	}
 	var v struct {
 		Level string `json:"level"`
@@ -56,7 +62,7 @@ func limaLine(raw string) string {
 		Error string `json:"error"`
 	}
 	if json.Unmarshal([]byte(raw), &v) != nil || v.Msg == "" {
-		return raw
+		return guest.SafeLine(raw, limaLineMax)
 	}
 	out := v.Msg
 	if v.Error != "" {
@@ -65,7 +71,7 @@ func limaLine(raw string) string {
 	if v.Level != "" && v.Level != "info" {
 		out = v.Level + ": " + out
 	}
-	return out
+	return guest.SafeLine(out, limaLineMax)
 }
 
 // watchLimaStage: Lima appends to ha.stderr.log across starts, so only lines

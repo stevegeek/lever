@@ -152,6 +152,14 @@ version bump moves the block under the new version heading.
 
 ### Security
 
+- **A constraint on a renamed argument is checked against that argument only.** When a tool's
+  `caveat_param` maps a constraint key to another argument name (`repo: repository`), the gateway
+  and `captool` also read an argument named like the key itself, so a call that omitted
+  `repository` and sent `"repo":"allowed"` met a `repo=allowed` constraint, while a tool decoding
+  into a Go struct could read `"Repository":"evil"` from the same call. A renamed key now binds
+  only its argument, and the broker answers `400` (`captool` an invalid params error) to a call
+  that carries an argument named like a renamed key, under any case.
+
 - **An agent that bloats its own hub record no longer stalls `lever up`.** Each agent can write its
   record's status and activity without a size limit, so the hub's agent list can pass lever's cap
   on scion's output. The host's agent lists and the waits on them now fail at once with an error

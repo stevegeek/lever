@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 )
 
 // MaxBodyBytes caps a JSON-RPC request body: the caller is a possibly
@@ -147,12 +148,20 @@ func ToolsCall(msg map[string]any) (name string, args map[string]string, capabil
 
 // MapConstraintParams builds the constraint-keyed parameters the token layer
 // verifies: each argument under its own name, plus caveatParam's renamed
-// bindings (constraint key -> argument name). An absent renamed argument
-// produces no binding, so a constraint on that key fails closed.
+// bindings (constraint key -> argument name). A renamed key binds only its
+// argument, never an argument named like the key itself: the tool reads the
+// renamed argument, so that one must be what the constraint checks. An absent
+// renamed argument produces no binding, so a constraint on that key fails
+// closed.
 func MapConstraintParams(caveatParam, args map[string]string) map[string]string {
 	out := make(map[string]string, len(args)+len(caveatParam))
 	for k, v := range args {
 		out[k] = v
+	}
+	for ck, argName := range caveatParam {
+		if ck != argName {
+			delete(out, ck)
+		}
 	}
 	for ck, argName := range caveatParam {
 		if v, ok := args[argName]; ok {
@@ -160,6 +169,24 @@ func MapConstraintParams(caveatParam, args map[string]string) map[string]string 
 		}
 	}
 	return out
+}
+
+// RenamedKeyArg returns the renamed constraint key that an argument in args
+// is named like, equal under case folding, or "" when none is. A call that
+// carries one is refused: whichever argument a tool's decoder reads, the
+// call is ambiguous about what the constraint checked.
+func RenamedKeyArg(caveatParam, args map[string]string) string {
+	for ck, argName := range caveatParam {
+		if ck == argName {
+			continue
+		}
+		for k := range args {
+			if k != argName && strings.EqualFold(k, ck) {
+				return ck
+			}
+		}
+	}
+	return ""
 }
 
 // StripCapability re-marshals the message with params.arguments._capability

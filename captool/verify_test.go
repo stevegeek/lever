@@ -140,3 +140,35 @@ func TestVerifyDeniesBeforeRegisterWithoutPanic(t *testing.T) {
 		t.Fatalf("must return a JSON-RPC error when pubKey is nil; body=%s", w.Body.String())
 	}
 }
+
+// A constraint key that caveat_param renames binds only its argument, as at
+// the broker: an argument named like the key is refused before the handler
+// runs, and the renamed argument is checked as usual.
+func TestVerifyRenamedConstraintKeyBindsOnlyItsArgument(t *testing.T) {
+	call := func(args string) (string, bool) {
+		kp, _ := token.Generate()
+		var ran bool
+		s := serverBoundTo(t, kp, &ran)
+		o := s.ops["read"]
+		o.CaveatParam = map[string]string{"repo": "repository"}
+		s.ops["read"] = o
+		tok := mintTok(t, kp, "worker", map[string]string{"repo": "allowed"})
+		body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read","arguments":{` + args + `,"_capability":"` + tok + `"}}}`
+		w := rpc(t, s, body, map[string]string{"X-Lever-Caller": "worker"})
+		return w.Body.String(), ran
+	}
+	for _, args := range []string{`"repo":"allowed","Repository":"evil"`, `"repo":"allowed"`, `"Repo":"allowed","repository":"allowed"`} {
+		if body, ran := call(args); ran || !strings.Contains(body, "invalid params") {
+			t.Errorf("SECURITY: %s: ran=%v body=%s", args, ran, body)
+		}
+	}
+	if body, ran := call(`"Repository":"allowed"`); ran || !strings.Contains(body, "forbidden") {
+		t.Errorf("SECURITY: the renamed argument under another case must not bind the key: ran=%v body=%s", ran, body)
+	}
+	if body, ran := call(`"repository":"evil"`); ran || !strings.Contains(body, "forbidden") {
+		t.Errorf("a forbidden value: ran=%v body=%s", ran, body)
+	}
+	if body, ran := call(`"repository":"allowed"`); !ran {
+		t.Errorf("the renamed argument must pass: body=%s", body)
+	}
+}

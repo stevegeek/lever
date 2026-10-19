@@ -326,6 +326,11 @@ func (b *Broker) authorizeToolCall(w http.ResponseWriter, r *http.Request, t reg
 		// checked yet.
 		tokID := token.ID(rawTok)
 		params, err := b.reg.MapParams(toolName, requiredOp, args)
+		if errors.Is(err, registry.ErrRenamedKeyArg) {
+			b.audit(toolName, caller, "deny", err.Error(), "id", tokID)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return false
+		}
 		if err != nil {
 			b.audit(toolName, caller, "deny", err.Error(), "id", tokID)
 			http.Error(w, "forbidden", http.StatusForbidden)

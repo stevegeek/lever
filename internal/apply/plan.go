@@ -30,6 +30,11 @@ const (
 	// hub-identity has already invited and bound. Stopping a stale proxy when
 	// remote is disabled is Run's job, not this step's.
 	KindRemoteProxy StepKind = "remote-proxy"
+	// KindWorkerAutostart resumes or starts one worker that sets autostart,
+	// through the broker's operator socket (see Deps.AutostartWorker). Plan
+	// emits one per such worker, last. A failure warns and never fails the
+	// run.
+	KindWorkerAutostart StepKind = "worker-autostart"
 )
 
 // Step is one named bring-up operation. TarPath is set on load-image steps
@@ -118,6 +123,12 @@ func Plan(a *config.App, opts PlanOpts) []Step {
 	steps = append(steps, Step{Kind: KindStartManager, Target: a.Name})
 	if a.RemoteEnabled() {
 		steps = append(steps, Step{Kind: KindRemoteProxy})
+	}
+	// Last: each can wait minutes for a worker, and nothing waits on them.
+	for _, g := range a.Workers {
+		if g.Autostart {
+			steps = append(steps, Step{Kind: KindWorkerAutostart, Target: g.Name})
+		}
 	}
 	if opts.BrokerOnly {
 		filtered := steps[:0:0]

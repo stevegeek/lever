@@ -131,18 +131,8 @@ func TestOperatorResumeIsNotOnTheTCPListeners(t *testing.T) {
 	}
 }
 
-// The deprecated wake keeps working, says it is deprecated, names its
-// successor, and its refusals carry reasons too.
-func TestOperatorWakeIsDeprecatedButWorks(t *testing.T) {
-	rt := &fakeRuntime{agents: map[string][]scion.Agent{testInstanceProject: {{Slug: "worker", Phase: "suspended"}}}}
-	b := newTestBroker(t, rt, wakeSpec)
-	rec := postWake(t, b, `{"worker":"worker","login":"c@x","tier":"operator"}`)
-	if rec.Code != http.StatusOK || len(rt.resumed) != 1 {
-		t.Fatalf("%d %s", rec.Code, rec.Body)
-	}
-	if rec.Header().Get("Deprecation") != "true" || !strings.Contains(rec.Header().Get("Link"), PathOperatorWorkerResume) {
-		t.Fatalf("headers %v", rec.Header())
-	}
+// The remote chat page's resume answers with reasons and phases too.
+func TestOperatorResumeForReasons(t *testing.T) {
 	for _, tc := range []struct {
 		agents       []scion.Agent
 		body         string

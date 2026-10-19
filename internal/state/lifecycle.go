@@ -61,17 +61,13 @@ var errLifecycleNewer = errors.New("lifecycle.json was written by a newer lever"
 
 func (s State) LifecycleFile() string { return filepath.Join(s.Dir, "lifecycle.json") }
 
-// legacyGuestBoot is the guest boot record before lifecycle.json held it.
-func (s State) legacyGuestBoot() string { return filepath.Join(s.Dir, "guest-boot.json") }
-
 // lifecycleMu serialises the read-modify-write of the record within one
 // process: the bring-up runs steps on several lanes at once.
 var lifecycleMu sync.Mutex
 
 // LoadLifecycle reads the record. A record the file cannot give (absent,
 // corrupt) is the zero record with the error, so a caller that only reads
-// treats it as nothing recorded. The guest boot of a record that has none
-// comes from the legacy guest-boot.json while that file remains.
+// treats it as nothing recorded.
 func (s State) LoadLifecycle() (Lifecycle, error) {
 	var l Lifecycle
 	b, err := os.ReadFile(s.LifecycleFile())
@@ -87,17 +83,11 @@ func (s State) LoadLifecycle() (Lifecycle, error) {
 			return Lifecycle{}, errLifecycleNewer
 		}
 	}
-	if l.GuestBoot == nil {
-		if old, err := LoadJSON[GuestBootRecord](s.legacyGuestBoot(), "guest boot record"); err == nil && old.BootID != "" {
-			l.GuestBoot = &old
-		}
-	}
 	return l, nil
 }
 
 // UpdateLifecycle applies fn to the record and writes it atomically (0600).
-// A corrupt record is replaced; one a newer lever wrote is not. Once written,
-// the legacy guest-boot.json it took over is removed.
+// A corrupt record is replaced; one a newer lever wrote is not.
 func (s State) UpdateLifecycle(fn func(*Lifecycle)) error {
 	lifecycleMu.Lock()
 	defer lifecycleMu.Unlock()
@@ -113,13 +103,7 @@ func (s State) UpdateLifecycle(fn func(*Lifecycle)) error {
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
 		return fmt.Errorf("state: write lifecycle.json: %w", err)
 	}
-	if err := SaveJSON(s.LifecycleFile(), "lifecycle.json", l); err != nil {
-		return err
-	}
-	if err := os.Remove(s.legacyGuestBoot()); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("state: remove the migrated guest-boot.json: %w", err)
-	}
-	return nil
+	return SaveJSON(s.LifecycleFile(), "lifecycle.json", l)
 }
 
 // StepMatches reports whether step last converged on inputs. Any doubt (no

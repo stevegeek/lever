@@ -217,10 +217,17 @@ type Worker struct {
 	Obtain           []Grant         `yaml:"obtain"`
 	Delegate         []DelegateGrant `yaml:"delegate"`
 	// Recyclable lets the manager discard this worker's record and start it
-	// fresh with a new task; its workspace is kept. Without it only the
-	// operator's `lever worker purge` discards a record. The json tag keeps
-	// it out of brokerctl.ConfigHash while false.
+	// fresh with a new task; its workspace is kept. The operator's purge and
+	// recycle never need it. The json tag keeps it out of
+	// brokerctl.ConfigHash while false.
 	Recyclable bool `yaml:"recyclable" json:",omitempty"`
+	// TaskFile is the task of a fresh start by the operator (`lever worker
+	// start` or `recycle` with no --task-file, and autostart). Boot material
+	// like instructions_file: at the instance root, outside the tree.
+	TaskFile string `yaml:"task_file" json:",omitempty"`
+	// Autostart has `lever up` and `lever apply` resume or start the worker
+	// once the manager is up. A failure warns; the bring-up still succeeds.
+	Autostart bool `yaml:"autostart" json:",omitempty"`
 	// Resources is not inherited from the manager and is create-time only.
 	// The json tag keeps it out of brokerctl.ConfigHash while unset.
 	Resources Resources `yaml:"resources" json:",omitzero"`
@@ -352,9 +359,6 @@ type Remote struct {
 	// refused. Off by default: anything that reaches the listener directly
 	// can set that header.
 	TrustForwardedHost bool `yaml:"trust_forwarded_host"`
-	// LoginPort is parsed so an old lever.yaml still loads, and otherwise
-	// ignored (App.Warnings names it).
-	LoginPort int `yaml:"login_port"`
 	// Landing is what the remote origin opens on: the hub's web UI
 	// (RemoteLandingConsole, the default) or lever's chat page
 	// (RemoteLandingChat). Chat needs an operator-tier allowed_users entry:

@@ -150,7 +150,7 @@ func TestStopSuspendsRunningWorkers(t *testing.T) {
 }
 
 // TestStopDoesNotClearStagedState: unlike destroy, stop keeps the staged
-// bootstrap ticket and manifest so `lever up` can resume without re-applying.
+// bootstrap ticket so `lever up` can resume without re-applying.
 func TestStopDoesNotClearStagedState(t *testing.T) {
 	dir := writeInstance(t, managerYAML)
 	tree := filepath.Join(dir, "workspace")
@@ -158,11 +158,7 @@ func TestStopDoesNotClearStagedState(t *testing.T) {
 		t.Fatal(err)
 	}
 	bootstrap := filepath.Join(tree, ".lever", "bootstrap.json")
-	manifest := filepath.Join(tree, config.ManifestName)
 	if err := os.WriteFile(bootstrap, []byte("{}"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(manifest, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(dir)
@@ -182,9 +178,6 @@ func TestStopDoesNotClearStagedState(t *testing.T) {
 	}
 	if _, err := os.Stat(bootstrap); err != nil {
 		t.Fatalf("bootstrap.json must survive `lever stop`, stat err = %v", err)
-	}
-	if _, err := os.Stat(manifest); err != nil {
-		t.Fatalf("manifest must survive `lever stop`, stat err = %v", err)
 	}
 }
 

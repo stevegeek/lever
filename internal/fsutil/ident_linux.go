@@ -179,3 +179,9 @@ func unescapeMountinfo(s string) (string, error) {
 	}
 	return b.String(), nil
 }
+
+// openDirAt opens the directory name below dir without following a link.
+// O_PATH needs only search permission on it.
+func openDirAt(dir int, name string) (int, error) {
+	return unix.Openat(dir, name, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+}

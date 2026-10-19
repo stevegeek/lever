@@ -35,27 +35,15 @@ func TestLifecycleStepsRoundTrip(t *testing.T) {
 	}
 }
 
-// TestLifecycleMigratesTheGuestBoot: the guest-boot.json of an older lever is
-// read until the first write, which takes it over and removes it.
-func TestLifecycleMigratesTheGuestBoot(t *testing.T) {
+// TestLifecycleIgnoresTheOldGuestBoot: a guest-boot.json is not read.
+func TestLifecycleIgnoresTheOldGuestBoot(t *testing.T) {
 	st := State{Dir: t.TempDir()}
-	const id = "0f4c3a9e-7b1d-4c2e-9a8f-5d6e7f8a9b0c"
-	if err := os.WriteFile(st.legacyGuestBoot(), []byte(`{"boot_id":"`+id+`","recorded_at":"2026-10-01T00:00:00Z"}`), 0o600); err != nil {
+	old := filepath.Join(st.Dir, "guest-boot.json")
+	if err := os.WriteFile(old, []byte(`{"boot_id":"0f4c3a9e-7b1d-4c2e-9a8f-5d6e7f8a9b0c"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	l, err := st.LoadLifecycle()
-	if err != nil || l.GuestBoot == nil || l.GuestBoot.BootID != id {
-		t.Fatalf("legacy boot not read: %+v %v", l, err)
-	}
-	if err := st.RecordStep("x", "y", time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(st.legacyGuestBoot()); !os.IsNotExist(err) {
-		t.Fatalf("guest-boot.json survived the migration: %v", err)
-	}
-	l, err = st.LoadLifecycle()
-	if err != nil || l.GuestBoot == nil || l.GuestBoot.BootID != id || l.Version != LifecycleVersion {
-		t.Fatalf("migrated record: %+v %v", l, err)
+	if l, err := st.LoadLifecycle(); err != nil || l.GuestBoot != nil {
+		t.Fatalf("%+v %v", l, err)
 	}
 }
 

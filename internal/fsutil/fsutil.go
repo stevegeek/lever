@@ -625,3 +625,36 @@ func relComponents(p string) []string {
 	}
 	return strings.Split(c, "/")
 }
+
+// ReadRegularFile reads the regular file at path, at most max bytes. The open
+// does not block, so a FIFO or a device is refused by its mode instead of
+// hanging the read; a file over max is ErrFileTooLarge.
+func ReadRegularFile(path string, max int64) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return readOpenRegular(f, path, max)
+}
+
+func readOpenRegular(f *os.File, path string, max int64) ([]byte, error) {
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s: %s: %w", path, st.Mode().Type(), ErrNotRegularFile)
+	}
+	if st.Size() > max {
+		return nil, fmt.Errorf("%s: %d bytes: %w", path, st.Size(), ErrFileTooLarge)
+	}
+	b, err := io.ReadAll(io.LimitReader(f, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > max {
+		return nil, fmt.Errorf("%s: %w", path, ErrFileTooLarge)
+	}
+	return b, nil
+}

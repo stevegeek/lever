@@ -2,6 +2,7 @@ package host
 
 import (
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -19,10 +20,14 @@ func writeBrokerLog(t *testing.T, st state.State, content string) {
 	}
 }
 
+// daemonLine is a broker log line in lever's daemon shape.
+func daemonLine(ts time.Time, msg string) string {
+	return "time=" + ts.UTC().Format(logging.TimeFormat) + " level=INFO msg=" + strconv.Quote(msg) + " component=broker"
+}
+
 // certExpiredLine is the real broker fingerprint for an expired client leaf.
 func certExpiredLine(ts time.Time) string {
-	return ts.Format("2006/01/02 15:04:05") +
-		" http: TLS handshake error from 127.0.0.1: tls: failed to verify certificate: x509: certificate has expired or is not yet valid"
+	return daemonLine(ts, "http: TLS handshake error from 127.0.0.1: tls: failed to verify certificate: x509: certificate has expired or is not yet valid")
 }
 
 func TestCheckAgentCert_ActiveRejectionFails(t *testing.T) {
@@ -50,8 +55,7 @@ func TestCheckAgentCert_StaleRejectionPasses(t *testing.T) {
 func TestCheckAgentCert_BadCertFingerprintFails(t *testing.T) {
 	now := time.Now()
 	st := state.State{Dir: t.TempDir()}
-	line := now.Add(-1*time.Minute).Format("2006/01/02 15:04:05") +
-		" http: TLS handshake error from 127.0.0.1: remote error: tls: bad certificate"
+	line := daemonLine(now.Add(-1*time.Minute), "http: TLS handshake error from 127.0.0.1: remote error: tls: bad certificate")
 	writeBrokerLog(t, st, line+"\n")
 	if r := checkAgentCert(st, now); r.ok {
 		t.Fatalf("want FAIL for a recent 'tls: bad certificate' rejection, got ok: %q", r.detail)
@@ -61,7 +65,7 @@ func TestCheckAgentCert_BadCertFingerprintFails(t *testing.T) {
 func TestCheckAgentCert_NoRejectionsPasses(t *testing.T) {
 	now := time.Now()
 	st := state.State{Dir: t.TempDir()}
-	writeBrokerLog(t, st, "2026/07/08 09:00:00 http: TLS handshake succeeded\nunrelated line\n")
+	writeBrokerLog(t, st, daemonLine(now, "http: TLS handshake succeeded")+"\nunrelated line\n")
 	if r := checkAgentCert(st, now); !r.ok {
 		t.Fatalf("want PASS when no expired-leaf lines present, got fail: %q", r.detail)
 	}
@@ -118,25 +122,19 @@ func TestScanBrokerLogCertExpiry_PicksLatest(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("found=%v err=%v, want found and no error", found, err)
 	}
-	if got.Format("2006/01/02 15:04:05") != newer.Format("2006/01/02 15:04:05") {
+	if !got.Equal(newer.UTC().Truncate(time.Millisecond)) {
 		t.Errorf("latest = %s, want %s", got, newer)
 	}
 }
 
-// TestScanBrokerLogCertExpiry_ReadsBothShapes: lever's daemon line shape and
-// an older log's stdlog shape both count; the newest wins.
-func TestScanBrokerLogCertExpiry_ReadsBothShapes(t *testing.T) {
+// TestScanBrokerLogCertExpiry_ReadsDaemonLinesOnly: a line in Go's stdlog
+// shape, which no current broker writes, does not count.
+func TestScanBrokerLogCertExpiry_ReadsDaemonLinesOnly(t *testing.T) {
 	now := time.Now()
 	st := state.State{Dir: t.TempDir()}
-	old := now.Add(-30 * time.Minute)
-	newer := now.Add(-time.Minute).UTC()
-	line := "time=" + newer.Format(logging.TimeFormat) + ` level=INFO msg="http: TLS handshake error from 10.0.2.15:40000: remote error: tls: bad certificate" component=broker`
-	writeBrokerLog(t, st, certExpiredLine(old)+"\n"+line+"\n")
-	got, found, err := scanBrokerLogCertExpiry(st.OutLog())
-	if err != nil || !found {
+	old := now.Add(-time.Minute).Format("2006/01/02 15:04:05") + " http: TLS handshake error from 10.0.2.15:40000: remote error: tls: bad certificate"
+	writeBrokerLog(t, st, old+"\n")
+	if _, found, err := scanBrokerLogCertExpiry(st.OutLog()); err != nil || found {
 		t.Fatalf("found=%v err=%v", found, err)
-	}
-	if !got.Equal(newer.Truncate(time.Millisecond)) {
-		t.Errorf("latest = %s, want %s", got, newer)
 	}
 }

@@ -601,17 +601,11 @@ func (bc *brokerController) Start(ctx context.Context) error {
 	// Anything but a decodable epoch 200 means no lever broker is serving. Something
 	// else holding a port makes the child's bind fail, which Healthy reports.
 	if er, err := readBrokerIdentity(probeCtx, bc.admin, bc.adminURL); err == nil {
-		// alive: broker.pid names a live `lever broker serve` of this instance, not a
-		// pid the OS reused.
-		_, _, alive := bc.state.BrokerStatus()
-		switch judgeRunningBroker(er, ours, cli.VersionString(), brokerctl.ConfigHash(bc.app), alive) {
+		switch judgeRunningBroker(er, ours, cli.VersionString(), brokerctl.ConfigHash(bc.app)) {
 		case brokerReuse:
 			progress.From(ctx).Note("reused")
 			return nil // same instance, binary and broker config; keep the process + PID
 		case brokerRefuse:
-			if er.InstanceID == "" {
-				return fmt.Errorf("%w (this instance's %s names no live process)", foreignBrokerError(bc.app.EffectiveAdminPort(), er, ours), stateRel(bc.state, bc.state.PID()))
-			}
 			return foreignBrokerError(bc.app.EffectiveAdminPort(), er, ours)
 		}
 		bc.log.printf("lever: broker predates this binary or its tool config changed — restarting it (was %q)", er.Version)
@@ -1019,7 +1013,10 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 
 		// StopRemoteProxy needs no controller: teardown is by pid file.
 		StartRemoteProxy: rc.Start,
-		StopRemoteProxy:  func(context.Context) error { return brokerctl.StopRemoteProxy(st) },
+		AutostartWorker: func(ctx context.Context, worker string) error {
+			return autostartWorker(ctx, w.app, st, worker)
+		},
+		StopRemoteProxy: func(context.Context) error { return brokerctl.StopRemoteProxy(st) },
 		FenceRemoteLogins: func(context.Context) error {
 			return fenceRemoteLogins(w.app, st, func() error { return brokerctl.StopRemoteProxy(st) })
 		},

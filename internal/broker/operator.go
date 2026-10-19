@@ -58,25 +58,77 @@ func (b *Broker) handleOperatorNote(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, wire.OperatorNoteResponse{ID: ref})
 }
 
-// handleOperatorWake resumes a worker for the remote chat page, with the same
-// checks as the manager's resume verb but narrower: never the manager, and a
-// stopped worker only for the operator's own login. It is on the 0600
-// operator socket, never the admin listener the hub's network can reach.
+// ResumeFor is the remote chat page's resume of Worker for a chat login. The
+// login is for the audit line only; the socket's file mode is the
+// authority. Only Tier "operator" may resume a stopped worker; any other
+// value reads as a contact, which resumes only a suspended one.
+type ResumeFor struct {
+	Worker string `json:"worker"`
+	Login  string `json:"login"`
+	Tier   string `json:"tier"`
+}
+
+// WorkerResumeRequest is the body of POST PathOperatorWorkerResume: Worker
+// for the operator's own resume, or For alone for the chat page's narrower
+// one. The chat page names its worker inside For, so a broker that does not
+// know For finds no worker and refuses, rather than running the operator's
+// wider resume for a contact.
+type WorkerResumeRequest struct {
+	Worker string     `json:"worker,omitempty"`
+	For    *ResumeFor `json:"for,omitempty"`
+}
+
+// handleOperatorWorkerResume is `lever worker resume NAME`: the manager's
+// resume verb (resumeWorker: the worker's lock, the role check, every resume
+// check, the wait until live) with the host operator as the actor. It is on
+// the 0600 operator socket only, so it grants no manager or worker anything:
+// the socket's file permissions are the gate, as for notes.
 //
-// For host programs it is deprecated in favour of `lever worker resume`
-// (PathOperatorWorkerResume); the remote chat page keeps using it. The
-// Deprecation header (RFC 9745) says so to a direct caller.
-func (b *Broker) handleOperatorWake(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Deprecation", "true")
-	w.Header().Set("Link", `<`+PathOperatorWorkerResume+`>; rel="successor-version"`)
-	var req wire.OperatorWakeRequest
+// It resumes any record that is not running, as the manager's verb does:
+// suspended, stopped, completed, or error (with a forced resume). A worker
+// with no record is refused (start it instead), as is the manager: `lever
+// up` owns it. A request For a chat login is wakeFor.
+func (b *Broker) handleOperatorWorkerResume(w http.ResponseWriter, r *http.Request) {
+	var req WorkerResumeRequest
 	if err := decodeBody(w, r, jailBodyLimit, &req); err != nil {
-		b.audit("worker", "remote", "deny", "wake: bad body")
+		b.audit("worker", operatorActor, "deny", "resume: bad body")
 		refuse(w, ReasonBadRequest, "bad request", http.StatusBadRequest)
 		return
 	}
-	actor := "remote:" + boundedLogin(req.Login)
+	if req.For != nil {
+		if req.Worker != "" {
+			b.audit("worker", operatorActor, "deny", "resume: both a worker and a resume for a chat login")
+			refuse(w, ReasonBadRequest, "bad request", http.StatusBadRequest)
+			return
+		}
+		b.wakeFor(w, r, *req.For)
+		return
+	}
 	spec, ok := b.workerSpec(req.Worker)
+	if !ok {
+		b.audit("worker", operatorActor, "deny", "resume: not a declared worker")
+		refuse(w, ReasonNotAWorker, "not a declared worker (the manager is resumed with `lever up`)", http.StatusForbidden)
+		return
+	}
+	if b.isRevoked(spec.Name) {
+		// A resume would stage a revoked identity a fresh ticket.
+		b.audit("worker", operatorActor, "deny", "resume "+spec.Name+": revoked")
+		refuse(w, ReasonRevoked, "worker "+spec.Name+" is revoked", http.StatusForbidden)
+		return
+	}
+	if !b.runtimeReady(w) {
+		return
+	}
+	b.resumeWorker(r.Context(), w, spec, operatorActor)
+}
+
+// wakeFor resumes a worker for the remote chat page, with the same checks as
+// the manager's resume verb but narrower: never the manager, only a
+// suspended or stopped record, and a stopped one only for the operator's own
+// login. Its answers are short words: the proxy shows none of them.
+func (b *Broker) wakeFor(w http.ResponseWriter, r *http.Request, who ResumeFor) {
+	actor := "remote:" + boundedLogin(who.Login)
+	spec, ok := b.workerSpec(who.Worker)
 	if !ok {
 		b.audit("worker", actor, "deny", "wake: not a declared worker")
 		refuse(w, ReasonNotAWorker, "not a worker", http.StatusForbidden)
@@ -97,6 +149,11 @@ func (b *Broker) handleOperatorWake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer unlock()
+	if b.isRevoked(spec.Name) {
+		b.audit("worker", actor, "deny", "wake "+spec.Name+": revoked")
+		refuse(w, ReasonRevoked, "revoked", http.StatusForbidden)
+		return
+	}
 	if err := b.checkAgentRole(ctx, spec.Name); err != nil {
 		b.audit("worker", actor, "deny", "wake "+spec.Name+": "+err.Error())
 		refuse(w, ReasonRoleMismatch, "refused", http.StatusConflict)
@@ -114,7 +171,7 @@ func (b *Broker) handleOperatorWake(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 		return
 	}
-	if phase == scion.PhaseStopped && req.Tier != "operator" {
+	if phase == scion.PhaseStopped && who.Tier != "operator" {
 		// Stopped is the operator's decision; a contact may not undo it.
 		b.audit("worker", actor, "deny", "wake "+spec.Name+": stopped, and the login is not the operator's")
 		refusePhase(w, ReasonStoppedByOperator, phase, "stopped by the operator", http.StatusConflict)
@@ -130,41 +187,6 @@ func (b *Broker) handleOperatorWake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b.resumeRecord(ctx, w, spec, phase, actor)
-}
-
-// handleOperatorWorkerResume is `lever worker resume NAME`: the manager's
-// resume verb (resumeWorker: the worker's lock, the role check, every resume
-// check, the wait until live) with the host operator as the actor. It is on
-// the 0600 operator socket only, so it grants no manager or worker anything:
-// the socket's file permissions are the gate, as for notes.
-//
-// Unlike the remote page's wake it resumes any record that is not running,
-// as the manager's verb does: suspended, stopped, completed, or error (with
-// a forced resume). A worker with no record is refused (start it instead), as
-// is the manager: `lever up` owns it.
-func (b *Broker) handleOperatorWorkerResume(w http.ResponseWriter, r *http.Request) {
-	var req wire.WorkerRequest
-	if err := decodeBody(w, r, jailBodyLimit, &req); err != nil {
-		b.audit("worker", operatorActor, "deny", "resume: bad body")
-		refuse(w, ReasonBadRequest, "bad request", http.StatusBadRequest)
-		return
-	}
-	spec, ok := b.workerSpec(req.Worker)
-	if !ok {
-		b.audit("worker", operatorActor, "deny", "resume: not a declared worker")
-		refuse(w, ReasonNotAWorker, "not a declared worker (the manager is resumed with `lever up`)", http.StatusForbidden)
-		return
-	}
-	if b.isRevoked(spec.Name) {
-		// A resume would stage a revoked identity a fresh ticket.
-		b.audit("worker", operatorActor, "deny", "resume "+spec.Name+": revoked")
-		refuse(w, ReasonRevoked, "worker "+spec.Name+" is revoked", http.StatusForbidden)
-		return
-	}
-	if !b.runtimeReady(w) {
-		return
-	}
-	b.resumeWorker(r.Context(), w, spec, operatorActor)
 }
 
 // boundedLogin keeps a caller-supplied login to one short, safe audit token.

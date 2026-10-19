@@ -91,6 +91,10 @@ func (f *fakeWorkerRuntime) Resume(_ context.Context, worker, _ string) error {
 	return nil
 }
 
+func (f *fakeWorkerRuntime) ResumeTask(ctx context.Context, worker, project, _ string) error {
+	return f.Resume(ctx, worker, project)
+}
+
 func (f *fakeWorkerRuntime) ResumeForce(ctx context.Context, worker, project string) error {
 	return f.Resume(ctx, worker, project)
 }

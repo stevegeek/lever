@@ -338,6 +338,11 @@ func (g *gatedRuntime) Resume(ctx context.Context, w, p string) error {
 	defer g.mu.Unlock()
 	return g.f.Resume(ctx, w, p)
 }
+func (g *gatedRuntime) ResumeTask(ctx context.Context, w, p, task string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.f.ResumeTask(ctx, w, p, task)
+}
 func (g *gatedRuntime) ResumeForce(ctx context.Context, w, p string) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()

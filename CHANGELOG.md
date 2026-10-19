@@ -20,6 +20,59 @@ version bump moves the block under the new version heading.
   gets the host's version and Jail ABI and nothing else, with no capability. A request without a
   client certificate or from a revoked identity gets 403. The manager's skill says how to check.
 
+- **`lever worker list [--json]`: see the workers from the host (lever#237).** It lists every
+  declared worker as the broker sees it on the hub: phase (`none` with no record), activity, last
+  activity, container status, and `idle_at_prompt`, which is `true` for a running worker waiting
+  for input or done, `false` for a busy or not-running one, and `null` when the record doesn't
+  settle it (the hub's `stalled` covers both an idle worker and one that can't reach the model).
+  The activity is marked `worker-reported`: the hooks inside the worker's own container report it,
+  and the worker can set its phase and container status on the hub too, so the list is the worker's
+  word.
+  The broker passes only known labels, and the CLI bounds and sanitizes every string again.
+  `--json` prints one line, `{"ok","workers":[…],"reason","error","exit"}`. Read-only, through
+  the new `GET /operator/worker/list` on the broker's operator socket.
+
+- **`lever worker start`, `recycle`, `suspend` and `stop` from the host, and `autostart`
+  (lever#235).** They run the manager's own verbs through the broker's operator socket with the
+  operator as the actor, with the same per-worker lock, role, workspace and shared-folder checks,
+  running-worker cap and one-a-minute recycle limit, which the manager's recycles share. `start`
+  and `recycle` take the task from `--task-file` (read on the host: a regular file, at most 64 KiB,
+  never through a symbolic link inside the tree) or from the worker's new `task_file` setting, which
+  lives at the instance root like `prompt_file`. A worker with `autostart: true` is resumed or started
+  by `lever up` and `lever apply` once the manager is up; a failure warns, naming the worker, and the
+  bring-up still succeeds. The `--json` line and the exit codes are those of `lever worker resume`,
+  plus `12` (`not-stopped`); new reasons are `task-file`, `bad-task`, `task-too-long`, `task-fixed`,
+  `config-file`, `not-stopped` and `rate-limited`. `lever worker recycle` works on any declared
+  worker: `recyclable: true` is the manager's authority to recycle, and the operator owns the
+  instance, so the manager's `/worker/recycle` still needs it and the operator's verb does not.
+  The manager's own start and recycle refusals keep their status and text, and now carry
+  `X-Lever-Reason` too. Nothing changes inside the jail, and the manager and workers get no new
+  authority.
+
+- **`lever worker new-session NAME [--task-file F]`: a new conversation for a worker, keeping its
+  record and workspace (lever#236).** The broker stops the worker, which ends its session, waits
+  until the hub reads the record stopped and podman shows its container down, and resumes the
+  stopped record in a new session, the way `lever conversation new` does for the manager. The task
+  is the file's, else the worker's `task_file`, else the one the hub stored on the record. It takes
+  the worker's lock like the other verbs, and every check of `lever worker resume` runs before the
+  stop, so a refusal leaves the session as it was; once the stop is under way the broker finishes
+  the verb even when the command is interrupted. The new session is recorded like a fresh start
+  for the contact gate. The old conversation is not backed up. It is on the operator socket only
+  (`POST /operator/worker/new-session`); a message still can't clear a worker's context, since
+  lever never lets a message become a slash command.
+
+- **`lever worker watch NAME [--json]`: a worker's hub events from the host (lever#238).** It
+  long-polls the new `POST /operator/worker/events` on the broker's operator socket and prints the
+  worker's state changes and the completion summary it reports with `sciontool status`, from the
+  moment the watch starts. The broker reads the hub's notification feed with nothing acknowledged,
+  so the manager's inbox is unchanged, and passes on only the events the hub attributes to that
+  worker's record id, as `/msg/list` does. Every event is marked `worker-reported`, is one line of
+  at most 1 KiB, and carries the status only when the hub produces it (`UNRECOGNISED` otherwise);
+  a completion is a trigger to check the work, never its result. `--json` prints one event per
+  line. The watch ends on Ctrl-C, after `--idle-timeout`, or with exit `8` when the record is
+  purged or replaced, and it rides out a broker restart. Free-text messages from a worker to the
+  operator are not part of it.
+
 ### Changed
 
 - **Every lever binary reports its exact build commit, in a git worktree too.** `make install`,
@@ -36,6 +89,25 @@ version bump moves the block under the new version heading.
   (`RuntimeBrokerReady`; bring-up asks the hub as lever-admin instead) and `wire.Stage` (the host
   and the broker stage `bootstrap.json` through `fsutil.ReplaceInTreeNoLinks`). No behaviour
   changes.
+
+- **The broker's `/operator/wake` route.** It was deprecated in 0.50.0. The remote chat page now
+  wakes a worker through `/operator/worker/resume`, with a `for` object naming the worker, the
+  chat login and its tier, which keeps the chat page's narrower rules (only a suspended or stopped
+  worker, a stopped one only for the operator's login, never the manager). The worker is named
+  only inside `for`, so a broker that predates it refuses the request instead of running the
+  operator's wider resume. The old route answers 404.
+
+- **Compatibility code for instances older than 0.51.0.** The broker's `/chat/verify` route for
+  0.27 agent images, which matched a lever message by its timestamp when the image could not pass
+  a `ref` (the in-image `chat_verify` tool already asks `/message/verify`), and with it the
+  timestamp match in the sent ledger; the reading of `guest-boot.json` into `lifecycle.json`
+  (0.50.0); the `remote.login_port` key and its warning (0.39.0); the clean-up of the single-file
+  chat ledger (`chat-ledger.jsonl`) and of the `.lever-manifest.yaml` runtime manifest; session
+  records that hold a skill's full-file hash (before 0.33.1), which now read as stale; the
+  expired-certificate check's reading of the Go stdlog lines `broker.out.log` held before 0.36.0;
+  and the restart of a broker without an instance id (before 0.36.0), which is now refused like
+  any broker that is not this instance's. `lever doctor`'s *guest clock* row now only warns when
+  the guest's clock is off, unless agent messages are on: no verification depends on it any more.
 
 ### Security
 
@@ -75,6 +147,21 @@ version bump moves the block under the new version heading.
   (`make lever-image` or `make lever-image-slim`, then any instance image built from it) and
   recreate the manager on it with `lever up --fresh --keep-conversation`. Doctor's *agent lever
   version* row says so.
+
+- **Host programs that called `/operator/wake` must run `lever worker resume NAME`** (or POST
+  `/operator/worker/resume` without `for`). Run `lever reload` after upgrading: a broker of the
+  last release refuses the chat page's new wake request (it names no worker it knows), so the wake
+  fails until the broker runs this release.
+
+- **Remove `remote.login_port` from `lever.yaml`** if it is still there: it is now ignored without a
+  warning. A leftover `.lever-state/chat-ledger.jsonl`, `chat-ledger.jsonl.1`, `guest-boot.json`
+  or `<tree>/.lever-manifest.yaml` holds nothing lever reads and can be deleted.
+
+- **An agent whose session record predates 0.33.1 refuses contacts** until it starts fresh
+  (`lever up --fresh` for the manager, `lever worker new-session` or a recycle for a worker).
+
+- **A broker started by a lever older than 0.36.0** is refused by `lever up` and `lever apply`:
+  run `lever stop`, then `lever up`.
 
 ## [0.51.0] - 2026-10-19
 

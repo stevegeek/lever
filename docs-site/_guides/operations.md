@@ -111,7 +111,8 @@ when it is created again:
   logged by size and its first 60 bytes only.
 
 Leave `recyclable` off for a worker whose conversation is worth keeping: without it, only you can
-discard a record (`lever worker purge NAME --force`). `lever doctor`'s *worker recycle* row lists
+discard a record (`lever worker purge NAME --force`, or `lever worker recycle NAME`, which does not
+need `recyclable`). `lever doctor`'s *worker recycle* row lists
 the recyclable workers.
 
 ## Driving workers from a host program
@@ -120,18 +121,49 @@ A program on the host (a job runner, a cron script) can drive long-lived workers
 manager. Everything goes through the broker's operator socket, which only the host user can reach,
 so it gives no agent anything new:
 
+- `lever worker list --json` shows each declared worker's phase, activity, container and whether it
+  is idle at its prompt (`idle_at_prompt`: `true`, `false`, or `null` when the record doesn't
+  settle it). The worker can write all of it (its hooks report the activity, and it can set its
+  phase and container status on the hub), so it is the worker's word, not lever's: use it to pace
+  work, never to decide anything that matters for security.
+- `lever worker start NAME [--task-file F]` brings a worker up and waits until it is live: a worker
+  with no record is created with the task in `F`, else its `task_file` from the config; an existing
+  record is resumed; a running worker is left alone.
 - `lever worker resume NAME` brings a worker that is not running back up and waits until it is live.
   Run it after `lever stop` and `lever up` (which resumes the manager, not the workers), or whenever
   a send is refused with exit `9`. It is a no-op for a running worker. It does not start a worker
-  that has no record (exit `8`): the manager starts it.
+  that has no record (exit `8`): `lever worker start` does.
+- `lever worker watch NAME [--json]` prints the worker's hub events as they come: its state changes
+  and the completion summary it reports. Each is the worker's own report, so a completion is a
+  trigger to go and look at its work (its workspace, its tests), never the result itself. Start the
+  watch before the work, since it shows only events from then on.
 - `lever msg send "…" --to NAME` gives a running worker its next piece of work. The worker verifies
   it as an `operator-note`. Exit `9` means the worker was not running and nothing was sent.
+- `lever worker recycle NAME [--task-file F]` discards a worker's record and starts it fresh (any
+  declared worker: `recyclable: true` is only the manager's authority), for a slot that needs a fresh context; the workspace is kept and the conversation is lost.
+  `lever worker suspend NAME` and `lever worker stop NAME` take a worker down.
+- `lever worker new-session NAME [--task-file F]` keeps the worker's record and workspace and drops
+  its conversation, for a long-lived worker whose context is full or stale: the broker stops it,
+  then resumes the stopped record in a new session with the task in `F`, else its `task_file`.
+  Every check runs before the stop, so a refusal changes nothing. The old conversation is not backed
+  up. A message can't do this: lever never lets a message become a slash command such as `/clear`.
+
+Each verb but `new-session` is the manager's own (`lever-manager agent start`, `resume`, `recycle`,
+`suspend`, `stop`) run with the operator as the actor, and `new-session` is a stop and a resume: the same per-worker lock, the same checks, the same
+running-worker cap, and one recycle a minute per worker, a count you and the manager share. The
+broker's audit log names the operator (`caller=operator`).
+
+To bring workers up with the instance, set `autostart: true` on them in `lever.yaml`. After the
+manager is up, `lever up` and `lever apply` then resume or start each one (a `worker-autostart NAME`
+step each), as `lever worker start NAME` with no `--task-file` would. A worker that doesn't come up
+is a warning naming it and the command to retry; the bring-up still succeeds. Note that this also
+brings back a worker you stopped with `lever worker stop`.
 
 Branch on exit codes or on `--json`'s `reason`, never on the text
-([the exit codes](/reference/cli/#lever-worker-resume-exit-codes)). A typical loop:
+([the exit codes](/reference/cli/#lever-worker-exit-codes)). A typical loop:
 
 ```sh
-lever worker resume fwK --json || exit $?   # 75: busy, try again later; 8: ask the manager to start it
+lever worker start fwK --json || exit $?    # 75: busy, try again later; 10: fix the cause
 lever msg send "job 42 ready at jobs/42" --to fwK
 ```
 
@@ -143,12 +175,10 @@ Two things to know about sends:
   keeps its own marker and ref, and the worker's verify returns one entry per note, so none is
   lost, but space notes out if each should be its own turn.
 
-**`/operator/wake` is deprecated for host programs.** It is the remote chat page's route (it takes
-the chat login and tier, and lets a contact wake only a suspended worker). It keeps working as
-before, and now answers with a `Deprecation: true` header naming `/operator/worker/resume` as its
-successor. A program that called it directly should run `lever worker resume NAME` instead. The
-route may become internal to the remote proxy, with its body changed, no sooner than one release
-after `lever worker resume` ships, and the CHANGELOG will say so.
+The remote chat page wakes a worker through the same `/operator/worker/resume` route, with a `for`
+object naming the worker, the chat login and its tier: then the narrower rules apply (only a
+suspended or stopped worker, and a stopped one only for the operator's own login). A host program
+never sets `for`.
 
 ## Where the logs are
 
@@ -1330,7 +1360,7 @@ Two effects to know:
   `user:lever-controller@lever.local`. A message delivered before the migration but checked with
   `message_verify` after it answers `unknown_sender`. Agents verify on receipt, so this touches
   only messages in flight across the upgrade.
-- `remote.login_port` is ignored; `lever apply` warns until you remove it.
+- `remote.login_port` is ignored; remove it.
 
 ### Downgrading
 
@@ -1748,8 +1778,7 @@ the manager. Earlier releases' `lever up` refused ("record says running, but its
 \"created\" — the harness died; `lever stop` then `lever up` resumes it").
 
 lever now records the guest's boot id (`/proc/sys/kernel/random/boot_id`, new on every boot) in
-`.lever-state/lifecycle.json` each time it sees the manager live (lever 0.42 and earlier kept it in
-`guest-boot.json`, which the first write takes over and removes). When `lever apply` or
+`.lever-state/lifecycle.json` each time it sees the manager live. When `lever apply` or
 `lever up` finds the record "running", the boot id changed since, and the manager's container is
 not running (podman's own answer in the guest; when podman cannot be asked, lever does nothing,
 because the hub briefly reports `created` for a container that is starting), it logs

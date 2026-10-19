@@ -37,8 +37,6 @@ func (s *sentRecord) get(now time.Time) (*sentledger.Ledger, error) {
 	return s.ledger, nil
 }
 
-// sendTimeout lets a send with no done line be trusted to have ended within
-// sentledger.MaxSendDuration of its start.
 const sendTimeout = time.Minute
 
 // errNotRecorded: a send that cannot be recorded is not made, since it could
@@ -85,7 +83,6 @@ func (b *Broker) sendRecorded(ctx context.Context, recipientCN, slug, kind strin
 	merr := b.runtime.Message(mctx, o)
 	cancel()
 	if err := led.Done(e, time.Now(), merr == nil); err != nil {
-		// The entry stays in flight, bounded by MaxSendDuration.
 		b.audit("msg", recipientCN, "error", "send "+kind+" "+id+": recording the end: "+err.Error())
 	}
 	return id, merr

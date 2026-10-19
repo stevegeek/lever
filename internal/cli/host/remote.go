@@ -22,6 +22,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/backend/common"
 	"github.com/stevegeek/lever/internal/backend/registry"
+	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/chatledger"
 	"github.com/stevegeek/lever/internal/cli"
@@ -541,16 +542,18 @@ func agentRecordOf(a hubapi.Agent) remoteproxy.AgentRecord {
 		ContainerDown: scion.RunningContainerDown(phase, a.ContainerStatus)}
 }
 
-// remoteWake POSTs /operator/wake on the broker's 0600 operator socket, the
-// host user's own channel. Nil when the state directory is inside the tree:
-// the broker then binds no operator socket.
+// remoteWake asks the broker's 0600 operator socket, the host user's own
+// channel, to resume a worker for the chat login (its narrower rules: For).
+// Nil when the state directory is inside the tree: the broker then binds no
+// operator socket.
 func remoteWake(app *config.App, st state.State) func(ctx context.Context, login, tier, worker string) error {
 	if brokerctl.StateInsideTree(app, st) {
 		return nil
 	}
 	client := udsClient(st.OperatorSock())
 	return func(ctx context.Context, login, tier, worker string) error {
-		err := httpjson.Post(ctx, client, udsURL+wire.PathOperatorWake, wire.OperatorWakeRequest{Worker: worker, Login: login, Tier: tier}, nil)
+		err := httpjson.Post(ctx, client, udsURL+broker.PathOperatorWorkerResume,
+			broker.WorkerResumeRequest{For: &broker.ResumeFor{Worker: worker, Login: login, Tier: tier}}, nil)
 		if err != nil {
 			return &remoteproxy.WakeError{Status: httpjson.Status(err), Err: err}
 		}
@@ -632,19 +635,7 @@ func remoteChatLedger(app *config.App, st state.State) func(chatledger.Entry) er
 	if p == "" {
 		return nil
 	}
-	removeOldChatLedger(st)
 	return chatledger.NewWriter(p).Append
-}
-
-// removeOldChatLedger deletes the legacy single-file ledger and its rotated
-// copy, which only hold old chat text.
-func removeOldChatLedger(st state.State) {
-	for _, name := range []string{"chat-ledger.jsonl", "chat-ledger.jsonl.1"} {
-		p := filepath.Join(st.Dir, name)
-		if fi, err := os.Lstat(p); err == nil && fi.Mode().IsRegular() {
-			_ = os.Remove(p)
-		}
-	}
 }
 
 // serveRemote stamps the config this process actually loaded. apply reuses a
@@ -761,7 +752,7 @@ func remoteBindHost(app *config.App) string {
 // treat every web post as data and do not answer, which would otherwise look
 // like agents ignoring the operator.
 func printRemoteWarnings(cmd *cobra.Command, app *config.App) {
-	for _, w := range append(app.Warnings(), app.RemoteWarnings()...) {
+	for _, w := range app.RemoteWarnings() {
 		cmd.PrintErrf("lever: warning: %s\n", w)
 	}
 	if app.RemoteEnabled() && len(app.Remote.AllowedUsers) == 0 {

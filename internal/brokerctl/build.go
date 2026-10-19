@@ -16,6 +16,7 @@ import (
 	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/cap/token"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/servicehost"
 	"github.com/stevegeek/lever/internal/state"
 )
 
@@ -62,9 +63,17 @@ func BuildBroker(app *config.App, keys token.KeyPair, caInst *ca.CA, tickets *ca
 			// at-least-one-operation invariant.
 			ops[registry.WildcardOp] = registry.Operation{Name: registry.WildcardOp}
 		}
+		backend := t.Backend
+		if t.Host != "" {
+			h, ok := app.ServiceHost(t.Host)
+			if !ok {
+				return broker.Config{}, fmt.Errorf("brokerctl: tool %q: service host %q is not declared", t.Name, t.Host)
+			}
+			backend = servicehost.ToolURL(h.Address, t.Name)
+		}
 		if err := reg.Register(registry.Tool{
 			Name:          t.Name,
-			Backend:       t.Backend,
+			Backend:       backend,
 			Operations:    ops,
 			AllowedValues: registry.CloneAllowedValues(t.AllowedValues),
 			// External servers are third-party: the broker enforces the rules

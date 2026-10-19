@@ -621,6 +621,9 @@ func checkToolBackends(tools []config.Tool, dir string, p doctorProbes) checkRes
 	var down []string
 	probed := 0
 	for _, t := range tools {
+		if t.Host != "" {
+			continue // its service host's own row covers it
+		}
 		probed++
 		if t.External {
 			addr := backendHostPort(t.Backend)

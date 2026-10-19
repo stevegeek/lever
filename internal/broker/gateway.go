@@ -53,6 +53,19 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 		return nil, fmt.Errorf("broker: tool %q bad backend %q: %w", toolName, t.Backend, err)
 	}
 	rp := newToolProxy(target)
+	sh, onServiceHost := b.serviceHosts[toolName]
+	if onServiceHost {
+		rp.Transport = sh.Transport
+		augment := rp.ModifyResponse
+		rp.ModifyResponse = func(resp *http.Response) error {
+			// The service host's own ceiling refused a call the broker
+			// allowed: the broker's log must show it too.
+			if resp.StatusCode == http.StatusForbidden && resp.Request != nil {
+				b.audit(toolName, callerFrom(resp.Request.Context()), "deny", "service_host.refused", "host", sh.Host)
+			}
+			return augment(resp)
+		}
+	}
 	rp.ErrorLog = slog.NewLogLogger(b.log.With("op", toolName).Handler(), slog.LevelWarn)
 	v, _ := b.backendErrs.LoadOrStore(toolName, &backendErrLimit{every: backendErrEvery})
 	limit := v.(*backendErrLimit)
@@ -121,6 +134,10 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 		if t.FirstParty && b.toolSecret != "" {
 			r.Header.Set(toolSecretHeader, b.toolSecret)
 		}
+		// For the service host's audit log only; it grants nothing there.
+		if onServiceHost {
+			r.Header.Set("X-Lever-Caller", caller)
+		}
 		// ReverseProxy turns an Upgrade request into a raw tunnel that later
 		// messages would cross unauthorized, and fails a malformed one with
 		// agent-chosen text before dialing. MCP never upgrades.
@@ -171,6 +188,11 @@ func backendURL(backend string) (*url.URL, error) {
 	return url.Parse(backend)
 }
 
+// maxToolsListBytes bounds the tools/list answer the gateway reads whole to
+// add the capability argument: a backend, a remote one above all, must not
+// be able to exhaust the broker's memory.
+const maxToolsListBytes = 16 << 20
+
 // maxAuditPath bounds the agent-chosen path an audit line carries.
 const maxAuditPath = 256
 
@@ -219,10 +241,13 @@ func newToolProxy(target *url.URL) *httputil.ReverseProxy {
 		if resp.Request == nil || resp.Request.Header.Get("X-Lever-Method") != "tools/list" {
 			return nil
 		}
-		body, err := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxToolsListBytes+1))
 		resp.Body.Close()
 		if err != nil {
 			return err
+		}
+		if len(body) > maxToolsListBytes {
+			return errors.New("tools/list answer too large")
 		}
 		out := mcp.AugmentToolsListSchema(body)
 		resp.Body = io.NopCloser(bytes.NewReader(out))

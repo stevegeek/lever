@@ -352,8 +352,8 @@ missing image fails instead of asking the network. As defence
 in depth, every `lever apply` also sets the registry back to `lever.local` as lever-admin. An agent
 record created by an older lever keeps its bare image name, and the registry still applies to it
 at each start: under lever's pin a record on `x` runs `lever.local/x`, the image lever loaded, or
-fails to start when there is none. `lever up` and `lever apply` refuse to keep or resume a manager
-on such a record and say to run `lever up --fresh --keep-conversation`; `lever doctor`'s `manager
+fails to start when there is none. `lever up`, `lever apply`, a conversation restore or new conversation and the broker's
+re-enrol refuse to keep or resume a manager on such a record and say to run `lever up --fresh --keep-conversation`; `lever doctor`'s `manager
 image` row lists such records, and recreating them closes it. The runtime route can likewise switch the hub's container runtime, which fails agent starts
 until the next `lever apply` sets it back to podman as lever-admin; doctor's `hub container
 runtime` row fails meanwhile. That pin stores the hub's profiles in its database, which from then

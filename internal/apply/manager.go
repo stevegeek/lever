@@ -552,8 +552,10 @@ func (r *run) ensureUp(ctx context.Context, jp string, q ManagerRequest) (Manage
 	if err != nil {
 		return ManagerResult{}, err
 	}
-	if err := r.refuseUnqualifiedRecord(rec, opts.Image); err != nil {
-		return ManagerResult{}, err
+	if !r.fresh {
+		if err := r.refuseUnqualifiedRecord(rec); err != nil {
+			return ManagerResult{}, err
+		}
 	}
 	p, err := planManager(q, r.app.Name, o)
 	if err == nil && p.recover {
@@ -634,17 +636,17 @@ func (r *run) ensureUp(ctx context.Context, jp string, q ManagerRequest) (Manage
 	return res, nil
 }
 
-// refuseUnqualifiedRecord stops a keep before anything is changed when the
-// manager record was created on an unqualified image name, by an older lever.
-// scion keeps a record's image for life and rewrites an unqualified one to the
-// hub's image registry at every start, a setting any agent can change between
-// applies; only a fresh create moves the record to a qualified name.
-func (r *run) refuseUnqualifiedRecord(rec *scion.Agent, want string) error {
-	if rec == nil || r.fresh || rec.Image == "" || strings.Contains(rec.Image, "@") || imageref.Qualified(rec.Image) {
+// refuseUnqualifiedRecord refuses to keep or resume a manager record whose
+// image is unqualified. scion keeps a record's image for life and rewrites an
+// unqualified one to the hub's image registry at every start, a setting any
+// agent can change between applies (to a registry it controls, which scion
+// pulls from); only a fresh create moves the record to a qualified name.
+func (r *run) refuseUnqualifiedRecord(rec *scion.Agent) error {
+	if rec == nil || rec.Image == "" || strings.Contains(rec.Image, "@") || imageref.Qualified(rec.Image) {
 		return nil
 	}
 	return fmt.Errorf("%s: manager %q was created on the unqualified image name %s, which the hub rewrites to its image registry at every start, a setting any agent can change; nothing was changed. Run `lever up --fresh --keep-conversation` to recreate it on %s and keep its conversation",
-		r.subjectName(), r.app.Name, termsafe.Sanitize(rec.Image), termsafe.Sanitize(want))
+		r.subjectName(), r.app.Name, termsafe.Sanitize(rec.Image), termsafe.Sanitize(r.app.ManagerAgentImage()))
 }
 
 // actUp makes the plan's change to the record; the gate after it confirms
@@ -705,6 +707,9 @@ func (r *run) swapConversation(ctx context.Context, jp string, q ManagerRequest)
 	agents, err := sc.List(ctx, jp)
 	if err != nil {
 		return res, fmt.Errorf("the hub does not answer (%s); bring the instance up first (`lever up --no-attach`)", termsafe.Sanitize(scion.ErrSummary(err)))
+	}
+	if err := r.refuseUnqualifiedRecord(scion.FindAgent(agents, r.app.Name)); err != nil {
+		return res, err
 	}
 	p, err := planManager(q, r.app.Name, observationOf(scion.FindAgent(agents, r.app.Name)))
 	if err != nil {
@@ -891,6 +896,9 @@ func (r *run) newSession(ctx context.Context, jp string, q ManagerRequest) (res 
 	if err != nil {
 		return res, fmt.Errorf("the hub does not answer (%s); nothing was changed", termsafe.Sanitize(scion.ErrSummary(err)))
 	}
+	if err := r.refuseUnqualifiedRecord(scion.FindAgent(agents, r.app.Name)); err != nil {
+		return res, err
+	}
 	p, err := planManager(q, r.app.Name, observationOf(scion.FindAgent(agents, r.app.Name)))
 	if err != nil {
 		return res, err
@@ -1038,6 +1046,9 @@ func (r *run) reenrol(ctx context.Context, jp string, q ManagerRequest, release 
 		return res, fmt.Errorf("listing the agents: %s", termsafe.Sanitize(scion.ErrSummary(err)))
 	}
 	rec := scion.FindAgent(agents, r.app.Name)
+	if err := r.refuseUnqualifiedRecord(rec); err != nil {
+		return res, refused(err)
+	}
 	// A resume takes no --role: a record whose stored role the installed
 	// scion reads as full is never bounced, before any ticket is staged.
 	if err := r.d.VerifyAgentRole(ctx, path.Base(jp), r.app.Name); err != nil {

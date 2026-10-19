@@ -4284,34 +4284,49 @@ func TestApplyRefusesAManagerOnAnUnqualifiedImage(t *testing.T) {
 	}
 }
 
-// A manager an older lever created keeps its unqualified image name, which
-// the hub's image registry still applies to: a keep refuses it before any
-// change, and only --fresh goes on.
+// A record on an unqualified image name is refused whatever the image it
+// runs or the path; a qualified, digest-pinned or unreported one is not.
 func TestRefuseUnqualifiedRecord(t *testing.T) {
 	for _, c := range []struct {
 		image  string
-		fresh  bool
 		refuse bool
 	}{
-		{"scionlocal/lever-claude:arm64", false, true},
-		{"localhost/scionlocal/lever-claude:arm64", false, true},
-		{"lever-claude:arm64", false, true},
-		{"scionlocal/lever-claude:arm64", true, false},
-		{"lever.local/lever-claude:arm64", false, false},
-		{"scionlocal/x@sha256:abc", false, false},
-		{"", false, false},
+		{"scionlocal/lever-claude:arm64", true},
+		{"localhost/scionlocal/lever-claude:arm64", true},
+		{"lever-claude:arm64", true},
+		{"lever.local/lever-claude:arm64", false},
+		{"scionlocal/x@sha256:abc", false},
+		{"", false},
 	} {
-		r := &run{app: &config.App{Name: "m"}, fresh: c.fresh}
-		rec := &scion.Agent{Slug: "m", Phase: scion.PhaseRunning, Image: c.image}
-		err := r.refuseUnqualifiedRecord(rec, "lever.local/lever-claude:arm64")
+		r := &run{app: &config.App{Name: "m", Manager: config.Manager{Image: "lever.local/lever-claude:arm64"}}}
+		err := r.refuseUnqualifiedRecord(&scion.Agent{Slug: "m", Phase: scion.PhaseRunning, Image: c.image})
 		if (err != nil) != c.refuse {
-			t.Errorf("%q fresh=%v: err = %v, want refused %v", c.image, c.fresh, err, c.refuse)
+			t.Errorf("%q: err = %v, want refused %v", c.image, err, c.refuse)
 		}
 		if err != nil {
 			testutil.WantErrContaining(t, err, "lever up --fresh --keep-conversation")
 		}
 	}
-	if err := (&run{app: &config.App{Name: "m"}}).refuseUnqualifiedRecord(nil, "lever.local/x:1"); err != nil {
+	if err := (&run{app: &config.App{Name: "m"}}).refuseUnqualifiedRecord(nil); err != nil {
 		t.Errorf("no record: %v", err)
+	}
+}
+
+// Restore, new session and the broker's re-enrol resume the record too: each
+// refuses one on an unqualified image name before it changes anything.
+func TestResumePathsRefuseAnUnqualifiedRecord(t *testing.T) {
+	for _, intent := range []ManagerIntent{ManagerRestore, ManagerNewSession, ManagerReenrol} {
+		app, f := newObserveFirstApp(t)
+		r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "Up 5 minutes", image: "scionlocal/lever-claude:arm64"}
+		staged, swapped := 0, 0
+		d, q := reenrolDeps(r, &staged)
+		q.Intent, q.Force = intent, true
+		q.WhileSuspended = func(context.Context) error { swapped++; return nil }
+		q.BeginSession = func() (func() error, error) { swapped++; return func() error { return nil }, nil }
+		_, err := EnsureManager(context.Background(), app, d, q)
+		testutil.WantErrContaining(t, err, "lever up --fresh --keep-conversation")
+		if staged+swapped+r.suspendCalls+r.resumeCalls+r.startCalls+r.deleteCalls != 0 {
+			t.Errorf("%s: staged %d swapped %d suspend %d resume %d start %d delete %d, want none", intent, staged, swapped, r.suspendCalls, r.resumeCalls, r.startCalls, r.deleteCalls)
+		}
 	}
 }

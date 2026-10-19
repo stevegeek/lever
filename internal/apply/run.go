@@ -1057,8 +1057,8 @@ func runCredential(ctx context.Context, s Step, d Deps) error {
 // (imageref.Agent); the pin keeps an agent from pointing a record still on an
 // unqualified name at an image of its own. scion keeps only the last path
 // component, so such a record on x or a/x runs lever.local/x: the name
-// load-image gives lever's freshly loaded x, or, with none loaded, a name no
-// registry serves, so the start fails instead of resolving through podman's
+// load-image gives lever's freshly loaded x, or, with none loaded, a name the
+// jail's registries.conf blocks (guest.go), so the start fails instead of resolving through podman's
 // short-name path to a stale localhost/ image or a Docker Hub pull.
 const ImageRegistry = imageref.Registry
 

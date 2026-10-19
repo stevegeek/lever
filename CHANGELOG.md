@@ -157,8 +157,9 @@ version bump moves the block under the new version heading.
   `a/x`) to `<registry>/x` at every start. Under the old `scionlocal` pin, with the
   `scionlocal/` alias gone, that named a stale image in the jail or, through podman's short-name
   path, a Docker Hub pull. Under `lever.local` it names the image lever just loaded, or none, and
-  the start fails. A plain `lever up` or `lever apply` now stops before it changes a manager whose
-  record is on an unqualified name, instead of warning, and says to run `lever up --fresh
+  the start fails. A plain `lever up` or `lever apply`, a conversation restore, a new conversation
+  (the daily one too) and the broker's re-enrol now stop before they change a manager whose record
+  is on an unqualified name, instead of warning, and say to run `lever up --fresh
   --keep-conversation`; doctor's *manager image* row fails for it.
 
 - **Two spellings of one image name are one image to config and to `image_tar`.** `x:arm64` and
@@ -230,9 +231,11 @@ version bump moves the block under the new version heading.
   --keep-conversation` recreates it.
 
 - **A manager created by an older lever on an unqualified image name must be recreated:** run
-  `lever up --fresh --keep-conversation` once. Plain `lever up` and `lever apply` refuse it until
-  then. A worker on such a name (doctor's *manager image* row warns) should be recycled. The
-  first apply sets the hub's image registry to `lever.local`.
+  `lever up --fresh --keep-conversation` once. Plain `lever up`, `lever apply`, conversation
+  restores, new conversations and the broker's re-enrol refuse it until then. Recycle a worker
+  on such a name (doctor's *manager image* row warns): the broker still resumes and heals it,
+  and an agent can point the hub's registry at its own between applies. The first apply sets
+  the hub's image registry to `lever.local`.
 
 - **Fix any `caveat_param` that config load now refuses** (see Security): bind each constraint
   key directly to its argument.

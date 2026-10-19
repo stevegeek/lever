@@ -1150,8 +1150,8 @@ func activityAge(a *scionpkg.Agent, now time.Time) string {
 // else. Podman may qualify the ref (docker.io/, localhost/), so refs are
 // compared normalised.
 //
-// A record created on an unqualified name, by an older lever, fails for the
-// manager, which lever up refuses to keep, and is a warning for a worker:
+// A record on an unqualified name fails for the manager, which lever refuses
+// to keep or resume, and is a warning for a worker:
 // scion rewrites that name to the hub's image registry at every start, and
 // any agent can set the registry between applies.
 func checkManagerImage(ctx context.Context, project, name, configured string, list agentLister) checkResult {

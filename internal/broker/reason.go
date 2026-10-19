@@ -7,6 +7,16 @@ import "net/http"
 // import graph, and this route is host-only.
 const PathOperatorWorkerResume = "/operator/worker/resume"
 
+// The other host-only worker routes of the operator socket, for `lever worker
+// list|start|recycle|suspend|stop`.
+const (
+	PathOperatorWorkerList    = "/operator/worker/list"
+	PathOperatorWorkerStart   = "/operator/worker/start"
+	PathOperatorWorkerRecycle = "/operator/worker/recycle"
+	PathOperatorWorkerSuspend = "/operator/worker/suspend"
+	PathOperatorWorkerStop    = "/operator/worker/stop"
+)
+
 // ReasonHeader carries a machine-readable reason on a worker refusal, so a
 // host program can branch on it without reading the text (which can name a
 // phase or a path). The body keeps its human text unchanged. PhaseHeader names
@@ -36,6 +46,13 @@ const (
 	ReasonHubRefused         = "hub-refused"         // 409: the hub refused the resume; the record is kept
 	ReasonNotLive            = "not-live"            // 502: resumed, but the worker did not come live
 	ReasonRuntimeError       = "runtime-error"       // 502 or 500: a runtime or staging error; the record is kept
+	ReasonBadTask            = "bad-task"            // 400: the task is flag-shaped
+	ReasonTaskTooLong        = "task-too-long"       // 413: the task is over scion's command-line budget
+	ReasonTaskFixed          = "task-fixed"          // 409 (start): a task was given, but the record exists and its task is fixed
+	ReasonConfigFile         = "config-file"         // 500: the worker's instructions_file or task_file cannot be read or is invalid
+	ReasonNotRecyclable      = "not-recyclable"      // 403 (recycle): the worker does not set recyclable
+	ReasonNotStopped         = "not-stopped"         // 409 (recycle): the record is not suspended, stopped or error, or its container is live
+	ReasonRateLimited        = "rate-limited"        // 429 (recycle): the worker was recycled less than a minute ago
 )
 
 // refuse writes an error answer with its machine-readable reason. The text is

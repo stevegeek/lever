@@ -353,6 +353,15 @@ func (a *App) WorkerInstructionsPath(g Worker) string {
 	return filepath.Join(a.dir, g.InstructionsFile)
 }
 
+// WorkerTaskPath is resolved at the instance root like
+// WorkerInstructionsPath, and has no fallback either.
+func (a *App) WorkerTaskPath(g Worker) string {
+	if g.TaskFile == "" {
+		return ""
+	}
+	return filepath.Join(a.dir, g.TaskFile)
+}
+
 // OperatorAllowedSignersPath returns the absolute path to the operator's
 // allowed_signers file, resolved at the instance root, or "".
 func (a *App) OperatorAllowedSignersPath() string {

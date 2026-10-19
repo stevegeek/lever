@@ -66,7 +66,11 @@ type WorkerSpec struct {
 	// none). The manager cannot choose it; its content is read at each fresh
 	// start so an edit needs no broker restart.
 	InstructionsPath string
-	APIKey           bool // true ⇒ api-key LLM mode for this worker
+	// TaskPath is the host path of the worker's task_file ("" = none): the
+	// task of a fresh start by the operator that names none. Read at that
+	// start, like InstructionsPath.
+	TaskPath string
+	APIKey   bool // true ⇒ api-key LLM mode for this worker
 	// Recyclable lets the manager discard this worker's record and start it
 	// fresh.
 	Recyclable bool
@@ -492,29 +496,38 @@ func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	b.startWorker(r.Context(), w, spec, req.Task, false, b.manager)
+}
+
+// startWorker is the start verb after its caller is authorized: the manager's
+// /worker/start and the operator's `lever worker start` share it. A running
+// worker is a no-op, an existing record is resumed, and a worker with no
+// record is started fresh with task. configTask lets a fresh start with no
+// task take the worker's task_file; only the operator's verbs set it.
+func (b *Broker) startWorker(ctx context.Context, w http.ResponseWriter, spec WorkerSpec, task string, configTask bool, actor string) {
 	// scion inlines the task into a tmux command capped at 16 KiB, so a
 	// longer one fails the container with a generic error: refuse it by name,
 	// whatever the phase. A flag-shaped task is refused too (the start argv
 	// keeps it behind `--` regardless).
-	if err := scion.CheckTask(req.Task); err != nil {
-		b.audit("worker", b.manager, "deny", "start "+spec.Name+": "+err.Error())
-		status := http.StatusBadRequest
-		var tooLong *scion.TaskTooLongError
-		if errors.As(err, &tooLong) {
-			status = http.StatusRequestEntityTooLarge
-		}
-		http.Error(w, err.Error(), status)
+	if !b.taskOK(w, actor, "start "+spec.Name, task, "") {
 		return
 	}
-	unlock, ok := b.lockWorkerOrRefuse(w, r.Context(), b.manager, "start", spec.Name)
+	unlock, ok := b.lockWorkerOrRefuse(w, ctx, actor, "start", spec.Name)
 	if !ok {
 		return
 	}
 	defer unlock()
-	phase, err := b.phaseOf(r.Context(), spec)
+	if actor == operatorActor && b.isRevoked(spec.Name) {
+		// Under the lock: a revoke that landed while this start waited must
+		// not get the worker a fresh ticket.
+		b.audit("worker", actor, "deny", "start "+spec.Name+": revoked")
+		refuse(w, ReasonRevoked, "worker "+spec.Name+" is revoked", http.StatusForbidden)
+		return
+	}
+	phase, err := b.phaseOf(ctx, spec)
 	if err != nil {
-		b.audit("worker", b.manager, "error", "phase: "+err.Error())
-		http.Error(w, "runtime error", http.StatusBadGateway)
+		b.audit("worker", actor, "error", "phase: "+err.Error())
+		refuse(w, ReasonRuntimeError, "runtime error", http.StatusBadGateway)
 		return
 	}
 	switch {
@@ -523,32 +536,56 @@ func (b *Broker) handleWorkerStart(w http.ResponseWriter, r *http.Request) {
 		// task is fixed too.
 		writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 	case phase != "":
-		b.resumeExistingWorker(w, r, spec, phase, req.Task)
+		b.resumeExistingWorker(ctx, w, spec, phase, task, actor)
 	default:
-		b.startFreshWorker(w, r, spec, req.Task)
+		b.startFreshWorker(ctx, w, spec, task, configTask, actor)
 	}
 }
 
-func (b *Broker) resumeExistingWorker(w http.ResponseWriter, r *http.Request, spec WorkerSpec, phase, task string) {
-	ctx := r.Context()
+// taskOK refuses a task scion could not start an agent with. suffix is
+// appended to the refusal text.
+func (b *Broker) taskOK(w http.ResponseWriter, actor, verb, task, suffix string) bool {
+	err := scion.CheckTask(task)
+	if err == nil {
+		return true
+	}
+	b.audit("worker", actor, "deny", verb+": "+err.Error())
+	reason, status := ReasonBadTask, http.StatusBadRequest
+	var tooLong *scion.TaskTooLongError
+	if errors.As(err, &tooLong) {
+		reason, status = ReasonTaskTooLong, http.StatusRequestEntityTooLarge
+	}
+	refuse(w, reason, err.Error()+suffix, status)
+	return false
+}
+
+func (b *Broker) resumeExistingWorker(ctx context.Context, w http.ResponseWriter, spec WorkerSpec, phase, task, actor string) {
 	// scion pins the task at creation and Resume takes none, so a re-dispatch
 	// with a new task must not silently resume the old one.
 	if strings.TrimSpace(task) != "" {
-		b.audit("worker", b.manager, "deny", "start "+spec.Name+": task given but worker exists (phase "+phase+")")
+		b.audit("worker", actor, "deny", "start "+spec.Name+": task given but worker exists (phase "+phase+")")
 		fresh := "Run `lever worker purge " + spec.Name + "` to start it fresh with a new task"
 		if spec.Recyclable {
 			fresh = "Run `lever-manager agent recycle " + spec.Name + " --task \"…\"` to start it fresh with a new task (its old conversation is discarded)"
 		}
-		http.Error(w, "worker "+spec.Name+" already exists (phase "+phase+"); its task is fixed at creation. "+fresh+", or dispatch with no task to resume.", http.StatusConflict)
+		again := ", or dispatch with no task to resume."
+		if actor == operatorActor {
+			fresh = "Run `lever worker purge " + spec.Name + " --force`, then start it, to start it fresh with a new task"
+			if spec.Recyclable {
+				fresh = "Run `lever worker recycle " + spec.Name + " --task-file F` to start it fresh with a new task (its old conversation is discarded)"
+			}
+			again = ", or start it with no --task-file to resume it."
+		}
+		refusePhase(w, ReasonTaskFixed, phase, "worker "+spec.Name+" already exists (phase "+phase+"); its task is fixed at creation. "+fresh+again, http.StatusConflict)
 		return
 	}
 	// Before staging anything (DispatchConfig.VerifyAgentRole).
 	if err := b.checkAgentRole(ctx, spec.Name); err != nil {
-		b.audit("worker", b.manager, "deny", "resume "+spec.Name+": "+err.Error())
-		http.Error(w, err.Error(), http.StatusConflict)
+		b.audit("worker", actor, "deny", "resume "+spec.Name+": "+err.Error())
+		refuse(w, ReasonRoleMismatch, err.Error(), http.StatusConflict)
 		return
 	}
-	b.resumeRecord(ctx, w, spec, phase, b.manager)
+	b.resumeRecord(ctx, w, spec, phase, actor)
 }
 
 // resumeRecord brings a non-running worker record back up and answers only
@@ -665,10 +702,9 @@ func workerPurgeHint(worker string) string {
 	return "If it does not recover, the operator can run `lever worker purge " + worker + "` on the host, then start the worker fresh."
 }
 
-func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec WorkerSpec, task string) {
-	ctx := r.Context()
+func (b *Broker) startFreshWorker(ctx context.Context, w http.ResponseWriter, spec WorkerSpec, task string, configTask bool, actor string) {
 	// Before any side effect.
-	release, ok := b.admitOrRefuse(ctx, w, b.manager, "start", spec.Name)
+	release, ok := b.admitOrRefuse(ctx, w, actor, "start", spec.Name)
 	if !ok {
 		return
 	}
@@ -677,45 +713,52 @@ func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec W
 	// staged.
 	instructions, err := readWorkerInstructions(spec)
 	if err != nil {
-		b.audit("worker", b.manager, "error", "start "+spec.Name+": "+err.Error())
-		http.Error(w, "instructions error", http.StatusInternalServerError)
+		b.audit("worker", actor, "error", "start "+spec.Name+": "+err.Error())
+		refuse(w, ReasonConfigFile, "instructions error", http.StatusInternalServerError)
 		return
+	}
+	if configTask && task == "" {
+		if task, err = readWorkerTask(spec); err != nil {
+			b.audit("worker", actor, "error", "start "+spec.Name+": "+err.Error())
+			refuse(w, ReasonConfigFile, "task_file error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	// Before the ticket: a refused workspace must not spend one.
 	if err := b.ensureWorkspaceDir(spec); err != nil {
 		if errors.Is(err, ErrSharedFolder) {
-			b.audit("worker", b.manager, "deny", "start "+spec.Name+": "+err.Error())
-			http.Error(w, "forbidden: a shared folder of worker "+spec.Name+" is missing on the host or reached through a symbolic link", http.StatusForbidden)
+			b.audit("worker", actor, "deny", "start "+spec.Name+": "+err.Error())
+			refuse(w, ReasonWorkspaceUnsafe, "forbidden: a shared folder of worker "+spec.Name+" is missing on the host or reached through a symbolic link", http.StatusForbidden)
 			return
 		}
 		if errors.Is(err, fsutil.ErrEscapesTree) {
-			b.audit("worker", b.manager, "deny", "start "+spec.Name+": workspace dir: "+err.Error())
-			http.Error(w, "forbidden: worker workspace escapes the instance tree", http.StatusForbidden)
+			b.audit("worker", actor, "deny", "start "+spec.Name+": workspace dir: "+err.Error())
+			refuse(w, ReasonWorkspaceUnsafe, "forbidden: worker workspace escapes the instance tree", http.StatusForbidden)
 			return
 		}
 		if errors.Is(err, ErrReadOnlyOverlap) {
-			b.audit("worker", b.manager, "deny", "start "+spec.Name+": workspace dir: "+err.Error())
-			http.Error(w, "forbidden: worker workspace overlaps a protected directory (manager.read_only or a shared folder)", http.StatusForbidden)
+			b.audit("worker", actor, "deny", "start "+spec.Name+": workspace dir: "+err.Error())
+			refuse(w, ReasonWorkspaceUnsafe, "forbidden: worker workspace overlaps a protected directory (manager.read_only or a shared folder)", http.StatusForbidden)
 			return
 		}
-		b.audit("worker", b.manager, "error", "start "+spec.Name+": workspace dir: "+err.Error())
-		http.Error(w, "workspace error", http.StatusInternalServerError)
+		b.audit("worker", actor, "error", "start "+spec.Name+": workspace dir: "+err.Error())
+		refuse(w, ReasonRuntimeError, "workspace error", http.StatusInternalServerError)
 		return
 	}
 	if err := b.checkSharedAccess(ctx, spec, false); err != nil {
-		b.audit("worker", b.manager, "deny", "start "+spec.Name+": "+err.Error())
-		http.Error(w, "forbidden: "+sharedAccessHint(spec.Name, err), http.StatusForbidden)
+		b.audit("worker", actor, "deny", "start "+spec.Name+": "+err.Error())
+		refuse(w, ReasonSharedAccess, "forbidden: "+sharedAccessHint(spec.Name, err), http.StatusForbidden)
 		return
 	}
 	if err := b.stageWorkerTicket(ctx, spec); err != nil {
-		b.audit("worker", b.manager, "error", "start "+err.Error())
-		http.Error(w, "stage error", http.StatusInternalServerError)
+		b.audit("worker", actor, "error", "start "+err.Error())
+		refuse(w, ReasonRuntimeError, "stage error", http.StatusInternalServerError)
 		return
 	}
 	if spec.APIKey {
 		if err := b.runtime.EnvSet(ctx, b.instanceProject, "LEVER_LLM_AUTH", "api-key"); err != nil {
-			b.audit("worker", b.manager, "error", "env set: "+err.Error())
-			http.Error(w, "runtime error", http.StatusBadGateway)
+			b.audit("worker", actor, "error", "env set: "+err.Error())
+			refuse(w, ReasonRuntimeError, "runtime error", http.StatusBadGateway)
 			return
 		}
 	}
@@ -731,23 +774,23 @@ func (b *Broker) startFreshWorker(w http.ResponseWriter, r *http.Request, spec W
 		Instructions: instructions, Volumes: volumes, Env: env,
 		Resources: spec.Resources,
 	}); err != nil {
-		b.audit("worker", b.manager, "error", "start "+spec.Name+": "+err.Error())
-		http.Error(w, "runtime error", http.StatusBadGateway)
+		b.audit("worker", actor, "error", "start "+spec.Name+": "+err.Error())
+		refuse(w, ReasonRuntimeError, "runtime error", http.StatusBadGateway)
 		return
 	}
 	// A failed session record only keeps contacts out.
 	if commit != nil {
 		if err := commit(); err != nil {
-			b.audit("worker", b.manager, "error", "start "+spec.Name+": session record: "+err.Error())
+			b.audit("worker", actor, "error", "start "+spec.Name+": session record: "+err.Error())
 		}
 	}
 	if err := b.waitWorkerLive(ctx, spec); err != nil {
-		b.audit("worker", b.manager, "error", "start "+spec.Name+": "+err.Error())
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		b.audit("worker", actor, "error", "start "+spec.Name+": "+err.Error())
+		refuse(w, ReasonNotLive, err.Error(), http.StatusBadGateway)
 		return
 	}
 	b.resetReenrolTries(spec.Name)
-	b.audit("worker", b.manager, "allow", "start "+spec.Name)
+	b.audit("worker", actor, "allow", "start "+spec.Name)
 	writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 }
 
@@ -765,6 +808,28 @@ func readWorkerInstructions(spec WorkerSpec) (string, error) {
 		return "", fmt.Errorf("instructions %s: %w", spec.InstructionsPath, err)
 	}
 	return string(b), nil
+}
+
+// maxTaskFileBytes bounds what is read of a task file. scion.CheckTask then
+// holds the task to scion's much smaller command-line budget.
+const maxTaskFileBytes = 64 << 10
+
+// readWorkerTask reads the worker's task_file host-side, trimmed. Config load
+// has placed it outside the mounted tree; it must still be a regular file, so
+// a FIFO cannot hang the start.
+func readWorkerTask(spec WorkerSpec) (string, error) {
+	if spec.TaskPath == "" {
+		return "", nil
+	}
+	raw, err := fsutil.ReadRegularFile(spec.TaskPath, maxTaskFileBytes)
+	if err != nil {
+		return "", fmt.Errorf("reading task_file %s: %w", spec.TaskPath, err)
+	}
+	task := strings.TrimSpace(string(raw))
+	if err := scion.CheckTask(task); err != nil {
+		return "", fmt.Errorf("task_file %s: %w", spec.TaskPath, err)
+	}
+	return task, nil
 }
 
 const (

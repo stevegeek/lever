@@ -464,6 +464,9 @@ func (a *App) validateWorker(g Worker) error {
 	if g.InstructionsFile != "" && !confinedRel(g.InstructionsFile) {
 		return fmt.Errorf("config: worker %q instructions_file %q must be a relative path inside the instance root (no \"..\", not absolute)", g.Name, g.InstructionsFile)
 	}
+	if g.TaskFile != "" && !confinedRel(g.TaskFile) {
+		return fmt.Errorf("config: worker %q task_file %q must be a relative path inside the instance root (no \"..\", not absolute)", g.Name, g.TaskFile)
+	}
 	if err := validateClaude(fmt.Sprintf("worker %q", g.Name), g.ClaudeSettings, g.AfterCompactNote); err != nil {
 		return err
 	}

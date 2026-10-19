@@ -221,6 +221,13 @@ type Worker struct {
 	// operator's `lever worker purge` discards a record. The json tag keeps
 	// it out of brokerctl.ConfigHash while false.
 	Recyclable bool `yaml:"recyclable" json:",omitempty"`
+	// TaskFile is the task of a fresh start by the operator (`lever worker
+	// start` or `recycle` with no --task-file, and autostart). Boot material
+	// like instructions_file: at the instance root, outside the tree.
+	TaskFile string `yaml:"task_file" json:",omitempty"`
+	// Autostart has `lever up` and `lever apply` resume or start the worker
+	// once the manager is up. A failure warns; the bring-up still succeeds.
+	Autostart bool `yaml:"autostart" json:",omitempty"`
 	// Resources is not inherited from the manager and is create-time only.
 	// The json tag keeps it out of brokerctl.ConfigHash while unset.
 	Resources Resources `yaml:"resources" json:",omitzero"`

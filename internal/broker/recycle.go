@@ -2,7 +2,6 @@ package broker
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -50,53 +49,69 @@ func (b *Broker) handleWorkerRecycle(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	b.recycleWorker(r.Context(), w, spec, req.Task, false, b.manager)
+}
+
+// recycleWorker is the recycle verb after its caller is authorized: the
+// manager's /worker/recycle and the operator's `lever worker recycle` share
+// it, and with it the worker's lock and its rate limit. configTask lets an
+// empty task take the worker's task_file; only the operator's verb sets it.
+func (b *Broker) recycleWorker(ctx context.Context, w http.ResponseWriter, spec WorkerSpec, task string, configTask bool, actor string) {
 	verb := "recycle " + spec.Name
+	op := actor == operatorActor
 	// Config validation already excludes this; checked again because a
 	// recycle deletes a record.
 	if spec.Name == b.manager || spec.Name == b.managerSlug {
-		b.audit("worker", b.manager, "deny", verb+": the manager is never recycled")
-		http.Error(w, "forbidden", http.StatusForbidden)
+		b.audit("worker", actor, "deny", verb+": the manager is never recycled")
+		refuse(w, ReasonNotAWorker, "forbidden", http.StatusForbidden)
 		return
 	}
 	if !spec.Recyclable {
-		b.audit("worker", b.manager, "deny", verb+": not recyclable")
-		http.Error(w, "worker "+spec.Name+" is not recyclable: the operator must set `recyclable: true` on it under `workers:` in lever.yaml "+
-			"(then `lever reload`). Until then, ask the operator to run `lever worker purge "+spec.Name+" --force`.", http.StatusForbidden)
+		b.audit("worker", actor, "deny", verb+": not recyclable")
+		msg := "worker " + spec.Name + " is not recyclable: the operator must set `recyclable: true` on it under `workers:` in lever.yaml " +
+			"(then `lever reload`). Until then, ask the operator to run `lever worker purge " + spec.Name + " --force`."
+		if op {
+			msg = "worker " + spec.Name + " is not recyclable: set `recyclable: true` on it under `workers:` in lever.yaml (then `lever reload`), " +
+				"or run `lever worker purge " + spec.Name + " --force` and then `lever worker start " + spec.Name + "`. Nothing was deleted."
+		}
+		refuse(w, ReasonNotRecyclable, msg, http.StatusForbidden)
 		return
 	}
-	if err := scion.CheckTask(req.Task); err != nil {
-		b.audit("worker", b.manager, "deny", verb+": "+err.Error())
-		status := http.StatusBadRequest
-		var tooLong *scion.TaskTooLongError
-		if errors.As(err, &tooLong) {
-			status = http.StatusRequestEntityTooLarge
-		}
-		http.Error(w, err.Error(), status)
+	if !b.taskOK(w, actor, verb, task, "") {
 		return
 	}
 	if b.purger == nil {
-		b.audit("worker", b.manager, "error", verb+": no purge channel is wired (DispatchConfig.Purge)")
-		http.Error(w, "worker recycle unavailable", http.StatusBadGateway)
+		b.audit("worker", actor, "error", verb+": no purge channel is wired (DispatchConfig.Purge)")
+		refuse(w, ReasonRuntimeUnavailable, "worker recycle unavailable", http.StatusBadGateway)
 		return
 	}
 	unlock, ok := b.tryLockWorker(spec.Name)
 	if !ok {
-		b.audit("worker", b.manager, "deny", verb+": busy (another lifecycle operation holds the worker)")
-		http.Error(w, "busy: another start, resume, stop or heal of "+spec.Name+" is under way; nothing was deleted. Try again shortly.", http.StatusServiceUnavailable)
+		b.audit("worker", actor, "deny", verb+": busy (another lifecycle operation holds the worker)")
+		refuse(w, ReasonBusy, "busy: another start, resume, stop or heal of "+spec.Name+" is under way; nothing was deleted. Try again shortly.", http.StatusServiceUnavailable)
 		return
 	}
 	defer unlock()
-	ctx := r.Context()
+	if op && b.isRevoked(spec.Name) {
+		// The fresh start would stage a revoked identity a ticket.
+		b.audit("worker", actor, "deny", verb+": revoked")
+		refuse(w, ReasonRevoked, "worker "+spec.Name+" is revoked; nothing was deleted", http.StatusForbidden)
+		return
+	}
 	phase, containerStatus, err := b.recordOf(ctx, spec)
 	if err != nil {
-		b.audit("worker", b.manager, "error", verb+": phase: "+err.Error())
-		http.Error(w, "runtime error", http.StatusBadGateway)
+		b.audit("worker", actor, "error", verb+": phase: "+err.Error())
+		refuse(w, ReasonRuntimeError, "runtime error", http.StatusBadGateway)
 		return
 	}
 	notStopped := func(why string) {
-		b.audit("worker", b.manager, "deny", verb+": not stopped ("+why+")")
-		http.Error(w, "worker "+spec.Name+" is "+why+"; a recycle deletes only a suspended, stopped or error record whose container is down, never a live session. "+
-			"Run `lever-manager agent stop "+spec.Name+"` (or `suspend`), then recycle. Nothing was deleted.", http.StatusConflict)
+		b.audit("worker", actor, "deny", verb+": not stopped ("+why+")")
+		first := "Run `lever-manager agent stop " + spec.Name + "` (or `suspend`), then recycle."
+		if op {
+			first = "Run `lever worker stop " + spec.Name + "` (or `suspend`), then recycle."
+		}
+		refusePhase(w, ReasonNotStopped, phase, "worker "+spec.Name+" is "+why+"; a recycle deletes only a suspended, stopped or error record whose container is down, never a live session. "+
+			first+" Nothing was deleted.", http.StatusConflict)
 	}
 	if phase != "" && !recyclablePhase(phase) {
 		notStopped("phase " + phase)
@@ -112,8 +127,8 @@ func (b *Broker) handleWorkerRecycle(w http.ResponseWriter, r *http.Request) {
 		if b.containerRunning != nil {
 			live, err := b.containerRunning(ctx, spec.Name)
 			if err != nil {
-				b.audit("worker", b.manager, "error", verb+": container state: "+err.Error())
-				http.Error(w, "runtime error: could not read the state of worker "+spec.Name+"'s container; nothing was deleted", http.StatusBadGateway)
+				b.audit("worker", actor, "error", verb+": container state: "+err.Error())
+				refuse(w, ReasonRuntimeError, "runtime error: could not read the state of worker "+spec.Name+"'s container; nothing was deleted", http.StatusBadGateway)
 				return
 			}
 			if live {
@@ -124,13 +139,20 @@ func (b *Broker) handleWorkerRecycle(w http.ResponseWriter, r *http.Request) {
 	}
 	// Read now so an unreadable file fails with the record still in place.
 	if _, err := readWorkerInstructions(spec); err != nil {
-		b.audit("worker", b.manager, "error", verb+": "+err.Error())
-		http.Error(w, "instructions error; nothing was deleted", http.StatusInternalServerError)
+		b.audit("worker", actor, "error", verb+": "+err.Error())
+		refuse(w, ReasonConfigFile, "instructions error; nothing was deleted", http.StatusInternalServerError)
 		return
+	}
+	if configTask && task == "" {
+		if task, err = readWorkerTask(spec); err != nil {
+			b.audit("worker", actor, "error", verb+": "+err.Error())
+			refuse(w, ReasonConfigFile, "task_file error: "+err.Error()+"; nothing was deleted", http.StatusInternalServerError)
+			return
+		}
 	}
 	// Before the purge. The start below admits again under the same name,
 	// which is allowed (a worker never counts against itself).
-	release, ok := b.admitOrRefuse(ctx, w, b.manager, "recycle", spec.Name)
+	release, ok := b.admitOrRefuse(ctx, w, actor, "recycle", spec.Name)
 	if !ok {
 		return
 	}
@@ -142,37 +164,40 @@ func (b *Broker) handleWorkerRecycle(w http.ResponseWriter, r *http.Request) {
 		if secs < 1 {
 			secs = 1
 		}
-		b.audit("worker", b.manager, "deny", verb+": rate limited")
+		b.audit("worker", actor, "deny", verb+": rate limited")
 		w.Header().Set("Retry-After", strconv.Itoa(secs))
-		http.Error(w, fmt.Sprintf("rate limited: worker %s was recycled less than a minute ago; try again in %ds. Nothing was deleted.", spec.Name, secs), http.StatusTooManyRequests)
+		refuse(w, ReasonRateLimited, fmt.Sprintf("rate limited: worker %s was recycled less than a minute ago; try again in %ds. Nothing was deleted.", spec.Name, secs), http.StatusTooManyRequests)
 		return
 	}
-	task := fmt.Sprintf("task %d bytes, begins %q", len(req.Task), taskPreview(req.Task))
+	preview := fmt.Sprintf("task %d bytes, begins %q", len(task), taskPreview(task))
 	// The fresh start would be refused; refuse before the purge.
 	if err := b.checkSharedAccess(ctx, spec, false); err != nil {
 		b.recycleRate.refund(spec.Name, counted)
-		b.audit("worker", b.manager, "deny", verb+": "+err.Error())
-		http.Error(w, "forbidden: "+sharedAccessHint(spec.Name, err)+". Nothing was deleted.", http.StatusForbidden)
+		b.audit("worker", actor, "deny", verb+": "+err.Error())
+		refuse(w, ReasonSharedAccess, "forbidden: "+sharedAccessHint(spec.Name, err)+". Nothing was deleted.", http.StatusForbidden)
 		return
 	}
 	if phase == "" {
-		b.audit("worker", b.manager, "allow", verb+": no record, starting fresh; "+task)
+		b.audit("worker", actor, "allow", verb+": no record, starting fresh; "+preview)
 	} else {
 		ticketErr, err := b.purger.PurgeWorker(ctx, spec.Name)
 		if err != nil {
 			b.recycleRate.refund(spec.Name, counted)
-			b.audit("worker", b.manager, "error", verb+": purge (phase "+phase+"): "+err.Error())
-			http.Error(w, "runtime error: the record of worker "+spec.Name+" was not deleted, or its delete was not confirmed; nothing was started. Check `lever-manager agent list` and try again. "+
-				"If it persists, the operator should run `lever doctor`.", http.StatusBadGateway)
+			b.audit("worker", actor, "error", verb+": purge (phase "+phase+"): "+err.Error())
+			check := "Check `lever-manager agent list` and try again. If it persists, the operator should run `lever doctor`."
+			if op {
+				check = "Check `lever worker list` and try again. If it persists, run `lever doctor`."
+			}
+			refuse(w, ReasonRuntimeError, "runtime error: the record of worker "+spec.Name+" was not deleted, or its delete was not confirmed; nothing was started. "+check, http.StatusBadGateway)
 			return
 		}
 		if ticketErr != nil {
 			// The start stages a fresh ticket over what is left.
-			b.audit("worker", b.manager, "error", verb+": removing the staged ticket: "+ticketErr.Error())
+			b.audit("worker", actor, "error", verb+": removing the staged ticket: "+ticketErr.Error())
 		}
-		b.audit("worker", b.manager, "allow", verb+": record deleted (phase "+phase+"), workspace kept; "+task)
+		b.audit("worker", actor, "allow", verb+": record deleted (phase "+phase+"), workspace kept; "+preview)
 	}
-	b.startFreshWorker(w, r, spec, req.Task)
+	b.startFreshWorker(ctx, w, spec, task, false, actor)
 }
 
 func taskPreview(task string) string {

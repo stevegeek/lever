@@ -185,6 +185,7 @@ func LoadNoHostChecks(path string) (*App, error) {
 	for _, g := range app.Workers {
 		bootFiles = append(bootFiles,
 			struct{ key, path string }{fmt.Sprintf("workers[%s].instructions_file", g.Name), app.WorkerInstructionsPath(g)},
+			struct{ key, path string }{fmt.Sprintf("workers[%s].task_file", g.Name), app.WorkerTaskPath(g)},
 			struct{ key, path string }{fmt.Sprintf("workers[%s].image_tar", g.Name), app.WorkerImageTarPath(g)})
 	}
 	for _, m := range bootFiles {

@@ -1035,6 +1035,37 @@ func TestLoadRejectsEmptyOperationName(t *testing.T) {
 	rejectNoHost(t, cfg) // an operation with an empty name must be rejected
 }
 
+// TestLoadValidatesCaveatParam: a caveat_param whose binding is ambiguous is
+// refused at config load; identity and plain renames load.
+func TestLoadValidatesCaveatParam(t *testing.T) {
+	const from = "{name: read, caveat_param: {table: table, filter: filter}}"
+	for _, c := range []struct{ cp, want string }{
+		{`{"": table}`, "empty"},
+		{`{table: ""}`, "empty"},
+		{`{_capability: table}`, "reserved"},
+		{`{table: _capability}`, "reserved"},
+		{`{_x: _x}`, "reserved"},
+		{`{repo: Repo}`, "to itself"},
+		{`{repo: REPO}`, "to itself"},
+		{`{a: b, b: c}`, "renamed key"},
+		{`{a: B, b: c}`, "renamed key"},
+		{`{a: b, b: a}`, "cycle"},
+		{`{a: b, b: c, c: a}`, "renamed key"},
+	} {
+		cfg := strings.Replace(baseCfg, from, "{name: read, caveat_param: "+c.cp+"}", 1)
+		_, err := LoadNoHostChecks(writeConfig(t, cfg))
+		if err == nil || !strings.Contains(err.Error(), "caveat_param") || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: want refused (%s), got %v", c.cp, c.want, err)
+		}
+	}
+	for _, cp := range []string{`{table: table, filter: filter}`, `{repo: repository}`, `{table: schema.table, a: a}`, `{a: x, b: x}`, `{a: b, b: b}`} {
+		cfg := strings.Replace(baseCfg, from, "{name: read, caveat_param: "+cp+"}", 1)
+		if _, err := LoadNoHostChecks(writeConfig(t, cfg)); err != nil {
+			t.Errorf("%s: %v", cp, err)
+		}
+	}
+}
+
 func TestWorkerToWorkerMessagingDefaultsTrue(t *testing.T) {
 	tr := true
 	fa := false

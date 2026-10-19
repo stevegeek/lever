@@ -177,6 +177,12 @@ version bump moves the block under the new version heading.
   only its argument, and the broker answers `400` (`captool` an invalid params error) to a call
   that carries an argument named like a renamed key, under any case.
 
+- **Config load refuses an ambiguous `caveat_param`.** An empty argument name bound a
+  constraint key to an argument the agent names `""`. Config load now refuses an empty name on
+  either side, a name starting with `_` (the broker's own, as in `_capability`), a key renamed to
+  itself under a change of case (`repo: Repo`), and a key renamed to another renamed key, in a
+  chain (`a: b, b: c`) or a cycle (`a: b, b: a`), whose own argument the gateway would refuse.
+
 - **An agent that bloats its own hub record no longer stalls `lever up`.** Each agent can write its
   record's status and activity without a size limit, so the hub's agent list can pass lever's cap
   on scion's output. The host's agent lists and the waits on them now fail at once with an error
@@ -227,6 +233,9 @@ version bump moves the block under the new version heading.
   `lever up --fresh --keep-conversation` once. Plain `lever up` and `lever apply` refuse it until
   then. A worker on such a name (doctor's *manager image* row warns) should be recycled. The
   first apply sets the hub's image registry to `lever.local`.
+
+- **Fix any `caveat_param` that config load now refuses** (see Security): bind each constraint
+  key directly to its argument.
 
 - **Host programs that called `/operator/wake` must run `lever worker resume NAME`** (or POST
   `/operator/worker/resume` without `for`). Run `lever reload` after upgrading: a broker of the

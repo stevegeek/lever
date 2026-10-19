@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"maps"
 	"net"
 	"net/url"
 	"path"
@@ -38,6 +39,9 @@ func (t Tool) validate() error {
 		}
 		if o.Name == wire.WildcardOp {
 			return fmt.Errorf("config: broker tool %q declares operation %q, which is reserved for gate: coarse", t.Name, wire.WildcardOp)
+		}
+		if err := validateCaveatParam(o.CaveatParam); err != nil {
+			return fmt.Errorf("config: broker tool %q operation %q caveat_param: %w", t.Name, o.Name, err)
 		}
 	}
 	if t.Host != "" {
@@ -203,6 +207,44 @@ func validateLimaKeys(a *App, goos string) error {
 		}
 		if n < 2<<30 {
 			return fmt.Errorf("config: memory %q too small: at least 2GiB", a.Memory)
+		}
+	}
+	return nil
+}
+
+// validateCaveatParam refuses a constraint key map whose binding is
+// ambiguous. An empty name binds to an argument the agent names "", and a
+// leading "_" is the gateway's own namespace (_capability). A renamed key
+// binds only its argument and the gateway refuses a call carrying an argument
+// named like the key under case folding, so a key renamed to itself under
+// folding, or to another renamed key (a chain, or a cycle), would refuse the
+// very argument it is meant to read.
+func validateCaveatParam(cp map[string]string) error {
+	keys := slices.Sorted(maps.Keys(cp))
+	for _, ck := range keys {
+		arg := cp[ck]
+		switch {
+		case ck == "" || arg == "":
+			return fmt.Errorf("%q: %q: an empty constraint key or argument name", ck, arg)
+		case strings.HasPrefix(ck, "_") || strings.HasPrefix(arg, "_"):
+			return fmt.Errorf("%q: %q: names starting with _ are reserved for the broker", ck, arg)
+		case ck != arg && strings.EqualFold(ck, arg):
+			return fmt.Errorf("%q: %q renames the key to itself under a change of case; write %q: %q", ck, arg, ck, ck)
+		}
+	}
+	for _, ck := range keys {
+		arg := cp[ck]
+		if ck == arg {
+			continue
+		}
+		for _, other := range keys {
+			if other == ck || other == cp[other] || !strings.EqualFold(arg, other) {
+				continue
+			}
+			if strings.EqualFold(cp[other], ck) {
+				return fmt.Errorf("%q: %q and %q: %q rename each other (a cycle)", ck, arg, other, cp[other])
+			}
+			return fmt.Errorf("%q: %q names the renamed key %q (%q: %q); bind each key to its argument directly", ck, arg, other, other, cp[other])
 		}
 	}
 	return nil

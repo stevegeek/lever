@@ -34,7 +34,7 @@ func TestLoadValid(t *testing.T) {
 backend: orbstack
 tree: ./tree
 manager:
-  image: scionlocal/lever-claude:latest
+  image: lever.local/lever-claude:latest
   allow_ports: [3305]
 workers:
   - name: appa
@@ -321,18 +321,18 @@ func TestAPIKeyEgressClosedLoads(t *testing.T) {
 
 func TestWorkerImageFallsBackToManagerImage(t *testing.T) {
 	app := &App{
-		Manager: Manager{Image: "scionlocal/lever-claude:latest"},
+		Manager: Manager{Image: "lever.local/lever-claude:latest"},
 		Workers: []Worker{
 			{Name: "plain", Dir: "workers/plain"},
-			{Name: "custom", Dir: "workers/custom", Image: "scionlocal/lever-rust:latest"},
+			{Name: "custom", Dir: "workers/custom", Image: "lever.local/lever-rust:latest"},
 		},
 	}
 	g0, _ := app.WorkerByName("plain")
-	if got := app.WorkerImage(g0); got != "scionlocal/lever-claude:latest" {
+	if got := app.WorkerImage(g0); got != "lever.local/lever-claude:latest" {
 		t.Fatalf("plain worker image = %q, want manager image", got)
 	}
 	g1, _ := app.WorkerByName("custom")
-	if got := app.WorkerImage(g1); got != "scionlocal/lever-rust:latest" {
+	if got := app.WorkerImage(g1); got != "lever.local/lever-rust:latest" {
 		t.Fatalf("custom worker image = %q, want override", got)
 	}
 	if _, ok := app.WorkerByName("missing"); ok {
@@ -399,10 +399,10 @@ workers:
 
 func TestArchImage(t *testing.T) {
 	for _, c := range []struct{ ref, arch, want string }{
-		{"scionlocal/lever-claude", "arm64", "scionlocal/lever-claude:arm64"}, // tagless local name → arch tag
-		{"scionlocal/lever-claude", "amd64", "scionlocal/lever-claude:amd64"},
-		{"img", "amd64", "img:amd64"},                                                 // bare name
-		{"scionlocal/lever-claude:latest", "amd64", "scionlocal/lever-claude:latest"}, // explicit tag → untouched
+		{"lever.local/lever-claude", "arm64", "lever.local/lever-claude:arm64"}, // tagless local name → arch tag
+		{"lever.local/lever-claude", "amd64", "lever.local/lever-claude:amd64"},
+		{"img", "amd64", "img:amd64"},                                                   // bare name
+		{"lever.local/lever-claude:latest", "amd64", "lever.local/lever-claude:latest"}, // explicit tag → untouched
 		{"img:v3", "arm64", "img:v3"},
 		{"host:5000/img", "arm64", "host:5000/img:arm64"},       // registry port is NOT a tag → append
 		{"host:5000/img:v2", "arm64", "host:5000/img:v2"},       // registry port + real tag → untouched
@@ -421,26 +421,26 @@ func TestManagerAndWorkerImageResolveArch(t *testing.T) {
 	defer func() { imageArch = save }()
 
 	app := &App{
-		Manager: Manager{Image: "scionlocal/lever-claude"}, // tagless → arch-resolved
+		Manager: Manager{Image: "lever.local/lever-claude"}, // tagless → arch-resolved
 		Workers: []Worker{
-			{Name: "plain", Dir: "workers/plain"},                                 // inherits manager
-			{Name: "tagged", Dir: "workers/tagged", Image: "scionlocal/x:latest"}, // explicit tag kept
-			{Name: "bare", Dir: "workers/bare", Image: "scionlocal/y"},            // tagless → arch-resolved
+			{Name: "plain", Dir: "workers/plain"},                                  // inherits manager
+			{Name: "tagged", Dir: "workers/tagged", Image: "lever.local/x:latest"}, // explicit tag kept
+			{Name: "bare", Dir: "workers/bare", Image: "lever.local/y"},            // tagless → arch-resolved
 		},
 	}
-	if got := app.ManagerImage(); got != "scionlocal/lever-claude:arm64" {
-		t.Errorf("ManagerImage = %q, want scionlocal/lever-claude:arm64", got)
+	if got := app.ManagerImage(); got != "lever.local/lever-claude:arm64" {
+		t.Errorf("ManagerImage = %q, want lever.local/lever-claude:arm64", got)
 	}
 	plain, _ := app.WorkerByName("plain")
-	if got := app.WorkerImage(plain); got != "scionlocal/lever-claude:arm64" {
+	if got := app.WorkerImage(plain); got != "lever.local/lever-claude:arm64" {
 		t.Errorf("plain worker inherits arch-resolved manager image, got %q", got)
 	}
 	tagged, _ := app.WorkerByName("tagged")
-	if got := app.WorkerImage(tagged); got != "scionlocal/x:latest" {
+	if got := app.WorkerImage(tagged); got != "lever.local/x:latest" {
 		t.Errorf("explicitly-tagged worker image must be kept, got %q", got)
 	}
 	bare, _ := app.WorkerByName("bare")
-	if got := app.WorkerImage(bare); got != "scionlocal/y:arm64" {
+	if got := app.WorkerImage(bare); got != "lever.local/y:arm64" {
 		t.Errorf("tagless worker image should arch-resolve, got %q", got)
 	}
 }
@@ -450,17 +450,17 @@ func TestLoadParsesWorkerImage(t *testing.T) {
 backend: orbstack
 tree: ./tree
 manager:
-  image: scionlocal/lever-claude:latest
+  image: lever.local/lever-claude:latest
 workers:
   - name: appa
     dir: workers/appa
-    image: scionlocal/lever-rust:latest
+    image: lever.local/lever-rust:latest
 `)
 	app, err := LoadNoHostChecks(p)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if app.Workers[0].Image != "scionlocal/lever-rust:latest" {
+	if app.Workers[0].Image != "lever.local/lever-rust:latest" {
 		t.Fatalf("worker image = %q", app.Workers[0].Image)
 	}
 }
@@ -607,10 +607,10 @@ func TestSecurityImagePolicy(t *testing.T) {
 	mk := func(sec, img string) string {
 		return "name: demo\nbackend: orbstack\ntree: ws\n" + sec + "manager:\n  image: " + img + "\n"
 	}
-	allowlist := "security:\n  allowed_image_registries: [scionlocal]\n"
+	allowlist := "security:\n  allowed_image_registries: [lever.local]\n"
 	digest := "security:\n  require_image_digest: true\n"
-	both := "security:\n  allowed_image_registries: [scionlocal]\n  require_image_digest: true\n"
-	pinned := "scionlocal/lever-claude@sha256:" + strings.Repeat("a", 64)
+	both := "security:\n  allowed_image_registries: [lever.local]\n  require_image_digest: true\n"
+	pinned := "lever.local/lever-claude@sha256:" + strings.Repeat("a", 64)
 
 	cases := []struct {
 		name   string
@@ -618,13 +618,13 @@ func TestSecurityImagePolicy(t *testing.T) {
 		wantOK bool
 	}{
 		{"no policy, any registry tag", mk("", "ghcr.io/who/x:latest"), true},
-		{"allowlist permits scionlocal", mk(allowlist, "scionlocal/lever-claude:latest"), true},
+		{"allowlist permits lever.local", mk(allowlist, "lever.local/lever-claude:latest"), true},
 		{"allowlist rejects other registry", mk(allowlist, "ghcr.io/who/x:latest"), false},
-		{"allowlist not fooled by prefix", mk(allowlist, "scionlocalevil/x:latest"), false},
-		{"require digest rejects tag", mk(digest, "scionlocal/lever-claude:latest"), false},
+		{"allowlist not fooled by prefix", mk(allowlist, "lever.localevil/x:latest"), false},
+		{"require digest rejects tag", mk(digest, "lever.local/lever-claude:latest"), false},
 		{"require digest accepts pin", mk(digest, pinned), true},
 		{"both accept allowed+pinned", mk(both, pinned), true},
-		{"both reject allowed+unpinned", mk(both, "scionlocal/lever-claude:latest"), false},
+		{"both reject allowed+unpinned", mk(both, "lever.local/lever-claude:latest"), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -642,8 +642,8 @@ func TestSecurityImagePolicy(t *testing.T) {
 
 func TestSecurityImagePolicyAppliesToWorkers(t *testing.T) {
 	body := "name: demo\nbackend: orbstack\ntree: ws\n" +
-		"security:\n  allowed_image_registries: [scionlocal]\n" +
-		"manager:\n  image: scionlocal/mgr:latest\n" +
+		"security:\n  allowed_image_registries: [lever.local]\n" +
+		"manager:\n  image: lever.local/mgr:latest\n" +
 		"workers:\n  - name: g\n    dir: workers/g\n    image: ghcr.io/who/x:latest\n"
 	rejectNoHost(t, body) // worker image outside the allowlist should be rejected
 }
@@ -653,7 +653,7 @@ name: demo
 backend: orbstack
 tree: work
 manager:
-  image: scionlocal/mgr
+  image: lever.local/mgr
   delegate:
     - {tool: db, op: read, to: [worker]}
 workers:

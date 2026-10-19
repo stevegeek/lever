@@ -16,10 +16,6 @@ import "strings"
 // registry live. A qualified name is never rewritten.
 const Registry = "lever.local"
 
-// Legacy is the namespace lever's images used before Registry. A configured
-// "scionlocal/<name>" runs as Registry + "/<name>".
-const Legacy = "scionlocal"
-
 // Qualified reports whether ref names its registry host, which is what keeps
 // scion from rewriting it.
 func Qualified(ref string) bool {
@@ -34,5 +30,5 @@ func Agent(ref string) string {
 	if ref == "" || strings.Contains(ref, "@") || Qualified(ref) {
 		return ref
 	}
-	return Registry + "/" + strings.TrimPrefix(ref, Legacy+"/")
+	return Registry + "/" + ref
 }

@@ -63,9 +63,8 @@ make lever-image
 ```
 
 This cross-compiles the in-jail binaries into `image/lever-claude/`, syncs the pre-start hook, and
-runs `docker build` to produce `lever.local/lever-claude:<arch>`, and `scionlocal/lever-claude:<arch>`
-for a `lever.yaml` that still names it. No registry called `lever.local` exists: `lever apply` loads
-the image into the jail, so scion runs it with no pull. The dotted name is what keeps scion from
+runs `docker build` to produce `lever.local/lever-claude:<arch>`. No registry called `lever.local`
+exists: `lever apply` loads the image into the jail, so scion runs it with no pull. The dotted name is what keeps scion from
 swapping in the hub's image registry, which an agent can change (see [worker
 isolation](/security-model/worker-isolation/)).
 

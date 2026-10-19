@@ -23,7 +23,7 @@ func mustWrite(t *testing.T, path string) {
 // agent-writable all the same.
 func TestLoadRejectsBootFilesReachedThroughRootSymlink(t *testing.T) {
 	cases := []struct{ key, body string }{
-		{"image_tar", "manager:\n  image: scionlocal/x\n  image_tar: img/x.tar\n"},
+		{"image_tar", "manager:\n  image: lever.local/x\n  image_tar: img/x.tar\n"},
 		{"prompt_file", "manager:\n  prompt_file: img/boot.md\n"},
 		{"instructions_file", "manager:\n  instructions_file: img/manual.md\n"},
 		{"scion.binary", "manager: {}\nscion:\n  binary: img/scion\n"},
@@ -47,7 +47,7 @@ func TestLoadRejectsBootFilesReachedThroughRootSymlink(t *testing.T) {
 // A symlink at the root that points to a file OUTSIDE the tree is the
 // operator's business and stays accepted.
 func TestLoadAcceptsRootSymlinkToFileOutsideTree(t *testing.T) {
-	p := writeConfig(t, "name: demo\nbackend: orbstack\ntree: ws\nmanager:\n  prompt_file: boot.md\n  image: scionlocal/x\n  image_tar: x.tar\n")
+	p := writeConfig(t, "name: demo\nbackend: orbstack\ntree: ws\nmanager:\n  prompt_file: boot.md\n  image: lever.local/x\n  image_tar: x.tar\n")
 	root := filepath.Dir(p)
 	outside := t.TempDir()
 	for _, f := range []string{"boot.md", "x.tar"} {
@@ -64,7 +64,7 @@ func TestLoadAcceptsRootSymlinkToFileOutsideTree(t *testing.T) {
 func TestLoadRejectsDirectoryAsBootFile(t *testing.T) {
 	cases := []struct{ key, body string }{
 		{"prompt_file", "manager:\n  prompt_file: boot\n"},
-		{"image_tar", "manager:\n  image: scionlocal/x\n  image_tar: boot\n"},
+		{"image_tar", "manager:\n  image: lever.local/x\n  image_tar: boot\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.key, func(t *testing.T) {

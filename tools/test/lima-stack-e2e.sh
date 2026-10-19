@@ -19,8 +19,7 @@
 #
 # Env: SCION_VERSION (default: the release pin), IMAGE_TAR, IMAGE (default
 # lever.local/lever-claude-slim), SAVE_IMAGE_TAR (copy the archive lever loaded
-# there, e.g. for the hub auth e2e; a lever.local image is also tagged
-# scionlocal/<name> in it, the name an older lever.yaml uses), IMAGE_CACHE (an
+# there, e.g. for the hub auth e2e), IMAGE_CACHE (an
 # archive path: reuse the archive an earlier run saved there when the key file
 # beside it matches this tree's in-jail fingerprint, pins, arch and image, else
 # build the image and save it there), LEVER (default ~/.local/bin/lever), NAME,
@@ -33,7 +32,7 @@ VM="lever-${NAME}"
 LEVER="${LEVER:-$HOME/.local/bin/lever}"
 IMAGE="${IMAGE:-lever.local/lever-claude-slim}"
 # AGENT_IMAGE is the name agents run $IMAGE under (internal/imageref.Agent).
-AGENT_NAME="${IMAGE#lever.local/}"; AGENT_NAME="${AGENT_NAME#scionlocal/}"
+AGENT_NAME="${IMAGE#lever.local/}"
 SCION_VERSION="${SCION_VERSION:-$(sed -n 's/^const ReleasePin = "\(.*\)"/\1/p' "$REPO_ROOT/internal/provision/scionbin/release.go")}"
 SCION_MODULE=github.com/GoogleCloudPlatform/scion
 OPERATOR=operator@example.com
@@ -240,7 +239,7 @@ if [ -z "${IMAGE_TAR:-}" ]; then
 	# podman names a local build of an unqualified ref localhost/<ref>; lever
 	# looks the archive up by the docker form of manager.image.
 	case "$IMAGE" in
-	lever.local/*) names="$IMAGE:$ARCH docker.io/scionlocal/${IMAGE#lever.local/}:$ARCH" ;;
+	lever.local/*) names="$IMAGE:$ARCH" ;;
 	*) names="docker.io/$IMAGE:$ARCH" ;;
 	esac
 	tagged=1

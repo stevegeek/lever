@@ -18,11 +18,11 @@
 # ref of this repo built into the work dir; default: c288d646, the 0.38.0
 # release, the last before proxy auth).
 #
-# The config keeps the image name an older lever.yaml uses (scionlocal/...):
-# after the migration this lever starts agents on its lever.local/ name, and
-# doctor flags the manager the older lever created on the unqualified one.
+# Both levers run the image under its lever.local/ name: the older lever loads
+# a qualified name as written and starts its agents on it, and this one has no
+# other name for it.
 #
-# Env: IMAGE_TAR (required), IMAGE (default scionlocal/lever-claude-slim),
+# Env: IMAGE_TAR (required), IMAGE (default lever.local/lever-claude-slim),
 # OLD_LEVER | OLD_REF, LEVER (default ~/.local/bin/lever), SCION_VERSION
 # (default: the release pin), OLD_SCION_VERSION (the older lever's pin,
 # default e0f61f2d), NAME, KEEP=1.
@@ -32,7 +32,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 NAME="${NAME:-hubauthe2e}"
 VM="lever-${NAME}"
 LEVER="${LEVER:-$HOME/.local/bin/lever}"
-IMAGE="${IMAGE:-scionlocal/lever-claude-slim}"
+IMAGE="${IMAGE:-lever.local/lever-claude-slim}"
 : "${IMAGE_TAR:?set IMAGE_TAR to a docker archive holding $IMAGE:<arch>}"
 SCION_VERSION="${SCION_VERSION:-$(sed -n 's/^const ReleasePin = "\(.*\)"/\1/p' "$REPO_ROOT/internal/provision/scionbin/release.go")}"
 OLD_SCION_VERSION="${OLD_SCION_VERSION:-e0f61f2d}"
@@ -270,14 +270,12 @@ att=$(cd "$INST" && timeout 15 script -qfec "'$LEVER' attach" /dev/null 2>&1 | h
 checkx "lever attach opens with the member controller's PAT" '[ ${#att} -gt 100 ] && ! printf "%s" "$att" | grep -qiE "authentication failed|forbidden|no access token"'
 checkx "the migration needed no broker link (the old window linked it)" '! grep -q "linking the jail.s runtime broker" "$WORK/migrate.log"'
 start_worker2 "migrated"
-AGENT_NAME="${IMAGE#lever.local/}"; AGENT_NAME="${AGENT_NAME#scionlocal/}"
+AGENT_NAME="${IMAGE#lever.local/}"
 AGENT_IMAGE="lever.local/$AGENT_NAME:$ARCH"
 w2img=$(X inspect -f '{{.ImageName}}' lever--worker2 2>&1)
 checkx "migrated: worker2 runs the image under its lever.local name ($w2img)" '[ "$w2img" = "$AGENT_IMAGE" ]'
 checkx "migrated: the jail holds $AGENT_IMAGE" 'X image inspect "$AGENT_IMAGE" >/dev/null 2>&1'
-mrow=$(doctor_row "manager image")
-echo "      | $mrow" | cut -c1-400
-checkx "migrated: doctor warns that the manager runs an unqualified image name" '[[ "$mrow" == "! manager image"*unqualified* ]]'
+check "migrated: doctor: manager image" row_ok "manager image"
 fence_checks "migrated"
 
 say "a contact added while agents run"

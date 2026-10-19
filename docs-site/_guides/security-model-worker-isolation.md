@@ -342,7 +342,7 @@ either (the workstation settings, image registry, runtime, init, image pull and 
 mutating routes, or running the hub in hosted mode (which removes `system/*` entirely).
 
 The image registry route is the one to watch, since it changes where agent images come from.
-scion rewrites a bare image name such as `scionlocal/lever-claude` to the registry it holds, and
+scion rewrites a bare image name such as `myorg/lever-claude` to the registry it holds, and
 this scion keeps that registry in the hub database, which outranks `settings.yaml` and applies at
 the next agent start without a restart. An agent can set it to a registry it controls. lever
 therefore starts every agent on a name with a registry host, `lever.local/<name>`, which scion

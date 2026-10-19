@@ -1051,10 +1051,10 @@ func runCredential(ctx context.Context, s Step, d Deps) error {
 	return d.Scion.SecretSet(ctx, "CLAUDE_CODE_OAUTH_TOKEN", tok)
 }
 
-// ImageRegistry is the registry prefix scion rewrites a bare agent image name
-// to. Agents lever starts run a qualified name scion never rewrites
-// (imageref.Agent); a record created by an older lever keeps its bare name,
-// which this value resolves to the image load-image tagged for it.
+// ImageRegistry is the registry prefix scion rewrites an unqualified agent
+// image name to. Agents lever starts run a qualified name scion never rewrites
+// (imageref.Agent); the pin keeps an agent from pointing a record still on an
+// unqualified name at an image of its own.
 const ImageRegistry = "scionlocal"
 
 // AgentRuntime is the container runtime the jail's scion starts agents with:

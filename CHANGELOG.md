@@ -132,6 +132,13 @@ version bump moves the block under the new version heading.
   any broker that is not this instance's. `lever doctor`'s *guest clock* row now only warns when
   the guest's clock is off, unless agent messages are on: no verification depends on it any more.
 
+- **The `scionlocal/<name>` image name.** lever no longer runs a configured `scionlocal/<name>` as
+  `lever.local/<name>`: config refuses the old name and gives the `lever.local/` one, and `make
+  lever-image` and `make lever-image-slim` tag only `lever.local/<name>:<arch>`. A host's docker
+  can still hold a stale build under the old name, which a `lever.yaml` naming it would have loaded
+  and run. Every apply still pins the hub's image registry to `scionlocal`, which keeps an agent
+  from redirecting a record that is still on an unqualified name.
+
 ### Fixed
 
 - **The broker refuses a tool call with duplicate keys, or keys equal under case folding.** The gateway
@@ -181,6 +188,13 @@ version bump moves the block under the new version heading.
   (`make lever-image` or `make lever-image-slim`, then any instance image built from it) and
   recreate the manager on it with `lever up --fresh --keep-conversation`. Doctor's *agent lever
   version* row says so.
+
+- **Rename `scionlocal/<name>` to `lever.local/<name>` in `lever.yaml`:** `manager.image`,
+  `workers[].image` and any `security.allowed_image_registries` entry that allowed it. Rebuild the
+  image (`make lever-image` or `make lever-image-slim`), and build an instance image `FROM
+  lever.local/lever-claude:<arch>`. An `image_tar` archive must carry the `lever.local/<name>:<arch>`
+  tag: tag the image with it and save the archive again. A manager still running on the old name
+  fails doctor's *manager image* row until `lever up --fresh --keep-conversation` recreates it.
 
 - **Host programs that called `/operator/wake` must run `lever worker resume NAME`** (or POST
   `/operator/worker/resume` without `for`). Run `lever reload` after upgrading: a broker of the

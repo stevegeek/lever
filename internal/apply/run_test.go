@@ -1434,13 +1434,13 @@ func TestRunDispatchesStepsInOrder(t *testing.T) {
 	f := scionOKRunner()
 	app := &config.App{
 		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
-		Manager: config.Manager{Image: "scionlocal/lever-claude:latest"},
+		Manager: config.Manager{Image: "lever.local/lever-claude:latest"},
 		Workers: []config.Worker{{Name: "worker", Dir: "workers/worker"}},
 	}
 	var loadImg bool
 	deps := Deps{
 		LoadImage: func(_ context.Context, ref string) error {
-			loadImg = (ref == "scionlocal/lever-claude:latest")
+			loadImg = (ref == "lever.local/lever-claude:latest")
 			return nil
 		},
 		Scion: hubScion(f, app),
@@ -3756,9 +3756,9 @@ func TestRunLoadImageTarForwardsImageTagPolicy(t *testing.T) {
 			return nil
 		},
 	})
-	app := &config.App{Manager: config.Manager{Image: "scionlocal/mgr:arm64"},
-		Workers: []config.Worker{{Name: "w", Image: "scionlocal/x:arm64"}}}
-	step := Step{Target: "scionlocal/x:arm64", TarPath: "/inst/images/x.tar"}
+	app := &config.App{Manager: config.Manager{Image: "lever.local/mgr:arm64"},
+		Workers: []config.Worker{{Name: "w", Image: "lever.local/x:arm64"}}}
+	step := Step{Target: "lever.local/x:arm64", TarPath: "/inst/images/x.tar"}
 	if err := runLoadImage(context.Background(), step, d, app); err != nil {
 		t.Fatalf("runLoadImage: %v", err)
 	}
@@ -3769,12 +3769,12 @@ func TestRunLoadImageTarForwardsImageTagPolicy(t *testing.T) {
 	if err := runLoadImage(context.Background(), step, d, app); err != nil {
 		t.Fatalf("runLoadImage: %v", err)
 	}
-	for _, ok := range []string{"scionlocal/x:arm64", "docker.io/scionlocal/x:arm64", "lever.local/x:arm64", "scionlocal/other:1"} {
+	for _, ok := range []string{"lever.local/x:arm64", "x:arm64", "docker.io/x:arm64", "lever.local/other:1", "scionlocal/mgr:arm64"} {
 		if err := got(ok); err != nil {
 			t.Errorf("%s: %v", ok, err)
 		}
 	}
-	for _, bad := range []string{"lever.local/mgr:arm64", "scionlocal/mgr:arm64", "docker.io/scionlocal/mgr:arm64", "mgr:arm64"} {
+	for _, bad := range []string{"lever.local/mgr:arm64", "docker.io/mgr:arm64", "docker.io/library/mgr:arm64", "mgr:arm64"} {
 		if err := got(bad); err == nil || !strings.Contains(err.Error(), "configured for another agent") {
 			t.Errorf("%s: want refused, got %v", bad, err)
 		}
@@ -4109,7 +4109,7 @@ func TestManagerStartOptsNestedVirtVolume(t *testing.T) {
 // The manager is created on a qualified image name: scion rewrites a bare one
 // to the hub's image registry, which any agent can set.
 func TestManagerStartOptsQualifiedImage(t *testing.T) {
-	for _, img := range []string{"scionlocal/lever-claude:arm64", "lever.local/lever-claude:arm64"} {
+	for _, img := range []string{"lever-claude:arm64", "lever.local/lever-claude:arm64"} {
 		r := &run{app: &config.App{Name: "m", Manager: config.Manager{Image: img}, Broker: config.Broker{LLMAuth: config.LLMAuthSubscription}}}
 		opts, err := r.managerStartOpts(context.Background(), "/lever/proj", "task", "")
 		if err != nil {

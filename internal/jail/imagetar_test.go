@@ -79,8 +79,8 @@ func writeDockerArchive(t *testing.T, dir string, specs ...tarImageSpec) (string
 
 func TestReadImageTarParsesManifestAndConfig(t *testing.T) {
 	path, digests := writeDockerArchive(t, t.TempDir(),
-		tarImageSpec{repoTags: []string{"scionlocal/lever-claude:arm64"}, labels: map[string]string{"claude_code_version": "2.1.207"}},
-		tarImageSpec{repoTags: []string{"scionlocal/lever-claude:latest", "scionlocal/lever-claude:v3"}, legacy: true},
+		tarImageSpec{repoTags: []string{"myorg/lever-claude:arm64"}, labels: map[string]string{"claude_code_version": "2.1.207"}},
+		tarImageSpec{repoTags: []string{"myorg/lever-claude:latest", "myorg/lever-claude:v3"}, legacy: true},
 	)
 	imgs, err := ReadImageTar(path)
 	if err != nil {
@@ -95,7 +95,7 @@ func TestReadImageTarParsesManifestAndConfig(t *testing.T) {
 	if got := imgs[0].Labels["claude_code_version"]; got != "2.1.207" {
 		t.Errorf("label = %q, want 2.1.207", got)
 	}
-	if len(imgs[1].RepoTags) != 2 || imgs[1].RepoTags[1] != "scionlocal/lever-claude:v3" {
+	if len(imgs[1].RepoTags) != 2 || imgs[1].RepoTags[1] != "myorg/lever-claude:v3" {
 		t.Errorf("repo tags = %v", imgs[1].RepoTags)
 	}
 }
@@ -127,25 +127,25 @@ func TestReadImageTarRejectsArchiveWithoutManifest(t *testing.T) {
 }
 
 // TestFindTarImage pins reference normalisation: docker writes RepoTags
-// unqualified (`scionlocal/x:latest`, `alpine:latest`), while a config may
+// unqualified (`myorg/x:latest`, `alpine:latest`), while a config may
 // name the image qualified, tagless, or both.
 func TestFindTarImage(t *testing.T) {
 	imgs := []TarImage{
-		{RepoTags: []string{"scionlocal/lever-claude:arm64"}, ConfigDigest: "a"},
+		{RepoTags: []string{"myorg/lever-claude:arm64"}, ConfigDigest: "a"},
 		{RepoTags: []string{"alpine:latest"}, ConfigDigest: "b"},
 	}
 	cases := []struct {
 		ref  string
 		want string // digest, "" ⇒ not found
 	}{
-		{"scionlocal/lever-claude:arm64", "a"},
-		{"docker.io/scionlocal/lever-claude:arm64", "a"},
-		{"scionlocal/lever-claude:latest", ""},
-		{"scionlocal/lever-claude", ""}, // tagless ⇒ :latest, which the tar lacks
+		{"myorg/lever-claude:arm64", "a"},
+		{"docker.io/myorg/lever-claude:arm64", "a"},
+		{"myorg/lever-claude:latest", ""},
+		{"myorg/lever-claude", ""}, // tagless ⇒ :latest, which the tar lacks
 		{"alpine", "b"},
 		{"docker.io/library/alpine:latest", "b"},
 		{"library/alpine", "b"},
-		{"ghcr.io/scionlocal/lever-claude:arm64", ""},
+		{"ghcr.io/myorg/lever-claude:arm64", ""},
 	}
 	for _, tc := range cases {
 		got, err := FindTarImage(imgs, tc.ref)
@@ -166,9 +166,9 @@ func TestFindTarImage(t *testing.T) {
 }
 
 func TestFindTarImageErrorListsAvailableTags(t *testing.T) {
-	imgs := []TarImage{{RepoTags: []string{"scionlocal/lever-claude:arm64"}}}
-	_, err := FindTarImage(imgs, "scionlocal/lever-claude:latest")
-	if err == nil || !strings.Contains(err.Error(), "scionlocal/lever-claude:arm64") {
+	imgs := []TarImage{{RepoTags: []string{"myorg/lever-claude:arm64"}}}
+	_, err := FindTarImage(imgs, "myorg/lever-claude:latest")
+	if err == nil || !strings.Contains(err.Error(), "myorg/lever-claude:arm64") {
 		t.Fatalf("err = %v, want the tar's tags listed", err)
 	}
 }
@@ -176,11 +176,11 @@ func TestFindTarImageErrorListsAvailableTags(t *testing.T) {
 // TestLoadImageTarStreamsFileIntoPodmanLoad: the archive's bytes reach the
 // jail's `podman load` on stdin, and host docker is never invoked.
 func TestLoadImageTarStreamsFileIntoPodmanLoad(t *testing.T) {
-	path, _ := writeDockerArchive(t, t.TempDir(), tarImageSpec{repoTags: []string{"scionlocal/lever-claude:arm64"}})
+	path, _ := writeDockerArchive(t, t.TempDir(), tarImageSpec{repoTags: []string{"myorg/lever-claude:arm64"}})
 	want, _ := os.ReadFile(path)
 	r := proc.NewFakeRunner()
 	r.Script("orb", proc.Result{})
-	err := LoadImageTar(context.Background(), r, orbPrefix("lever-demo", "leveruser"), "501", "scionlocal/lever-claude:arm64", path, nil)
+	err := LoadImageTar(context.Background(), r, orbPrefix("lever-demo", "leveruser"), "501", "myorg/lever-claude:arm64", path, nil)
 	if err != nil {
 		t.Fatalf("LoadImageTar: %v", err)
 	}
@@ -202,11 +202,11 @@ func TestLoadImageTarStreamsFileIntoPodmanLoad(t *testing.T) {
 // A tar that does not carry the configured ref is a named config error, and
 // nothing is streamed into the jail.
 func TestLoadImageTarRejectsMissingTag(t *testing.T) {
-	path, _ := writeDockerArchive(t, t.TempDir(), tarImageSpec{repoTags: []string{"scionlocal/lever-claude:arm64"}})
+	path, _ := writeDockerArchive(t, t.TempDir(), tarImageSpec{repoTags: []string{"myorg/lever-claude:arm64"}})
 	r := proc.NewFakeRunner()
 	r.Script("orb", proc.Result{})
-	err := LoadImageTar(context.Background(), r, orbPrefix("m", "u"), "501", "scionlocal/lever-claude:latest", path, nil)
-	if err == nil || !strings.Contains(err.Error(), "scionlocal/lever-claude:latest") || !strings.Contains(err.Error(), path) {
+	err := LoadImageTar(context.Background(), r, orbPrefix("m", "u"), "501", "myorg/lever-claude:latest", path, nil)
+	if err == nil || !strings.Contains(err.Error(), "myorg/lever-claude:latest") || !strings.Contains(err.Error(), path) {
 		t.Fatalf("err = %v, want the ref and the tar path named", err)
 	}
 	if len(r.Calls) != 0 {
@@ -217,7 +217,7 @@ func TestLoadImageTarRejectsMissingTag(t *testing.T) {
 // TestImageLoadedTar: the skip compares the tar's config digest (what podman
 // will assign as the ID) with the jail's ID for the ref — no host docker.
 func TestImageLoadedTar(t *testing.T) {
-	path, digests := writeDockerArchive(t, t.TempDir(), tarImageSpec{repoTags: []string{"scionlocal/lever-claude:arm64"}})
+	path, digests := writeDockerArchive(t, t.TempDir(), tarImageSpec{repoTags: []string{"myorg/lever-claude:arm64"}})
 	prefix := orbPrefix("lever-demo", "leveruser")
 	cases := []struct {
 		name    string
@@ -226,12 +226,12 @@ func TestImageLoadedTar(t *testing.T) {
 		jailOut string
 		want    bool
 	}{
-		{"matching", "scionlocal/lever-claude:arm64", path, digests[0] + "\n", true},
-		{"sha256-prefixed jail id", "scionlocal/lever-claude:arm64", path, "sha256:" + digests[0], true},
-		{"jail-missing", "scionlocal/lever-claude:arm64", path, "", false},
-		{"rebuilt", "scionlocal/lever-claude:arm64", path, strings.Repeat("a", 64), false},
-		{"tag-not-in-tar", "scionlocal/lever-claude:latest", path, digests[0], false},
-		{"tar-missing", "scionlocal/lever-claude:arm64", filepath.Join(t.TempDir(), "none.tar"), digests[0], false},
+		{"matching", "myorg/lever-claude:arm64", path, digests[0] + "\n", true},
+		{"sha256-prefixed jail id", "myorg/lever-claude:arm64", path, "sha256:" + digests[0], true},
+		{"jail-missing", "myorg/lever-claude:arm64", path, "", false},
+		{"rebuilt", "myorg/lever-claude:arm64", path, strings.Repeat("a", 64), false},
+		{"tag-not-in-tar", "myorg/lever-claude:latest", path, digests[0], false},
+		{"tar-missing", "myorg/lever-claude:arm64", filepath.Join(t.TempDir(), "none.tar"), digests[0], false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -272,16 +272,16 @@ func TestReadImageTarRealArchive(t *testing.T) {
 // when there is no host docker store to inspect.
 func TestImageTarLabel(t *testing.T) {
 	path, _ := writeDockerArchive(t, t.TempDir(),
-		tarImageSpec{repoTags: []string{"scionlocal/lever-claude:arm64"}, labels: map[string]string{"claude_code_version": "2.1.240"}},
-		tarImageSpec{repoTags: []string{"scionlocal/bare:latest"}},
+		tarImageSpec{repoTags: []string{"myorg/lever-claude:arm64"}, labels: map[string]string{"claude_code_version": "2.1.240"}},
+		tarImageSpec{repoTags: []string{"myorg/bare:latest"}},
 	)
-	if v, err := ImageTarLabel(path, "scionlocal/lever-claude:arm64", "claude_code_version"); err != nil || v != "2.1.240" {
+	if v, err := ImageTarLabel(path, "myorg/lever-claude:arm64", "claude_code_version"); err != nil || v != "2.1.240" {
 		t.Fatalf("labelled: %q, %v", v, err)
 	}
-	if v, err := ImageTarLabel(path, "scionlocal/bare", "claude_code_version"); err != nil || v != "" {
+	if v, err := ImageTarLabel(path, "myorg/bare", "claude_code_version"); err != nil || v != "" {
 		t.Fatalf("absent label must be \"\" with no error, got %q, %v", v, err)
 	}
-	if _, err := ImageTarLabel(path, "scionlocal/other:latest", "claude_code_version"); err == nil {
+	if _, err := ImageTarLabel(path, "myorg/other:latest", "claude_code_version"); err == nil {
 		t.Fatal("a ref the tar lacks must be an error")
 	}
 }
@@ -332,12 +332,12 @@ func TestSameImageRef(t *testing.T) {
 		a, b string
 		want bool
 	}{
-		{"scionlocal/lever-claude:arm64", "scionlocal/lever-claude:arm64", true},
-		{"docker.io/scionlocal/lever-claude:arm64", "scionlocal/lever-claude:arm64", true},
-		{"localhost/scionlocal/lever-claude:arm64", "scionlocal/lever-claude:arm64", true},
+		{"myorg/lever-claude:arm64", "myorg/lever-claude:arm64", true},
+		{"docker.io/myorg/lever-claude:arm64", "myorg/lever-claude:arm64", true},
+		{"localhost/myorg/lever-claude:arm64", "myorg/lever-claude:arm64", true},
 		{"alpine", "docker.io/library/alpine:latest", true},
-		{"scionlocal/lever-claude:latest", "scionlocal/lever-claude:arm64", false},
-		{"scionlocal/lever-claude:arm64", "scionlocal/other:arm64", false},
+		{"myorg/lever-claude:latest", "myorg/lever-claude:arm64", false},
+		{"myorg/lever-claude:arm64", "myorg/other:arm64", false},
 		{"ghcr.io/x/y:1", "x/y:1", false},
 	}
 	for _, c := range cases {
@@ -353,17 +353,17 @@ func TestSameImageRef(t *testing.T) {
 // the jail.
 func TestLoadImageTarRefusesDisallowedTagBeforeLoad(t *testing.T) {
 	path, _ := writeDockerArchive(t, t.TempDir(),
-		tarImageSpec{repoTags: []string{"scionlocal/lever-claude:arm64"}},
-		tarImageSpec{repoTags: []string{"scionlocal/ok:latest", "evil/miner:latest"}})
+		tarImageSpec{repoTags: []string{"myorg/lever-claude:arm64"}},
+		tarImageSpec{repoTags: []string{"myorg/ok:latest", "evil/miner:latest"}})
 	r := proc.NewFakeRunner()
 	r.Script("orb", proc.Result{})
 	allow := func(ref string) error {
-		if strings.HasPrefix(ref, "scionlocal/") {
+		if strings.HasPrefix(ref, "myorg/") {
 			return nil
 		}
-		return fmt.Errorf("image %q is not from an allowed registry (allowed: scionlocal)", ref)
+		return fmt.Errorf("image %q is not from an allowed registry (allowed: myorg)", ref)
 	}
-	err := LoadImageTar(context.Background(), r, orbPrefix("m", "u"), "501", "scionlocal/lever-claude:arm64", path, allow)
+	err := LoadImageTar(context.Background(), r, orbPrefix("m", "u"), "501", "myorg/lever-claude:arm64", path, allow)
 	if err == nil || !strings.Contains(err.Error(), "evil/miner:latest") || !strings.Contains(err.Error(), "not from an allowed registry") || !strings.Contains(err.Error(), path) {
 		t.Fatalf("err = %v, want the refused tag, the reason and the tar path named", err)
 	}
@@ -374,20 +374,20 @@ func TestLoadImageTarRefusesDisallowedTagBeforeLoad(t *testing.T) {
 
 func TestLoadImageTarLoadsWhenEveryTagIsAllowed(t *testing.T) {
 	path, _ := writeDockerArchive(t, t.TempDir(),
-		tarImageSpec{repoTags: []string{"scionlocal/lever-claude:arm64"}},
-		tarImageSpec{repoTags: []string{"scionlocal/tool:latest"}})
+		tarImageSpec{repoTags: []string{"myorg/lever-claude:arm64"}},
+		tarImageSpec{repoTags: []string{"myorg/tool:latest"}})
 	r := proc.NewFakeRunner()
 	r.Script("orb", proc.Result{})
 	var seen []string
 	allow := func(ref string) error { seen = append(seen, ref); return nil }
-	err := LoadImageTar(context.Background(), r, orbPrefix("m", "u"), "501", "scionlocal/lever-claude:arm64", path, allow)
+	err := LoadImageTar(context.Background(), r, orbPrefix("m", "u"), "501", "myorg/lever-claude:arm64", path, allow)
 	if err != nil {
 		t.Fatalf("LoadImageTar: %v", err)
 	}
 	if len(r.Calls) == 0 || r.Calls[0].Name != "orb" {
 		t.Fatalf("want the podman load call, got %+v", r.Calls)
 	}
-	if !reflect.DeepEqual(seen, []string{"scionlocal/lever-claude:arm64", "scionlocal/tool:latest"}) {
+	if !reflect.DeepEqual(seen, []string{"myorg/lever-claude:arm64", "myorg/tool:latest"}) {
 		t.Fatalf("policy must see every tag in the archive, saw %v", seen)
 	}
 }

@@ -223,6 +223,11 @@ func (s Security) validateImage(field, ref string) error {
 	if !imageRE.MatchString(ref) {
 		return fmt.Errorf("config: %s %q has invalid characters", field, ref)
 	}
+	// A host's docker can still hold a stale lever image under scionlocal/,
+	// which a config naming it would load and run.
+	if name, ok := strings.CutPrefix(ref, "scionlocal/"); ok {
+		return fmt.Errorf("config: %s %q: lever's images are named %s/<name>; use %s/%s (make lever-image builds it)", field, ref, imageref.Registry, imageref.Registry, name)
+	}
 	if len(s.AllowedImageRegistries) > 0 && !registryAllowed(ref, s.AllowedImageRegistries) {
 		return fmt.Errorf("config: %s %q is not from an allowed registry (allowed: %s)", field, ref, strings.Join(s.AllowedImageRegistries, ", "))
 	}
@@ -1140,7 +1145,7 @@ func validateImageTar(who, image, tar string) error {
 }
 
 // validateAgentImagesDistinct: two configured refs that run under one agent
-// image name (scionlocal/x and lever.local/x) would each re-tag it on load,
+// image name (x and lever.local/x) would each re-tag it on load,
 // and one of the agents would run the other's image.
 func (a *App) validateAgentImagesDistinct() error {
 	from := map[string]string{}

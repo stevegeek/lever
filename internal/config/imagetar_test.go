@@ -13,10 +13,10 @@ const tarHeader = "name: demo\nbackend: orbstack\ntree: ws\n"
 // bytes run as the agent, so it must stay inside the instance root.
 func TestValidateRejectsUnconfinedImageTar(t *testing.T) {
 	cases := map[string]string{
-		"manager traversal": tarHeader + "manager:\n  image: scionlocal/x\n  image_tar: ../x.tar\n",
-		"manager absolute":  tarHeader + "manager:\n  image: scionlocal/x\n  image_tar: /srv/x.tar\n",
-		"worker traversal":  tarHeader + "manager: {}\nworkers:\n  - name: w\n    dir: ws/w\n    image: scionlocal/w\n    image_tar: ../w.tar\n",
-		"worker absolute":   tarHeader + "manager: {}\nworkers:\n  - name: w\n    dir: ws/w\n    image: scionlocal/w\n    image_tar: /srv/w.tar\n",
+		"manager traversal": tarHeader + "manager:\n  image: lever.local/x\n  image_tar: ../x.tar\n",
+		"manager absolute":  tarHeader + "manager:\n  image: lever.local/x\n  image_tar: /srv/x.tar\n",
+		"worker traversal":  tarHeader + "manager: {}\nworkers:\n  - name: w\n    dir: ws/w\n    image: lever.local/w\n    image_tar: ../w.tar\n",
+		"worker absolute":   tarHeader + "manager: {}\nworkers:\n  - name: w\n    dir: ws/w\n    image: lever.local/w\n    image_tar: /srv/w.tar\n",
 	}
 	for label, body := range cases {
 		_, err := LoadNoHostChecks(writeConfig(t, body))
@@ -30,8 +30,8 @@ func TestValidateRejectsUnconfinedImageTar(t *testing.T) {
 // at a tar it wrote.
 func TestLoadRejectsImageTarInsideTheTree(t *testing.T) {
 	cases := map[string]string{
-		"manager": tarHeader + "manager:\n  image: scionlocal/x\n  image_tar: ws/x.tar\n",
-		"worker":  tarHeader + "manager: {}\nworkers:\n  - name: w\n    dir: ws/w\n    image: scionlocal/w\n    image_tar: ws/w/w.tar\n",
+		"manager": tarHeader + "manager:\n  image: lever.local/x\n  image_tar: ws/x.tar\n",
+		"worker":  tarHeader + "manager: {}\nworkers:\n  - name: w\n    dir: ws/w\n    image: lever.local/w\n    image_tar: ws/w/w.tar\n",
 	}
 	for label, body := range cases {
 		_, err := LoadNoHostChecks(writeConfig(t, body))
@@ -48,8 +48,8 @@ func TestLoadRejectsImageTarInsideTheTree(t *testing.T) {
 func TestValidateRejectsImageTarWithoutMatchableImage(t *testing.T) {
 	cases := map[string]string{
 		"manager tar without image": tarHeader + "manager:\n  image_tar: x.tar\n",
-		"worker tar without image":  tarHeader + "manager:\n  image: scionlocal/x\nworkers:\n  - name: w\n    dir: ws/w\n    image_tar: w.tar\n",
-		"manager digest-pinned":     tarHeader + "manager:\n  image: scionlocal/x@sha256:" + strings.Repeat("a", 64) + "\n  image_tar: x.tar\n",
+		"worker tar without image":  tarHeader + "manager:\n  image: lever.local/x\nworkers:\n  - name: w\n    dir: ws/w\n    image_tar: w.tar\n",
+		"manager digest-pinned":     tarHeader + "manager:\n  image: lever.local/x@sha256:" + strings.Repeat("a", 64) + "\n  image_tar: x.tar\n",
 	}
 	for label, body := range cases {
 		_, err := LoadNoHostChecks(writeConfig(t, body))
@@ -62,7 +62,7 @@ func TestValidateRejectsImageTarWithoutMatchableImage(t *testing.T) {
 // One image ref must map to one tar: the bring-up loads each distinct ref
 // once, so two tars for the same ref would be an ambiguous source.
 func TestValidateRejectsOneImageFromTwoTars(t *testing.T) {
-	body := tarHeader + "manager:\n  image: scionlocal/x\n  image_tar: a.tar\nworkers:\n  - name: w\n    dir: ws/w\n    image: scionlocal/x\n    image_tar: b.tar\n"
+	body := tarHeader + "manager:\n  image: lever.local/x\n  image_tar: a.tar\nworkers:\n  - name: w\n    dir: ws/w\n    image: lever.local/x\n    image_tar: b.tar\n"
 	_, err := LoadNoHostChecks(writeConfig(t, body))
 	if err == nil || !strings.Contains(err.Error(), "a.tar") || !strings.Contains(err.Error(), "b.tar") {
 		t.Fatalf("want rejection naming both tars, got %v", err)
@@ -73,11 +73,11 @@ func TestImageTarPathsAreRootRelativeAndInheritWithImage(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, CanonicalName)
 	body := "name: demo\nbackend: orbstack\ntree: workspace\nbroker:\n  llm_auth: subscription\n" +
-		"manager:\n  image: scionlocal/x\n  image_tar: images/x.tar\n" +
+		"manager:\n  image: lever.local/x\n  image_tar: images/x.tar\n" +
 		"workers:\n" +
 		"  - name: inherits\n    dir: workers/a\n" +
-		"  - name: own\n    dir: workers/b\n    image: scionlocal/y\n    image_tar: images/y.tar\n" +
-		"  - name: docker\n    dir: workers/c\n    image: scionlocal/z\n"
+		"  - name: own\n    dir: workers/b\n    image: lever.local/y\n    image_tar: images/y.tar\n" +
+		"  - name: docker\n    dir: workers/c\n    image: lever.local/z\n"
 	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestImageTarPathsAreRootRelativeAndInheritWithImage(t *testing.T) {
 }
 
 func TestNoImageTarMeansNoPath(t *testing.T) {
-	app, err := LoadNoHostChecks(writeConfig(t, tarHeader+"manager:\n  image: scionlocal/x\n"))
+	app, err := LoadNoHostChecks(writeConfig(t, tarHeader+"manager:\n  image: lever.local/x\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,17 +121,17 @@ func TestImageTagPolicy(t *testing.T) {
 	if s.ImageTagPolicy() != nil {
 		t.Fatal("no allowed_image_registries: want a nil policy (no check)")
 	}
-	s.AllowedImageRegistries = []string{"scionlocal", "ghcr.io/stevegeek"}
+	s.AllowedImageRegistries = []string{"lever.local", "ghcr.io/stevegeek"}
 	pol := s.ImageTagPolicy()
 	if pol == nil {
 		t.Fatal("allowlist configured: want a policy")
 	}
-	for _, ok := range []string{"scionlocal/lever-claude:arm64", "scionlocal", "ghcr.io/stevegeek/x:v1"} {
+	for _, ok := range []string{"lever.local/lever-claude:arm64", "lever.local", "ghcr.io/stevegeek/x:v1"} {
 		if err := pol(ok); err != nil {
 			t.Errorf("%q: want allowed, got %v", ok, err)
 		}
 	}
-	for _, bad := range []string{"scionlocalevil/x:latest", "alpine:latest", "docker.io/scionlocal/x", "ghcr.io/other/x"} {
+	for _, bad := range []string{"lever.localevil/x:latest", "alpine:latest", "docker.io/lever.local/x", "ghcr.io/other/x"} {
 		err := pol(bad)
 		if err == nil || !strings.Contains(err.Error(), bad) || !strings.Contains(err.Error(), "allowed registry") {
 			t.Errorf("%q: want a refusal naming the ref and the allowlist, got %v", bad, err)
@@ -140,10 +140,10 @@ func TestImageTagPolicy(t *testing.T) {
 }
 
 // Agents run a configured image under a qualified name the hub's image
-// registry setting never rewrites; a legacy scionlocal/ ref and its
-// lever.local/ form are one name, so a config may not use both.
+// registry setting never rewrites; an unqualified ref and its lever.local/
+// form are one name, so a config may not use both.
 func TestAgentImageNames(t *testing.T) {
-	app, err := LoadNoHostChecks(writeConfig(t, tarHeader+"manager:\n  image: scionlocal/x:1\nworkers:\n  - name: w\n    dir: ws/w\n    image: ghcr.io/o/w:2\n  - name: v\n    dir: ws/v\n"))
+	app, err := LoadNoHostChecks(writeConfig(t, tarHeader+"manager:\n  image: x:1\nworkers:\n  - name: w\n    dir: ws/w\n    image: ghcr.io/o/w:2\n  - name: v\n    dir: ws/v\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,8 +156,28 @@ func TestAgentImageNames(t *testing.T) {
 	if got := app.WorkerAgentImage(app.Workers[1]); got != "lever.local/x:1" {
 		t.Errorf("WorkerAgentImage(v) = %q, want the manager's", got)
 	}
-	body := tarHeader + "manager:\n  image: scionlocal/x:1\nworkers:\n  - name: w\n    dir: ws/w\n    image: lever.local/x:1\n"
+	body := tarHeader + "manager:\n  image: x:1\nworkers:\n  - name: w\n    dir: ws/w\n    image: lever.local/x:1\n"
 	if _, err := LoadNoHostChecks(writeConfig(t, body)); err == nil || !strings.Contains(err.Error(), "both run in the jail as lever.local/x:1") {
 		t.Fatalf("want the two names refused, got %v", err)
+	}
+}
+
+// scionlocal/ is not an alias of lever.local/: a config naming it is refused
+// with the name to use, for the manager and a worker alike.
+func TestScionlocalImageRefused(t *testing.T) {
+	for name, body := range map[string]string{
+		"manager": tarHeader + "manager:\n  image: scionlocal/lever-claude:arm64\n",
+		"worker":  tarHeader + "manager: {}\nworkers:\n  - name: w\n    dir: ws/w\n    image: scionlocal/lever-claude\n",
+		"digest":  tarHeader + "manager:\n  image: scionlocal/x@sha256:" + strings.Repeat("a", 64) + "\n",
+	} {
+		_, err := LoadNoHostChecks(writeConfig(t, body))
+		if err == nil || !strings.Contains(err.Error(), "use lever.local/") {
+			t.Errorf("%s: want the scionlocal/ name refused, got %v", name, err)
+		}
+	}
+	for _, ok := range []string{"lever.local/lever-claude:arm64", "scionlocalevil/x:1", "docker.io/scionlocal/x:1"} {
+		if _, err := LoadNoHostChecks(writeConfig(t, tarHeader+"manager:\n  image: "+ok+"\n")); err != nil {
+			t.Errorf("%s: %v", ok, err)
+		}
 	}
 }

@@ -8,7 +8,7 @@ import (
 func TestAgent(t *testing.T) {
 	for _, c := range []struct{ in, want string }{
 		{"", ""},
-		{"scionlocal/lever-claude:amd64", "lever.local/lever-claude:amd64"},
+		{"scionlocal/lever-claude:amd64", "lever.local/scionlocal/lever-claude:amd64"},
 		{"lever.local/lever-claude:amd64", "lever.local/lever-claude:amd64"},
 		{"myimage:1", "lever.local/myimage:1"},
 		{"myorg/tool:2", "lever.local/myorg/tool:2"},

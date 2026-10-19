@@ -11,7 +11,7 @@ package apply_test
 // prerequisite paths are set. Run with:
 //
 //	LEVER_IT=1 \
-//	LEVER_IT_IMAGE=scionlocal/lever-claude:latest \
+//	LEVER_IT_IMAGE=lever.local/lever-claude:latest \
 //	LEVER_IT_SCION_SRC=$LEVER_INSTANCE/vendor/scion-src \
 //	LEVER_IT_CRED=$HOME/.scion/oauth-token \
 //	go test -tags integration -run TestApplyLiveHelloWorker -timeout 35m ./internal/apply/

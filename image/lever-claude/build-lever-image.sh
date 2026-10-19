@@ -13,9 +13,7 @@
 # to the jail's arch tag at apply time (internal/config archImage).
 #
 # Env:
-#   LEVER_IMAGE_REGISTRY  registry prefix of the output tag (default: lever.local).
-#                         The default also tags scionlocal/<name>:<arch>, the
-#                         name a lever.yaml from before lever.local still uses
+#   LEVER_IMAGE_REGISTRY  registry prefix of the output tag (default: lever.local)
 #   LEVER_IMAGE_ARCH      arch the staged binaries were built for (default: arm64);
 #                         selects the scion-claude:<arch> base and the output tag
 #   LEVER_IMAGE_FORCE=1   overwrite an existing <registry>/lever-claude:<arch>
@@ -65,7 +63,6 @@ case "${FLAVOR}" in
     ;;
 esac
 TARGETS=("${REGISTRY}/${NAME}:${ARCH}")
-if [ "${REGISTRY}" = lever.local ]; then TARGETS+=("scionlocal/${NAME}:${ARCH}"); fi
 TAG_ARGS=()
 for t in "${TARGETS[@]}"; do TAG_ARGS+=(-t "${t}"); done
 

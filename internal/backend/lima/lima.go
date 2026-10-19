@@ -611,7 +611,7 @@ func (l *Lima) hardenGuest(ctx context.Context, cfg backend.Config, boot vmBoot)
 func (l *Lima) rebootGuest(ctx context.Context, cfg backend.Config, instDir, params string, warn func(string, ...any)) (bool, error) {
 	s := progress.From(ctx).Current()
 	s.Detail("rebooting the VM to apply " + params)
-	res, err := l.Runner().Run(ctx, nil, "limactl", "stop", l.Machine())
+	res, err := l.Runner().Run(guest.LimitOutput(ctx), nil, "limactl", "stop", l.Machine())
 	if err = exitErr(err, res); err != nil {
 		stopErr := briefErr(err, res)
 		status, serr := l.vmStatus(ctx)

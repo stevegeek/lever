@@ -703,7 +703,6 @@ func TestEnsureScionTakesTheEarlyBuild(t *testing.T) {
 	}
 }
 
-// limitRunner records the output cap each command ran under.
 type limitRunner struct {
 	*proc.FakeRunner
 	limits []int
@@ -840,7 +839,6 @@ func TestEnsureHubAuthBoundsGuestStderr(t *testing.T) {
 	}
 }
 
-// failingRunner fails every command with res.
 type failingRunner struct{ res proc.Result }
 
 func (f *failingRunner) Run(context.Context, map[string]string, string, ...string) (proc.Result, error) {
@@ -859,5 +857,17 @@ func TestGOARCHBoundsTheUnameItQuotes(t *testing.T) {
 	_, err := goarchOf("\x1b]52;c;bad\x07" + strings.Repeat("x", 1<<20))
 	if err == nil || len(err.Error()) > 1000 || strings.ContainsAny(err.Error(), "\x1b\x07") {
 		t.Fatalf("error is %d bytes or carries escapes", len(err.Error()))
+	}
+}
+
+// A dot in the run user must match itself in the subuid check, not any byte.
+func TestEnsureRuntimesMatchesADottedUserLiterally(t *testing.T) {
+	f := proc.NewFakeRunner()
+	f.Script("orb", proc.Result{})
+	if err := orbGuest(f, "m").EnsureRuntimes(context.Background(), "first.last"); err != nil {
+		t.Fatal(err)
+	}
+	if !f.Called(proc.ArgvContains(`grep -q '^first\.last:' /etc/subuid || echo 'first.last:100000:65536' >> /etc/subuid`)) {
+		t.Fatalf("subuid line not matched literally: %+v", f.Calls)
 	}
 }

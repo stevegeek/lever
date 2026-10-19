@@ -11,7 +11,6 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 )
 
-// versionOutMax bounds the unparsed version output an error quotes.
 const versionOutMax = 200
 
 // VersionAtLeast runs argv on the host, extracts "major.minor.patch" from its

@@ -65,10 +65,8 @@ func LimitOutput(ctx context.Context) context.Context {
 	return proc.WithOutputLimit(ctx, OutputLimit)
 }
 
-// stderrMax bounds the guest stderr an error quotes.
 const stderrMax = 500
 
-// quoteStderr is guest stderr as one bounded, printable line for an error.
 func quoteStderr(res proc.Result) string {
 	return SafeLine(strings.TrimSpace(res.Stderr), stderrMax)
 }
@@ -80,7 +78,8 @@ func quoteStderr(res proc.Result) string {
 var runUserRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9._-]{0,31}$`)
 
 // ValidRunUser refuses a run user name or uid the guest reported in any form
-// other than a plain user name and a canonical decimal uid, and refuses root.
+// other than a plain user name and a canonical decimal uid, and uid 0: the
+// rootless runtimes and their user namespaces assume an unprivileged user.
 func ValidRunUser(user, uid string) error {
 	if !runUserRE.MatchString(user) {
 		return fmt.Errorf("the guest reported run user %q, which is not a plain user name", SafeLine(user, 64))
@@ -140,8 +139,10 @@ func (g Guest) EnsureRuntimes(ctx context.Context, runUser string) error {
 	// D-Bus interface intermittently hangs, so loginctl gets a short timeout
 	// and the fallback writes /var/lib/systemd/linger/<user> directly, the
 	// documented equivalent.
+	// A dot in the user name is a regexp wildcard to grep.
+	pat := strings.ReplaceAll(runUser, ".", `\.`)
 	if err := root(fmt.Sprintf(`grep -q '^%s:' /etc/subuid || echo '%s:100000:65536' >> /etc/subuid; grep -q '^%s:' /etc/subgid || echo '%s:100000:65536' >> /etc/subgid; timeout 8 loginctl enable-linger %s 2>/dev/null || { mkdir -p /var/lib/systemd/linger && : > /var/lib/systemd/linger/%s; }`,
-		runUser, runUser, runUser, runUser, runUser, runUser)); err != nil {
+		pat, runUser, pat, runUser, runUser, runUser)); err != nil {
 		return fmt.Errorf("subid/linger: %w", err)
 	}
 	// A guest may still run an unused rootless dockerd; stop and disable it.

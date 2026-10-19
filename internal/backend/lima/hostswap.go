@@ -145,15 +145,15 @@ func (l *Lima) startVM(ctx context.Context, hostSwap bool, instDir string, warn 
 		}
 	}
 	if !scoped {
-		res, err := l.Runner().Run(ctx, nil, start[0], start[1:]...)
+		res, err := l.Runner().Run(guest.LimitOutput(ctx), nil, start[0], start[1:]...)
 		return exitErr(err, res)
 	}
 	argv := append(NoSwapScopePrefix(l.Machine()), start...)
-	res, err := l.Runner().Run(ctx, nil, argv[0], argv[1:]...)
+	res, err := l.Runner().Run(guest.LimitOutput(ctx), nil, argv[0], argv[1:]...)
 	err = exitErr(err, res)
 	if err != nil && scopeNotStarted(res) {
 		warn("jail: warning: starting the VM without the host swap limit: systemd-run could not start the scope (%s); the host can swap the VM's memory out", briefErr(err, res))
-		res, err = l.Runner().Run(ctx, nil, start[0], start[1:]...)
+		res, err = l.Runner().Run(guest.LimitOutput(ctx), nil, start[0], start[1:]...)
 		return exitErr(err, res)
 	}
 	if err == nil {

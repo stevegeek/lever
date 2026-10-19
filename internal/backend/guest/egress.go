@@ -214,8 +214,26 @@ func (g Guest) ensureEgressChain(ctx context.Context) error {
 			return fmt.Errorf("egress: list OUTPUT (%s): %w", bin, err)
 		}
 		if !egress.JumpFirst(after.Stdout) {
-			return fmt.Errorf("egress: after the repair, the %s jump is still not OUTPUT's first and only rule (%s); OUTPUT lists:\n%s", egress.Chain, bin, strings.TrimSpace(after.Stdout))
+			return fmt.Errorf("egress: after the repair, the %s jump is still not OUTPUT's first and only rule (%s); OUTPUT lists:\n%s", egress.Chain, bin, safeListing(after.Stdout))
 		}
 	}
 	return nil
+}
+
+// safeListing is a guest rule listing fit to quote in an error: the guest
+// writes it, and it can be as long as the output cap.
+func safeListing(out string) string {
+	out = strings.TrimSpace(out)
+	var lines []string
+	for _, l := range strings.Split(out, "\n") {
+		lines = append(lines, SafeLine(l, reportLineMax))
+		if len(lines) > reportLinesMax+1 {
+			break
+		}
+	}
+	n := strings.Count(out, "\n") + 1
+	if len(lines) > reportLinesMax {
+		lines = append(lines[:reportLinesMax], fmt.Sprintf("and %d more guest rules not shown", n-reportLinesMax))
+	}
+	return strings.Join(lines, "\n")
 }

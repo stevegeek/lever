@@ -46,8 +46,10 @@ func FingerprintOf(cert *x509.Certificate) Fingerprint {
 }
 
 func (f Fingerprint) matches(cert *x509.Certificate) bool {
-	got := FingerprintOf(cert)
-	return f != "" && subtle.ConstantTimeCompare([]byte(got), []byte(f)) == 1
+	if f == "" || cert == nil {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(FingerprintOf(cert)), []byte(f)) == 1
 }
 
 // ErrPinMismatch is a peer whose key is not the pinned one.

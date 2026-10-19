@@ -90,6 +90,9 @@ func fakeTool(t *testing.T, fakeLog string, allow ...string) Tool {
 
 func newRig(t *testing.T, timeout time.Duration, tools ...Tool) *rig {
 	t.Helper()
+	if timeout == 0 {
+		timeout = 20 * time.Second
+	}
 	r := &rig{t: t, server: newKeyPair(t, x509.ExtKeyUsageServerAuth), client: newKeyPair(t, x509.ExtKeyUsageClientAuth), log: &syncBuffer{}}
 	cfg := &Config{Listen: "127.0.0.1:7443", ClientFingerprint: string(r.client.fp), CallTimeout: timeout, Tools: tools, dir: t.TempDir()}
 	if err := cfg.validate(); err != nil {
@@ -102,6 +105,7 @@ func newRig(t *testing.T, timeout time.Duration, tools ...Tool) *rig {
 	t.Cleanup(srv.Close)
 	r.ts = httptest.NewUnstartedServer(srv)
 	r.ts.TLS = ServerTLSConfig(r.server.cert, r.client.fp)
+	r.ts.Config.ErrorLog = slog.NewLogLogger(srv.log.Handler(), slog.LevelWarn)
 	r.ts.StartTLS()
 	t.Cleanup(r.ts.Close)
 	r.http = &http.Client{Transport: Transport(r.client.cert, r.server.fp)}

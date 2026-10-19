@@ -37,8 +37,8 @@ func fakeMCP() {
 			ID     json.RawMessage `json:"id"`
 			Method string          `json:"method"`
 			Params struct {
-				Name      string            `json:"name"`
-				Arguments map[string]string `json:"arguments"`
+				Name      string         `json:"name"`
+				Arguments map[string]any `json:"arguments"`
 			} `json:"params"`
 		}
 		if json.Unmarshal(line, &msg) != nil || msg.Method == "" {
@@ -65,9 +65,9 @@ func fakeMCP() {
 			case "echo":
 				_ = out.Encode(map[string]any{"jsonrpc": "2.0", "id": 9999, "method": "roots/list"})
 				_ = out.Encode(map[string]any{"jsonrpc": "2.0", "method": "notifications/message", "params": map[string]any{"level": "info"}})
-				reply(text(fmt.Sprintf("pid=%d msg=%s", os.Getpid(), msg.Params.Arguments["msg"])))
+				reply(text(fmt.Sprintf("pid=%d msg=%s", os.Getpid(), fmt.Sprint(msg.Params.Arguments["msg"]))))
 			case "env":
-				v, ok := os.LookupEnv(msg.Params.Arguments["name"])
+				v, ok := os.LookupEnv(fmt.Sprint(msg.Params.Arguments["name"]))
 				reply(text(fmt.Sprintf("%v:%s", ok, v)))
 			case "crash":
 				os.Exit(3)

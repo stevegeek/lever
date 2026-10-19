@@ -145,6 +145,16 @@ version bump moves the block under the new version heading.
   PID in file"), so every `lever up` failed. Lever now removes a pid file that holds anything but
   the digits scion writes (empty, a trailing newline, other bytes), as it already removed one
   naming a dead or foreign pid. Found by the new chaos e2e.
+- **`lever up` recovers a manager that a dead hub left in phase "starting".** The hub writes
+  "starting" before it dispatches a resume, and only the same hub process moves it on. If the hub
+  dies in between, nothing in scion clears it, a resume gets "already exists", and every `lever
+  up` refused after its 60 s wait until the operator discarded the session with `--fresh`. Now,
+  once the wait is over, if podman has no container for the manager, lever runs `scion stop` on
+  the record, after a second podman look 30 s later. That is the hub's own remedy for a stuck
+  start: it cancels the start and keeps the record and its agent home. Lever then resumes the
+  manager as it would any stopped one, so it comes back in a new claude session. The old
+  conversation stays in the home (`lever attach`, then `/resume`). A record with a container, or
+  one podman cannot read, is still refused untouched. Found by the new chaos e2e.
 
 ### Security
 

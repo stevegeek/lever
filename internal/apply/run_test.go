@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -299,6 +300,11 @@ type agentLifecycleRunner struct {
 	resumeForceCalls                                int // subset of resumeCalls carrying --force
 	suspendCalls                                    int
 	suspendErr                                      error
+	// stopCalls counts scion stop on the record; stop moves it to stopped,
+	// or to stopPhase when set (a stop that did not take), or fails with stopErr.
+	stopCalls int
+	stopErr   error
+	stopPhase string
 }
 
 func (r *agentLifecycleRunner) ensureInit() {
@@ -407,6 +413,14 @@ func (r *agentLifecycleRunner) RunIn(ctx context.Context, dir string, env map[st
 			return proc.Result{Code: 1, Stderr: r.suspendErr.Error()}, r.suspendErr
 		}
 		r.phase, r.containerStatus = "suspended", "stopped"
+		return proc.Result{Stdout: "ok"}, nil
+	case "stop":
+		r.stopCalls++
+		r.record(dir, env, name, args)
+		if r.stopErr != nil {
+			return proc.Result{Code: 1, Stderr: r.stopErr.Error()}, r.stopErr
+		}
+		r.phase, r.containerStatus = cmp.Or(r.stopPhase, "stopped"), ""
 		return proc.Result{Stdout: "ok"}, nil
 	case "delete":
 		r.deleteCalls++
@@ -1002,6 +1016,129 @@ func TestStartManagerTransitionalPhaseNeverSettlesFailsWithoutDelete(t *testing.
 			}
 		})
 	}
+}
+
+// TestStartManagerStaleStartingIsStoppedThenResumed: a hub killed mid-resume
+// leaves the record in phase starting with no container, which nothing in
+// scion moves on and which resume refuses. With podman showing no container,
+// lever stops the record (keeping it) and resumes it; with a container, an
+// unreadable podman, or no podman probe, it refuses as before and touches
+// nothing.
+func TestStartManagerStaleStartingIsStoppedThenResumed(t *testing.T) {
+	settle := RetryBudget{Attempts: 2, Interval: time.Millisecond}
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "starting", initContainerStatus: ""}
+	var logged logSink
+	j := &seqJanitor{errs: []error{jail.ErrNoContainer, jail.ErrNoContainer}}
+	deps := Deps{
+		Scion:            scion.New(r, scion.Options{}),
+		StaleContainer:   j,
+		PhaseSettleRetry: settle,
+		Log:              logged.logf,
+	}
+	if err := runApply(app, deps); err != nil {
+		t.Fatalf("a stale starting record with no container must be recovered: %v", err)
+	}
+	if r.stopCalls != 1 || r.resumeCalls != 1 || r.deleteCalls != 0 || r.startCalls != 0 {
+		t.Fatalf("stop/resume/delete/start = %d/%d/%d/%d, want 1/1/0/0", r.stopCalls, r.resumeCalls, r.deleteCalls, r.startCalls)
+	}
+	ref := jail.ContainerName(path.Base(JailPath(app.Tree, app.Tree, "")), app.Name)
+	if len(j.refs) < 2 || j.refs[0] != ref || j.refs[1] != ref {
+		t.Fatalf("podman looks = %q, want at least two of %s", j.refs, ref)
+	}
+	if !slices.ContainsFunc(logged.lines, func(l string) bool {
+		return strings.Contains(l, "a start the hub did not finish") && strings.Contains(l, "new claude session")
+	}) {
+		t.Errorf("no log line names the recovery and the new session: %q", logged.lines)
+	}
+
+	// A container that appears by the second look is a slow start: kept.
+	app2, f2 := newObserveFirstApp(t)
+	r2 := &agentLifecycleRunner{FakeRunner: f2, slug: "hello", initPhase: "starting", initContainerStatus: ""}
+	j2 := &seqJanitor{errs: []error{jail.ErrNoContainer, nil}}
+	err := runApply(app2, Deps{Scion: scion.New(r2, scion.Options{}), StaleContainer: j2, PhaseSettleRetry: settle})
+	testutil.WantErrContaining(t, err, "starting", "--fresh")
+	if r2.stopCalls != 0 || r2.resumeCalls != 0 {
+		t.Fatalf("a container on the second look: stop/resume = %d/%d, want 0/0", r2.stopCalls, r2.resumeCalls)
+	}
+
+	// Other stuck phases are not probed and not stopped.
+	for _, phase := range []string{"stopping", "created", "provisioning", "cloning"} {
+		app, f := newObserveFirstApp(t)
+		r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: phase, initContainerStatus: ""}
+		j := &seqJanitor{errs: []error{jail.ErrNoContainer}}
+		err := runApply(app, Deps{Scion: scion.New(r, scion.Options{}), StaleContainer: j, PhaseSettleRetry: settle})
+		testutil.WantErrContaining(t, err, phase)
+		if r.stopCalls != 0 || r.resumeCalls != 0 {
+			t.Fatalf("%s: stop/resume = %d/%d, want 0/0", phase, r.stopCalls, r.resumeCalls)
+		}
+	}
+
+	for _, c := range []struct {
+		name string
+		j    StaleContainerOps
+	}{
+		{"a container exists", &fakeJanitor{states: []jail.ContainerState{created(staleID)}}},
+		{"podman unreadable", &fakeJanitor{stateErr: errors.New("podman hung")}},
+		{"no podman probe", nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			app, f := newObserveFirstApp(t)
+			r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "starting", initContainerStatus: ""}
+			deps := Deps{Scion: scion.New(r, scion.Options{}), StaleContainer: c.j, PhaseSettleRetry: settle}
+			err := runApply(app, deps)
+			testutil.WantErrContaining(t, err, "starting", "--fresh")
+			if r.stopCalls != 0 || r.resumeCalls != 0 || r.deleteCalls != 0 || r.startCalls != 0 {
+				t.Fatalf("stop/resume/delete/start = %d/%d/%d/%d, want all 0", r.stopCalls, r.resumeCalls, r.deleteCalls, r.startCalls)
+			}
+		})
+	}
+
+	// A stop that fails, or does not take, is refused without a resume.
+	for _, c := range []struct {
+		name      string
+		stopErr   error
+		stopPhase string
+		want      string
+	}{
+		{"stop fails", errors.New("hub said no"), "", "scion stop"},
+		{"stop does not take", nil, "stopping", "not stopped"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			app, f := newObserveFirstApp(t)
+			r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "starting", initContainerStatus: "",
+				stopErr: c.stopErr, stopPhase: c.stopPhase}
+			deps := Deps{Scion: scion.New(r, scion.Options{}), StaleContainer: &fakeJanitor{stateErr: jail.ErrNoContainer}, PhaseSettleRetry: settle}
+			err := runApply(app, deps)
+			testutil.WantErrContaining(t, err, c.want, "--fresh")
+			if r.stopCalls != 1 || r.resumeCalls != 0 || r.deleteCalls != 0 {
+				t.Fatalf("stop/resume/delete = %d/%d/%d, want 1/0/0", r.stopCalls, r.resumeCalls, r.deleteCalls)
+			}
+		})
+	}
+}
+
+// seqJanitor answers State with errs in turn (the last one repeats; nil is a
+// created container) and records each ref asked about.
+type seqJanitor struct {
+	errs []error
+	refs []string
+}
+
+func (j *seqJanitor) State(_ context.Context, ref string) (jail.ContainerState, error) {
+	j.refs = append(j.refs, ref)
+	err := j.errs[0]
+	if len(j.errs) > 1 {
+		j.errs = j.errs[1:]
+	}
+	if err != nil {
+		return jail.ContainerState{}, err
+	}
+	return created(staleID), nil
+}
+
+func (j *seqJanitor) Remove(context.Context, string) error {
+	return errors.New("seqJanitor removes nothing")
 }
 
 // TestStartManagerCreatedNeverSettlesNamesWarmUp: a manager

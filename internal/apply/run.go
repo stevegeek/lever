@@ -2007,12 +2007,76 @@ func (r *run) settleManagerPhase(ctx context.Context, jp string, rec *scion.Agen
 		return nil, fmt.Errorf("start-manager: manager %q was in phase %q and could not be re-observed within %s (last error: %v); nothing was changed. Retry, or run `lever up --fresh` to discard the session and start over",
 			r.app.Name, cur.Phase, time.Duration(b.Attempts)*b.Interval, listErr)
 	}
+	if cur.Phase == phaseStarting {
+		if rec, done, err := r.cancelStaleStart(ctx, jp, cur); done {
+			return rec, err
+		}
+	}
 	if cur.Phase == "created" {
 		return nil, fmt.Errorf("start-manager: manager %q stayed in phase %q for %s and did not settle; nothing was changed. %s",
 			r.app.Name, cur.Phase, time.Duration(b.Attempts)*b.Interval, createdStuckHint(r.app.ManagerAgentImage()))
 	}
 	return nil, fmt.Errorf("start-manager: manager %q stayed in phase %q for %s and did not settle; nothing was changed. Retry once it settles (is a `lever stop` still running?), or run `lever up --fresh` to discard the session and start over",
 		r.app.Name, cur.Phase, time.Duration(b.Attempts)*b.Interval)
+}
+
+// phaseStarting is the phase scion's hub writes while it dispatches a start
+// or resume (beginStartDispatch), and moves off only from the same process.
+const phaseStarting = "starting"
+
+// cancelStaleStart recovers a manager record a dead hub left in phase
+// starting. The hub writes starting before it dispatches a resume, and only
+// its own rollback or post-start write moves the row off it. If the hub
+// process dies in between, nothing does: the start-claim reaper frees the
+// claim but leaves the phase, the heartbeat reconcile looks only at running
+// rows, and the launch reaper only at creates. Resume and resume --force get
+// a 409 ("already exists") over a starting row, so every lever up would
+// refuse until the operator discarded the session.
+//
+// It acts only when the phase outlived the settle wait, the caller holds the
+// lifecycle lock (EnsureManager), so no lever start is in flight, and podman
+// knows no container for the manager on two looks stopClaimSettle.Created
+// apart. A start under way creates its container well within that; the
+// lock does not exclude a hub-side start (a wake, or a dispatch an earlier
+// lever up left running), and the second look keeps a slow one from being
+// stopped. Then scion stop, the remedy the hub itself names for a stuck
+// start: it cancels any start still in flight on the broker, writes stopped
+// and keeps the record and its agent home. The plan resumes it like any
+// stopped manager, which scion does in a new claude session; the old
+// conversation stays in the home. done is false when the case does not
+// apply; the caller then refuses as before.
+func (r *run) cancelStaleStart(ctx context.Context, jp string, cur *scion.Agent) (*scion.Agent, bool, error) {
+	if r.d.StaleContainer == nil {
+		return nil, false, nil
+	}
+	ref := jail.ContainerName(path.Base(jp), r.app.Name)
+	if _, err := r.d.StaleContainer.State(ctx, ref); !errors.Is(err, jail.ErrNoContainer) {
+		return nil, false, nil
+	}
+	select {
+	case <-ctx.Done():
+		return nil, true, ctx.Err()
+	case <-time.After(stopClaimSettle.Created):
+	}
+	if _, err := r.d.StaleContainer.State(ctx, ref); !errors.Is(err, jail.ErrNoContainer) {
+		return nil, false, nil
+	}
+	r.d.Log("start-manager: manager %q stayed in phase %q with no container %s: a start the hub did not finish (it stopped mid-dispatch); stopping the record to cancel it. The record and its agent home are kept; the manager comes back in a new claude session, and the old conversation stays in the home (`lever attach`, then /resume)",
+		r.app.Name, cur.Phase, ref)
+	if err := r.d.managerScion().Stop(ctx, r.app.Name, jp); err != nil {
+		return nil, true, fmt.Errorf("start-manager: manager %q stayed in phase %q with no container, and the scion stop that cancels the unfinished start failed; nothing else was changed. Retry, or run `lever up --fresh` to discard the session and start over: %w",
+			r.app.Name, cur.Phase, err)
+	}
+	agents, err := r.listAgentsRetry(ctx, jp)
+	if err != nil {
+		return nil, true, fmt.Errorf("start-manager: stopped manager %q to cancel an unfinished start, but could not read its record back; retry, or run `lever up --fresh` to discard the session and start over: %w", r.app.Name, err)
+	}
+	rec := scion.FindAgent(agents, r.app.Name)
+	if rec != nil && rec.Phase != scion.PhaseStopped {
+		return nil, true, fmt.Errorf("start-manager: stopped manager %q to cancel an unfinished start, but the hub reads it in phase %s, not stopped; nothing else was changed. Retry once it settles, or run `lever up --fresh` to discard the session and start over",
+			r.app.Name, scion.BoundedQuote(rec.Phase))
+	}
+	return rec, true, nil
 }
 
 // createdStuckHint explains the usual cause of a manager stuck in phase

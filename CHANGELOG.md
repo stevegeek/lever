@@ -7,6 +7,29 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`lever up --fresh` no longer stages the new manager's enrolment ticket while the old manager's
+  container can read it (security).** The mint step wrote the single-use ticket into the tree
+  before the old record was deleted. The tree is the old manager's mount and the ticket is bound to
+  the manager identity both share, so the manager being discarded, still running, could redeem it
+  first and enrol as the new one. Under `--fresh` the ticket is now minted and staged only after
+  the record is gone and podman shows no container by the manager's name; a container with no
+  process in it is removed first (by id, never forced). If podman still shows the container after
+  30 seconds, or cannot say, `lever up --fresh` fails with no ticket staged and no manager created:
+  run it again once the container is gone. The fresh start lever makes on its own for a manager
+  with no conversation waits the same way before it re-arms the broker.
+- **The broker's certificate heal of the manager acts only on the container it resumed.** The heal
+  lets go of the lifecycle lock before it waits for claude, and another command can replace the
+  manager's container in that time. It now notes podman's id of the container it resumed, and
+  after the wait does nothing more (no mount check, no suspend) unless podman still shows that
+  container; when podman cannot give the id, it keeps the lock to the end.
+- **The remote proxy step fails when the new proxy never starts serving.** Another process holding
+  the remote port (a proxy an older run leaked) could answer the bring-up's check before the new
+  proxy failed to bind, and apply only warned. A new proxy that never records itself in
+  `remote.pid` now fails the step and is stopped. A proxy that runs but stamped a config edited
+  during the apply stays a warning, as before.
+
 ## [0.50.0] - 2026-10-19
 
 ### Added

@@ -2,10 +2,14 @@ package guest
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
+	"github.com/stevegeek/lever/internal/backend/types"
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/scion/layout"
 )
 
 // telemetryBlock digs out the top-level telemetry mapping, or nil.
@@ -203,5 +207,32 @@ func TestEnsureScionTelemetryFailsWhenItCannotRead(t *testing.T) {
 	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "m"}}
 	if _, err := g.EnsureScionTelemetry(context.Background(), true); err == nil {
 		t.Fatal("an unreadable settings file was treated as empty")
+	}
+}
+
+// A settings parse error quotes guest-written text (an alias names its
+// anchor); what reaches the operator is bounded and terminal-safe.
+func TestJailSettingsParseErrorIsBounded(t *testing.T) {
+	long := []byte("a: *" + strings.Repeat("x", 100000) + "\n")
+	if _, raw := layout.ParseSettings(long); raw == nil || len(raw.Error()) < 100000 {
+		t.Fatalf("the YAML error no longer quotes the anchor, so this test proves nothing: %.200q", fmt.Sprint(raw))
+	}
+	_, _, err := telemetrySettingsConverged(long, true)
+	if err == nil || utf8.RuneCountInString(err.Error()) > settingsErrMax+100 {
+		t.Fatalf("long: %d runes: %.200q", utf8.RuneCountInString(fmt.Sprint(err)), fmt.Sprint(err))
+	}
+	if _, err := ScionTelemetryEnabled(long); err == nil || utf8.RuneCountInString(err.Error()) > settingsErrMax+1 {
+		t.Fatalf("ScionTelemetryEnabled: %.200q", fmt.Sprint(err))
+	}
+	if _, _, _, err := hubAuthSettingsConverged(long, types.HubAuth{}, false); err == nil || utf8.RuneCountInString(err.Error()) > settingsErrMax+100 {
+		t.Fatalf("hub auth: %.200q", fmt.Sprint(err))
+	}
+	for _, in := range []string{"a: *x\x1b[31m\n", "\x1b]0;t\a: [\n"} {
+		if _, err := parseJailSettings([]byte(in)); err == nil || strings.ContainsAny(err.Error(), "\x1b\a") {
+			t.Fatalf("%q: %q", in, fmt.Sprint(err))
+		}
+	}
+	if _, err := ScionTelemetryEnabled([]byte("telemetry:\n  enabled: false\n")); err != nil {
+		t.Fatalf("normal: %v", err)
 	}
 }

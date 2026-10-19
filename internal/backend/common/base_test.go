@@ -109,3 +109,19 @@ func TestJailImageCommandsRunUnderTheGuestOutputLimit(t *testing.T) {
 		}
 	}
 }
+
+// A jail command with no cap of its own (the scion CLI, the probes) runs
+// under the guest output cap; one that set its own keeps it.
+func TestJailRunnerRunsUnderTheGuestOutputLimit(t *testing.T) {
+	r := &limitRecorder{FakeRunner: proc.NewFakeRunner()}
+	r.Script("", proc.Result{Stdout: "[]\n"})
+	b := NewBase(Config{Runner: r, Machine: "m", Hooks: Hooks{
+		JailPrefix: func(machine, _ string) []string { return []string{"enter", machine} },
+	}})
+	ctx := context.Background()
+	_, _ = b.JailRunner().Run(ctx, nil, "scion", "list", "--format", "json")
+	_, _ = b.JailRunner().Run(proc.WithOutputLimit(ctx, 512<<20), nil, "capture")
+	if !slices.Equal(r.limits, []int{guest.OutputLimit, 512 << 20}) {
+		t.Fatalf("caps = %v", r.limits)
+	}
+}

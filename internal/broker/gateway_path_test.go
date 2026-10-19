@@ -200,3 +200,43 @@ func TestGatewayAuditsRefusedPath(t *testing.T) {
 		t.Fatalf("audit path not truncated:\n%s", out)
 	}
 }
+
+// Neither an empty query nor a header some servers read as the real path or
+// method gets past the pin.
+func TestGatewayDropsRoutingHintsUpstream(t *testing.T) {
+	var uri string
+	var hdr http.Header
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		uri, hdr = r.RequestURI, r.Header.Clone()
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+	}))
+	t.Cleanup(up.Close)
+	b := New(testConfig(t))
+	if err := b.reg.Register(regTool("db", strings.TrimPrefix(up.URL, "http://")+"/mcp", "read")); err != nil {
+		t.Fatal(err)
+	}
+	h, err := b.gatewayHandler("db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("POST", "/mcp/db/?", strings.NewReader(initBody))
+	r.TLS = leafFor(t, b, "worker")
+	hints := []string{"X-Original-URL", "X-Rewrite-URL", "X-Original-Method", "X-HTTP-Method-Override",
+		"X-HTTP-Method", "X-Method-Override", "X-Forwarded-Prefix", "X-Forwarded-Uri", "X-Forwarded-Path"}
+	for _, k := range hints {
+		r.Header.Set(k, "/admin")
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body)
+	}
+	if uri != "/mcp" {
+		t.Fatalf("backend reached as %q, want %q", uri, "/mcp")
+	}
+	for _, k := range hints {
+		if v := hdr.Get(k); v != "" {
+			t.Fatalf("SECURITY: %s forwarded to the backend: %q", k, v)
+		}
+	}
+}

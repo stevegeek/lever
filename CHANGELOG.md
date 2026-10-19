@@ -26,10 +26,13 @@ version bump moves the block under the new version heading.
 - **A tool call reaches only its backend's MCP path (security).** The gateway forwarded whatever
   path an agent put after `/mcp/<tool>/` to the tool's backend, so an allowed MCP message could
   reach any other route on that `host:port`, such as an admin or metrics endpoint. Every request
-  now goes to the backend's configured path (`/` for a `backend` without one, as before), and the
-  agent's query string is dropped. Any other path under `/mcp/<tool>/` gets `404` and is logged as
-  `decision=deny detail="path not allowed"`; it never reaches the backend. A caller without a valid
-  client certificate still gets `403` on every path. Agents already use `/mcp/<tool>/`, so nothing
+  now goes to the backend's configured path and query (`/` for a `backend` without a path, as
+  before); the agent's query string is dropped, and so are headers that some servers read as the
+  real path or method (`X-Original-URL`, `X-Rewrite-URL`, `X-HTTP-Method-Override` and the like,
+  and every `X-Forwarded-*` but `X-Forwarded-For`). Any other path under `/mcp/<tool>/` gets `404`
+  and is logged as `decision=deny detail="path not allowed"`; it never reaches the backend. A
+  caller without a valid client certificate still gets `403` on every path under the tool route.
+  Agents already use `/mcp/<tool>/`, so nothing
   changes for them.
 
 ## [0.50.0] - 2026-10-19

@@ -29,7 +29,8 @@ const toolSecretHeader = "X-Lever-Tool-Secret"
 
 // rewriteUpstream routes to target, pins the outbound Host and drops
 // client-supplied forwarding/identity headers. Rewrite's Out request already
-// lacks inbound X-Forwarded-*, so only Cookie is scrubbed, and X-Forwarded-For
+// lacks inbound Forwarded and X-Forwarded-For/-Host/-Proto (other
+// X-Forwarded-* pass), so only Cookie is scrubbed here, and X-Forwarded-For
 // is set to the immediate client IP without the inbound chain. Credential
 // headers are not touched here: the llm proxy injects the real key after this
 // runs.
@@ -180,6 +181,13 @@ func truncate(s string, n int) string {
 	return s
 }
 
+// routingHeaders are honoured by some frameworks and front ends as the
+// request's real path or method, which would undo the path pin.
+var routingHeaders = []string{
+	"X-Original-Url", "X-Rewrite-Url", "X-Original-Method",
+	"X-Http-Method-Override", "X-Http-Method", "X-Method-Override",
+}
+
 // newToolProxy sends every request to the backend's configured path and
 // query, whatever the inbound URL: the backend host may serve other routes
 // (admin, metrics) that a capability for its MCP endpoint must not reach.
@@ -196,6 +204,16 @@ func newToolProxy(target *url.URL) *httputil.ReverseProxy {
 		pr.Out.URL.Path = path
 		pr.Out.URL.RawPath = rawPath
 		pr.Out.URL.RawQuery = target.RawQuery
+		pr.Out.URL.ForceQuery = false
+		pr.Out.URL.Fragment, pr.Out.URL.RawFragment = "", ""
+		for _, h := range routingHeaders {
+			pr.Out.Header.Del(h)
+		}
+		for name := range pr.Out.Header {
+			if strings.HasPrefix(name, "X-Forwarded-") && name != "X-Forwarded-For" {
+				pr.Out.Header.Del(name)
+			}
+		}
 	}
 	rp.ModifyResponse = func(resp *http.Response) error {
 		if resp.Request == nil || resp.Request.Header.Get("X-Lever-Method") != "tools/list" {

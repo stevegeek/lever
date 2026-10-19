@@ -11,6 +11,8 @@ import (
 	"os"
 	"path"
 	"strings"
+
+	"github.com/stevegeek/lever/internal/imageref"
 )
 
 // TarImage is one image described by a docker archive's manifest.json.
@@ -121,18 +123,8 @@ func SameImageRef(a, b string) bool {
 	return normalizeRef(strings.TrimPrefix(a, "localhost/")) == normalizeRef(strings.TrimPrefix(b, "localhost/"))
 }
 
-// normalizeRef looks for a tag after the last '/', so a registry port is not
-// a tag.
 func normalizeRef(ref string) string {
-	ref = strings.TrimPrefix(strings.TrimSpace(ref), "docker.io/")
-	if !strings.Contains(ref, "/") {
-		ref = "library/" + ref
-	}
-	name := ref[strings.LastIndex(ref, "/")+1:]
-	if !strings.ContainsAny(name, ":@") {
-		ref += ":latest"
-	}
-	return ref
+	return imageref.Normalize(strings.TrimSpace(ref))
 }
 
 // ImageTarLabel returns the value of label key on the image tagged ref in

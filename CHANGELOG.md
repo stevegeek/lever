@@ -161,6 +161,14 @@ version bump moves the block under the new version heading.
   record is on an unqualified name, instead of warning, and says to run `lever up --fresh
   --keep-conversation`; doctor's *manager image* row fails for it.
 
+- **Two spellings of one image name are one image to config and to `image_tar`.** `x:arm64` and
+  `docker.io/library/x:arm64` are one name in the jail's podman, but config load compared them as
+  written, and an `image_tar` archive's tags were compared the same way, so one agent could end
+  up running another's image. Config load and the tag check now compare normalised names
+  (`docker.io` as the default registry, `library/` for a single-name image, `:latest` as the
+  default tag, a lowercase registry host), with the `localhost/` and `lever.local/` names an image
+  is loaded under. A config with two such spellings is refused.
+
 - **A constraint on a renamed argument is checked against that argument only.** When a tool's
   `caveat_param` maps a constraint key to another argument name (`repo: repository`), the gateway
   and `captool` also read an argument named like the key itself, so a call that omitted

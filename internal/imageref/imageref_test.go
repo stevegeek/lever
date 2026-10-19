@@ -50,3 +50,63 @@ func TestAgentNeverRewritten(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalize(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"", ""},
+		{"x", "docker.io/library/x:latest"},
+		{"x:arm64", "docker.io/library/x:arm64"},
+		{"docker.io/library/x:arm64", "docker.io/library/x:arm64"},
+		{"docker.io/x:arm64", "docker.io/library/x:arm64"},
+		{"index.docker.io/library/x:arm64", "docker.io/library/x:arm64"},
+		{"Docker.IO/x:arm64", "docker.io/library/x:arm64"},
+		{"myorg/x", "docker.io/myorg/x:latest"},
+		{"Lever.Local/x:1", "lever.local/x:1"},
+		{"localhost/x", "localhost/x:latest"},
+		{"registry:5000/x", "registry:5000/x:latest"},
+		{"registry:5000/x:2", "registry:5000/x:2"},
+		{"x@sha256:abc", "docker.io/library/x@sha256:abc"},
+		{"ghcr.io/o/x:1@sha256:abc", "ghcr.io/o/x:1@sha256:abc"},
+	} {
+		if got := Normalize(c.in); got != c.want {
+			t.Errorf("Normalize(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// Two spellings of one image share a name; distinct images do not.
+func TestNames(t *testing.T) {
+	share := func(a, b string) bool {
+		for _, x := range Names(a) {
+			for _, y := range Names(b) {
+				if x == y {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	for _, c := range [][2]string{
+		{"x:arm64", "docker.io/library/x:arm64"},
+		{"x:arm64", "index.docker.io/library/x:arm64"},
+		{"x:arm64", "lever.local/x:arm64"},
+		{"x:arm64", "LEVER.LOCAL/x:arm64"},
+		{"x:arm64", "localhost/x:arm64"},
+		{"x", "docker.io/library/x:latest"},
+		{"myorg/x:1", "docker.io/myorg/x:1"},
+	} {
+		if !share(c[0], c[1]) {
+			t.Errorf("%q and %q share no name: %q, %q", c[0], c[1], Names(c[0]), Names(c[1]))
+		}
+	}
+	for _, c := range [][2]string{
+		{"x:arm64", "y:arm64"},
+		{"x:arm64", "x:amd64"},
+		{"lever.local/x:1", "ghcr.io/o/x:1"},
+		{"myorg/x:1", "x:1"},
+	} {
+		if share(c[0], c[1]) {
+			t.Errorf("%q and %q share a name: %q, %q", c[0], c[1], Names(c[0]), Names(c[1]))
+		}
+	}
+}

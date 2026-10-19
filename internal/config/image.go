@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/stevegeek/lever/internal/imageref"
@@ -61,20 +62,29 @@ func (a *App) WorkerAgentImage(g Worker) string {
 // another configured image, under its configured name or the name agents run
 // it as: podman load imports every tag in an archive, so the tag would repoint
 // that agent's image.
+//
+// A tag is compared by every name it is held under and, for a Docker Hub
+// tag, every name its short form is, so a tag that only shadows another
+// image's short name is refused too.
 func (a *App) CheckTarTag(stepRef, tag string) error {
-	plain := strings.TrimPrefix(strings.TrimPrefix(tag, "docker.io/"), "library/")
-	own := imageref.Agent(stepRef)
+	own := imageref.Normalize(imageref.Agent(stepRef))
 	refs := []string{a.ManagerImage()}
 	for _, g := range a.Workers {
 		refs = append(refs, a.WorkerImage(g))
 	}
+	tagNames := imageref.Names(tag)
+	if short, ok := strings.CutPrefix(imageref.Normalize(tag), "docker.io/"); ok {
+		tagNames = append(tagNames, imageref.Names(strings.TrimPrefix(short, "library/"))...)
+	}
 	for _, r := range refs {
-		agent := imageref.Agent(r)
-		if r == "" || agent == own {
+		if r == "" || imageref.Normalize(imageref.Agent(r)) == own {
 			continue
 		}
-		if plain == r || tag == r || imageref.Agent(plain) == agent || tag == agent {
-			return fmt.Errorf("image %q is configured for another agent (it runs as %s); one archive may not carry it", tag, agent)
+		names := imageref.Names(r)
+		for _, n := range tagNames {
+			if slices.Contains(names, n) {
+				return fmt.Errorf("image %q is configured for another agent (it runs as %s); one archive may not carry it", tag, imageref.Agent(r))
+			}
 		}
 	}
 	return nil

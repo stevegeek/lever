@@ -1149,20 +1149,21 @@ func validateImageTar(who, image, tar string) error {
 	return nil
 }
 
-// validateAgentImagesDistinct: two configured refs that run under one agent
-// image name (x and lever.local/x) would each re-tag it on load,
-// and one of the agents would run the other's image.
+// validateAgentImagesDistinct: two configured refs that the jail's podman
+// holds under one name (x and lever.local/x, or x:1 and
+// docker.io/library/x:1) would each re-tag it on load, and one of the agents
+// would run the other's image.
 func (a *App) validateAgentImagesDistinct() error {
 	from := map[string]string{}
 	check := func(ref string) error {
-		agent := imageref.Agent(ref)
-		if agent == "" {
-			return nil
+		for _, name := range imageref.Names(ref) {
+			if prev, ok := from[name]; ok && prev != ref {
+				return fmt.Errorf("config: images %q and %q are both held in the jail as %s; name one image one way", prev, ref, name)
+			}
 		}
-		if prev, ok := from[agent]; ok && prev != ref {
-			return fmt.Errorf("config: images %q and %q both run in the jail as %s; name one image one way", prev, ref, agent)
+		for _, name := range imageref.Names(ref) {
+			from[name] = ref
 		}
-		from[agent] = ref
 		return nil
 	}
 	if err := check(a.ManagerImage()); err != nil {

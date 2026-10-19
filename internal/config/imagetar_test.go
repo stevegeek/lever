@@ -157,8 +157,41 @@ func TestAgentImageNames(t *testing.T) {
 		t.Errorf("WorkerAgentImage(v) = %q, want the manager's", got)
 	}
 	body := tarHeader + "manager:\n  image: x:1\nworkers:\n  - name: w\n    dir: ws/w\n    image: lever.local/x:1\n"
-	if _, err := LoadNoHostChecks(writeConfig(t, body)); err == nil || !strings.Contains(err.Error(), "both run in the jail as lever.local/x:1") {
+	if _, err := LoadNoHostChecks(writeConfig(t, body)); err == nil || !strings.Contains(err.Error(), "both held in the jail as lever.local/x:1") {
 		t.Fatalf("want the two names refused, got %v", err)
+	}
+	for _, other := range []string{"docker.io/library/x:1", "docker.io/x:1", "index.docker.io/library/x:1", "LEVER.LOCAL/x:1", "localhost/x:1"} {
+		body := tarHeader + "manager:\n  image: x:1\nworkers:\n  - name: w\n    dir: ws/w\n    image: " + other + "\n"
+		if _, err := LoadNoHostChecks(writeConfig(t, body)); err == nil || !strings.Contains(err.Error(), "name one image one way") {
+			t.Errorf("%s: want it refused beside x:1, got %v", other, err)
+		}
+	}
+	for _, other := range []string{"x:1", "y:1", "x:2", "ghcr.io/o/x:1", "myorg/x:1"} {
+		body := tarHeader + "manager:\n  image: x:1\nworkers:\n  - name: w\n    dir: ws/w\n    image: " + other + "\n"
+		if _, err := LoadNoHostChecks(writeConfig(t, body)); err != nil {
+			t.Errorf("%s: want it allowed beside x:1, got %v", other, err)
+		}
+	}
+}
+
+// An archive tag spelled another way than a configured image is still that
+// image's name in the jail.
+func TestCheckTarTagNormalises(t *testing.T) {
+	app := &App{Manager: Manager{Image: "x:arm64"}, Workers: []Worker{{Name: "w", Image: "lever.local/w:arm64"}}}
+	for _, bad := range []string{"docker.io/library/x:arm64", "docker.io/x:arm64", "index.docker.io/library/x:arm64", "x:arm64", "localhost/x:arm64", "LEVER.LOCAL/x:arm64", "lever.local/x:arm64"} {
+		if err := app.CheckTarTag("lever.local/w:arm64", bad); err == nil || !strings.Contains(err.Error(), "configured for another agent") {
+			t.Errorf("%s: want refused, got %v", bad, err)
+		}
+	}
+	for _, ok := range []string{"lever.local/w:arm64", "w:arm64", "x:amd64", "y:arm64", "ghcr.io/o/x:arm64"} {
+		if err := app.CheckTarTag("lever.local/w:arm64", ok); err != nil {
+			t.Errorf("%s: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"lever.local/w:arm64", "LEVER.local/w:arm64", "docker.io/w:arm64", "w:arm64"} {
+		if err := app.CheckTarTag("x:arm64", bad); err == nil {
+			t.Errorf("x's archive with %s: want refused", bad)
+		}
 	}
 }
 

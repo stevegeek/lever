@@ -2302,7 +2302,10 @@ func (r *run) ensureFreshBootstrap(ctx context.Context) error {
 	return nil
 }
 
-var defaultContainerGoneRetry = budgetOf(wait.ManagerContainerGone)
+// defaultContainerGoneRetry bounds the wait for a discarded manager's
+// container to go. scion removes it before its delete returns, so this only
+// waits out a removal still under way.
+var defaultContainerGoneRetry = RetryBudget{Attempts: 30, Interval: time.Second}
 
 // confirmManagerContainerGone waits until podman knows no container by the
 // manager's name, and fails closed when it cannot tell. Only podman's answer
@@ -2319,7 +2322,7 @@ func (r *run) confirmManagerContainerGone(ctx context.Context) error {
 	ref := jail.ContainerName(path.Base(jp), r.app.Name)
 	last := "not read"
 	b := r.d.ContainerGoneRetry.or(defaultContainerGoneRetry)
-	err := wait.For(ctx, b.spec(wait.ManagerContainerGone.Name), func(ctx context.Context) wait.Result {
+	err := wait.For(ctx, b.spec("the previous manager's container to be removed"), func(ctx context.Context) wait.Result {
 		st, err := ops.State(ctx, ref)
 		switch {
 		case errors.Is(err, jail.ErrNoContainer):

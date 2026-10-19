@@ -141,6 +141,9 @@ type ManagerRequest struct {
 	// TicketStaged: a fresh enrolment ticket was staged for this run, so no
 	// re-arm is needed before a create or resume.
 	TicketStaged bool
+	// TicketDeferred: the mint step left the ticket to the create, which mints
+	// it once the discarded manager's container is gone (--fresh).
+	TicketDeferred bool
 	// BrokerOnline: the runtime broker was seen online since the hub last
 	// started, so no wait for it is needed.
 	BrokerOnline bool
@@ -260,6 +263,7 @@ func EnsureManager(ctx context.Context, app *config.App, d Deps, q ManagerReques
 		attach:       q.Attach,
 		freshNoConv:  q.FreshWithoutConversation,
 		minted:       q.TicketStaged,
+		deferMint:    q.TicketDeferred,
 		brokerOnline: q.BrokerOnline,
 		subject:      subject,
 	}

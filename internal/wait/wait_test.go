@@ -230,6 +230,7 @@ func TestBudgetsNeverShorterThanBefore(t *testing.T) {
 		{ManagerStopped, 30, 29 * time.Second},
 		{StopClaimReleased, 9, 185 * time.Second},
 		{ManagerMountsVerified, 30, 29 * time.Second},
+		{ManagerContainerGone, 30, 29 * time.Second},
 		{SessionHealed, 3, 2 * time.Second},
 	} {
 		if tc.s.MinAttempts < tc.attempts || tc.s.Total() < tc.total {

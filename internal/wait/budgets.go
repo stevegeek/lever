@@ -41,6 +41,11 @@ var (
 	// no live container.
 	ManagerStopped = Attempts("the manager to stop", 30, time.Second)
 
+	// ManagerContainerGone: a discarded manager's container, until podman
+	// knows none by its name. scion removes it before the delete returns, so
+	// this only waits out a removal still under way.
+	ManagerContainerGone = Attempts("the previous manager's container to be removed", 30, time.Second)
+
 	// ManagerMountsVerified: a resumed manager with no liveness gate, until
 	// lever can read its tree mounts back.
 	ManagerMountsVerified = Attempts("the resumed manager's mounts to verify", 30, time.Second)

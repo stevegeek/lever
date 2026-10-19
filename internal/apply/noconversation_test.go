@@ -145,7 +145,7 @@ func runNoConv(t *testing.T, c noConvCase) noConvResult {
 			return []jail.LiveMountProblem{{Target: "/workspace/kb", Reason: jail.LiveMountElsewhere}}, nil
 		}
 	}
-	res.err = Run(context.Background(), app, fillDeps(d), c.opts)
+	res.err = Run(context.Background(), app, fillDeps(withContainerGone(d)), c.opts)
 	res.loggedJoined = strings.Join(res.logs, "\n")
 	return res
 }
@@ -270,6 +270,7 @@ func TestStartManagerFreshWithoutConversationOnce(t *testing.T) {
 	proofs := 0
 	err := Run(context.Background(), app, fillDeps(Deps{
 		Scion:            scion.New(r, scion.Options{}),
+		StaleContainer:   goneContainer{},
 		ManagerLiveRetry: RetryBudget{Attempts: 3, Interval: time.Millisecond, Settle: 10 * time.Second},
 		HarnessLogTail:   func(context.Context, string) (string, error) { return noConvLog, nil },
 		ManagerConversationEmpty: func(context.Context) error {
@@ -395,7 +396,7 @@ func TestAttachResumeWithoutConversationStartsFresh(t *testing.T) {
 					return nil
 				},
 			}
-			err := Run(context.Background(), app, fillDeps(d), PlanOpts{Attach: true, FreshWithoutConversation: true})
+			err := Run(context.Background(), app, fillDeps(withContainerGone(d)), PlanOpts{Attach: true, FreshWithoutConversation: true})
 			if err != nil {
 				t.Fatalf("Run: %v", err)
 			}

@@ -21,6 +21,9 @@ func runStartManagerOver(t *testing.T, o testutil.ManagerObservation, fresh bool
 	app, f := newObserveFirstApp(t)
 	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: o.Phase, initContainerStatus: o.Container}
 	deps := fillDeps(Deps{Scion: scion.New(r, scion.Options{}), Log: func(string, ...any) {}})
+	if fresh {
+		deps = withContainerGone(deps)
+	}
 	err := Run(context.Background(), app, deps, PlanOpts{Fresh: fresh})
 	return startManagerOutcome{
 		verbs: fmt.Sprintf("create=%d resume=%d force=%d delete=%d", r.startCalls, r.resumeCalls, r.resumeForceCalls, r.deleteCalls),

@@ -22,7 +22,9 @@ redeem and binds it to the CSR's CN, so a leaked ticket cannot be replayed or us
 different identity. (The manager's ticket comes from the once-per-broker-process `/bootstrap`
 latch and is staged at `<tree>/.lever/bootstrap.json`. Under `lever up --fresh` it is staged only
 once podman shows the discarded manager's container gone, since that manager mounts the tree and
-shares the CN; a worker's is minted by the broker on
+shares the CN. A `/bootstrap` mint drops any older unspent manager ticket, and the file is
+replaced by rename, never written in place, so a hard link, FIFO or symbolic link the manager
+leaves there is not followed. A worker's is minted by the broker on
 dispatch and staged in the guest runtime dir, mounted read-only at `/run/lever` into that worker's
 container only — never into the tree the manager mounts.) The broker's CA signs a **leaf
 certificate** (`internal/cap/ca/issue.go`), written to `<id-dir>/agent.{crt,key}`. The leaf's CN

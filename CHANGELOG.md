@@ -19,6 +19,15 @@ version bump moves the block under the new version heading.
   30 seconds, or cannot say, `lever up --fresh` fails with no ticket staged and no manager created:
   run it again once the container is gone. The fresh start lever makes on its own for a manager
   with no conversation waits the same way before it re-arms the broker.
+- **Staging an enrolment ticket no longer writes through whatever the manager left at
+  `.lever/bootstrap.json` (security).** The host and the broker rewrote the file in place, and the
+  tree is the manager's to write. A hard link there to a file in a worker's directory put the
+  manager's next ticket into that file, a FIFO made the staging hang for ever while lever held the
+  lifecycle lock, and a directory broke it. The ticket is now written to a new temporary file in
+  `.lever` and renamed over `bootstrap.json`, which replaces the entry without opening it; a
+  symbolic link at `.lever` or above it in the tree is refused, as is a directory at
+  `bootstrap.json`. The minted ticket is also now the only manager ticket that still enrols: one a
+  certificate heal staged earlier in the broker's life no longer does.
 - **The broker's certificate heal of the manager acts only on the container it resumed.** The heal
   lets go of the lifecycle lock before it waits for claude, and another command can replace the
   manager's container in that time. It now notes podman's id of the container it resumed, and

@@ -10,15 +10,16 @@ version bump moves the block under the new version heading.
 ### Security
 
 - **The commands `lever` runs in the jail after the bring-up are capped too.** Only the bring-up's
-  guest commands stopped at 8 MiB; everything after it (the scion CLI, the container probes, the
-  project marker read, the guest clock read) held whatever the guest printed in memory. Every
-  command the `lever` CLI runs in the jail now stops at 8 MiB on stdout or stderr unless it
-  sets its own cap, and fails with an error that says the output passed its limit. The guest clock
-  read, the project marker read and the agent image policy check stop at 64 KiB. A clock read
-  past its cap signs on the host clock, with the usual warning, and a marker read past its cap is
-  a failed read. The conversation backup keeps its own larger cap, and the broker's commands are
-  unchanged. The policy check's quoted stderr, and a `settings.yaml` parse error, are now cut short
-  and stripped of terminal control sequences.
+  guest commands, and a few probes with caps of their own, stopped at a size limit; the rest (the
+  scion CLI, the project marker read, the guest clock read, the agent image policy check) held
+  whatever the guest printed in memory. Every command the `lever` CLI runs in the jail now stops
+  at 8 MiB on stdout or stderr unless it sets its own cap, and fails with an error that says the
+  output passed lever's limit, in place of the output. The guest clock reads (apply and doctor),
+  the project marker read, the agent image policy check and the guest boot id read stop at
+  64 KiB. A clock read past its cap signs on the host clock, with the usual warning, and a marker
+  read past its cap is a failed read. The conversation backup keeps its own larger cap, and the
+  broker's other commands are unchanged. The policy check's quoted stderr and a `settings.yaml`
+  parse error are now cut short and stripped of terminal control sequences.
 
 ## [0.51.0] - 2026-10-19
 

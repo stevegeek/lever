@@ -28,8 +28,12 @@ type JailGuestBoot struct {
 	Now   func() time.Time
 }
 
+// guestBootIDOutputLimit caps the boot id read: guest root writes that
+// output, and the broker's jail runner has no default cap.
+const guestBootIDOutputLimit = 64 << 10
+
 func (g JailGuestBoot) Current(ctx context.Context) (string, error) {
-	res, err := g.R.Run(ctx, nil, "cat", guestBootIDPath)
+	res, err := g.R.Run(proc.WithOutputLimit(ctx, guestBootIDOutputLimit), nil, "cat", guestBootIDPath)
 	if err != nil {
 		return "", err
 	}

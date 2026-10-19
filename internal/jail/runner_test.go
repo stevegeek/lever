@@ -3,6 +3,7 @@ package jail
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os/exec"
 	"reflect"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/proc"
+	"github.com/stevegeek/lever/internal/scion"
 )
 
 // orbPrefix mirrors the OrbStack backend's JailPrefix; the jail package
@@ -155,16 +157,47 @@ func TestJailRunnerOutputLimitStopsAFlood(t *testing.T) {
 		t.Skip("no yes(1)")
 	}
 	jr := New(Config{Host: proc.RealRunner{}, Prefix: []string{"env"}, UID: "501", OutputLimit: 64 << 10})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	start := time.Now()
-	res, err := jr.Run(context.Background(), nil, "yes")
-	if !errors.Is(err, proc.ErrOutputLimit) || len(res.Stdout) > 64<<10 {
-		t.Fatalf("flood: err %v, %d bytes", err, len(res.Stdout))
+	res, err := jr.Run(ctx, nil, "yes")
+	if !errors.Is(err, proc.ErrOutputLimit) || res.Stdout != "" || !strings.Contains(res.Stderr, "65536-byte limit") {
+		t.Fatalf("flood: err %v, stdout %d bytes, stderr %.200q", err, len(res.Stdout), res.Stderr)
 	}
 	if d := time.Since(start); d > 20*time.Second {
 		t.Fatalf("flood took %v", d)
 	}
-	res, err = jr.Run(context.Background(), nil, "echo", "fine")
+	res, err = jr.Run(ctx, nil, "echo", "fine")
 	if err != nil || res.Stdout != "fine\n" {
 		t.Fatalf("small output: %q %v", res.Stdout, err)
+	}
+}
+
+// The scion client quotes a failed command's output in its error; past the
+// default cap that is one line naming the cap, not the guest's flood.
+func TestScionClientErrorAtTheOutputLimitIsShort(t *testing.T) {
+	if _, err := exec.LookPath("yes"); err != nil {
+		t.Skip("no yes(1)")
+	}
+	jr := New(Config{Host: proc.RealRunner{}, Prefix: []string{"sh", "-c", "yes '[{}]'", "_"}, UID: "501", OutputLimit: 64 << 10})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err := scion.New(jr, scion.Options{}).List(ctx, "")
+	if err == nil || !strings.Contains(err.Error(), "65536-byte limit") || len(err.Error()) > 1000 {
+		t.Fatalf("List = %d bytes: %.300q", len(fmt.Sprint(err)), fmt.Sprint(err))
+	}
+}
+
+// A caller's own cap keeps the partial output it was stopped at.
+func TestJailRunnerOwnCapKeepsPartialOutput(t *testing.T) {
+	if _, err := exec.LookPath("yes"); err != nil {
+		t.Skip("no yes(1)")
+	}
+	jr := New(Config{Host: proc.RealRunner{}, Prefix: []string{"env"}, UID: "501", OutputLimit: 64 << 10})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := jr.Run(proc.WithOutputLimit(ctx, 4096), nil, "yes")
+	if !errors.Is(err, proc.ErrOutputLimit) || len(res.Stdout) != 4096 || !strings.HasPrefix(res.Stdout, "y\ny\n") {
+		t.Fatalf("err %v, %d bytes", err, len(res.Stdout))
 	}
 }

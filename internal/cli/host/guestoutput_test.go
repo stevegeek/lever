@@ -121,3 +121,14 @@ func TestAgentImagesEnforcePolicyIsCapped(t *testing.T) {
 	}
 	f.onlySmallCaps(t)
 }
+
+// doctor's guest clock read past its cap is a clock not checked.
+func TestCheckGuestClockIsCapped(t *testing.T) {
+	f := newCappedFake()
+	f.Script("date -u +%s", proc.Result{Stdout: "1\n" + strings.Repeat(" ", smallGuestOutputLimit)})
+	r := checkGuestClock(context.Background(), f, time.Now, false)
+	if !strings.Contains(r.detail, "not checked") {
+		t.Fatalf("flood: %+v", r)
+	}
+	f.onlySmallCaps(t)
+}

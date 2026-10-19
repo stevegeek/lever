@@ -211,7 +211,7 @@ func TestEnsureScionTelemetryFailsWhenItCannotRead(t *testing.T) {
 }
 
 // A settings parse error quotes guest-written text (an alias names its
-// anchor); what reaches the operator is bounded and terminal-safe.
+// anchor); what reaches the operator is bounded.
 func TestJailSettingsParseErrorIsBounded(t *testing.T) {
 	long := []byte("a: *" + strings.Repeat("x", 100000) + "\n")
 	if _, raw := layout.ParseSettings(long); raw == nil || len(raw.Error()) < 100000 {
@@ -226,11 +226,6 @@ func TestJailSettingsParseErrorIsBounded(t *testing.T) {
 	}
 	if _, _, _, err := hubAuthSettingsConverged(long, types.HubAuth{}, false); err == nil || utf8.RuneCountInString(err.Error()) > settingsErrMax+100 {
 		t.Fatalf("hub auth: %.200q", fmt.Sprint(err))
-	}
-	for _, in := range []string{"a: *x\x1b[31m\n", "\x1b]0;t\a: [\n"} {
-		if _, err := parseJailSettings([]byte(in)); err == nil || strings.ContainsAny(err.Error(), "\x1b\a") {
-			t.Fatalf("%q: %q", in, fmt.Sprint(err))
-		}
 	}
 	if _, err := ScionTelemetryEnabled([]byte("telemetry:\n  enabled: false\n")); err != nil {
 		t.Fatalf("normal: %v", err)

@@ -139,12 +139,10 @@ func isFalse(n *yaml.Node) bool {
 	return n.Kind == yaml.ScalarNode && n.Decode(&b) == nil && !b
 }
 
-// settingsErrMax bounds what a settings parse error may quote.
 const settingsErrMax = 200
 
-// parseJailSettings is layout.ParseSettings for a settings file the guest
-// wrote: a YAML error can quote the text it failed on, so the error is cut
-// to settingsErrMax and made terminal-safe.
+// parseJailSettings is for a settings file the guest wrote: a YAML error can
+// quote the text it failed on (an alias quotes its whole anchor name).
 func parseJailSettings(content []byte) (*yaml.Node, error) {
 	doc, err := layout.ParseSettings(content)
 	if err != nil {

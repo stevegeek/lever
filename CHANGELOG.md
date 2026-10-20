@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [1.0.0-beta.2] - 2026-10-20
+
 ### Fixed
 
 - **A worker or manager stranded in a created container shows as down (T0320).** A guest killed

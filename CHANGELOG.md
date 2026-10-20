@@ -25,6 +25,17 @@ version bump moves the block under the new version heading.
   command at all. A movable version (a branch, `latest`) and a `source:` checkout work as before.
   The stack e2e runs `conversation new` with `GOPROXY=off` to prove it.
 
+- **An agent's own work can no longer crash its claude by exhausting the container (T0312).** At the
+  container's pids limit (podman's default, 2048), claude can't fork or start a thread and aborts,
+  taking the agent's tmux session and container with it; a subagent's fork loop did this to a
+  manager. `lever-agent boot` now points Claude Code's `CLAUDE_CODE_SHELL_PREFIX` at a new
+  wrapper in the image, `/usr/local/libexec/lever-toolshell`. Every Bash tool command, hook, status
+  line and stdio MCP server then runs under a hard process limit 256 below the container's
+  `pids.max`, and with `oom_score_adj` 500, so the tool fails or is OOM-killed first and claude
+  keeps running. The key is set only when the image has the wrapper (a prefix that can't run
+  would fail every command). The stack e2e checks it live: a tool past its limit can't start
+  all its processes, and claude still runs.
+
 ### Security
 
 - **The hub pid file: a running hub's file is repaired, and a FIFO there can't hang the hub start
@@ -44,8 +55,11 @@ version bump moves the block under the new version heading.
 
 ### Upgrade
 
-- **Jail ABI 8.** The in-jail code changed: `lever-agent` (its default bootstrap path) and
-  `internal/scion` (the pid file probe). Rebuild the agent image (`make lever-image` or `make
+- **Jail ABI 8.** The in-jail code changed: `lever-agent` (its default bootstrap path and the shell
+  prefix in the managed settings), `internal/scion` (the pid file probe) and the image (the new
+  `lever-toolshell`). An instance image with its own Dockerfile needs the wrapper too: copy
+  `scionhook/toolshell` to `/usr/local/libexec/lever-toolshell` as `image/lever-claude/Dockerfile`
+  does (`make lever-image-bins` stages it). Rebuild the agent image (`make lever-image` or `make
   lever-image-slim`, then any instance image built from it) and recreate the manager on it with
   `lever up --fresh --keep-conversation`. Until then `lever-agent` in the old image keeps the
   relative default; the pid file fix runs from the host lever and needs no rebuild to take effect.

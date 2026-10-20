@@ -1,0 +1,29 @@
+#!/bin/bash
+# lever-toolshell: Claude Code's CLAUDE_CODE_SHELL_PREFIX in every lever agent
+# (lever-agent boot writes it into the managed settings when this file is in
+# the image). Claude Code runs every Bash tool command, hook, status line and
+# stdio MCP server through it, with the command line as one shell-quoted
+# argument in $1.
+#
+# It keeps the harness alive when the agent's own work exhausts the container
+# (T0312): at podman's pids limit claude can no longer fork or start a thread
+# and aborts, taking tmux and the container with it.
+#   - A hard RLIMIT_NPROC of pids.max minus a reserve. The kernel counts every
+#     task of the user against it, so the tool's forks fail (EAGAIN) once the
+#     container is that full, and claude, which runs without this limit, keeps
+#     the reserve.
+#   - oom_score_adj +500, so an out-of-memory kill in the container takes the
+#     tool's processes before claude.
+# A pids.max of reserve+64 or less leaves the limit alone (too small to split).
+# Self-protection, not a security boundary: the agent controls its commands.
+# Each step is best-effort; the command runs whatever they manage.
+reserve=256
+pids_max_file=${LEVER_TOOLSHELL_PIDS_MAX:-/sys/fs/cgroup/pids.max}
+max=
+read -r max < "$pids_max_file" 2>/dev/null
+case "$max" in
+''|*[!0-9]*) ;;
+*) if [ "$max" -gt $((reserve + 64)) ]; then ulimit -u $((max - reserve)) 2>/dev/null; fi ;;
+esac
+echo 500 > /proc/self/oom_score_adj 2>/dev/null
+exec /bin/bash -c "$1"

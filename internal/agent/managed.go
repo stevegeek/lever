@@ -22,7 +22,19 @@ const (
 	DisableAgentViewEnv     = wire.DisableAgentViewEnv
 	DisableAgentViewSetting = wire.DisableAgentViewSetting
 	afterCompactCommand     = wire.AfterCompactHookPrefix
+	ShellPrefixEnv          = wire.ShellPrefixEnv
 )
+
+// toolShellPath is wire.ToolShellPath; a var for tests.
+var toolShellPath = wire.ToolShellPath
+
+// toolShellReady reports whether the image has lever-toolshell as an
+// executable regular file, the condition for pointing Claude Code's shell
+// prefix at it: with a prefix that can't run, every tool command fails.
+func toolShellReady() bool {
+	fi, err := os.Stat(toolShellPath)
+	return err == nil && fi.Mode().IsRegular() && fi.Mode().Perm()&0o111 != 0
+}
 
 // AfterCompactMarker starts the context lever's after-compaction hook gives
 // the agent, as SessionStart hook context, never inside a message. It
@@ -32,7 +44,8 @@ const (
 const AfterCompactMarker = "[after compaction: note from this instance's lever.yaml]"
 
 // WriteManagedSettings merges c into the managed-settings file at path. It
-// always disables agent view and adds the claude-ready hook, so the file is
+// always disables agent view, sets the shell prefix when the image has
+// lever-toolshell, and adds the claude-ready hook, so the file is
 // written for every agent, nil c included. Keys and hooks lever does not own
 // are kept; lever's are replaced, or removed when c no longer sets them. An
 // empty path is a no-op.
@@ -109,6 +122,12 @@ func mergeManagedSettings(settings map[string]any, c *wire.Claude) {
 	}
 	// See wire.DisableAgentViewEnv.
 	env[DisableAgentViewEnv] = "1"
+	// See wire.ShellPrefixEnv. Lever owns the key: it is replaced, or removed
+	// when the image has no lever-toolshell.
+	delete(env, ShellPrefixEnv)
+	if toolShellReady() {
+		env[ShellPrefixEnv] = toolShellPath
+	}
 	settings["env"] = env
 	settings[DisableAgentViewSetting] = true
 

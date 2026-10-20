@@ -52,7 +52,7 @@ func ContainerStrandedCreated(ctx context.Context, r proc.Runner, ref string) (b
 	if st.Running || st.Paused || st.Status != "created" {
 		return false, nil
 	}
-	return ContainerCreatedBeforeBoot(ctx, r, ref)
+	return ContainerCreatedBeforeBoot(ctx, r, st.ID)
 }
 
 // RemoveStrandedCreated removes the container ref when ContainerStrandedCreated

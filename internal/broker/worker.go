@@ -256,26 +256,28 @@ func (b *Broker) strandedCreated(ctx context.Context, worker string) bool {
 // a stop claim that is all: the hub releases it on its next sweep, and the
 // record keeps its session. Over a start claim the record is also stopped
 // (the hub's remedy for a held start; the record and its home are kept), and
-// resumed once, in a new session the broker does not record (contacts stay
-// out until the worker's next recorded session). It returns resume's error,
-// or err when nothing was removed, and whether it removed the container.
-func (b *Broker) cancelStrandedStart(ctx context.Context, spec WorkerSpec, actor string, err error, resume func(ctx context.Context, worker, project string) error) (error, bool) {
+// resumed once, in a new session. The retry is the caller's own resume, so a
+// fresh session's task and its session record (commit) carry over; after the
+// stop of a plain resume the new session is not recorded, and contacts stay
+// out until the worker's next recorded one. It reports whether it removed the
+// container, and resume's error, or err when nothing was removed.
+func (b *Broker) cancelStrandedStart(ctx context.Context, spec WorkerSpec, actor string, err error, resume func(ctx context.Context, worker, project string) error) (bool, error) {
 	removed, rerr := b.removeStranded(ctx, spec.Name)
 	if rerr != nil {
 		b.audit("worker", actor, "error", "resume "+spec.Name+": removing a stranded container failed: "+rerr.Error())
 	}
 	if rerr != nil || !removed {
-		return err, false
+		return false, err
 	}
 	b.audit("worker", actor, "allow", "resume "+spec.Name+": removed its container, created before the guest restarted and never started")
 	if scion.IsStartClaimHeld(err) {
 		if serr := b.runtime.Stop(ctx, spec.Name, b.instanceProject); serr != nil {
 			b.audit("worker", actor, "error", "resume "+spec.Name+": the stop that cancels a stranded start failed: "+serr.Error())
-			return err, true
+			return true, err
 		}
 		b.audit("worker", actor, "allow", "resume "+spec.Name+": stopped the record to cancel the stranded start; resuming it in a new session")
 	}
-	return resume(ctx, spec.Name, b.instanceProject), true
+	return true, resume(ctx, spec.Name, b.instanceProject)
 }
 
 // phaseRunningContainerDown is not a scion phase: it fails every comparison
@@ -719,7 +721,7 @@ func (b *Broker) resumeRecordAs(ctx context.Context, w http.ResponseWriter, spec
 	err := resume(ctx, spec.Name, b.instanceProject)
 	removed := false
 	if (scion.IsStartClaimHeld(err) || scion.IsStopClaimHeld(err)) && b.removeStranded != nil {
-		err, removed = b.cancelStrandedStart(ctx, spec, actor, err, resume)
+		removed, err = b.cancelStrandedStart(ctx, spec, actor, err, resume)
 	}
 	if scion.IsStartClaimHeld(err) || scion.IsStopClaimHeld(err) {
 		// A claim the hub holds is a start or stop still in progress, or one

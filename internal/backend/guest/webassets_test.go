@@ -235,6 +235,9 @@ func fakePrebuilt(t *testing.T, fn func(ctx context.Context, version string) (st
 
 // A release's web UI is staged as-is: no Go, no node.
 func TestEnsureScionWebAssetsStagesThePrebuiltUI(t *testing.T) {
+	// The real user cache may hold a recorded build of the pin (T0305),
+	// which would skip the paths this test checks.
+	isolateCacheDir(t)
 	dist := filepath.Join(t.TempDir(), "client")
 	write(t, filepath.Join(dist, filepath.FromSlash(layout.WebAssetsSentinel)), "x")
 	fakePrebuilt(t, func(_ context.Context, version string) (string, string, error) {
@@ -266,6 +269,9 @@ func TestEnsureScionWebAssetsStagesThePrebuiltUI(t *testing.T) {
 
 // A refused download stops the apply; an unavailable one builds instead.
 func TestEnsureScionWebAssetsPrebuiltErrors(t *testing.T) {
+	// The real user cache may hold a recorded build of the pin (T0305),
+	// which would skip the paths this test checks.
+	isolateCacheDir(t)
 	g := func(f *proc.FakeRunner) Guest {
 		return Guest{Host: f, UserPrefix: []string{"orb", "-m", "m"}, RootPrefix: []string{"orb", "-u", "root", "-m", "m"}}
 	}

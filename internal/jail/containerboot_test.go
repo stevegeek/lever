@@ -102,6 +102,7 @@ func TestContainerStrandedCreated(t *testing.T) {
 			f := proc.NewFakeRunner()
 			f.Script(stateFormat+"lever--hello", proc.Result{Stdout: testID + " lever--hello " + c.state + " false false\n"})
 			f.Script(created, proc.Result{Stdout: c.made})
+			f.Script("podman inspect --type container --format {{.Created.Unix}} "+testID, proc.Result{Stdout: c.made})
 			f.Script("cat /proc/stat", proc.Result{Stdout: procStat})
 			got, err := ContainerStrandedCreated(context.Background(), f, "lever--hello")
 			if err != nil || got != c.want {

@@ -1056,6 +1056,11 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		ContainerStartedBeforeBoot: func(ctx context.Context, ref string) (bool, error) {
 			return jail.ContainerStartedBeforeBoot(ctx, b.JailRunner(), ref)
 		},
+		// ContainerCreatedBeforeBoot tells a created container a guest kill
+		// stranded from a start under way.
+		ContainerCreatedBeforeBoot: func(ctx context.Context, ref string) (bool, error) {
+			return jail.ContainerCreatedBeforeBoot(ctx, b.JailRunner(), ref)
+		},
 		// StaleContainer lets a manager resume clear a hub stop claim that only
 		// removing the manager's stopped container releases.
 		StaleContainer: jail.ContainerJanitor{R: b.JailRunner()},

@@ -483,18 +483,28 @@ func (r *run) observeUp(ctx context.Context, jp string) (*scion.Agent, managerOb
 
 // containerGoneUnder reports a running record whose container podman shows
 // gone, exited or stopped. Only podman's answer counts, never the hub's
-// container column, and a container podman lists as created (a start under
-// way) does not. Any read that fails answers no.
+// container column. A container podman lists as created is a start under way,
+// unless podman made it before the guest's current boot: a guest killed
+// between podman's create and its start leaves one that nothing will start,
+// and the hub still reads the record running, so every up waited on it and
+// failed. Any read that fails answers no.
 func containerGoneUnder(ctx context.Context, d Deps, project, name string, rec *scion.Agent) bool {
 	if rec == nil || rec.Phase != scion.PhaseRunning || d.StaleContainer == nil {
 		return false
 	}
-	st, err := d.StaleContainer.State(ctx, jail.ContainerName(path.Base(project), name))
+	ref := jail.ContainerName(path.Base(project), name)
+	st, err := d.StaleContainer.State(ctx, ref)
 	switch {
 	case errors.Is(err, jail.ErrNoContainer):
 		return true
 	case err != nil, st.Running, st.Paused:
 		return false
+	case st.Status == "created":
+		if d.ContainerCreatedBeforeBoot == nil {
+			return false
+		}
+		before, err := d.ContainerCreatedBeforeBoot(ctx, ref)
+		return err == nil && before
 	}
 	return st.Status == "exited" || st.Status == "stopped"
 }
@@ -507,7 +517,7 @@ func (r *run) suspendToRecover(ctx context.Context, jp string, rec *scion.Agent,
 		suspendAfterGuestRestart(ctx, r.d, r.subjectName(), jp, r.app.Name, rec)
 		return
 	}
-	r.d.logf("%s: manager %q: the hub reads it running, but podman shows its container gone or exited; suspending and resuming it (the conversation is kept)", r.subjectName(), r.app.Name)
+	r.d.logf("%s: manager %q: the hub reads it running, but podman shows its container gone, exited, or created in an earlier guest boot and never started; suspending and resuming it (the conversation is kept)", r.subjectName(), r.app.Name)
 	if err := r.d.managerScion().Suspend(ctx, r.app.Name, jp); err != nil {
 		r.d.logf("%s: warning: suspend of manager %q failed: %s", r.subjectName(), r.app.Name, scion.ErrSummary(err))
 	}

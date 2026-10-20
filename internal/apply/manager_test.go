@@ -118,24 +118,30 @@ func TestEnsureManagerTakesTheLock(t *testing.T) {
 
 // TestKeepRecoversARunningRecordOverAGoneContainer: a record the hub reads
 // running over a container podman shows exited or gone is suspended and
-// resumed on its conversation; one podman shows created (a start under way)
-// or running, or cannot be read, is kept and gated as it is.
+// resumed on its conversation, and so is one podman shows created in an
+// earlier guest boot (a guest killed between create and start); one podman
+// shows created in this boot (a start under way) or running, or cannot be
+// read, is kept and gated as it is.
 func TestKeepRecoversARunningRecordOverAGoneContainer(t *testing.T) {
 	for _, c := range []struct {
 		name    string
 		j       *fakeJanitor
+		before  func(context.Context, string) (bool, error)
 		recover bool
 	}{
-		{"exited", &fakeJanitor{states: []jail.ContainerState{{ID: staleID, Status: "exited"}}}, true},
-		{"gone", &fakeJanitor{stateErr: jail.ErrNoContainer}, true},
-		{"created", &fakeJanitor{states: []jail.ContainerState{created(staleID)}}, false},
-		{"running", &fakeJanitor{states: []jail.ContainerState{{ID: staleID, Status: "running", Running: true}}}, false},
-		{"unreadable", &fakeJanitor{stateErr: errors.New("podman hung")}, false},
+		{"exited", &fakeJanitor{states: []jail.ContainerState{{ID: staleID, Status: "exited"}}}, nil, true},
+		{"gone", &fakeJanitor{stateErr: jail.ErrNoContainer}, nil, true},
+		{"created", &fakeJanitor{states: []jail.ContainerState{created(staleID)}}, nil, false},
+		{"created this boot", &fakeJanitor{states: []jail.ContainerState{created(staleID)}}, createdBefore(false, nil), false},
+		{"created in an ended boot", &fakeJanitor{states: []jail.ContainerState{created(staleID)}}, createdBefore(true, nil), true},
+		{"created, boot unreadable", &fakeJanitor{states: []jail.ContainerState{created(staleID)}}, createdBefore(true, errors.New("no btime")), false},
+		{"running", &fakeJanitor{states: []jail.ContainerState{{ID: staleID, Status: "running", Running: true}}}, createdBefore(true, nil), false},
+		{"unreadable", &fakeJanitor{stateErr: errors.New("podman hung")}, createdBefore(true, nil), false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			app, f := newObserveFirstApp(t)
 			r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "Exited (1) 2 seconds ago"}
-			d := fillDeps(Deps{Scion: scion.New(r, scion.Options{}), StaleContainer: c.j, Log: func(string, ...any) {}})
+			d := fillDeps(Deps{Scion: scion.New(r, scion.Options{}), StaleContainer: c.j, ContainerCreatedBeforeBoot: c.before, Log: func(string, ...any) {}})
 			res, err := EnsureManager(context.Background(), app, d, ManagerRequest{Intent: ManagerKeep})
 			if c.recover {
 				if err != nil || r.suspendCalls != 1 || r.resumeCalls != 1 || r.deleteCalls != 0 || res.Verb != "resume" {
@@ -573,4 +579,8 @@ func TestTokenResetUnderTheLock(t *testing.T) {
 			}
 		}
 	}
+}
+
+func createdBefore(before bool, err error) func(context.Context, string) (bool, error) {
+	return func(context.Context, string) (bool, error) { return before, err }
 }

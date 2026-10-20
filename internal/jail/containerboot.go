@@ -21,21 +21,36 @@ import (
 // OrbStack btime is the shared VM's, so a restart of the machine alone is
 // not seen (a false no, which is safe).
 func ContainerStartedBeforeBoot(ctx context.Context, r proc.Runner, ref string) (bool, error) {
+	return beforeBoot(ctx, r, ref, "{{.State.StartedAt.Unix}}", "start")
+}
+
+// ContainerCreatedBeforeBoot reports whether podman created the container ref
+// before the guest's current boot. A container podman still lists as created
+// that was made in an ended boot is no start under way: the podman run that
+// made it died with that boot, and nothing will start it. btime's caveat
+// (ContainerStartedBeforeBoot) holds: a host sleep can make a container made
+// in this boot read as older, and callers act only where the remedy (suspend
+// and resume) is benign.
+func ContainerCreatedBeforeBoot(ctx context.Context, r proc.Runner, ref string) (bool, error) {
+	return beforeBoot(ctx, r, ref, "{{.Created.Unix}}", "creation")
+}
+
+func beforeBoot(ctx context.Context, r proc.Runner, ref, format, what string) (bool, error) {
 	if strings.TrimSpace(ref) == "" || strings.HasPrefix(ref, "-") {
-		return false, fmt.Errorf("inspecting container start: invalid container reference %q", ref)
+		return false, fmt.Errorf("inspecting container %s: invalid container reference %q", what, ref)
 	}
 	ctx, cancel := context.WithTimeout(ctx, containerStateTimeout)
 	defer cancel()
-	res, err := r.Run(ctx, nil, "podman", "inspect", "--type", "container", "--format", "{{.State.StartedAt.Unix}}", ref)
+	res, err := r.Run(ctx, nil, "podman", "inspect", "--type", "container", "--format", format, ref)
 	if err != nil {
-		return false, fmt.Errorf("inspecting container %s start: %w: %s", ref, err, strings.TrimSpace(res.Stderr))
+		return false, fmt.Errorf("inspecting container %s %s: %w: %s", ref, what, err, strings.TrimSpace(res.Stderr))
 	}
-	started, err := strconv.ParseInt(strings.TrimSpace(res.Stdout), 10, 64)
+	at, err := strconv.ParseInt(strings.TrimSpace(res.Stdout), 10, 64)
 	if err != nil {
-		return false, fmt.Errorf("inspecting container %s start: unexpected answer", ref)
+		return false, fmt.Errorf("inspecting container %s %s: unexpected answer", ref, what)
 	}
-	if started <= 0 {
-		return false, nil // never started (Go's zero time is far before 1970)
+	if at <= 0 {
+		return false, nil // never happened (Go's zero time is far before 1970)
 	}
 	stat, err := r.Run(ctx, nil, "cat", "/proc/stat")
 	if err != nil {
@@ -45,7 +60,7 @@ func ContainerStartedBeforeBoot(ctx context.Context, r proc.Runner, ref string) 
 	if !ok {
 		return false, fmt.Errorf("reading the guest boot time: no btime line")
 	}
-	return started < btime, nil
+	return at < btime, nil
 }
 
 func parseBtime(stat string) (int64, bool) {

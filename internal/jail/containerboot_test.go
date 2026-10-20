@@ -55,3 +55,32 @@ func TestContainerStartedBeforeBootRefuses(t *testing.T) {
 		t.Errorf("got %t, %v", got, err)
 	}
 }
+
+func TestContainerCreatedBeforeBoot(t *testing.T) {
+	const inspect = "podman inspect --type container --format {{.Created.Unix}} lever--hello"
+	for _, c := range []struct {
+		name    string
+		created string
+		want    bool
+		wantErr bool
+	}{
+		{"created in an earlier boot", "1759990000\n", true, false},
+		{"created in this boot", "1760000100\n", false, false},
+		{"zero time", "-62135596800\n", false, false},
+		{"odd answer", "soon\n", false, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := proc.NewFakeRunner()
+			f.Script(inspect, proc.Result{Stdout: c.created})
+			f.Script("cat /proc/stat", proc.Result{Stdout: procStat})
+			got, err := ContainerCreatedBeforeBoot(context.Background(), f, "lever--hello")
+			if (err != nil) != c.wantErr || got != c.want {
+				t.Fatalf("got %t, %v; want %t, err %t", got, err, c.want, c.wantErr)
+			}
+		})
+	}
+	f := proc.NewFakeRunner()
+	if _, err := ContainerCreatedBeforeBoot(context.Background(), f, "--all"); err == nil || len(f.Calls) != 0 {
+		t.Fatalf("a flag-like ref must be refused before podman runs: %v %+v", err, f.Calls)
+	}
+}

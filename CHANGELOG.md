@@ -37,6 +37,14 @@ version bump moves the block under the new version heading.
   every command). The wrapper runs each command in the shell Claude Code built it for. The stack e2e checks it live: a tool past its limit can't start
   all its processes, and claude still runs.
 
+- **A guest killed while podman starts the manager no longer strands it (T0313).** If the jail VM
+  died after podman created the manager's container but before it started it, the hub kept the
+  record `running` over a container podman lists as `created`. Lever read that as a start under
+  way, so every later `lever up` failed with "did not come up (last phase running, container
+  Created)" until the operator discarded the session. A created container that podman made before
+  the guest's current boot is now treated as down: `lever up` suspends and resumes the manager,
+  and the conversation is kept.
+
 ### Security
 
 - **The hub pid file: a running hub's file is repaired, and a FIFO there can't hang the hub start

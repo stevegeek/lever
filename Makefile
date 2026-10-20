@@ -78,6 +78,8 @@ lever-image-bins:
 		go build $(LEVER_BUILDVCS) -ldflags "$(LEVER_STAMP_LDFLAGS)" -o $(LEVER_IMAGE_CTX)/bin/lever-manager ./cmd/lever-manager
 	cp cmd/lever-agent/scionhook/pre-start $(LEVER_IMAGE_CTX)/scionhook/pre-start
 	chmod +x $(LEVER_IMAGE_CTX)/scionhook/pre-start
+	cp cmd/lever-agent/scionhook/toolshell $(LEVER_IMAGE_CTX)/scionhook/toolshell
+	chmod +x $(LEVER_IMAGE_CTX)/scionhook/toolshell
 	@file $(LEVER_IMAGE_CTX)/bin/lever-agent $(LEVER_IMAGE_CTX)/bin/lever-tool-db $(LEVER_IMAGE_CTX)/bin/lever-manager
 
 # Build the generic lever-claude agent image in-repo, on the local
@@ -100,6 +102,8 @@ framework-image-stage:
 		go build $(LEVER_BUILDVCS) -ldflags "$(LEVER_STAMP_LDFLAGS)" -o $(FRAMEWORK_IMAGE_CTX)/bin/lever-manager ./cmd/lever-manager
 	cp cmd/lever-agent/scionhook/pre-start $(FRAMEWORK_IMAGE_CTX)/scionhook/pre-start
 	chmod +x $(FRAMEWORK_IMAGE_CTX)/scionhook/pre-start
+	cp cmd/lever-agent/scionhook/toolshell $(FRAMEWORK_IMAGE_CTX)/scionhook/toolshell
+	chmod +x $(FRAMEWORK_IMAGE_CTX)/scionhook/toolshell
 
 # The slim agent image, lever.local/lever-claude-slim:<arch>: the same lever
 # layer as lever-image, FROM lever's slim base (image/scion-slim) instead of

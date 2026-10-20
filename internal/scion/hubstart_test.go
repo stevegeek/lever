@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -356,7 +357,7 @@ func TestServerPIDProbeRefusesADecoy(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(home, layout.Dir), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	decoy := exec.Command(bash, "-c", `exec -a "scion server start" sleep 30`)
+	decoy := exec.Command(bash, "-c", `exec -a "scion server start --foreground" sleep 30`)
 	if err := decoy.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -396,5 +397,183 @@ func TestServerPIDProbeRefusesADecoy(t *testing.T) {
 	}
 	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
 		t.Fatalf("a decoy's pid file was kept (stat err %v)", err)
+	}
+}
+
+// A pid file that names no live server, beside a running hub (an agent can
+// write the file under a live server), is rewritten to the one scion server
+// that runs, not removed: removing it would orphan the hub. Malformed bytes
+// of any length, a dead pid, a decoy's pid and a non-regular file are all
+// repaired. Two servers make the repair ambiguous, and the file is removed.
+func TestServerPIDProbeRepairsAFileBesideALiveServer(t *testing.T) {
+	if _, err := os.Stat("/proc/self/ns/pid"); err != nil {
+		t.Skip("needs /proc")
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("needs bash")
+	}
+	home := t.TempDir()
+	dir := filepath.Join(home, layout.Dir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	startServer := func() (string, string) {
+		t.Helper()
+		c := exec.Command(bash, "-c", `exec -a "scion server start --foreground" sleep 30`)
+		if err := c.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = c.Process.Kill(); _ = c.Wait() })
+		pid := strconv.Itoa(c.Process.Pid)
+		for range 200 {
+			if exe, err := os.Readlink("/proc/" + pid + "/exe"); err == nil && strings.Contains(filepath.Base(exe), "sleep") {
+				return pid, exe
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Skip("could not read the server's exe")
+		return "", ""
+	}
+	pid, bin := startServer()
+	dead := exec.Command("true")
+	if err := dead.Run(); err != nil {
+		t.Fatal(err)
+	}
+	pidFile := filepath.Join(home, layout.ServerPIDRel)
+	run := func() string {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "sh", "-c", serverPIDProbeScript, "_", layout.ServerPIDRel, bin)
+		cmd.Env = append(os.Environ(), "HOME="+home)
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("probe: %v", err)
+		}
+		return string(out)
+	}
+	repaired := func(what string) {
+		t.Helper()
+		if got := run(); got != pid {
+			t.Fatalf("%s: probe printed %q, want %s", what, got, pid)
+		}
+		fi, err := os.Lstat(pidFile)
+		if err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm() != 0o644 {
+			t.Fatalf("%s: pid file after the probe: %v %v, want a 0644 regular file", what, fi, err)
+		}
+		if b, _ := os.ReadFile(pidFile); string(b) != pid {
+			t.Fatalf("%s: pid file holds %q, want exactly %s", what, b, pid)
+		}
+	}
+	for _, body := range []string{
+		pid + "\n", pid + "\r\n", " " + pid, "\t" + pid + "\n\n",
+		pid + strings.Repeat(" ", 40), "x", "", pid + "x", strings.Repeat("9", 40),
+		strconv.Itoa(dead.Process.Pid), strconv.Itoa(os.Getpid()),
+	} {
+		if err := os.WriteFile(pidFile, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		repaired(fmt.Sprintf("body %q", body))
+	}
+	for name, mk := range map[string]func() error{
+		"fifo":      func() error { return syscall.Mkfifo(pidFile, 0o644) },
+		"directory": func() error { return os.Mkdir(pidFile, 0o755) },
+		"symlink":   func() error { return os.Symlink(filepath.Join(home, "none"), pidFile) },
+	} {
+		if err := os.Remove(pidFile); err != nil {
+			t.Fatal(err)
+		}
+		if err := mk(); err != nil {
+			t.Fatal(err)
+		}
+		repaired(name)
+	}
+	// A missing file is left alone.
+	if err := os.Remove(pidFile); err != nil {
+		t.Fatal(err)
+	}
+	if got := run(); got != "" {
+		t.Fatalf("a missing file: probe printed %q", got)
+	}
+	if _, err := os.Lstat(pidFile); !os.IsNotExist(err) {
+		t.Fatalf("a missing file was created (lstat err %v)", err)
+	}
+	// Two servers: no repair, the bad file goes.
+	startServer()
+	if err := os.WriteFile(pidFile, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := run(); got != "" {
+		t.Fatalf("two servers: probe printed %q, want nothing", got)
+	}
+	if _, err := os.Lstat(pidFile); !os.IsNotExist(err) {
+		t.Fatalf("two servers: the bad file was kept (lstat err %v)", err)
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range ents {
+		t.Errorf("left behind in %s: %s", dir, e.Name())
+	}
+}
+
+// Anything at the pid path that is not a regular file is removed without
+// being read: scion's os.ReadFile blocks forever on a FIFO. A symlink is
+// removed even when it names a valid pid file, and its target is kept.
+func TestServerPIDProbeRemovesNonRegularFiles(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, layout.Dir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pidFile := filepath.Join(home, layout.ServerPIDRel)
+	target := filepath.Join(home, "target")
+	if err := os.WriteFile(target, []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fifo := filepath.Join(home, "fifo")
+	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
+		t.Skipf("mkfifo: %v", err)
+	}
+	cases := []struct {
+		name string
+		make func() error
+	}{
+		{"fifo", func() error { return syscall.Mkfifo(pidFile, 0o644) }},
+		{"directory", func() error {
+			if err := os.Mkdir(pidFile, 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(pidFile, "x"), []byte("1"), 0o644)
+		}},
+		{"symlink to a pid file", func() error { return os.Symlink(target, pidFile) }},
+		{"symlink to a fifo", func() error { return os.Symlink(fifo, pidFile) }},
+		{"dangling symlink", func() error { return os.Symlink(filepath.Join(home, "none"), pidFile) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.make(); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "sh", "-c", serverPIDProbeScript, "_", layout.ServerPIDRel, layout.ScionBin)
+			cmd.Env = append(os.Environ(), "HOME="+home)
+			out, err := cmd.Output()
+			if ctx.Err() != nil {
+				t.Fatal("the probe hung")
+			}
+			if err != nil || len(out) != 0 {
+				t.Fatalf("probe printed %q, err %v", out, err)
+			}
+			if _, err := os.Lstat(pidFile); !os.IsNotExist(err) {
+				t.Fatalf("the %s was kept (lstat err %v)", tc.name, err)
+			}
+		})
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("a symlink's target was touched: %v", err)
 	}
 }

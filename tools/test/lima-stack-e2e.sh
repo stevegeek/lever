@@ -234,6 +234,7 @@ if [ -z "${IMAGE_TAR:-}" ]; then
 		GOOS=linux GOARCH=$ARCH CGO_ENABLED=0 go build -ldflags "-X main.Version=$LEVER_VERSION" -o "$C/lever/bin/lever-tool-db" ./cmd/lever-tool-db &&
 		GOOS=linux GOARCH=$ARCH CGO_ENABLED=0 go build -o "$C/lever/bin/lever-manager" ./cmd/lever-manager) || { bad "building lever's in-jail binaries"; exit 1; }
 	cp "$REPO_ROOT/cmd/lever-agent/scionhook/pre-start" "$C/lever/scionhook/pre-start"; chmod 0755 "$C/lever/scionhook/pre-start"
+	cp "$REPO_ROOT/cmd/lever-agent/scionhook/toolshell" "$C/lever/scionhook/toolshell"; chmod 0755 "$C/lever/scionhook/toolshell"
 	cp "$REPO_ROOT/image/lever-claude/Dockerfile" "$C/lever/Dockerfile"
 	cp "$REPO_ROOT/image/scion-slim/Dockerfile" "$C/slim/Dockerfile"
 	G rm -rf /tmp/stackctx
@@ -623,7 +624,9 @@ done) &
 sampler=$!
 # The manager here never idles (its API key is fake, so every turn retries);
 # the busy refusal itself is unit-tested.
-(cd "$INST" && timeout 900 "$LEVER" conversation new --force > "$WORK/conv-new.log" 2>&1); conv_rc=$?
+# GOPROXY=off (T0305): `lever up` built scion and its web UI for this pin, so
+# nothing here may ask the Go module proxy; a `go mod download` would fail.
+(cd "$INST" && GOPROXY=off timeout 900 "$LEVER" conversation new --force > "$WORK/conv-new.log" 2>&1); conv_rc=$?
 touch "$WORK/conv-done"; wait "$sampler"
 tail -3 "$WORK/conv-new.log" | mask_secrets | sed 's/^/      | /'
 echo "      | phases seen: $(awk '{print $1"/"$2}' "$WORK/conv-samples" | uniq | tr '\n' ' ')"
@@ -639,6 +642,45 @@ checkx "the hub reads the manager running ($(mgrrec phase))" '[ "$(mgrrec phase)
 for _ in $(seq 1 30); do claude_up && break; sleep 2; done
 check "claude runs in the manager's container" claude_up
 claude_up || { echo "      | processes in the manager's container:"; cmdlines | cut -c1-160 | sed 's/^/      |   /'; }
+# T0312: claude's tool commands run under lever-toolshell, whose process limit
+# leaves claude headroom. Here a "tool" under a limit 30 above the user's
+# current task count starts 60 short sleeps: some forks must fail, and claude
+# must still run. Every process stays inside the nested manager container.
+check "the managed settings name lever-toolshell as the shell prefix" \
+	P exec "lever--$NAME" grep -q '"CLAUDE_CODE_SHELL_PREFIX": "/usr/local/libexec/lever-toolshell"' /etc/claude-code/managed-settings.json
+# dash starts the sleeps, so a failed fork ends the loop at once (bash would
+# retry it for seconds); the survivors are counted from /proc and killed.
+headroom_script=$(cat <<'EOS'
+n=$(grep -l "^Uid:[[:space:]]*1000[[:space:]]" /proc/[0-9]*/task/*/status 2>/dev/null | wc -l)
+echo $((n + 30 + 256)) > /tmp/lever-e2e-pids.max
+LEVER_TOOLSHELL_PIDS_MAX=/tmp/lever-e2e-pids.max /usr/local/libexec/lever-toolshell 'sh -c "for i in \$(seq 60); do sleep 37 & done"' >/dev/null 2>&1
+pids=
+for d in /proc/[0-9]*; do
+	[ "$(tr '\000' ' ' < "$d/cmdline" 2>/dev/null)" = "sleep 37 " ] && pids="$pids ${d#/proc/}"
+done
+set -- $pids
+echo "started=$#"
+[ $# -gt 0 ] && kill $pids
+EOS
+)
+headroom=$(P exec --user scion "lever--$NAME" bash -c "$headroom_script" 2>/dev/null | tail -1)
+echo "      | tool under the headroom limit: ${headroom:-(no output)}"
+started=${headroom#started=}
+checkx "a tool past its process limit could not start all 60 ($started)" '[ -n "$started" ] && [ "$started" -gt 0 ] && [ "$started" -lt 60 ]'
+check "claude still runs after the tool hit its limit" claude_up
+# Claude Code really runs its children through the prefix: the stdio MCP
+# server it started (lever-agent serve-capability) carries the limit and the
+# OOM score.
+mcp_limits=$(P exec --user scion "lever--$NAME" sh -c '
+for d in /proc/[0-9]*; do
+	case "$(tr "\000" " " < "$d/cmdline" 2>/dev/null)" in lever-agent\ serve-capability*|*/lever-agent\ serve-capability*)
+		lim=$(sed -n "s/^Max processes  *\([0-9][0-9]*\) .*/\1/p" "$d/limits"); adj=$(cat "$d/oom_score_adj")
+		echo "$lim $adj $(($(cat /sys/fs/cgroup/pids.max) - 256))"; exit ;;
+	esac
+done' 2>/dev/null)
+echo "      | serve-capability: max processes, oom_score_adj, pids.max-256: ${mcp_limits:-(not found)}"
+read -r mcp_lim mcp_adj mcp_want <<<"${mcp_limits:-}"
+checkx "claude's stdio MCP server runs under lever-toolshell (${mcp_lim:-?} = ${mcp_want:-?}, oom ${mcp_adj:-?})" '[ -n "${mcp_want:-}" ] && [ "$mcp_lim" = "$mcp_want" ] && [ "$mcp_adj" = 500 ]'
 after=$(newest)
 echo "      | session after: ${after:-(no transcript)}"
 checkx "a new claude session" '[ -n "$after" ] && [ "$after" != "$before" ]'

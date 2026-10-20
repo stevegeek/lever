@@ -7,6 +7,84 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [1.0.0-beta.1] - 2026-10-20
+
+### Fixed
+
+- **`lever-agent` works from any directory in the workspace (T0308).** Its default
+  bootstrap file was `./.lever/bootstrap.json`, relative to the current directory, so `lever-agent
+  version` (and every subcommand that reads the broker URL) failed from a subdirectory such as a
+  repo checkout. The default now follows the pre-start hook: `$LEVER_BOOTSTRAP`, else a worker's
+  `/run/lever/bootstrap.json` when present, else the manager's `/workspace/.lever/bootstrap.json`.
+  When the default can't be read, the error names both paths and the overrides (`--bootstrap`,
+  `$LEVER_BOOTSTRAP`, `--broker-url`).
+
+- **Lever commands no longer need the Go module proxy once a pin's web UI is built (T0305).** To
+  find the cached scion web UI build, every `lever up`, `apply` and `conversation new` ran `go mod
+  download` of the scion pin, and for a pin given as a commit hash Go asks the module proxy each
+  time, even with the module cached. A network blip there failed the whole command. Lever now
+  records which build a pin produced (in the web build cache, `pins/<pin>`) and uses it with no Go
+  command at all. A movable version (a branch, `latest`) and a `source:` checkout work as before.
+  The stack e2e runs `conversation new` with `GOPROXY=off` to prove it.
+
+- **An agent's own work can no longer crash its claude by exhausting the container (T0312).** At the
+  container's pids limit (podman's default, 2048), claude can't fork or start a thread and aborts,
+  taking the agent's tmux session and container with it; a subagent's fork loop did this to a
+  manager. `lever-agent boot` now points Claude Code's `CLAUDE_CODE_SHELL_PREFIX` at a new
+  wrapper in the image, `/usr/local/libexec/lever-toolshell`. Every Bash tool command, hook, status
+  line and stdio MCP server then runs under a hard process limit 256 below the container's
+  `pids.max`, and with `oom_score_adj` 500, so the tool fails or is OOM-killed first and claude
+  keeps running; a stdio MCP server near the limit may lose its tools instead. The key is set
+  only when the image's wrapper runs a test command at boot (a prefix that can't run would fail
+  every command). The wrapper runs each command in the shell Claude Code built it for. The stack e2e checks it live: a tool past its limit can't start
+  all its processes, and claude still runs.
+
+- **A guest killed while podman starts an agent no longer strands it (T0313, T0314).** If the jail
+  VM died after podman created the manager's container but before it started it, the hub kept the
+  record `running` over a container podman lists as `created`, and held the interrupted start's
+  claim for its 12-minute lease. Lever read the container as a start under way, so every later
+  `lever up` failed with "did not come up (last phase running, container Created)". A created
+  container that podman made before the guest's current boot now reads as down. `lever up`
+  suspends the manager and resumes it; if the hub refuses over the stranded start's claim, lever
+  stops the record (the hub's own remedy), clears the stop claim as before and resumes it. The
+  record and its agent home are kept; after a stop the manager comes back in a new claude session
+  (`lever attach`, then `/resume` for the old conversation). A worker in the same state now reads
+  as down, and `lever worker resume` removes its stranded container and resumes it; over a held
+  start claim it also stops the record first, so the worker's task restarts in a new session. A
+  resume refused over any claim the hub holds is now a 503 to retry, never a purge hint.
+
+- **The hub's stop claim is recognised when scion adds a request id.** Lever matched the refusal
+  only as `(status: 409)`; scion can append the request id (`(status: 409, request: …)`), which
+  skipped the stop-claim recovery.
+
+### Security
+
+- **The hub pid file: a running hub's file is repaired, and a FIFO there can't hang the hub start
+  (T0304).** An agent can write `~/.scion/server.pid`. Lever removes a file that names no live
+  scion server (since 0.60.0 also one that isn't exactly digits), so an agent could get a *running*
+  hub's file removed by writing junk, a newline or a dead pid into it. That orphaned the hub: the
+  next start failed on its port, and the readiness wait read the hub as gone. Now, before removing
+  such a file, lever looks in `/proc` for scion servers it installed (its own binary, in the jail's
+  own pid and user namespaces, with scion's daemon argv `server start --foreground`). When exactly
+  one runs, lever rewrites the file to that pid (a fresh 0644 file, created exclusively under an
+  unguessable name and renamed over the path) and treats the hub as running. Anything
+  at the path that isn't a regular file (a symlink, a directory, a FIFO, a device) is replaced the
+  same way, or removed: scion reads the file with `os.ReadFile`, which blocks forever on a FIFO, so
+  one planted there hung every later hub start. Every read and write of the file is bounded by a
+  timeout, so a file swapped for a FIFO mid-probe can't hang lever either. Not covered: an agent
+  that deletes the file outright, and the window between lever's probe and scion's own read.
+
+### Upgrade
+
+- **Jail ABI 8.** The in-jail code changed: `lever-agent` (its default bootstrap path and the shell
+  prefix in the managed settings), `internal/scion` (the pid file probe) and the image (the new
+  `lever-toolshell`). An instance image with its own Dockerfile needs the wrapper too: copy
+  `scionhook/toolshell` to `/usr/local/libexec/lever-toolshell` as `image/lever-claude/Dockerfile`
+  does (`make lever-image-bins` stages it). Rebuild the agent image (`make lever-image` or `make
+  lever-image-slim`, then any instance image built from it) and recreate the manager on it with
+  `lever up --fresh --keep-conversation`. Until then `lever-agent` in the old image keeps the
+  relative default; the pid file fix runs from the host lever and needs no rebuild to take effect.
+
 ## [0.60.0] - 2026-10-19
 
 ### Added

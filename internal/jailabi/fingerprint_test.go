@@ -48,6 +48,7 @@ var jailRoots = []string{
 // image of either flavor for what lever relies on.
 var jailExtraFiles = []string{
 	"cmd/lever-agent/scionhook/pre-start",
+	"cmd/lever-agent/scionhook/toolshell",
 	"image/lever-claude/Dockerfile",
 }
 

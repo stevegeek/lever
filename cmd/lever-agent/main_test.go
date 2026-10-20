@@ -352,7 +352,8 @@ func TestCommonFlagsDefinesTrio(t *testing.T) {
 
 // TestResolveBrokerURLFallbackChain: an explicit --broker-url wins without
 // touching any file; otherwise the URL is read from the bootstrap file found
-// by --bootstrap, then $LEVER_BOOTSTRAP, then ./.lever/bootstrap.json.
+// by --bootstrap, then $LEVER_BOOTSTRAP, then the manager's absolute path
+// (managerBootstrapPath), whatever the current directory.
 func TestResolveBrokerURLFallbackChain(t *testing.T) {
 	writeBootstrap := func(t *testing.T, dir, url string) string {
 		t.Helper()
@@ -403,27 +404,62 @@ func TestResolveBrokerURLFallbackChain(t *testing.T) {
 		}
 	})
 
-	t.Run("defaults to ./.lever/bootstrap.json when nothing is set", func(t *testing.T) {
+	t.Run("defaults to the manager path from any directory", func(t *testing.T) {
 		t.Setenv("LEVER_BOOTSTRAP", "")
-		dir := t.TempDir()
-		leverDir := filepath.Join(dir, ".lever")
+		root := t.TempDir()
+		leverDir := filepath.Join(root, "workspace", ".lever")
 		if err := os.MkdirAll(leverDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		data, err := json.Marshal(agent.Bootstrap{BrokerURL: "https://from-default.example"})
-		if err != nil {
+		p := writeBootstrap(t, leverDir, "https://from-default.example")
+		oldM, oldW := managerBootstrapPath, workerBootstrapPath
+		managerBootstrapPath, workerBootstrapPath = p, filepath.Join(root, "run", "lever", "bootstrap.json")
+		t.Cleanup(func() { managerBootstrapPath, workerBootstrapPath = oldM, oldW })
+		// A subdirectory with its own ./.lever/bootstrap.json: the default
+		// must not depend on the current directory.
+		sub := filepath.Join(root, "workspace", "repo")
+		if err := os.MkdirAll(filepath.Join(sub, ".lever"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(leverDir, "bootstrap.json"), data, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		t.Chdir(dir)
+		writeBootstrap(t, filepath.Join(sub, ".lever"), "https://from-cwd.example")
+		t.Chdir(sub)
 		got, err := resolveBrokerURL("", "")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if got != "https://from-default.example" {
-			t.Errorf("got %q, want the URL from ./.lever/bootstrap.json", got)
+			t.Errorf("got %q, want the URL from the manager path", got)
+		}
+		// A worker's mount, when present, wins over the manager's path.
+		wdir := filepath.Dir(workerBootstrapPath)
+		if err := os.MkdirAll(wdir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeBootstrap(t, wdir, "https://from-worker-mount.example")
+		got, err = resolveBrokerURL("", "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "https://from-worker-mount.example" {
+			t.Errorf("got %q, want the URL from the worker mount", got)
+		}
+	})
+
+	t.Run("a missing default names the path and the overrides", func(t *testing.T) {
+		t.Setenv("LEVER_BOOTSTRAP", "")
+		oldM, oldW := managerBootstrapPath, workerBootstrapPath
+		tmp := t.TempDir()
+		managerBootstrapPath = filepath.Join(tmp, "workspace", ".lever", "bootstrap.json")
+		workerBootstrapPath = filepath.Join(tmp, "run", "lever", "bootstrap.json")
+		t.Cleanup(func() { managerBootstrapPath, workerBootstrapPath = oldM, oldW })
+		_, err := resolveBrokerURL("", "")
+		if err == nil {
+			t.Fatal("want an error for a missing bootstrap")
+		}
+		for _, want := range []string{managerBootstrapPath, workerBootstrapPath, "--bootstrap", "$LEVER_BOOTSTRAP", "--broker-url"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not name %q", err, want)
+			}
 		}
 	})
 }

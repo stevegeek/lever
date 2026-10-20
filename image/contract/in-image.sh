@@ -115,6 +115,12 @@ else
   fail "$hook missing, not executable, or not root's: the agent never enrols"
 fi
 if grep -q 'lever-agent boot' "$hook" 2>/dev/null; then ok "the hook runs lever-agent boot"; else fail "the hook does not run lever-agent boot"; fi
+ts=/usr/local/libexec/lever-toolshell
+if [ -f "$ts" ] && [ -x "$ts" ] && [ "$(owner "$ts")" = 0:0 ] && [ ! -w "$ts" ] && [ "$("$ts" "echo 'tool shell ok'" 2>/dev/null)" = "tool shell ok" ]; then
+  ok "$ts (root's, runs a command: Claude Code's shell prefix, T0312)"
+else
+  fail "$ts missing, not root's, or does not run a command: boot leaves Claude Code without the process headroom"
+fi
 if [ -d /etc/claude-code ] && [ "$(owner /etc/claude-code)" = 1000:1000 ] && [ -w /etc/claude-code ]; then
   ok "/etc/claude-code is scion's (boot writes managed-settings.json as scion)"
 else

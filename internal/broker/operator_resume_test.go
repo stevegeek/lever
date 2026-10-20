@@ -221,3 +221,114 @@ func TestResumeHubRefusalHintByActor(t *testing.T) {
 		t.Fatalf("manager text changed: %s", body)
 	}
 }
+
+// TestOperatorResumeRecoversAStrandedCreatedContainer (T0314): a worker the
+// hub reads running over a container podman lists as created resumes with
+// --force only when podman made that container in an earlier guest boot; a
+// created container from this boot (a start under way), an unwired probe or
+// an unreadable one leaves the running worker as it is.
+func TestOperatorResumeRecoversAStrandedCreatedContainer(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		stranded func(context.Context, string) (bool, error)
+		forced   int
+	}{
+		{"made in an ended boot", func(context.Context, string) (bool, error) { return true, nil }, 1},
+		{"made in this boot", func(context.Context, string) (bool, error) { return false, nil }, 0},
+		{"probe fails", func(context.Context, string) (bool, error) { return true, errors.New("podman hung") }, 0},
+		{"unwired", nil, 0},
+	} {
+		rt := &fakeRuntime{agents: map[string][]scion.Agent{testInstanceProject: {{Slug: "worker", Phase: "running", ContainerStatus: "Created"}}}}
+		b := newTestBroker(t, rt, wakeSpec)
+		var asked []string
+		if tc.stranded != nil {
+			b.containerStranded = func(ctx context.Context, worker string) (bool, error) {
+				asked = append(asked, worker)
+				return tc.stranded(ctx, worker)
+			}
+		}
+		rec := postOperatorResume(t, b, `{"worker":"worker"}`)
+		if rec.Code != http.StatusOK || len(rt.resumeForced) != tc.forced || len(rt.resumed) != 0 {
+			t.Fatalf("%s: %d %s resumed=%d forced=%d", tc.name, rec.Code, rec.Body, len(rt.resumed), len(rt.resumeForced))
+		}
+		if tc.stranded != nil && (len(asked) == 0 || asked[0] != "worker") {
+			t.Fatalf("%s: podman was not asked about the worker: %v", tc.name, asked)
+		}
+	}
+	// A live container is never probed.
+	rt := &fakeRuntime{agents: map[string][]scion.Agent{testInstanceProject: {{Slug: "worker", Phase: "running", ContainerStatus: "Up 3 minutes"}}}}
+	b := newTestBroker(t, rt, wakeSpec)
+	b.containerStranded = func(context.Context, string) (bool, error) {
+		t.Fatal("a live container must not be probed")
+		return false, nil
+	}
+	if rec := postOperatorResume(t, b, `{"worker":"worker"}`); rec.Code != http.StatusOK || len(rt.resumeForced)+len(rt.resumed) != 0 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+}
+
+// TestOperatorResumeCancelsAStrandedStart (T0314): the hub refuses the resume
+// over the claim a guest kill stranded. With podman's stranded container
+// removed, the record is stopped and resumed once; a stop claim the hub has
+// not released yet is a 503 to retry, never a purge hint; with nothing
+// removed (a start under way, or no remover) the refusal stands.
+func TestOperatorResumeCancelsAStrandedStart(t *testing.T) {
+	const startHeld = "failed to start agent via Hub: start_in_progress: A start is already in progress for this agent (a user start, since 12:40). It will finish or be released by 12:52; run scion stop to cancel it. (status: 409, request: 42f9)"
+	const stopHeld = "failed to start agent via Hub: start_in_progress: A stop is in progress for this agent (since 12:41). It is released when the broker reports the agent stopped; start it again then. (status: 409)"
+	stranded := func(context.Context, string) (bool, error) { return true, nil }
+	for _, tc := range []struct {
+		name       string
+		firstErr   string
+		removed    bool
+		removeErr  error
+		stopErr    error
+		secondErr  error
+		code       int
+		stopped    int
+		resumeRuns int
+	}{
+		{"start claim: recovered", startHeld, true, nil, nil, nil, http.StatusOK, 1, 2},
+		{"start claim: stop claim not yet released", startHeld, true, nil, nil, errors.New(stopHeld), http.StatusServiceUnavailable, 1, 2},
+		{"start claim: stop fails", startHeld, true, nil, errors.New("hub down"), nil, http.StatusServiceUnavailable, 1, 1},
+		{"start claim: nothing removed (a start under way)", startHeld, false, nil, nil, nil, http.StatusServiceUnavailable, 0, 1},
+		{"start claim: removal fails", startHeld, false, errors.New("podman hung"), nil, nil, http.StatusServiceUnavailable, 0, 1},
+		{"stop claim: removed, kept in its session", stopHeld, true, nil, nil, nil, http.StatusOK, 0, 2},
+	} {
+		runs := 0
+		rt := &fakeRuntime{agents: map[string][]scion.Agent{testInstanceProject: {{Slug: "worker", Phase: "running", ContainerStatus: "Created"}}},
+			stopErr: tc.stopErr}
+		first, second := errors.New(tc.firstErr), tc.secondErr
+		b := newTestBroker(t, &resumeSeq{fakeRuntime: rt, runs: &runs, errs: []error{first, second}}, wakeSpec)
+		b.containerStranded = stranded
+		b.removeStranded = func(context.Context, string) (bool, error) { return tc.removed, tc.removeErr }
+		rec := postOperatorResume(t, b, `{"worker":"worker"}`)
+		if rec.Code != tc.code || len(rt.stopped) != tc.stopped || runs != tc.resumeRuns {
+			t.Fatalf("%s: %d %s stopped=%d resumes=%d", tc.name, rec.Code, rec.Body, len(rt.stopped), runs)
+		}
+		if strings.Contains(rec.Body.String(), "purge") {
+			t.Fatalf("%s: a claim the hub is releasing must not suggest a purge: %s", tc.name, rec.Body)
+		}
+	}
+}
+
+// resumeSeq answers the worker's forced resume (a running record over a down
+// container) with errs in turn, then nil, counting every run: the retry after
+// a stranded start must use the same resume.
+type resumeSeq struct {
+	*fakeRuntime
+	runs *int
+	errs []error
+}
+
+func (r *resumeSeq) ResumeForce(ctx context.Context, worker, project string) error {
+	_ = r.fakeRuntime.ResumeForce(ctx, worker, project)
+	*r.runs++
+	if *r.runs <= len(r.errs) {
+		return r.errs[*r.runs-1]
+	}
+	return nil
+}
+
+func (r *resumeSeq) Resume(context.Context, string, string) error {
+	panic("a forced resume's retry must not fall back to a plain resume")
+}

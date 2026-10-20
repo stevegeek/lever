@@ -3,6 +3,7 @@ package jail
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/stevegeek/lever/internal/proc"
@@ -54,4 +55,148 @@ func TestContainerStartedBeforeBootRefuses(t *testing.T) {
 	if err == nil || got || !errors.Is(err, proc.ErrUnscripted) {
 		t.Errorf("got %t, %v", got, err)
 	}
+}
+
+func TestContainerCreatedBeforeBoot(t *testing.T) {
+	const inspect = "podman inspect --type container --format {{.Created.Unix}} lever--hello"
+	for _, c := range []struct {
+		name    string
+		created string
+		want    bool
+		wantErr bool
+	}{
+		{"created in an earlier boot", "1759990000\n", true, false},
+		{"created in this boot", "1760000100\n", false, false},
+		{"zero time", "-62135596800\n", false, false},
+		{"odd answer", "soon\n", false, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := proc.NewFakeRunner()
+			f.Script(inspect, proc.Result{Stdout: c.created})
+			f.Script("cat /proc/stat", proc.Result{Stdout: procStat})
+			got, err := ContainerCreatedBeforeBoot(context.Background(), f, "lever--hello")
+			if (err != nil) != c.wantErr || got != c.want {
+				t.Fatalf("got %t, %v; want %t, err %t", got, err, c.want, c.wantErr)
+			}
+		})
+	}
+	f := proc.NewFakeRunner()
+	if _, err := ContainerCreatedBeforeBoot(context.Background(), f, "--all"); err == nil || len(f.Calls) != 0 {
+		t.Fatalf("a flag-like ref must be refused before podman runs: %v %+v", err, f.Calls)
+	}
+}
+
+func TestContainerStrandedCreated(t *testing.T) {
+	const created = "podman inspect --type container --format {{.Created.Unix}} lever--hello"
+	for _, c := range []struct {
+		name  string
+		state string
+		made  string
+		want  bool
+	}{
+		{"created in an ended boot", "created", "1759990000\n", true},
+		{"created in this boot", "created", "1760000100\n", false},
+		{"exited", "exited", "1759990000\n", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := proc.NewFakeRunner()
+			f.Script(stateFormat+"lever--hello", proc.Result{Stdout: testID + " lever--hello " + c.state + " false false\n"})
+			f.Script(created, proc.Result{Stdout: c.made})
+			f.Script("podman inspect --type container --format {{.Created.Unix}} "+testID, proc.Result{Stdout: c.made})
+			f.Script("cat /proc/stat", proc.Result{Stdout: procStat})
+			got, err := ContainerStrandedCreated(context.Background(), f, "lever--hello")
+			if err != nil || got != c.want {
+				t.Fatalf("got %t, %v; want %t", got, err, c.want)
+			}
+		})
+	}
+}
+
+// A failed podman inspect or an unreadable boot time is an error, never a yes.
+func TestContainerCreatedBeforeBootErrors(t *testing.T) {
+	f := proc.NewFakeRunner()
+	if got, err := ContainerCreatedBeforeBoot(context.Background(), f, "lever--hello"); err == nil || got {
+		t.Fatalf("podman failing: got %t, %v", got, err)
+	}
+	f = proc.NewFakeRunner()
+	f.Script("podman inspect --type container --format {{.Created.Unix}} lever--hello", proc.Result{Stdout: "1759990000\n"})
+	if got, err := ContainerCreatedBeforeBoot(context.Background(), f, "lever--hello"); err == nil || got {
+		t.Fatalf("/proc/stat unreadable: got %t, %v", got, err)
+	}
+	f.Script("cat /proc/stat", proc.Result{Stdout: "cpu 1 2\n"})
+	if got, err := ContainerCreatedBeforeBoot(context.Background(), f, "lever--hello"); err == nil || got {
+		t.Fatalf("no btime: got %t, %v", got, err)
+	}
+}
+
+func TestRemoveStrandedCreated(t *testing.T) {
+	const made = "podman inspect --type container --format {{.Created.Unix}} lever--hello"
+	for _, c := range []struct {
+		name, state, created string
+		removed              bool
+	}{
+		{"stranded", "created", "1759990000\n", true},
+		{"created this boot", "created", "1760000100\n", false},
+		{"exited", "exited", "1759990000\n", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := proc.NewFakeRunner()
+			f.Script(stateFormat+"lever--hello", proc.Result{Stdout: testID + " lever--hello " + c.state + " false false\n"})
+			f.Script(made, proc.Result{Stdout: c.created})
+			f.Script("podman inspect --type container --format {{.Created.Unix}} "+testID, proc.Result{Stdout: c.created})
+			f.Script("cat /proc/stat", proc.Result{Stdout: procStat})
+			f.Script("podman rm "+testID, proc.Result{})
+			got, err := ContainerStrandedCreated(context.Background(), f, "lever--hello")
+			if err != nil || got != c.removed {
+				t.Fatalf("stranded: %t, %v", got, err)
+			}
+			removed, err := RemoveStrandedCreated(context.Background(), f, "lever--hello")
+			if err != nil || removed != c.removed {
+				t.Fatalf("got %t, %v; want %t", removed, err, c.removed)
+			}
+			rm := false
+			for _, call := range f.Calls {
+				if strings.Contains(call.Name+" "+strings.Join(call.Args, " "), "podman rm") {
+					rm = true
+					if strings.Contains(call.Name+" "+strings.Join(call.Args, " "), "-f") {
+						t.Fatal("never --force")
+					}
+				}
+			}
+			if rm != c.removed {
+				t.Fatalf("podman rm run: %t, want %t", rm, c.removed)
+			}
+		})
+	}
+}
+
+// A container someone else removed between the inspect and the rm is not
+// reported as removed by this call.
+func TestRemoveStrandedCreatedRaceIsNotARemoval(t *testing.T) {
+	f := proc.NewFakeRunner()
+	f.Script(stateFormat+"lever--hello", proc.Result{Stdout: testID + " lever--hello created false false\n"})
+	f.Script("podman inspect --type container --format {{.Created.Unix}} "+testID, proc.Result{Stdout: "1759990000\n"})
+	f.Script("cat /proc/stat", proc.Result{Stdout: procStat})
+	r := rmFails{FakeRunner: f, stderr: "Error: no container with name or ID " + testID + " found: no such container"}
+	removed, err := RemoveStrandedCreated(context.Background(), r, "lever--hello")
+	if err != nil || removed {
+		t.Fatalf("got %t, %v; want not removed, no error", removed, err)
+	}
+	r.stderr = "Error: cannot remove container as it is running"
+	if removed, err := RemoveStrandedCreated(context.Background(), r, "lever--hello"); err == nil || removed {
+		t.Fatalf("podman's refusal must come back: %t, %v", removed, err)
+	}
+}
+
+// rmFails is f, except that podman rm fails with stderr.
+type rmFails struct {
+	*proc.FakeRunner
+	stderr string
+}
+
+func (r rmFails) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
+	if name == "podman" && len(args) > 0 && args[0] == "rm" {
+		return proc.Result{Code: 1, Stderr: r.stderr}, errors.New("exit status 1")
+	}
+	return r.FakeRunner.Run(ctx, env, name, args...)
 }

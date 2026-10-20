@@ -93,6 +93,33 @@ func IsRefusedByHub(err error) bool {
 		strings.Contains(msg, "token does not have scope")
 }
 
+// IsStopClaimHeld reports the hub's refusal of a start or resume over a stop
+// claim it holds ("A stop is in progress for this agent").
+func IsStopClaimHeld(err error) bool {
+	return hubRefusal(err, "via hub: start_in_progress: a stop is in progress for this agent (since ")
+}
+
+// IsStartClaimHeld reports the hub's refusal of a start or resume over a
+// start claim it still holds ("A start is already in progress for this
+// agent"). A guest killed mid-start leaves one live for its lease (about 12
+// minutes), and the hub names scion stop as the way to cancel it.
+func IsStartClaimHeld(err error) bool {
+	return hubRefusal(err, "via hub: start_in_progress: a start is already in progress for this agent (")
+}
+
+func hubRefusal(err error, phrase string) bool {
+	if err == nil {
+		return false
+	}
+	for line := range strings.Lines(err.Error()) {
+		l := strings.ToLower(line)
+		if strings.Contains(l, phrase) && (strings.Contains(l, "(status: 409)") || strings.Contains(l, "(status: 409, request: ")) {
+			return true
+		}
+	}
+	return false
+}
+
 // RefusalHint is what to do after IsRefusedByHub. It names both causes: the
 // same 409 also answers a resume of a record in the wrong phase (running,
 // starting, stopping, error), so the missing scope is not certain.
@@ -640,34 +667,84 @@ func (c *Client) ServerStop(ctx context.Context) error {
 // must also run the root-installed scion ($2; "(deleted)" once an upgrade
 // replaced the file under it) in the reader's own pid and user namespaces,
 // not a decoy in a container. The cmdline test matches scion's own daemon
-// argv (cmd/server_daemon.go).
+// argv, `scion server start --foreground ...` (cmd/server_daemon.go), so a
+// `scion server stop` or `status` client is not taken for the daemon.
 //
 // Scion writes only its pid's digits and reads the file back with Atoi, so
 // a file that holds anything else stops every later server start ("invalid
 // PID in file"): above all an empty one, left by a guest killed between the
-// file's create and its write. Such a file names no server and is removed,
-// with the same re-read. The size test catches a trailing newline, which the
-// command substitution drops but Atoi refuses.
+// file's create and its write. The size test catches a trailing newline,
+// which the command substitution drops but Atoi refuses.
+//
+// Anything at the path that is not a regular file is removed: a symlink
+// (never followed), a directory, a FIFO or a device. Scion reads the file
+// with os.ReadFile, which blocks forever on a FIFO, so one there would hang
+// every later server start. Every read and write of the file is bounded by
+// timeout and its size is read with stat, which opens nothing, so a file
+// swapped for a FIFO mid-probe cannot hang the probe either. The window
+// between this probe and scion's own read is not closed (scion opens the path
+// itself); the probe runs before every start.
+//
+// A file that names no live server (malformed, not a regular file, a dead
+// pid, a decoy) may still sit beside a running hub: an agent can write the
+// file under a live server. Removing it would orphan that hub, and the next
+// start would fail on its port. So before removing it, the probe looks in
+// /proc for scion servers lever installed (the same test, after a cheap
+// filter on the process name, read by a builtin); when exactly one runs, it
+// rewrites the file to that pid and prints the pid. The new file gets an
+// unguessable name, is created exclusively (set -C: O_EXCL, so a planted
+// symlink is never followed) under umask 022 and a timeout, then renamed
+// over the path with mv -T, which replaces a symlink there rather than
+// following it. The name travels in the environment, not argv, which any
+// process can read from /proc, and without 16 random hex digits there is no
+// rewrite. A missing file is left alone.
 const serverPIDProbeScript = `f="$HOME/$1"
-[ -f "$f" ] || exit 0
-pid=$(head -c 32 -- "$f")
+rd() { timeout 5 head -c 32 -- "$f" 2>/dev/null; }
+# repair "$@": scionServerTest reads $2, a function's own argument.
+repair() {
+  n=0; srv=; base=${2##*/}; comm=$(printf '%.15s' "$base")
+  for d in /proc/[0-9]*; do
+    pid=${d#/proc/}
+    c=; read -r c 2>/dev/null < "$d/comm" || continue
+    [ "$c" = "$comm" ] || continue
+` + scionServerTest + `
+    then n=$((n+1)); srv=$pid; fi
+  done
+  [ "$n" -eq 1 ] || return 1
+  r=$(od -An -N8 -tx8 /dev/urandom 2>/dev/null | tr -d ' ')
+  [ ${#r} -eq 16 ] || { printf '%s' "$srv"; return 0; }
+  tmp="$f.lever.$$.$r"
+  if LEVER_PID="$srv" LEVER_TMP="$tmp" timeout 5 sh -c 'umask 022; set -C; printf %s "$LEVER_PID" > "$LEVER_TMP"' &&
+    mv -fT -- "$tmp" "$f"; then :; else rm -f -- "$tmp"; fi
+  printf '%s' "$srv"
+}
+if [ -L "$f" ]; then rm -f -- "$f"; repair "$@"; exit 0; fi
+[ -e "$f" ] || exit 0
+if [ ! -f "$f" ]; then rm -rf -- "$f"; repair "$@"; exit 0; fi
+raw=$(rd)
+pid=$raw
+size=$(stat -c %s -- "$f" 2>/dev/null) || exit 0
 case "$pid" in
 ''|*[!0-9]*) bad=1 ;;
-*) [ "$(wc -c < "$f")" -eq "${#pid}" ] && bad= || bad=1 ;;
+*) [ "$size" -eq "${#pid}" ] && bad= || bad=1 ;;
 esac
 if [ -n "$bad" ]; then
-  [ "$(head -c 32 -- "$f")" = "$pid" ] && rm -f -- "$f"
+  repair "$@" && exit 0
+  [ "$(rd)" = "$raw" ] && rm -f -- "$f"
   exit 0
 fi
+named=$pid
 if [ ! -r "/proc/$pid/cmdline" ]; then
-  [ "$(tr -cd '0-9' < "$f")" = "$pid" ] && rm -f -- "$f"
+  repair "$@" && exit 0
+  [ "$(rd)" = "$named" ] && rm -f -- "$f"
   exit 0
 fi
 ` + scionServerTest + `
 then
   printf '%s' "$pid"
 else
-  rm -f -- "$f"; printf 'stale:%s' "$pid"
+  repair "$@" && exit 0
+  rm -f -- "$f"; printf 'stale:%s' "$named"
 fi`
 
 // scionServerTest is the condition of an if, true when $pid is a scion server
@@ -676,7 +753,7 @@ const scionServerTest = `exe=$(readlink "/proc/$pid/exe")
 if [ -n "$2" ] && { [ "$exe" = "$2" ] || [ "$exe" = "$2 (deleted)" ]; } &&
   [ "$(readlink "/proc/$pid/ns/pid")" = "$(readlink /proc/self/ns/pid)" ] &&
   [ "$(readlink "/proc/$pid/ns/user")" = "$(readlink /proc/self/ns/user)" ] &&
-  case "$(tr '\000' ' ' < "/proc/$pid/cmdline")" in *scion*" server "*) true ;; *) false ;; esac`
+  case "$(tr '\000' ' ' < "/proc/$pid/cmdline")" in *" server start --foreground "*) true ;; *) false ;; esac`
 
 // serverPIDProbe returns the live scion server's pid, or 0 when there is none.
 func (c *Client) serverPIDProbe(ctx context.Context) (int, error) {
@@ -716,8 +793,8 @@ var HubEnvPrefixes = []string{"SCION_SERVER_AUTH_", "SCION_SERVER_HUB_ADMINEMAIL
 // process that is not a scion server lever installed (scionServerTest) reads
 // as no hub.
 var runningHubScript = `f="$HOME/$1"
-[ -f "$f" ] || exit 0
-pid=$(tr -cd '0-9' < "$f")
+[ -f "$f" ] && [ ! -L "$f" ] || exit 0
+pid=$(timeout 5 head -c 32 -- "$f" 2>/dev/null | tr -cd '0-9')
 [ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ] || exit 0
 ` + scionServerTest + `
 then :; else exit 0; fi

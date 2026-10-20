@@ -100,6 +100,17 @@ const (
 	DisableAgentViewSetting = "disableAgentView"
 )
 
+// ShellPrefixEnv is Claude Code's CLAUDE_CODE_SHELL_PREFIX: a command every
+// Bash tool command, hook, status line and stdio MCP server is run through,
+// with the command line in $1. Boot points it at ToolShellPath when the image
+// has that file (T0312), so the agent's own work can't starve claude of
+// processes or memory. An image without it (an instance image built from an
+// older Dockerfile) gets no prefix: a missing prefix would fail every command.
+const (
+	ShellPrefixEnv = "CLAUDE_CODE_SHELL_PREFIX"
+	ToolShellPath  = "/usr/local/libexec/lever-toolshell"
+)
+
 // ReadyHookCommand is the command of lever's claude-ready SessionStart hook,
 // which writes ReadyMarkerPath once a session (new or resumed) has started.
 // The manager gate waits for that marker. Boot uses the command to find and

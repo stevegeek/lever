@@ -134,7 +134,7 @@ func TestRunningHubScriptRunsForReal(t *testing.T) {
 		t.Fatal(err)
 	}
 	// "; :" keeps sh from exec'ing sleep, so the pid keeps this argv.
-	hub := exec.Command("sh", "-c", "sleep 30; :", "scion", "server", "--dev-auth=false")
+	hub := exec.Command("sh", "-c", "sleep 30; :", "scion", "server", "start", "--foreground", "--dev-auth=false")
 	hub.Env = []string{
 		"PATH=" + os.Getenv("PATH"),
 		"SCION_SERVER_AUTH_MODE=proxy",
@@ -194,7 +194,7 @@ func TestRunningHubScriptRunsForReal(t *testing.T) {
 	if !h.Running || h.PID != hub.Process.Pid || !reflect.DeepEqual(h.Env, want) {
 		t.Fatalf("got %+v", h)
 	}
-	if !strings.Contains(strings.Join(h.Argv, " "), "scion server --dev-auth=false") {
+	if !strings.Contains(strings.Join(h.Argv, " "), "scion server start --foreground --dev-auth=false") {
 		t.Fatalf("argv = %q", h.Argv)
 	}
 }

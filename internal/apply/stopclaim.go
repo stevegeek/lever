@@ -211,16 +211,7 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 // once a broker inventory shows the agent's container gone or terminal; the
 // hub reads a container podman lists as Created as still running, so a
 // Created container left by an interrupted start holds it for good.
-func IsStopClaimHeld(err error) bool {
-	if err == nil {
-		return false
-	}
-	for line := range strings.Lines(err.Error()) {
-		l := strings.ToLower(line)
-		if strings.Contains(l, "via hub: start_in_progress: a stop is in progress for this agent (since ") &&
-			strings.Contains(l, "(status: 409)") {
-			return true
-		}
-	}
-	return false
-}
+func IsStopClaimHeld(err error) bool { return scion.IsStopClaimHeld(err) }
+
+// IsStartClaimHeld is scion.IsStartClaimHeld.
+func IsStartClaimHeld(err error) bool { return scion.IsStartClaimHeld(err) }

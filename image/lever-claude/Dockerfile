@@ -34,6 +34,13 @@ RUN mkdir -p /etc/scion/hooks/pre-start.d
 COPY scionhook/pre-start /etc/scion/hooks/pre-start.d/10-lever-agent-boot
 RUN chmod 0755 /etc/scion/hooks/pre-start.d/10-lever-agent-boot
 
+# lever-toolshell: Claude Code's CLAUDE_CODE_SHELL_PREFIX (boot writes it into
+# the managed settings when this file exists). Every tool command runs under a
+# process limit below the container's pids limit and a raised oom_score_adj,
+# so the agent's own work can't starve claude of processes or memory.
+COPY scionhook/toolshell /usr/local/libexec/lever-toolshell
+RUN chmod 0755 /usr/local/libexec/lever-toolshell
+
 # Point Claude Code at the agent's enrolled mTLS identity (written by the hook at
 # boot) so it presents a client cert and trusts the broker CA when connecting to
 # the broker's /mcp/<tool>/ gateway over mutual TLS. Real Claude Code env vars; a

@@ -374,6 +374,11 @@ type Deps struct {
 	// before the guest's current boot. The guest-restart recovery reads it only
 	// when GuestBoot kept no boot id. nil: no fallback.
 	ContainerStartedBeforeBoot func(ctx context.Context, ref string) (bool, error)
+	// ContainerCreatedBeforeBoot reports whether an agent container was created
+	// before the guest's current boot. A running record over a container podman
+	// still lists as created reads as down only when it says yes
+	// (containerGoneUnder). nil: such a container is a start under way.
+	ContainerCreatedBeforeBoot func(ctx context.Context, ref string) (bool, error)
 	// GuestBoot reads the guest's boot id and keeps the one the manager last ran
 	// live in, so a record left "running" by a hard VM kill is suspended and
 	// resumed instead of refused. Optional.
@@ -1383,8 +1388,8 @@ func (r *run) managerInstructions() (string, error) {
 // managerStartOpts builds the manager's scion start options; in api-key mode
 // it first sets the project env and the placeholder secret.
 //
-// LEVER_BOOTSTRAP is not set: lever-agent boot defaults to
-// ./.lever/bootstrap.json relative to its CWD /workspace, which is jp, where
+// LEVER_BOOTSTRAP is not set: lever-agent defaults to
+// /workspace/.lever/bootstrap.json (the tree jp is mounted at /workspace), where
 // mint-manager-bootstrap staged the ticket.
 func (r *run) managerStartOpts(ctx context.Context, jp, task, instructions string) (scion.StartOpts, error) {
 	apiKey := r.app.EffectiveManagerLLMAuth() == config.LLMAuthAPIKey

@@ -274,6 +274,16 @@ type DispatchConfig struct {
 	// text). A recycle refuses a running one. nil ⇒ only the hub record is
 	// read.
 	ContainerRunning func(ctx context.Context, worker string) (bool, error)
+	// ContainerStranded reports whether podman lists the worker's container as
+	// created in an earlier guest boot (jail.ContainerStrandedCreated): a guest
+	// killed between podman's create and start leaves one that nothing starts.
+	// A running record over it reads as running with its container down.
+	// nil ⇒ a created container is a start under way.
+	ContainerStranded func(ctx context.Context, worker string) (bool, error)
+	// RemoveStranded removes the worker's container when ContainerStranded
+	// holds for it (jail.RemoveStrandedCreated), so the hub can release the
+	// claims the stranded start left. nil ⇒ such a resume is refused for retry.
+	RemoveStranded func(ctx context.Context, worker string) (bool, error)
 	// HubTokens heals an agent whose scion hub token expired, governed by
 	// AutoReenrol. nil ⇒ no watch.
 	HubTokens HubTokenHealer
@@ -387,6 +397,8 @@ type Broker struct {
 	ticketStager        TicketStager
 	purger              WorkerPurger
 	containerRunning    func(ctx context.Context, worker string) (bool, error)
+	containerStranded   func(ctx context.Context, worker string) (bool, error)
+	removeStranded      func(ctx context.Context, worker string) (bool, error)
 	recycleRate         *rateWindow // recycles per worker
 	reenrolEvents       chan string
 	reenrolNow          func() time.Time
@@ -486,6 +498,8 @@ func New(c Config) *Broker {
 		ticketStager:        d.Tickets,
 		purger:              d.Purge,
 		containerRunning:    d.ContainerRunning,
+		containerStranded:   d.ContainerStranded,
+		removeStranded:      d.RemoveStranded,
 		recycleRate:         newRateWindow(recycleRateLimit),
 		reenrolEvents:       make(chan string, reenrolQueueDepth),
 		reenrolNow:          time.Now,

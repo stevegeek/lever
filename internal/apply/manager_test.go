@@ -584,3 +584,45 @@ func TestTokenResetUnderTheLock(t *testing.T) {
 func createdBefore(before bool, err error) func(context.Context, string) (bool, error) {
 	return func(context.Context, string) (bool, error) { return before, err }
 }
+
+// TestKeepRecoversAStrandedCreatedContainerThroughAStopClaim (T0313): the
+// realistic sequence after a guest kill between podman's create and start.
+// The suspend leaves the container created, so the hub keeps its stop claim
+// and refuses the first resume; lever removes the created container, and the
+// next resume brings the manager up on its conversation.
+func TestKeepRecoversAStrandedCreatedContainerThroughAStopClaim(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "running", initContainerStatus: "Created",
+		resumeErr: errors.New(stopClaimMsg), resumeFailsThenSucceed: 1}
+	j := &fakeJanitor{states: []jail.ContainerState{created(staleID)}}
+	d := fillDeps(Deps{Scion: scion.New(r, scion.Options{}), StaleContainer: j, ContainerCreatedBeforeBoot: createdBefore(true, nil),
+		StopClaimRetry: RetryBudget{Attempts: 4, Interval: time.Millisecond}, Log: func(string, ...any) {}})
+	res, err := EnsureManager(context.Background(), app, d, ManagerRequest{Intent: ManagerKeep})
+	if err != nil || r.suspendCalls != 1 || r.resumeCalls != 2 || r.deleteCalls != 0 || res.Verb != "resume" || !j.did("rm ") {
+		t.Fatalf("err %v suspend %d resume %d delete %d verb %q janitor %v", err, r.suspendCalls, r.resumeCalls, r.deleteCalls, res.Verb, j.calls)
+	}
+}
+
+// TestKeepCancelsAStrandedStartClaim (T0313): after a guest kill mid-start
+// the hub still holds the start's claim for its lease, and refuses the
+// resume over it. With podman showing the manager's container created in an
+// earlier boot, lever stops the record (the hub's remedy) and resumes; with
+// a container created in this boot it does neither.
+func TestKeepCancelsAStrandedStartClaim(t *testing.T) {
+	const held = `scion resume m: failed to start agent via Hub: start_in_progress: A start is already in progress for this agent (a user start, since 12:40). It will finish or be released by 12:52; run scion stop to cancel it. (status: 409)`
+	for _, stranded := range []bool{true, false} {
+		app, f := newObserveFirstApp(t)
+		r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "Created",
+			resumeErr: errors.New(held), resumeFailsThenSucceed: 1}
+		j := &fakeJanitor{states: []jail.ContainerState{created(staleID)}}
+		d := fillDeps(Deps{Scion: scion.New(r, scion.Options{}), StaleContainer: j, ContainerCreatedBeforeBoot: createdBefore(stranded, nil),
+			StopClaimRetry: RetryBudget{Attempts: 4, Interval: time.Millisecond}, Log: func(string, ...any) {}})
+		_, err := EnsureManager(context.Background(), app, d, ManagerRequest{Intent: ManagerKeep})
+		if stranded && (err != nil || r.stopCalls != 1 || r.resumeCalls != 2 || r.deleteCalls != 0) {
+			t.Fatalf("stranded: err %v stop %d resume %d delete %d", err, r.stopCalls, r.resumeCalls, r.deleteCalls)
+		}
+		if !stranded && (err == nil || r.stopCalls != 0 || r.resumeCalls != 1) {
+			t.Fatalf("a start under way must not be stopped: err %v stop %d resume %d", err, r.stopCalls, r.resumeCalls)
+		}
+	}
+}

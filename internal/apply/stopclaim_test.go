@@ -371,3 +371,25 @@ func TestIsStopClaimHeld(t *testing.T) {
 		t.Fatal("nil")
 	}
 }
+
+func TestIsStartClaimHeld(t *testing.T) {
+	held := errors.New("scion resume m: failed to start agent via Hub: start_in_progress: A start is already in progress for this agent (a user start, since 12:40). It will finish or be released by 12:52; run scion stop to cancel it. (status: 409, request: 42f9)")
+	if !IsStartClaimHeld(held) || IsStopClaimHeld(held) {
+		t.Fatal("a start claim must read as a start claim only")
+	}
+	if IsStartClaimHeld(errors.New(stopClaimMsg)) || IsStartClaimHeld(nil) || IsStartClaimHeld(errors.New("A start is already in progress for this agent (")) {
+		t.Fatal("a stop claim, nil or a bare phrase without the hub's frame is no start claim")
+	}
+}
+
+// scion appends the request id to the status ("(status: 409, request: …)"):
+// the stop claim reads as one either way.
+func TestIsStopClaimHeldWithARequestID(t *testing.T) {
+	withID := errors.New(strings.Replace(stopClaimMsg, "(status: 409)", "(status: 409, request: 42f9f2e6-62b6-4511-8e3a-13f0112c33d8)", 1))
+	if !IsStopClaimHeld(withID) {
+		t.Fatal("the request id must not hide a stop claim")
+	}
+	if IsStopClaimHeld(errors.New(strings.Replace(stopClaimMsg, "(status: 409)", "(status: 4090)", 1))) {
+		t.Fatal("another status is no stop claim")
+	}
+}

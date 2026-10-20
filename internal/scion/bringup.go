@@ -93,6 +93,33 @@ func IsRefusedByHub(err error) bool {
 		strings.Contains(msg, "token does not have scope")
 }
 
+// IsStopClaimHeld reports the hub's refusal of a start or resume over a stop
+// claim it holds ("A stop is in progress for this agent").
+func IsStopClaimHeld(err error) bool {
+	return hubRefusal(err, "via hub: start_in_progress: a stop is in progress for this agent (since ")
+}
+
+// IsStartClaimHeld reports the hub's refusal of a start or resume over a
+// start claim it still holds ("A start is already in progress for this
+// agent"). A guest killed mid-start leaves one live for its lease (about 12
+// minutes), and the hub names scion stop as the way to cancel it.
+func IsStartClaimHeld(err error) bool {
+	return hubRefusal(err, "via hub: start_in_progress: a start is already in progress for this agent (")
+}
+
+func hubRefusal(err error, phrase string) bool {
+	if err == nil {
+		return false
+	}
+	for line := range strings.Lines(err.Error()) {
+		l := strings.ToLower(line)
+		if strings.Contains(l, phrase) && (strings.Contains(l, "(status: 409)") || strings.Contains(l, "(status: 409, request: ")) {
+			return true
+		}
+	}
+	return false
+}
+
 // RefusalHint is what to do after IsRefusedByHub. It names both causes: the
 // same 409 also answers a resume of a record in the wrong phase (running,
 // starting, stopping, error), so the missing scope is not certain.

@@ -326,6 +326,12 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 	d.ContainerRunning = func(ctx context.Context, worker string) (bool, error) {
 		return jail.ContainerRunning(ctx, jr, jail.ContainerName(filepath.Base(jailMount), worker))
 	}
+	d.ContainerStranded = func(ctx context.Context, worker string) (bool, error) {
+		return jail.ContainerStrandedCreated(ctx, jr, jail.ContainerName(filepath.Base(jailMount), worker))
+	}
+	d.RemoveStranded = func(ctx context.Context, worker string) (bool, error) {
+		return jail.RemoveStrandedCreated(ctx, jr, jail.ContainerName(filepath.Base(jailMount), worker))
+	}
 	// Expired agent hub tokens are read in each agent's container and reset
 	// with `scion reset-auth` under the controller PAT.
 	d.HubTokens = hubTokenHealer{probe: jail.AgentProbe{R: jr}, sc: sc, project: jailMount}

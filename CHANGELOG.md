@@ -37,13 +37,22 @@ version bump moves the block under the new version heading.
   every command). The wrapper runs each command in the shell Claude Code built it for. The stack e2e checks it live: a tool past its limit can't start
   all its processes, and claude still runs.
 
-- **A guest killed while podman starts the manager no longer strands it (T0313).** If the jail VM
-  died after podman created the manager's container but before it started it, the hub kept the
-  record `running` over a container podman lists as `created`. Lever read that as a start under
-  way, so every later `lever up` failed with "did not come up (last phase running, container
-  Created)" until the operator discarded the session. A created container that podman made before
-  the guest's current boot is now treated as down: `lever up` suspends and resumes the manager,
-  and the conversation is kept.
+- **A guest killed while podman starts an agent no longer strands it (T0313, T0314).** If the jail
+  VM died after podman created the manager's container but before it started it, the hub kept the
+  record `running` over a container podman lists as `created`, and held the interrupted start's
+  claim for its 12-minute lease. Lever read the container as a start under way, so every later
+  `lever up` failed with "did not come up (last phase running, container Created)". A created
+  container that podman made before the guest's current boot now reads as down. `lever up`
+  suspends the manager and resumes it; if the hub refuses over the stranded start's claim, lever
+  stops the record (the hub's own remedy), clears the stop claim as before and resumes it. The
+  record and its agent home are kept; after a stop the manager comes back in a new claude session
+  (`lever attach`, then `/resume` for the old conversation). A worker in the same state now reads
+  as down, and `lever worker resume` removes its stranded container, stops the record and
+  resumes it; a 503 asks to retry while the hub finishes releasing the claim.
+
+- **The hub's stop claim is recognised when scion adds a request id.** Lever matched the refusal
+  only as `(status: 409)`; scion can append the request id (`(status: 409, request: …)`), which
+  skipped the stop-claim recovery.
 
 ### Security
 

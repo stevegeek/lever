@@ -2,6 +2,7 @@ package jail
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -33,6 +34,48 @@ func ContainerStartedBeforeBoot(ctx context.Context, r proc.Runner, ref string) 
 // and resume) is benign.
 func ContainerCreatedBeforeBoot(ctx context.Context, r proc.Runner, ref string) (bool, error) {
 	return beforeBoot(ctx, r, ref, "{{.Created.Unix}}", "creation")
+}
+
+// ContainerStrandedCreated reports whether podman lists the container ref as
+// created (made, never started) and made it before the guest's current boot:
+// a guest killed between podman's create and its start leaves one, and
+// nothing will start it. No container, or any other state, answers false.
+func ContainerStrandedCreated(ctx context.Context, r proc.Runner, ref string) (bool, error) {
+	st, err := ContainerJanitor{R: r}.State(ctx, ref)
+	if errors.Is(err, ErrNoContainer) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if st.Running || st.Paused || st.Status != "created" {
+		return false, nil
+	}
+	return ContainerCreatedBeforeBoot(ctx, r, ref)
+}
+
+// RemoveStrandedCreated removes the container ref when ContainerStrandedCreated
+// holds for it, by the id it inspected and without --force (podman refuses a
+// container that started meanwhile). It reports whether it removed one.
+func RemoveStrandedCreated(ctx context.Context, r proc.Runner, ref string) (bool, error) {
+	st, err := ContainerJanitor{R: r}.State(ctx, ref)
+	if errors.Is(err, ErrNoContainer) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if st.Running || st.Paused || st.Status != "created" {
+		return false, nil
+	}
+	before, err := ContainerCreatedBeforeBoot(ctx, r, ref)
+	if err != nil || !before {
+		return false, err
+	}
+	if err := RemoveStoppedContainer(ctx, r, st.ID); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func beforeBoot(ctx context.Context, r proc.Runner, ref, format, what string) (bool, error) {

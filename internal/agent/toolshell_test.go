@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,10 +14,10 @@ import (
 // installs one.
 func init() { toolShellPath = "/nonexistent/lever-toolshell" }
 
-func withToolShell(t *testing.T, mode os.FileMode) string {
+func withToolShell(t *testing.T, mode os.FileMode, body string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "lever-toolshell")
-	if err := os.WriteFile(p, []byte("#!/bin/sh\n"), mode); err != nil {
+	if err := os.WriteFile(p, []byte(body), mode); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(p, mode); err != nil {
@@ -47,15 +48,24 @@ func TestWriteManagedSettingsShellPrefix(t *testing.T) {
 		t.Fatalf("no toolshell in the image: env = %v, want the prefix removed and other keys kept", env)
 	}
 
-	withToolShell(t, 0o644)
-	if err := WriteManagedSettings(path, nil); err != nil {
-		t.Fatal(err)
-	}
-	if env := readManaged(t, path)["env"].(map[string]any); env[ShellPrefixEnv] != nil {
-		t.Fatalf("a toolshell that can't run: env = %v, want no prefix", env)
+	for name, c := range map[string]struct {
+		mode os.FileMode
+		body string
+	}{
+		"not executable":  {0o644, "#!/bin/sh\n"},
+		"fails a command": {0o755, "#!/bin/sh\nexit 1\n"},
+		"CRLF line ends":  {0o755, "#!/bin/sh\r\nexit 0\r\n"},
+	} {
+		withToolShell(t, c.mode, c.body)
+		if err := WriteManagedSettings(path, nil); err != nil {
+			t.Fatal(err)
+		}
+		if env := readManaged(t, path)["env"].(map[string]any); env[ShellPrefixEnv] != nil {
+			t.Fatalf("a toolshell that %s: env = %v, want no prefix", name, env)
+		}
 	}
 
-	p := withToolShell(t, 0o755)
+	p := withToolShell(t, 0o755, "#!/bin/sh\nexec \"$@\"\n")
 	if err := WriteManagedSettings(path, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -89,10 +99,15 @@ func TestToolShellSetsLimitsAndRunsTheCommand(t *testing.T) {
 			}
 		}
 		cmd := exec.Command(bash, script, `echo "$(ulimit -Hu) $(cat /proc/self/oom_score_adj) it's run"`)
-		cmd.Env = append(os.Environ(), "LEVER_TOOLSHELL_PIDS_MAX="+f)
+		cmd.Env = append(os.Environ(), "LEVER_TOOLSHELL_PIDS_MAX="+f, "CLAUDE_CODE_SHELL=", "SHELL=/bin/bash")
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
 		out, err := cmd.Output()
 		if err != nil {
 			t.Fatalf("toolshell with pids.max %q: %v", pidsMax, err)
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("toolshell with pids.max %q wrote to stderr: %q", pidsMax, stderr.String())
 		}
 		fields := strings.Fields(string(out))
 		if len(fields) != 4 || fields[2] != "it's" || fields[3] != "run" {
@@ -117,5 +132,58 @@ func TestToolShellSetsLimitsAndRunsTheCommand(t *testing.T) {
 		if lim, adj := run(pm); lim != unchanged || adj != "500" {
 			t.Fatalf("pids.max %q: limit %s, oom_score_adj %s; want %s unchanged and 500", pm, lim, adj, unchanged)
 		}
+	}
+}
+
+// The wrapper runs the command in the shell Claude Code built it for, since
+// Claude Code sources that shell's snapshot first: CLAUDE_CODE_SHELL, else a
+// bash or zsh $SHELL, else bash. Its exit status is the command's.
+func TestToolShellRunsClaudesShell(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("needs bash")
+	}
+	script, err := filepath.Abs("../../cmd/lever-agent/scionhook/toolshell")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shellOf := func(env ...string) string {
+		t.Helper()
+		cmd := exec.Command(bash, script, `if [ -n "$ZSH_VERSION" ]; then echo zsh; elif [ -n "$BASH_VERSION" ]; then echo bash; else echo other; fi`)
+		cmd.Env = append(os.Environ(), append([]string{"CLAUDE_CODE_SHELL=", "SHELL="}, env...)...)
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("toolshell with %v: %v", env, err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	if got := shellOf("SHELL=/bin/sh"); got != "bash" {
+		t.Fatalf("SHELL=/bin/sh ran %s, want bash", got)
+	}
+	if got := shellOf("SHELL=/nonexistent/zsh"); got != "bash" {
+		t.Fatalf("a missing zsh ran %s, want bash", got)
+	}
+	if zsh, err := exec.LookPath("zsh"); err == nil {
+		if got := shellOf("SHELL=" + zsh); got != "zsh" {
+			t.Fatalf("SHELL=%s ran %s, want zsh", zsh, got)
+		}
+		if got := shellOf("SHELL="+zsh, "CLAUDE_CODE_SHELL="+bash); got != "bash" {
+			t.Fatalf("CLAUDE_CODE_SHELL=bash ran %s, want bash", got)
+		}
+	}
+	cmd := exec.Command(bash, script, "exit 7")
+	err = cmd.Run()
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != 7 {
+		t.Fatalf("exit status = %v, want 7", err)
+	}
+	// No pids.max to read and no oom_score_adj to write: still nothing on
+	// stderr.
+	cmd = exec.Command(bash, script, "true")
+	cmd.Env = append(os.Environ(), "LEVER_TOOLSHELL_PIDS_MAX=/nonexistent/pids.max")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil || stderr.Len() != 0 {
+		t.Fatalf("missing pids.max: err %v, stderr %q", err, stderr.String())
 	}
 }

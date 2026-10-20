@@ -32,8 +32,9 @@ version bump moves the block under the new version heading.
   wrapper in the image, `/usr/local/libexec/lever-toolshell`. Every Bash tool command, hook, status
   line and stdio MCP server then runs under a hard process limit 256 below the container's
   `pids.max`, and with `oom_score_adj` 500, so the tool fails or is OOM-killed first and claude
-  keeps running. The key is set only when the image has the wrapper (a prefix that can't run
-  would fail every command). The stack e2e checks it live: a tool past its limit can't start
+  keeps running; a stdio MCP server near the limit may lose its tools instead. The key is set
+  only when the image's wrapper runs a test command at boot (a prefix that can't run would fail
+  every command). The wrapper runs each command in the shell Claude Code built it for. The stack e2e checks it live: a tool past its limit can't start
   all its processes, and claude still runs.
 
 ### Security

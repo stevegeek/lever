@@ -915,8 +915,12 @@ plausibly make it more likely; it has not been reproduced. The container's own t
   `pids.max` minus 256 and raises the command's `oom_score_adj` to 500. A runaway build or
   fork loop then fails with "Resource temporarily unavailable", or is the one the OOM killer
   takes, instead of claude: at the container's pids limit claude can't start a thread and
-  aborts, which takes the agent's tmux session and container down. It guards against accidents,
-  not against the agent, which can change its own commands. An instance image built from an
+  aborts, which takes the agent's tmux session and container down. Long-running stdio MCP
+  servers inherit the limit and the score too: near the limit one can fail to start a thread or
+  be the first OOM victim, and its tools are gone (until `/mcp` reconnects them) while claude keeps
+  running. The command runs in the shell Claude Code built it for (`CLAUDE_CODE_SHELL`, else a
+  bash or zsh `$SHELL`, else bash). Boot sets the prefix only after the wrapper has run a test
+  command. It guards against accidents, not against the agent, which can change its own commands. An instance image built from an
   older Dockerfile has no wrapper and gets no prefix; rebuild it to get the headroom.
 - **Background sessions are off in every agent, at start.** At every start, `lever-agent boot`
   writes `env.CLAUDE_CODE_DISABLE_AGENT_VIEW=1` and `"disableAgentView": true` into the

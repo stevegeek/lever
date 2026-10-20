@@ -34,7 +34,7 @@ func TestScriptsParse(t *testing.T) {
 	if _, err := exec.LookPath("dash"); err == nil {
 		posix = "dash"
 	}
-	for _, c := range []struct{ shell, file string }{{posix, "in-image.sh"}, {"bash", "check-image.sh"}} {
+	for _, c := range []struct{ shell, file string }{{posix, "in-image.sh"}, {"bash", "check-image.sh"}, {"bash", "../../cmd/lever-agent/scionhook/toolshell"}} {
 		if _, err := exec.LookPath(c.shell); err != nil {
 			t.Skipf("%s not found", c.shell)
 		}
@@ -51,6 +51,7 @@ func TestInImageCoversLever(t *testing.T) {
 	want := []string{
 		"[ -d " + path.Dir(wire.ManagedSettingsPath) + " ]",
 		"marker=" + wire.ReadyMarkerPath + "\n",
+		"ts=" + wire.ToolShellPath + "\n",
 		"'" + wire.ReadyHookCommand + ";",
 		`[ "$(id -un)" = ` + jail.AgentUser + " ]",
 		"[ -d " + path.Dir(jail.AgentTokenPath) + " ]",

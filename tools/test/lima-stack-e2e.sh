@@ -643,7 +643,7 @@ for _ in $(seq 1 30); do claude_up && break; sleep 2; done
 check "claude runs in the manager's container" claude_up
 claude_up || { echo "      | processes in the manager's container:"; cmdlines | cut -c1-160 | sed 's/^/      |   /'; }
 # T0312: claude's tool commands run under lever-toolshell, whose process limit
-# leaves claude headroom. Here a "tool" under a limit 20 above the user's
+# leaves claude headroom. Here a "tool" under a limit 30 above the user's
 # current task count starts 60 short sleeps: some forks must fail, and claude
 # must still run. Every process stays inside the nested manager container.
 check "the managed settings name lever-toolshell as the shell prefix" \
@@ -652,7 +652,7 @@ check "the managed settings name lever-toolshell as the shell prefix" \
 # retry it for seconds); the survivors are counted from /proc and killed.
 headroom_script=$(cat <<'EOS'
 n=$(grep -l "^Uid:[[:space:]]*1000[[:space:]]" /proc/[0-9]*/task/*/status 2>/dev/null | wc -l)
-echo $((n + 20 + 256)) > /tmp/lever-e2e-pids.max
+echo $((n + 30 + 256)) > /tmp/lever-e2e-pids.max
 LEVER_TOOLSHELL_PIDS_MAX=/tmp/lever-e2e-pids.max /usr/local/libexec/lever-toolshell 'sh -c "for i in \$(seq 60); do sleep 37 & done"' >/dev/null 2>&1
 pids=
 for d in /proc/[0-9]*; do
@@ -668,6 +668,19 @@ echo "      | tool under the headroom limit: ${headroom:-(no output)}"
 started=${headroom#started=}
 checkx "a tool past its process limit could not start all 60 ($started)" '[ -n "$started" ] && [ "$started" -gt 0 ] && [ "$started" -lt 60 ]'
 check "claude still runs after the tool hit its limit" claude_up
+# Claude Code really runs its children through the prefix: the stdio MCP
+# server it started (lever-agent serve-capability) carries the limit and the
+# OOM score.
+mcp_limits=$(P exec --user scion "lever--$NAME" sh -c '
+for d in /proc/[0-9]*; do
+	case "$(tr "\000" " " < "$d/cmdline" 2>/dev/null)" in lever-agent\ serve-capability*|*/lever-agent\ serve-capability*)
+		lim=$(sed -n "s/^Max processes  *\([0-9][0-9]*\) .*/\1/p" "$d/limits"); adj=$(cat "$d/oom_score_adj")
+		echo "$lim $adj $(($(cat /sys/fs/cgroup/pids.max) - 256))"; exit ;;
+	esac
+done' 2>/dev/null)
+echo "      | serve-capability: max processes, oom_score_adj, pids.max-256: ${mcp_limits:-(not found)}"
+read -r mcp_lim mcp_adj mcp_want <<<"${mcp_limits:-}"
+checkx "claude's stdio MCP server runs under lever-toolshell (${mcp_lim:-?} = ${mcp_want:-?}, oom ${mcp_adj:-?})" '[ -n "${mcp_want:-}" ] && [ "$mcp_lim" = "$mcp_want" ] && [ "$mcp_adj" = 500 ]'
 after=$(newest)
 echo "      | session after: ${after:-(no transcript)}"
 checkx "a new claude session" '[ -n "$after" ] && [ "$after" != "$before" ]'

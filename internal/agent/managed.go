@@ -1,15 +1,18 @@
 package agent
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/stevegeek/lever/internal/wire"
 )
@@ -28,12 +31,20 @@ const (
 // toolShellPath is wire.ToolShellPath; a var for tests.
 var toolShellPath = wire.ToolShellPath
 
-// toolShellReady reports whether the image has lever-toolshell as an
-// executable regular file, the condition for pointing Claude Code's shell
-// prefix at it: with a prefix that can't run, every tool command fails.
+// toolShellReady reports whether the image's lever-toolshell is an
+// executable regular file that runs a command (`true`, within 5 s), the
+// condition for pointing Claude Code's shell prefix at it: with a prefix that
+// can't run (absent, CRLF line ends, no bash in a custom image), every tool
+// command and hook fails. Boot runs in the pre-start hook, in the image the
+// agent then runs in, so the trial is the real thing.
 func toolShellReady() bool {
 	fi, err := os.Stat(toolShellPath)
-	return err == nil && fi.Mode().IsRegular() && fi.Mode().Perm()&0o111 != 0
+	if err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm()&0o111 == 0 {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return exec.CommandContext(ctx, toolShellPath, "true").Run() == nil
 }
 
 // AfterCompactMarker starts the context lever's after-compaction hook gives

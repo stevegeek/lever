@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [1.0.0-beta.1] - 2026-10-20
+
 ### Fixed
 
 - **`lever-agent` works from any directory in the workspace (T0308).** Its default

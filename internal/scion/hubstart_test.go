@@ -357,7 +357,7 @@ func TestServerPIDProbeRefusesADecoy(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(home, layout.Dir), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	decoy := exec.Command(bash, "-c", `exec -a "scion server start" sleep 30`)
+	decoy := exec.Command(bash, "-c", `exec -a "scion server start --foreground" sleep 30`)
 	if err := decoy.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -420,7 +420,7 @@ func TestServerPIDProbeRepairsAFileBesideALiveServer(t *testing.T) {
 	}
 	startServer := func() (string, string) {
 		t.Helper()
-		c := exec.Command(bash, "-c", `exec -a "scion server start" sleep 30`)
+		c := exec.Command(bash, "-c", `exec -a "scion server start --foreground" sleep 30`)
 		if err := c.Start(); err != nil {
 			t.Fatal(err)
 		}

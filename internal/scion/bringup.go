@@ -640,7 +640,8 @@ func (c *Client) ServerStop(ctx context.Context) error {
 // must also run the root-installed scion ($2; "(deleted)" once an upgrade
 // replaced the file under it) in the reader's own pid and user namespaces,
 // not a decoy in a container. The cmdline test matches scion's own daemon
-// argv (cmd/server_daemon.go).
+// argv, `scion server start --foreground ...` (cmd/server_daemon.go), so a
+// `scion server stop` or `status` client is not taken for the daemon.
 //
 // Scion writes only its pid's digits and reads the file back with Atoi, so
 // a file that holds anything else stops every later server start ("invalid
@@ -661,24 +662,28 @@ func (c *Client) ServerStop(ctx context.Context) error {
 // pid, a decoy) may still sit beside a running hub: an agent can write the
 // file under a live server. Removing it would orphan that hub, and the next
 // start would fail on its port. So before removing it, the probe looks in
-// /proc for scion servers lever installed (the same test); when exactly one
-// runs, it rewrites the file to that pid (a fresh 0644 file renamed over the
-// path with mv -T, which replaces a symlink rather than following it) and
-// prints the pid. A missing file is left alone.
+// /proc for scion servers lever installed (the same test, after a cheap
+// filter on the process name, read by a builtin); when exactly one runs, it
+// rewrites the file to that pid and prints the pid. The new file gets an
+// unguessable name, is created exclusively (set -C: O_EXCL, so a planted
+// symlink is never followed) under umask 022 and a timeout, then renamed
+// over the path with mv -T, which replaces a symlink there rather than
+// following it. A missing file is left alone.
 const serverPIDProbeScript = `f="$HOME/$1"
 rd() { timeout 5 head -c 32 -- "$f" 2>/dev/null; }
 # repair "$@": scionServerTest reads $2, a function's own argument.
 repair() {
-  n=0; srv=
+  n=0; srv=; base=${2##*/}; comm=$(printf '%.15s' "$base")
   for d in /proc/[0-9]*; do
     pid=${d#/proc/}
-    [ -r "$d/cmdline" ] || continue
+    c=; read -r c < "$d/comm" 2>/dev/null || continue
+    [ "$c" = "$comm" ] || continue
 ` + scionServerTest + `
     then n=$((n+1)); srv=$pid; fi
   done
   [ "$n" -eq 1 ] || return 1
-  tmp=$(mktemp -- "$f.XXXXXX") || { printf '%s' "$srv"; return 0; }
-  if chmod 644 -- "$tmp" && printf '%s' "$srv" | timeout 5 tee -- "$tmp" >/dev/null &&
+  tmp="$f.lever.$$.$(od -An -N8 -tx8 /dev/urandom | tr -d ' ')"
+  if timeout 5 sh -c 'umask 022; set -C; printf %s "$1" > "$2"' _ "$srv" "$tmp" &&
     mv -fT -- "$tmp" "$f"; then :; else rm -f -- "$tmp"; fi
   printf '%s' "$srv"
 }
@@ -717,7 +722,7 @@ const scionServerTest = `exe=$(readlink "/proc/$pid/exe")
 if [ -n "$2" ] && { [ "$exe" = "$2" ] || [ "$exe" = "$2 (deleted)" ]; } &&
   [ "$(readlink "/proc/$pid/ns/pid")" = "$(readlink /proc/self/ns/pid)" ] &&
   [ "$(readlink "/proc/$pid/ns/user")" = "$(readlink /proc/self/ns/user)" ] &&
-  case "$(tr '\000' ' ' < "/proc/$pid/cmdline")" in *scion*" server "*) true ;; *) false ;; esac`
+  case "$(tr '\000' ' ' < "/proc/$pid/cmdline")" in *" server start --foreground "*) true ;; *) false ;; esac`
 
 // serverPIDProbe returns the live scion server's pid, or 0 when there is none.
 func (c *Client) serverPIDProbe(ctx context.Context) (int, error) {

@@ -33,8 +33,9 @@ version bump moves the block under the new version heading.
   hub's file removed by writing junk, a newline or a dead pid into it. That orphaned the hub: the
   next start failed on its port, and the readiness wait read the hub as gone. Now, before removing
   such a file, lever looks in `/proc` for scion servers it installed (its own binary, in the jail's
-  own pid and user namespaces, with scion's daemon argv). When exactly one runs, lever rewrites the
-  file to that pid (a fresh 0644 file renamed over the path) and treats the hub as running. Anything
+  own pid and user namespaces, with scion's daemon argv `server start --foreground`). When exactly
+  one runs, lever rewrites the file to that pid (a fresh 0644 file, created exclusively under an
+  unguessable name and renamed over the path) and treats the hub as running. Anything
   at the path that isn't a regular file (a symlink, a directory, a FIFO, a device) is replaced the
   same way, or removed: scion reads the file with `os.ReadFile`, which blocks forever on a FIFO, so
   one planted there hung every later hub start. Every read and write of the file is bounded by a

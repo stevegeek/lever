@@ -144,7 +144,7 @@ func defaultBootstrapPath() string {
 	if p := os.Getenv("LEVER_BOOTSTRAP"); p != "" {
 		return p
 	}
-	if _, err := os.Lstat(workerBootstrapPath); err == nil {
+	if _, err := os.Stat(workerBootstrapPath); err == nil {
 		return workerBootstrapPath
 	}
 	return managerBootstrapPath

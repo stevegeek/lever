@@ -47,8 +47,9 @@ version bump moves the block under the new version heading.
   stops the record (the hub's own remedy), clears the stop claim as before and resumes it. The
   record and its agent home are kept; after a stop the manager comes back in a new claude session
   (`lever attach`, then `/resume` for the old conversation). A worker in the same state now reads
-  as down, and `lever worker resume` removes its stranded container, stops the record and
-  resumes it; a 503 asks to retry while the hub finishes releasing the claim.
+  as down, and `lever worker resume` removes its stranded container and resumes it; over a held
+  start claim it also stops the record first, so the worker's task restarts in a new session. A
+  resume refused over any claim the hub holds is now a 503 to retry, never a purge hint.
 
 - **The hub's stop claim is recognised when scion adds a request id.** Lever matched the refusal
   only as `(status: 409)`; scion can append the request id (`(status: 409, request: …)`), which

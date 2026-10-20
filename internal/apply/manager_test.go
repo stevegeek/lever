@@ -626,3 +626,19 @@ func TestKeepCancelsAStrandedStartClaim(t *testing.T) {
 		}
 	}
 }
+
+// A failed stop in the stranded-start recovery is reported with the hub's
+// refusal and nothing else is tried.
+func TestKeepStrandedStartStopFails(t *testing.T) {
+	const held = `scion resume m: failed to start agent via Hub: start_in_progress: A start is already in progress for this agent (a user start, since 12:40). It will finish or be released by 12:52; run scion stop to cancel it. (status: 409)`
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: "suspended", initContainerStatus: "Created",
+		resumeErr: errors.New(held), stopErr: errors.New("hub down")}
+	j := &fakeJanitor{states: []jail.ContainerState{created(staleID)}}
+	d := fillDeps(Deps{Scion: scion.New(r, scion.Options{}), StaleContainer: j, ContainerCreatedBeforeBoot: createdBefore(true, nil),
+		StopClaimRetry: RetryBudget{Attempts: 4, Interval: time.Millisecond}, Log: func(string, ...any) {}})
+	_, err := EnsureManager(context.Background(), app, d, ManagerRequest{Intent: ManagerKeep})
+	if err == nil || !strings.Contains(err.Error(), "the scion stop that cancels the unfinished start failed") || r.stopCalls != 1 || r.resumeCalls != 1 || r.deleteCalls != 0 {
+		t.Fatalf("err %v stop %d resume %d delete %d", err, r.stopCalls, r.resumeCalls, r.deleteCalls)
+	}
+}

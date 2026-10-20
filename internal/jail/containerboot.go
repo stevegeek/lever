@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/stevegeek/lever/internal/proc"
 )
@@ -68,12 +69,21 @@ func RemoveStrandedCreated(ctx context.Context, r proc.Runner, ref string) (bool
 	if st.Running || st.Paused || st.Status != "created" {
 		return false, nil
 	}
-	before, err := ContainerCreatedBeforeBoot(ctx, r, ref)
+	// By the inspected id from here on, so both looks and the rm are the
+	// same container.
+	before, err := ContainerCreatedBeforeBoot(ctx, r, st.ID)
 	if err != nil || !before {
 		return false, err
 	}
-	if err := RemoveStoppedContainer(ctx, r, st.ID); err != nil {
-		return false, err
+	rctx, cancel := context.WithTimeout(proc.WithOutputLimit(ctx, containerStateOutputLimit), 2*time.Minute)
+	defer cancel()
+	// Never --force: podman refuses a container that started meanwhile.
+	res, err := r.Run(rctx, nil, "podman", "rm", st.ID)
+	if err != nil {
+		if noSuchContainer(res.Stderr) {
+			return false, nil // someone else removed it: not this call's doing
+		}
+		return false, fmt.Errorf("removing container %.12s: %w: %s", st.ID, err, podmanErrTail(res.Stderr))
 	}
 	return true, nil
 }

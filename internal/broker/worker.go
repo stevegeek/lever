@@ -248,27 +248,34 @@ func (b *Broker) strandedCreated(ctx context.Context, worker string) bool {
 	return err == nil && stranded
 }
 
-// cancelStaleStart's worker form (T0314). A guest killed between podman's
-// create and its start leaves the worker's container created, and the hub
-// holds the start's claim for its lease, then a stop claim it releases only
-// once that container is gone. When podman shows the container created in an
-// earlier boot (no start can be under way), it is removed, the record is
-// stopped (the hub's remedy for a held start; the record and its home are
-// kept) and resumed once, in a new session. err is returned when the case
-// does not apply.
-func (b *Broker) cancelStrandedStart(ctx context.Context, spec WorkerSpec, actor string, err error) error {
+// cancelStrandedStart is cancelStaleStart's worker form (T0314). A guest
+// killed between podman's create and its start leaves the worker's container
+// created; the hub holds the start's claim for its lease, and a stop claim it
+// releases only once that container is gone. When podman shows the container
+// created in an earlier boot (no start can be under way), it is removed. Over
+// a stop claim that is all: the hub releases it on its next sweep, and the
+// record keeps its session. Over a start claim the record is also stopped
+// (the hub's remedy for a held start; the record and its home are kept), and
+// resumed once, in a new session the broker does not record (contacts stay
+// out until the worker's next recorded session). It returns resume's error,
+// or err when nothing was removed, and whether it removed the container.
+func (b *Broker) cancelStrandedStart(ctx context.Context, spec WorkerSpec, actor string, err error, resume func(ctx context.Context, worker, project string) error) (error, bool) {
 	removed, rerr := b.removeStranded(ctx, spec.Name)
+	if rerr != nil {
+		b.audit("worker", actor, "error", "resume "+spec.Name+": removing a stranded container failed: "+rerr.Error())
+	}
 	if rerr != nil || !removed {
-		if rerr != nil {
-			b.audit("worker", actor, "error", "resume "+spec.Name+": removing a stranded container failed: "+rerr.Error())
+		return err, false
+	}
+	b.audit("worker", actor, "allow", "resume "+spec.Name+": removed its container, created before the guest restarted and never started")
+	if scion.IsStartClaimHeld(err) {
+		if serr := b.runtime.Stop(ctx, spec.Name, b.instanceProject); serr != nil {
+			b.audit("worker", actor, "error", "resume "+spec.Name+": the stop that cancels a stranded start failed: "+serr.Error())
+			return err, true
 		}
-		return err
+		b.audit("worker", actor, "allow", "resume "+spec.Name+": stopped the record to cancel the stranded start; resuming it in a new session")
 	}
-	b.audit("worker", actor, "allow", "resume "+spec.Name+": removed its container, created before the guest restarted and never started; stopping the record to cancel the start it held")
-	if serr := b.runtime.Stop(ctx, spec.Name, b.instanceProject); serr != nil {
-		b.audit("worker", actor, "error", "resume "+spec.Name+": the stop that cancels a stranded start failed: "+serr.Error())
-	}
-	return b.runtime.Resume(ctx, spec.Name, b.instanceProject)
+	return resume(ctx, spec.Name, b.instanceProject), true
 }
 
 // phaseRunningContainerDown is not a scion phase: it fails every comparison
@@ -710,13 +717,19 @@ func (b *Broker) resumeRecordAs(ctx context.Context, w http.ResponseWriter, spec
 		}
 	}
 	err := resume(ctx, spec.Name, b.instanceProject)
+	removed := false
 	if (scion.IsStartClaimHeld(err) || scion.IsStopClaimHeld(err)) && b.removeStranded != nil {
-		err = b.cancelStrandedStart(ctx, spec, actor, err)
+		err, removed = b.cancelStrandedStart(ctx, spec, actor, err, resume)
 	}
-	if scion.IsStopClaimHeld(err) {
-		// The stranded container is gone; the hub releases its stop claim on
-		// its next sweep once a heartbeat shows that.
-		refusePhase(w, ReasonBusy, phase, "the hub is still releasing worker "+spec.Name+"'s interrupted start after a guest restart; its record was kept, nothing was deleted. Resume it again in a few minutes", http.StatusServiceUnavailable)
+	if scion.IsStartClaimHeld(err) || scion.IsStopClaimHeld(err) {
+		// A claim the hub holds is a start or stop still in progress, or one
+		// it is releasing: retry, never purge.
+		b.audit("worker", actor, "error", "resume "+spec.Name+" (phase "+phase+"): "+err.Error())
+		msg := "the hub holds a start or stop of worker " + spec.Name + " that is still in progress; its record was kept, nothing was deleted. Resume it again shortly"
+		if removed {
+			msg = "the hub is still releasing worker " + spec.Name + "'s start that a guest restart interrupted; its record was kept, nothing was deleted. Resume it again in a few minutes"
+		}
+		refusePhase(w, ReasonBusy, phase, msg, http.StatusServiceUnavailable)
 		return
 	}
 	if err != nil {

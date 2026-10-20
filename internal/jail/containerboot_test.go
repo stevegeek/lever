@@ -142,6 +142,7 @@ func TestRemoveStrandedCreated(t *testing.T) {
 			f := proc.NewFakeRunner()
 			f.Script(stateFormat+"lever--hello", proc.Result{Stdout: testID + " lever--hello " + c.state + " false false\n"})
 			f.Script(made, proc.Result{Stdout: c.created})
+			f.Script("podman inspect --type container --format {{.Created.Unix}} "+testID, proc.Result{Stdout: c.created})
 			f.Script("cat /proc/stat", proc.Result{Stdout: procStat})
 			f.Script("podman rm "+testID, proc.Result{})
 			got, err := ContainerStrandedCreated(context.Background(), f, "lever--hello")
@@ -166,4 +167,35 @@ func TestRemoveStrandedCreated(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A container someone else removed between the inspect and the rm is not
+// reported as removed by this call.
+func TestRemoveStrandedCreatedRaceIsNotARemoval(t *testing.T) {
+	f := proc.NewFakeRunner()
+	f.Script(stateFormat+"lever--hello", proc.Result{Stdout: testID + " lever--hello created false false\n"})
+	f.Script("podman inspect --type container --format {{.Created.Unix}} "+testID, proc.Result{Stdout: "1759990000\n"})
+	f.Script("cat /proc/stat", proc.Result{Stdout: procStat})
+	r := rmFails{FakeRunner: f, stderr: "Error: no container with name or ID " + testID + " found: no such container"}
+	removed, err := RemoveStrandedCreated(context.Background(), r, "lever--hello")
+	if err != nil || removed {
+		t.Fatalf("got %t, %v; want not removed, no error", removed, err)
+	}
+	r.stderr = "Error: cannot remove container as it is running"
+	if removed, err := RemoveStrandedCreated(context.Background(), r, "lever--hello"); err == nil || removed {
+		t.Fatalf("podman's refusal must come back: %t, %v", removed, err)
+	}
+}
+
+// rmFails is f, except that podman rm fails with stderr.
+type rmFails struct {
+	*proc.FakeRunner
+	stderr string
+}
+
+func (r rmFails) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
+	if name == "podman" && len(args) > 0 && args[0] == "rm" {
+		return proc.Result{Code: 1, Stderr: r.stderr}, errors.New("exit status 1")
+	}
+	return r.FakeRunner.Run(ctx, env, name, args...)
 }

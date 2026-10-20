@@ -277,27 +277,58 @@ func TestOperatorResumeCancelsAStrandedStart(t *testing.T) {
 	const stopHeld = "failed to start agent via Hub: start_in_progress: A stop is in progress for this agent (since 12:41). It is released when the broker reports the agent stopped; start it again then. (status: 409)"
 	stranded := func(context.Context, string) (bool, error) { return true, nil }
 	for _, tc := range []struct {
-		name      string
-		removed   bool
-		resumeErr error
-		code      int
-		stopped   int
+		name       string
+		firstErr   string
+		removed    bool
+		removeErr  error
+		stopErr    error
+		secondErr  error
+		code       int
+		stopped    int
+		resumeRuns int
 	}{
-		{"recovered", true, nil, http.StatusOK, 1},
-		{"stop claim not yet released", true, errors.New(stopHeld), http.StatusServiceUnavailable, 1},
-		{"nothing removed", false, nil, http.StatusBadGateway, 0},
+		{"start claim: recovered", startHeld, true, nil, nil, nil, http.StatusOK, 1, 2},
+		{"start claim: stop claim not yet released", startHeld, true, nil, nil, errors.New(stopHeld), http.StatusServiceUnavailable, 1, 2},
+		{"start claim: stop fails", startHeld, true, nil, errors.New("hub down"), nil, http.StatusServiceUnavailable, 1, 1},
+		{"start claim: nothing removed (a start under way)", startHeld, false, nil, nil, nil, http.StatusServiceUnavailable, 0, 1},
+		{"start claim: removal fails", startHeld, false, errors.New("podman hung"), nil, nil, http.StatusServiceUnavailable, 0, 1},
+		{"stop claim: removed, kept in its session", stopHeld, true, nil, nil, nil, http.StatusOK, 0, 2},
 	} {
+		runs := 0
 		rt := &fakeRuntime{agents: map[string][]scion.Agent{testInstanceProject: {{Slug: "worker", Phase: "running", ContainerStatus: "Created"}}},
-			resumeForceErr: errors.New(startHeld), resumeErr: tc.resumeErr}
-		b := newTestBroker(t, rt, wakeSpec)
+			stopErr: tc.stopErr}
+		first, second := errors.New(tc.firstErr), tc.secondErr
+		b := newTestBroker(t, &resumeSeq{fakeRuntime: rt, runs: &runs, errs: []error{first, second}}, wakeSpec)
 		b.containerStranded = stranded
-		b.removeStranded = func(context.Context, string) (bool, error) { return tc.removed, nil }
+		b.removeStranded = func(context.Context, string) (bool, error) { return tc.removed, tc.removeErr }
 		rec := postOperatorResume(t, b, `{"worker":"worker"}`)
-		if rec.Code != tc.code || len(rt.stopped) != tc.stopped {
-			t.Fatalf("%s: %d %s stopped=%d", tc.name, rec.Code, rec.Body, len(rt.stopped))
+		if rec.Code != tc.code || len(rt.stopped) != tc.stopped || runs != tc.resumeRuns {
+			t.Fatalf("%s: %d %s stopped=%d resumes=%d", tc.name, rec.Code, rec.Body, len(rt.stopped), runs)
 		}
-		if tc.code == http.StatusServiceUnavailable && strings.Contains(rec.Body.String(), "purge") {
+		if strings.Contains(rec.Body.String(), "purge") {
 			t.Fatalf("%s: a claim the hub is releasing must not suggest a purge: %s", tc.name, rec.Body)
 		}
 	}
+}
+
+// resumeSeq answers the worker's forced resume (a running record over a down
+// container) with errs in turn, then nil, counting every run: the retry after
+// a stranded start must use the same resume.
+type resumeSeq struct {
+	*fakeRuntime
+	runs *int
+	errs []error
+}
+
+func (r *resumeSeq) ResumeForce(ctx context.Context, worker, project string) error {
+	_ = r.fakeRuntime.ResumeForce(ctx, worker, project)
+	*r.runs++
+	if *r.runs <= len(r.errs) {
+		return r.errs[*r.runs-1]
+	}
+	return nil
+}
+
+func (r *resumeSeq) Resume(context.Context, string, string) error {
+	panic("a forced resume's retry must not fall back to a plain resume")
 }

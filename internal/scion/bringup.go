@@ -668,7 +668,9 @@ func (c *Client) ServerStop(ctx context.Context) error {
 // unguessable name, is created exclusively (set -C: O_EXCL, so a planted
 // symlink is never followed) under umask 022 and a timeout, then renamed
 // over the path with mv -T, which replaces a symlink there rather than
-// following it. A missing file is left alone.
+// following it. The name travels in the environment, not argv, which any
+// process can read from /proc, and without 16 random hex digits there is no
+// rewrite. A missing file is left alone.
 const serverPIDProbeScript = `f="$HOME/$1"
 rd() { timeout 5 head -c 32 -- "$f" 2>/dev/null; }
 # repair "$@": scionServerTest reads $2, a function's own argument.
@@ -676,14 +678,16 @@ repair() {
   n=0; srv=; base=${2##*/}; comm=$(printf '%.15s' "$base")
   for d in /proc/[0-9]*; do
     pid=${d#/proc/}
-    c=; read -r c < "$d/comm" 2>/dev/null || continue
+    c=; read -r c 2>/dev/null < "$d/comm" || continue
     [ "$c" = "$comm" ] || continue
 ` + scionServerTest + `
     then n=$((n+1)); srv=$pid; fi
   done
   [ "$n" -eq 1 ] || return 1
-  tmp="$f.lever.$$.$(od -An -N8 -tx8 /dev/urandom | tr -d ' ')"
-  if timeout 5 sh -c 'umask 022; set -C; printf %s "$1" > "$2"' _ "$srv" "$tmp" &&
+  r=$(od -An -N8 -tx8 /dev/urandom 2>/dev/null | tr -d ' ')
+  [ ${#r} -eq 16 ] || { printf '%s' "$srv"; return 0; }
+  tmp="$f.lever.$$.$r"
+  if LEVER_PID="$srv" LEVER_TMP="$tmp" timeout 5 sh -c 'umask 022; set -C; printf %s "$LEVER_PID" > "$LEVER_TMP"' &&
     mv -fT -- "$tmp" "$f"; then :; else rm -f -- "$tmp"; fi
   printf '%s' "$srv"
 }

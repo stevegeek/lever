@@ -2294,3 +2294,50 @@ func TestCheckRecyclableWorkers(t *testing.T) {
 		t.Fatalf("none recyclable: %+v", r)
 	}
 }
+
+// strandedSession adds jail.AgentProbe's StrandedCreated to stubSession.
+type strandedSession struct {
+	stubSession
+	stranded    bool
+	strandedErr error
+	asked       []string
+}
+
+func (s *strandedSession) StrandedCreated(_ context.Context, ref string) (bool, error) {
+	s.asked = append(s.asked, ref)
+	return s.stranded, s.strandedErr
+}
+
+// T0320: a running manager over a container podman created in an earlier
+// guest boot gets its own detail; any other answer keeps the generic one.
+func TestCheckManagerLiveStrandedCreated(t *testing.T) {
+	now := time.Date(2026, 10, 20, 22, 0, 0, 0, time.UTC)
+	list := func(context.Context, string) ([]scion.Agent, error) {
+		return []scion.Agent{{Slug: "assistant", Phase: "running", ContainerStatus: "created"}}, nil
+	}
+	s := &strandedSession{stranded: true}
+	r := checkManagerLive(context.Background(), "/lever", "assistant", list, s, nil, now)
+	if r.ok || !strings.Contains(r.detail, "earlier guest boot") || !strings.Contains(r.fix, "lever up") ||
+		!strings.Contains(r.fix, "new claude session") || !slices.Equal(s.asked, []string{"lever--assistant"}) {
+		t.Fatalf("stranded: %+v asked %v", r, s.asked)
+	}
+	for _, s := range []agentSessionReader{
+		&strandedSession{},
+		&strandedSession{stranded: true, strandedErr: errors.New("podman: boom")},
+		&stubSession{},
+		nil,
+	} {
+		r := checkManagerLive(context.Background(), "/lever", "assistant", list, s, nil, now)
+		if r.ok || strings.Contains(r.detail, "earlier guest boot") || !strings.Contains(r.detail, `phase "running", container "created"`) {
+			t.Fatalf("%T: %+v; want the generic not-live row", s, r)
+		}
+	}
+	// Podman is asked only for a running record over a created container.
+	s = &strandedSession{stranded: true}
+	up := func(context.Context, string) ([]scion.Agent, error) {
+		return []scion.Agent{{Slug: "assistant", Phase: "suspended", ContainerStatus: "created"}}, nil
+	}
+	if r := checkManagerLive(context.Background(), "/lever", "assistant", up, s, nil, now); strings.Contains(r.detail, "earlier guest boot") || len(s.asked) != 0 {
+		t.Fatalf("suspended: %+v asked %v", r, s.asked)
+	}
+}

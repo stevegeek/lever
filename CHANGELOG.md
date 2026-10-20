@@ -7,6 +7,18 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A worker or manager stranded in a created container shows as down (T0320).** A guest killed
+  between podman's create and its start leaves the agent's container created but never started.
+  Since 1.0.0-beta.1 `lever up` and `lever worker resume` recover it, but three views still showed
+  it as running:
+  - `lever worker list` now shows such a worker as `running-container-down` when podman says the
+    container was created in an earlier guest boot.
+  - On the chat page, an agent that stays running over a created container for two minutes now
+    shows as down. A real start leaves created within seconds.
+  - `lever doctor`'s manager row now names the case and its fix.
+
 ## [1.0.0-beta.1] - 2026-10-20
 
 ### Fixed

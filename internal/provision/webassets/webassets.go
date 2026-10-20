@@ -51,7 +51,8 @@ const NodeToolchainFix = `put a REAL node+npm on PATH (not just an asdf/mise shi
 // SourceDir resolves the host directory holding scion's npm project (the
 // module's or checkout's `web/`). The Version branch reuses
 // scionbin.FetchModule, so the SPA is built from the same source tree as the
-// pinned binary; the repeated `go mod download` is idempotent and cheap.
+// pinned binary. That `go mod download` asks the module proxy each time for a
+// commit-hash pin, so callers look for PinnedBuild first.
 func SourceDir(ctx context.Context, r proc.Runner, spec scionbin.Spec) (string, error) {
 	root := spec.Source
 	if spec.Version != "" {

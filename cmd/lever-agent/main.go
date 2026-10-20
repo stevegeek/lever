@@ -125,12 +125,20 @@ func cmdVersion(ctx context.Context, args []string, stdout io.Writer) error {
 	return nil
 }
 
-// defaultBootstrapPath is $LEVER_BOOTSTRAP, else ./.lever/bootstrap.json.
+// managerBootstrapPath is where the manager's bootstrap.json sits inside its
+// container: `lever apply` stages it at <tree>/.lever and scion mounts the tree
+// at /workspace. It is absolute, so a command run from a subdirectory of the
+// workspace finds it (lever-manager uses the same path). A var for tests.
+var managerBootstrapPath = "/workspace/.lever/bootstrap.json"
+
+// defaultBootstrapPath is $LEVER_BOOTSTRAP (set for a worker, naming its
+// read-only ticket), else the manager's path. It never depends on the current
+// directory.
 func defaultBootstrapPath() string {
 	if p := os.Getenv("LEVER_BOOTSTRAP"); p != "" {
 		return p
 	}
-	return "./.lever/bootstrap.json"
+	return managerBootstrapPath
 }
 
 func defaultIDDir() string {
@@ -581,6 +589,9 @@ func resolveBrokerURL(brokerURL, bootstrapPath string) (string, error) {
 	}
 	bs, err := agent.LoadBootstrap(bootstrapPathOrDefault(bootstrapPath))
 	if err != nil {
+		if bootstrapPath == "" && os.Getenv("LEVER_BOOTSTRAP") == "" {
+			return "", fmt.Errorf("resolve broker URL: %w (the default is %s; name another file with --bootstrap or $LEVER_BOOTSTRAP, or the broker with --broker-url)", err, managerBootstrapPath)
+		}
 		return "", fmt.Errorf("resolve broker URL: %w", err)
 	}
 	return bs.BrokerURL, nil

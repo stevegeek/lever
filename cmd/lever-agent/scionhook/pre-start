@@ -16,7 +16,7 @@
 #            worker's container alone, with LEVER_BOOTSTRAP naming the file.
 # The env var wins when set; else the worker mount is used when present; else
 # the manager path. Always absolute: the hook's CWD is the agent home, not
-# /workspace (verified live 2026-06-28), so boot's relative default fails here.
+# /workspace (verified live 2026-06-28), so name the file rather than rely on a default.
 #
 # LLM-auth mode: the launcher sets LEVER_LLM_AUTH=api-key for an agent that must
 # route the model through the broker /llm proxy (holding only a capability(llm)

@@ -290,3 +290,74 @@ func TestEnsureScionWebAssetsPrebuiltErrors(t *testing.T) {
 		t.Fatalf("err = %v, calls %+v; want the source build attempted", err, f.Calls)
 	}
 }
+
+// T0305: a pin built from source once is found by its record on the next
+// command, with no `go` at all, so no `go mod download` asks the module proxy.
+// The first command builds (here: finds the npm build cached by digest) and
+// records the pin.
+func TestEnsureScionWebAssetsReusesAPinnedSourceBuildOffline(t *testing.T) {
+	cacheRoot := isolateCacheDir(t)
+	src := fakeScionSource(t)
+	digest, err := webassets.HashSource(filepath.Join(src, "web"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stageCompletedBuild(t, cacheRoot, digest)
+	const pin = "65531d7f"
+	fakePrebuilt(t, func(context.Context, string) (string, string, error) {
+		_, _, err := webassets.Prebuilt(context.Background(), "666333f9")
+		return "", "", err
+	})
+	newGuest := func() (*proc.FakeRunner, Guest) {
+		f := proc.NewFakeRunner()
+		f.Script("orb -m m /bin/bash -c", proc.Result{})
+		f.Script("orb -u root -m m bash -c", proc.Result{})
+		return f, Guest{Host: f, UserPrefix: []string{"orb", "-m", "m"}, RootPrefix: []string{"orb", "-u", "root", "-m", "m"}}
+	}
+
+	f, g := newGuest()
+	f.Script("go env GOROOT", proc.Result{Stdout: "/goroot\n"})
+	f.Script("/goroot/bin/go mod download -json", proc.Result{Stdout: fmt.Sprintf(`{"Dir":%q}`, src)})
+	if err := g.EnsureScionWebAssets(context.Background(), ScionSpec{Version: pin, WebUI: true}); err != nil {
+		t.Fatalf("first EnsureScionWebAssets: %v", err)
+	}
+	var downloaded bool
+	for _, c := range f.Calls {
+		downloaded = downloaded || slices.Contains(c.Args, "download")
+	}
+	if !downloaded {
+		t.Fatalf("the first command did not fetch the sources: %+v", f.Calls)
+	}
+	if _, got, ok := webassets.PinnedBuild(pin); !ok || got != digest {
+		t.Fatalf("PinnedBuild after the first build = %q %v, want %s", got, ok, digest)
+	}
+
+	// Second command: no go, no npm; the build is staged under its digest.
+	f, g = newGuest()
+	if err := g.EnsureScionWebAssets(context.Background(), ScionSpec{Version: pin, WebUI: true}); err != nil {
+		t.Fatalf("second EnsureScionWebAssets: %v", err)
+	}
+	var staged bool
+	for _, c := range f.Calls {
+		if strings.HasSuffix(c.Name, "go") || c.Name == "npm" || c.Name == "node" {
+			t.Fatalf("a recorded pin ran %s %v", c.Name, c.Args)
+		}
+		if c.Stdin != "" {
+			staged = strings.Contains(c.Args[len(c.Args)-1], digest)
+		}
+	}
+	if !staged {
+		t.Fatal("the recorded build was not staged under its digest")
+	}
+
+	// The build gone from the cache: the record no longer counts, and the
+	// sources are fetched again.
+	if err := os.Remove(filepath.Join(cacheRoot, digest, webassets.BuildMarker)); err != nil {
+		t.Fatal(err)
+	}
+	f, g = newGuest()
+	err = g.EnsureScionWebAssets(context.Background(), ScionSpec{Version: pin, WebUI: true})
+	if err == nil || len(f.Calls) == 0 || f.Calls[0].Name != "go" {
+		t.Fatalf("err = %v, calls %+v; want the source fetch attempted", err, f.Calls)
+	}
+}

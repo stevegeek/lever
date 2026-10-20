@@ -1383,8 +1383,8 @@ func (r *run) managerInstructions() (string, error) {
 // managerStartOpts builds the manager's scion start options; in api-key mode
 // it first sets the project env and the placeholder secret.
 //
-// LEVER_BOOTSTRAP is not set: lever-agent boot defaults to
-// ./.lever/bootstrap.json relative to its CWD /workspace, which is jp, where
+// LEVER_BOOTSTRAP is not set: lever-agent defaults to
+// /workspace/.lever/bootstrap.json (the tree jp is mounted at /workspace), where
 // mint-manager-bootstrap staged the ticket.
 func (r *run) managerStartOpts(ctx context.Context, jp, task, instructions string) (scion.StartOpts, error) {
 	apiKey := r.app.EffectiveManagerLLMAuth() == config.LLMAuthAPIKey

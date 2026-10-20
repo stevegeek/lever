@@ -623,7 +623,9 @@ done) &
 sampler=$!
 # The manager here never idles (its API key is fake, so every turn retries);
 # the busy refusal itself is unit-tested.
-(cd "$INST" && timeout 900 "$LEVER" conversation new --force > "$WORK/conv-new.log" 2>&1); conv_rc=$?
+# GOPROXY=off (T0305): `lever up` built scion and its web UI for this pin, so
+# nothing here may ask the Go module proxy; a `go mod download` would fail.
+(cd "$INST" && GOPROXY=off timeout 900 "$LEVER" conversation new --force > "$WORK/conv-new.log" 2>&1); conv_rc=$?
 touch "$WORK/conv-done"; wait "$sampler"
 tail -3 "$WORK/conv-new.log" | mask_secrets | sed 's/^/      | /'
 echo "      | phases seen: $(awk '{print $1"/"$2}' "$WORK/conv-samples" | uniq | tr '\n' ' ')"

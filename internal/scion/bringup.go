@@ -647,20 +647,54 @@ func (c *Client) ServerStop(ctx context.Context) error {
 // PID in file"): above all an empty one, left by a guest killed between the
 // file's create and its write. Such a file names no server and is removed,
 // with the same re-read. The size test catches a trailing newline, which the
-// command substitution drops but Atoi refuses.
+// command substitution drops but Atoi refuses. A malformed file that is only
+// whitespace around the digits of a live scion server (an agent can append a
+// newline to the server's file) is rewritten to those digits, by a rename
+// from a fresh temporary file, rather than removed: removing it would orphan
+// the running hub, and the next start would fail on its port. The live pid is
+// printed even when the rewrite fails, since the server does run.
+//
+// Anything at the path that is not a regular file is removed: a symlink
+// (never followed), a directory, a FIFO or a device. Scion reads the file
+// with os.ReadFile, which blocks forever on a FIFO, so one there would hang
+// every later server start. Every read of the file is bounded by timeout and
+// size is read with stat, which opens nothing, so a file swapped for a FIFO
+// after the type check cannot hang the probe either. The window between this
+// probe and scion's own read is not closed (scion opens the path itself);
+// the probe runs before every start.
 const serverPIDProbeScript = `f="$HOME/$1"
-[ -f "$f" ] || exit 0
-pid=$(head -c 32 -- "$f")
+rd() { timeout 5 head -c 32 -- "$f" 2>/dev/null; }
+if [ -L "$f" ]; then rm -f -- "$f"; exit 0; fi
+[ -e "$f" ] || exit 0
+if [ ! -f "$f" ]; then rm -rf -- "$f"; exit 0; fi
+raw=$(rd)
+pid=$raw
+size=$(stat -c %s -- "$f" 2>/dev/null) || exit 0
 case "$pid" in
 ''|*[!0-9]*) bad=1 ;;
-*) [ "$(wc -c < "$f")" -eq "${#pid}" ] && bad= || bad=1 ;;
+*) [ "$size" -eq "${#pid}" ] && bad= || bad=1 ;;
 esac
 if [ -n "$bad" ]; then
-  [ "$(head -c 32 -- "$f")" = "$pid" ] && rm -f -- "$f"
+  pid=$(printf '%s' "$raw" | tr -d ' \t\r\n')
+  case "$pid" in
+  ''|*[!0-9]*) live= ;;
+  *) [ "$size" -le 32 ] && [ -r "/proc/$pid/cmdline" ] && live=1 || live= ;;
+  esac
+  if [ -n "$live" ]; then
+` + scionServerTest + `
+    then
+      if tmp=$(mktemp -- "$f.XXXXXX"); then
+        printf '%s' "$pid" > "$tmp" && [ "$(rd)" = "$raw" ] && mv -f -- "$tmp" "$f" || rm -f -- "$tmp"
+      fi
+      printf '%s' "$pid"
+      exit 0
+    fi
+  fi
+  [ "$(rd)" = "$raw" ] && rm -f -- "$f"
   exit 0
 fi
 if [ ! -r "/proc/$pid/cmdline" ]; then
-  [ "$(tr -cd '0-9' < "$f")" = "$pid" ] && rm -f -- "$f"
+  [ "$(rd)" = "$pid" ] && rm -f -- "$f"
   exit 0
 fi
 ` + scionServerTest + `
@@ -716,8 +750,8 @@ var HubEnvPrefixes = []string{"SCION_SERVER_AUTH_", "SCION_SERVER_HUB_ADMINEMAIL
 // process that is not a scion server lever installed (scionServerTest) reads
 // as no hub.
 var runningHubScript = `f="$HOME/$1"
-[ -f "$f" ] || exit 0
-pid=$(tr -cd '0-9' < "$f")
+[ -f "$f" ] && [ ! -L "$f" ] || exit 0
+pid=$(timeout 5 head -c 32 -- "$f" 2>/dev/null | tr -cd '0-9')
 [ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ] || exit 0
 ` + scionServerTest + `
 then :; else exit 0; fi

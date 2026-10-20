@@ -44,6 +44,15 @@ func (g Guest) EnsureScionWebAssets(ctx context.Context, spec ScionSpec) error {
 			progress.From(ctx).Note("prebuilt scion web UI not downloaded; using a source build")
 		}
 	}
+	// A pin built here before is found by its record, with no `go mod
+	// download`: that asks the module proxy for a commit-hash pin every time,
+	// so a network blip would fail the whole command.
+	if spec.Version != "" {
+		if dist, digest, ok := webassets.PinnedBuild(spec.Version); ok {
+			progress.From(ctx).Note("scion web UI built from source, cached")
+			return g.stageWebAssets(ctx, dist, digest)
+		}
+	}
 	srcWeb, err := webassets.SourceDir(ctx, g.Host, spec)
 	if err != nil {
 		return err
@@ -51,6 +60,13 @@ func (g Guest) EnsureScionWebAssets(ctx context.Context, spec ScionSpec) error {
 	dist, digest, err := webassets.Build(ctx, g.Host, srcWeb)
 	if err != nil {
 		return err
+	}
+	if spec.Version != "" {
+		if err := webassets.RecordPinnedBuild(spec.Version, digest); err != nil {
+			// Best-effort: without the record the next command fetches the
+			// sources again, as before.
+			progress.From(ctx).Note(fmt.Sprintf("could not record the scion web build for offline reuse: %v", err))
+		}
 	}
 	return g.stageWebAssets(ctx, dist, digest)
 }

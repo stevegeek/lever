@@ -7,6 +7,45 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`lever-agent` works from any directory in the workspace (T0308).** Its default
+  bootstrap file was `./.lever/bootstrap.json`, relative to the current directory, so `lever-agent
+  version` (and every subcommand that reads the broker URL) failed from a subdirectory such as a
+  repo checkout. The default is now `$LEVER_BOOTSTRAP`, else `/workspace/.lever/bootstrap.json`,
+  the same rule `lever-manager` follows. When the default can't be read, the error names it and the
+  overrides (`--bootstrap`, `$LEVER_BOOTSTRAP`, `--broker-url`).
+
+- **Lever commands no longer need the Go module proxy once a pin's web UI is built (T0305).** To
+  find the cached scion web UI build, every `lever up`, `apply` and `conversation new` ran `go mod
+  download` of the scion pin, and for a pin given as a commit hash Go asks the module proxy each
+  time, even with the module cached. A network blip there failed the whole command. Lever now
+  records which build a pin produced (in the web build cache, `pins/<pin>`) and uses it with no Go
+  command at all. A movable version (a branch, `latest`) and a `source:` checkout work as before.
+  The stack e2e runs `conversation new` with `GOPROXY=off` to prove it.
+
+### Security
+
+- **The hub pid file: a live server's file is repaired, and a FIFO there can't hang the hub start
+  (T0304).** Since 0.60.0 lever removes a `~/.scion/server.pid` that isn't exactly digits. An agent
+  that can write the file could append a newline to a *running* hub's file and have lever remove it,
+  orphaning the hub so the next start failed on its port, and the readiness wait read the hub as
+  gone. When the file is only whitespace around the digits of a live scion server lever installed,
+  lever now rewrites it to those digits (by a rename) and treats the hub as running. Anything at the
+  path that isn't a regular file (a symlink, a directory, a FIFO, a device) is now removed: scion
+  reads the file with `os.ReadFile`, which blocks forever on a FIFO, so one planted there hung every
+  later hub start. Every read of the file is bounded by a timeout, so a file swapped for a FIFO
+  mid-probe can't hang lever either. The window between lever's probe and scion's own read stays
+  open; the probe runs before every start.
+
+### Upgrade
+
+- **Jail ABI 8.** The in-jail code changed: `lever-agent` (its default bootstrap path) and
+  `internal/scion` (the pid file probe). Rebuild the agent image (`make lever-image` or `make
+  lever-image-slim`, then any instance image built from it) and recreate the manager on it with
+  `lever up --fresh --keep-conversation`. Until then `lever-agent` in the old image keeps the
+  relative default; the pid file fix runs from the host lever and needs no rebuild to take effect.
+
 ## [0.60.0] - 2026-10-19
 
 ### Added

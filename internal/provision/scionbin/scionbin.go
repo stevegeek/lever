@@ -132,7 +132,7 @@ func Resolve(ctx context.Context, r proc.Runner, spec Spec, goarch, machine stri
 		// A pinned module's source never changes, so the last output is this
 		// build's when the stamp beside it says so. A branch name or "latest"
 		// moves and must be fetched every time.
-		if immutableVersion(spec.Version) {
+		if ImmutableVersion(spec.Version) {
 			stampKey = buildKey(spec.Version, goarch, gb)
 		}
 		if stampKey != "" && stampMatches(out, stampKey) {
@@ -168,10 +168,10 @@ func Resolve(ctx context.Context, r proc.Runner, spec Spec, goarch, machine stri
 // pseudo-version (v1.2.3, v0.0.0-20260101000000-abcdef123456, v1.2.3-rc.1).
 var immutableRe = regexp.MustCompile(`^(?:[0-9a-f]{7,40}|v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)$`)
 
-// immutableVersion reports whether a scion.version may be stamped. A
+// ImmutableVersion reports whether a scion.version may be stamped. A
 // short hex prefix resolves to the same commit for as long as it is
 // unambiguous; the module proxy and go.sum keep a version's content fixed.
-func immutableVersion(v string) bool { return immutableRe.MatchString(v) }
+func ImmutableVersion(v string) bool { return immutableRe.MatchString(v) }
 
 func buildArgs(out string) []string {
 	return append(append([]string{"build"}, buildFlags...), "-o", out, "./cmd/scion")

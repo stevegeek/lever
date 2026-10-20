@@ -21,46 +21,69 @@ surface** (`lever`).
 
 {% raw %}
 ```mermaid
-graph TD
-    subgraph host[macOS host]
-        L[lever CLI, operator binary]
-        BK["Capability broker<br/>real credentials, capability minting,<br/>/llm proxy, worker dispatch, brokered tools (/mcp/&lt;name&gt;/),<br/>messaging (/msg/send, /msg/list)"]
-        MCP[first-party tool servers<br/>bound to 127.0.0.1]
+flowchart TB
+    subgraph host["HOST · macOS or Linux"]
+        direction LR
+        L(["<b>lever</b><br/>operator CLI"])
+        BK["<b>Capability broker</b><br/>holds the real credentials<br/>mints capability tokens<br/>/llm · /mcp/&lt;tool&gt; · /msg/*"]
+        MCP[("<b>Broker tools</b><br/>MCP servers<br/>on 127.0.0.1")]
+        L -. spawns .-> BK
+        BK --- MCP
     end
-    subgraph vm[OrbStack VM, the one hardware-virtualization boundary]
-        subgraph jail[Isolated machine, THE JAIL]
-            SS["Scion server + runtime broker<br/>one project for the whole instance"]
-            RD[rootless podman]
-            FW{{egress allowlist<br/>iptables / ip6tables<br/>enforced in jail netns}}
-            subgraph agents[Agent containers, rootless, same project]
-                MGR[Manager agent]
-                WA[Worker agent A]
-                WB[Worker agent B]
-            end
+
+    subgraph vm["LINUX VM · OrbStack or Lima · the hardware-virtualization boundary"]
+        subgraph jail["THE JAIL · an OrbStack isolated machine, or the Lima VM itself"]
+            SS["<b>Scion</b><br/>server + runtime broker<br/>one project per instance"]
+            RD["<b>rootless podman</b><br/>runs every agent"]
+            MGR(["Manager"])
+            WA(["Worker A"])
+            WB(["Worker B"])
+            FW{{"<b>Egress allowlist</b><br/>iptables / ip6tables<br/>in the jail's netns"}}
         end
     end
-    L -->|attach / drive| SS
-    L -.->|spawns| BK
+
+    LAN["LAN · other hosts"]
+
+    L ==>|attach / drive| SS
+    BK ==>|worker dispatch| SS
     SS --> RD
-    RD --> MGR
-    RD --> WA
-    RD --> WB
-    BK --- MCP
-    BK -->|drives Scion for worker dispatch| SS
-    agents -->|all network egress| FW
-    FW -->|"allowlisted: broker + model API<br/>via host.orb.internal"| BK
-    FW -.->|LAN ranges dropped| LAN[LAN / other hosts]
+    RD --> MGR & WA & WB
+    MGR --> FW
+    WA -->|all egress| FW
+    WB --> FW
+    FW ==>|"allowlisted only:<br/>broker + model API<br/>via the host alias"| BK
+    FW -. dropped .-x LAN
+
+    classDef hostNode fill:#3b82f61f,stroke:#3b82f6,stroke-width:1.5px
+    classDef jailNode fill:#f59e0b1f,stroke:#d97706,stroke-width:1.5px
+    classDef agentNode fill:#10b9811f,stroke:#059669,stroke-width:1.5px
+    classDef guard fill:#ef44441f,stroke:#dc2626,stroke-width:2px
+    classDef outside fill:none,stroke:#9ca3af,stroke-dasharray:4 3,color:#9ca3af
+    class L,BK,MCP hostNode
+    class SS,RD jailNode
+    class MGR,WA,WB agentNode
+    class FW guard
+    class LAN outside
+
+    style host fill:#3b82f60d,stroke:#3b82f6,stroke-width:2px
+    style vm fill:#8b5cf60d,stroke:#8b5cf6,stroke-width:2px,stroke-dasharray:6 4
+    style jail fill:#f59e0b0d,stroke:#d97706,stroke-width:2.5px
 ```
 {% endraw %}
 
-- **The OrbStack VM is the only hardware-virtualization boundary.** The jail (an OrbStack
-  *isolated machine*) and the containers inside it are kernel namespaces, so nesting adds no
-  per-level CPU cost. With the `orbstack`/`lima` backends a single kernel is shared across the
-  manager and all workers — a security trade noted in [security-model.md §8](/security-model/compromise/).
+- **The host** is macOS or Linux. `lever`, the capability broker and the broker tools run there,
+  outside the jail.
+- **The Linux VM is the only hardware-virtualization boundary.** With the `orbstack` backend
+  (macOS) the jail is an OrbStack *isolated machine* inside OrbStack's VM; with the `lima` backend
+  (macOS or Linux) the jail is the Lima VM itself, with its own kernel. The jail and the containers
+  inside it are kernel namespaces, so nesting adds no per-level CPU cost, and on either backend a
+  single kernel is shared across the manager and all workers — a security trade noted in
+  [security-model.md §8](/security-model/compromise/).
 - **The jail is the containment boundary**, not Scion. The egress allowlist is enforced in the
-  jail's network namespace, outside the agent containers.
-- **OrbStack is the reference *backend*, not a hard dependency.** The jail is a contract;
-  OrbStack and `lima` implement it. See [containment backends](/reference/backends/).
+  jail's network namespace, outside the agent containers. Allowlisted traffic reaches the broker
+  through the backend's host alias: `host.orb.internal` on OrbStack, `host.lima.internal` on Lima.
+- **The jail is a contract, not a product.** OrbStack and Lima both implement it; see
+  [containment backends](/reference/backends/).
 
 ## 2. The project model: a project is a directory
 
@@ -179,8 +202,8 @@ instance's records remain the authority on what was asked and whether it is done
 
 `lever up` is the everyday command an operator runs on the host. It:
 
-1. Ensures the jail (isolated machine) is up, with rootless podman, the Scion server/broker, and
-   the egress allowlist applied.
+1. Ensures the jail (the OrbStack isolated machine or the Lima VM) is up, with rootless podman,
+   the Scion server/broker, and the egress allowlist applied.
 2. Ensures the manager agent is up, resuming the prior conversation if it was suspended, creating
    it if absent, attaching if already running.
 3. Hands the terminal to the manager session (the Scion server/broker run inside the jail; `lever`
@@ -217,7 +240,8 @@ explicitly-tagged or digest-pinned ref is honored verbatim as an escape hatch. `
 LEVER_IMAGE_ARCH=<arch>` builds `FROM scion-claude:<arch>` and tags the output to match.
 
 **Filesystem performance note:** compute nesting is near-native, but files served from the host via
-the project-tree mount cross OrbStack's virtiofs, which is slow for metadata-heavy operations (large
+the project-tree mount cross the VM's shared-folder mount (virtiofs on OrbStack and on Lima's
+`vz`), which is slow for metadata-heavy operations (large
 dependency installs). A worker that runs its *own* Docker compounds overlay filesystems; prefer
 sibling containers (sharing the jail's rootless podman) over a nested daemon. See
 [security-model.md §2.3](/security-model/jail/) for the rootless requirement.

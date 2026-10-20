@@ -400,10 +400,12 @@ func TestServerPIDProbeRefusesADecoy(t *testing.T) {
 	}
 }
 
-// A live server's pid file with whitespace around its digits (an agent can
-// append a newline) is rewritten to the digits, not removed: removing it
-// would orphan the running hub. Other bytes still get the file removed.
-func TestServerPIDProbeRewritesALiveServersMalformedFile(t *testing.T) {
+// A pid file that names no live server, beside a running hub (an agent can
+// write the file under a live server), is rewritten to the one scion server
+// that runs, not removed: removing it would orphan the hub. Malformed bytes
+// of any length, a dead pid, a decoy's pid and a non-regular file are all
+// repaired. Two servers make the repair ambiguous, and the file is removed.
+func TestServerPIDProbeRepairsAFileBesideALiveServer(t *testing.T) {
 	if _, err := os.Stat("/proc/self/ns/pid"); err != nil {
 		t.Skip("needs /proc")
 	}
@@ -416,53 +418,97 @@ func TestServerPIDProbeRewritesALiveServersMalformedFile(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	server := exec.Command(bash, "-c", `exec -a "scion server start" sleep 30`)
-	if err := server.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = server.Process.Kill(); _ = server.Wait() }()
-	pid := strconv.Itoa(server.Process.Pid)
-	bin := ""
-	for range 200 {
-		if exe, err := os.Readlink("/proc/" + pid + "/exe"); err == nil && strings.Contains(filepath.Base(exe), "sleep") {
-			bin = exe
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if bin == "" {
-		t.Skip("could not read the server's exe")
-	}
-	pidFile := filepath.Join(home, layout.ServerPIDRel)
-	probe := func(body string) string {
+	startServer := func() (string, string) {
 		t.Helper()
-		if err := os.WriteFile(pidFile, []byte(body), 0o644); err != nil {
+		c := exec.Command(bash, "-c", `exec -a "scion server start" sleep 30`)
+		if err := c.Start(); err != nil {
 			t.Fatal(err)
 		}
-		cmd := exec.Command("sh", "-c", serverPIDProbeScript, "_", layout.ServerPIDRel, bin)
+		t.Cleanup(func() { _ = c.Process.Kill(); _ = c.Wait() })
+		pid := strconv.Itoa(c.Process.Pid)
+		for range 200 {
+			if exe, err := os.Readlink("/proc/" + pid + "/exe"); err == nil && strings.Contains(filepath.Base(exe), "sleep") {
+				return pid, exe
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Skip("could not read the server's exe")
+		return "", ""
+	}
+	pid, bin := startServer()
+	dead := exec.Command("true")
+	if err := dead.Run(); err != nil {
+		t.Fatal(err)
+	}
+	pidFile := filepath.Join(home, layout.ServerPIDRel)
+	run := func() string {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "sh", "-c", serverPIDProbeScript, "_", layout.ServerPIDRel, bin)
 		cmd.Env = append(os.Environ(), "HOME="+home)
 		out, err := cmd.Output()
 		if err != nil {
-			t.Fatalf("probe of %q: %v", body, err)
+			t.Fatalf("probe: %v", err)
 		}
 		return string(out)
 	}
-	for _, body := range []string{pid + "\n", pid + "\r\n", " " + pid, "\t" + pid + "\n\n"} {
-		if got := probe(body); got != pid {
-			t.Fatalf("probe of %q printed %q, want %s", body, got, pid)
+	repaired := func(what string) {
+		t.Helper()
+		if got := run(); got != pid {
+			t.Fatalf("%s: probe printed %q, want %s", what, got, pid)
 		}
-		b, err := os.ReadFile(pidFile)
-		if err != nil || string(b) != pid {
-			t.Fatalf("pid file %q after the probe holds %q (%v), want exactly %s", body, b, err, pid)
+		fi, err := os.Lstat(pidFile)
+		if err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm() != 0o644 {
+			t.Fatalf("%s: pid file after the probe: %v %v, want a 0644 regular file", what, fi, err)
+		}
+		if b, _ := os.ReadFile(pidFile); string(b) != pid {
+			t.Fatalf("%s: pid file holds %q, want exactly %s", what, b, pid)
 		}
 	}
-	for _, body := range []string{pid + "x", "1" + pid + "\n" + strings.Repeat(" ", 40), pid[:len(pid)-1] + " " + pid[len(pid)-1:] + "a"} {
-		if got := probe(body); got != "" {
-			t.Fatalf("probe of %q printed %q, want nothing", body, got)
+	for _, body := range []string{
+		pid + "\n", pid + "\r\n", " " + pid, "\t" + pid + "\n\n",
+		pid + strings.Repeat(" ", 40), "x", "", pid + "x", strings.Repeat("9", 40),
+		strconv.Itoa(dead.Process.Pid), strconv.Itoa(os.Getpid()),
+	} {
+		if err := os.WriteFile(pidFile, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
 		}
-		if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
-			t.Fatalf("the pid file %q was kept (stat err %v)", body, err)
+		repaired(fmt.Sprintf("body %q", body))
+	}
+	for name, mk := range map[string]func() error{
+		"fifo":      func() error { return syscall.Mkfifo(pidFile, 0o644) },
+		"directory": func() error { return os.Mkdir(pidFile, 0o755) },
+		"symlink":   func() error { return os.Symlink(filepath.Join(home, "none"), pidFile) },
+	} {
+		if err := os.Remove(pidFile); err != nil {
+			t.Fatal(err)
 		}
+		if err := mk(); err != nil {
+			t.Fatal(err)
+		}
+		repaired(name)
+	}
+	// A missing file is left alone.
+	if err := os.Remove(pidFile); err != nil {
+		t.Fatal(err)
+	}
+	if got := run(); got != "" {
+		t.Fatalf("a missing file: probe printed %q", got)
+	}
+	if _, err := os.Lstat(pidFile); !os.IsNotExist(err) {
+		t.Fatalf("a missing file was created (lstat err %v)", err)
+	}
+	// Two servers: no repair, the bad file goes.
+	startServer()
+	if err := os.WriteFile(pidFile, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := run(); got != "" {
+		t.Fatalf("two servers: probe printed %q, want nothing", got)
+	}
+	if _, err := os.Lstat(pidFile); !os.IsNotExist(err) {
+		t.Fatalf("two servers: the bad file was kept (lstat err %v)", err)
 	}
 	ents, err := os.ReadDir(dir)
 	if err != nil {
@@ -511,7 +557,7 @@ func TestServerPIDProbeRemovesNonRegularFiles(t *testing.T) {
 			if err := tc.make(); err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, "sh", "-c", serverPIDProbeScript, "_", layout.ServerPIDRel, layout.ScionBin)
 			cmd.Env = append(os.Environ(), "HOME="+home)

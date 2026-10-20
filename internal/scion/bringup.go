@@ -645,28 +645,46 @@ func (c *Client) ServerStop(ctx context.Context) error {
 // Scion writes only its pid's digits and reads the file back with Atoi, so
 // a file that holds anything else stops every later server start ("invalid
 // PID in file"): above all an empty one, left by a guest killed between the
-// file's create and its write. Such a file names no server and is removed,
-// with the same re-read. The size test catches a trailing newline, which the
-// command substitution drops but Atoi refuses. A malformed file that is only
-// whitespace around the digits of a live scion server (an agent can append a
-// newline to the server's file) is rewritten to those digits, by a rename
-// from a fresh temporary file, rather than removed: removing it would orphan
-// the running hub, and the next start would fail on its port. The live pid is
-// printed even when the rewrite fails, since the server does run.
+// file's create and its write. The size test catches a trailing newline,
+// which the command substitution drops but Atoi refuses.
 //
 // Anything at the path that is not a regular file is removed: a symlink
 // (never followed), a directory, a FIFO or a device. Scion reads the file
 // with os.ReadFile, which blocks forever on a FIFO, so one there would hang
-// every later server start. Every read of the file is bounded by timeout and
-// size is read with stat, which opens nothing, so a file swapped for a FIFO
-// after the type check cannot hang the probe either. The window between this
-// probe and scion's own read is not closed (scion opens the path itself);
-// the probe runs before every start.
+// every later server start. Every read and write of the file is bounded by
+// timeout and its size is read with stat, which opens nothing, so a file
+// swapped for a FIFO mid-probe cannot hang the probe either. The window
+// between this probe and scion's own read is not closed (scion opens the path
+// itself); the probe runs before every start.
+//
+// A file that names no live server (malformed, not a regular file, a dead
+// pid, a decoy) may still sit beside a running hub: an agent can write the
+// file under a live server. Removing it would orphan that hub, and the next
+// start would fail on its port. So before removing it, the probe looks in
+// /proc for scion servers lever installed (the same test); when exactly one
+// runs, it rewrites the file to that pid (a fresh 0644 file renamed over the
+// path with mv -T, which replaces a symlink rather than following it) and
+// prints the pid. A missing file is left alone.
 const serverPIDProbeScript = `f="$HOME/$1"
 rd() { timeout 5 head -c 32 -- "$f" 2>/dev/null; }
-if [ -L "$f" ]; then rm -f -- "$f"; exit 0; fi
+# repair "$@": scionServerTest reads $2, a function's own argument.
+repair() {
+  n=0; srv=
+  for d in /proc/[0-9]*; do
+    pid=${d#/proc/}
+    [ -r "$d/cmdline" ] || continue
+` + scionServerTest + `
+    then n=$((n+1)); srv=$pid; fi
+  done
+  [ "$n" -eq 1 ] || return 1
+  tmp=$(mktemp -- "$f.XXXXXX") || { printf '%s' "$srv"; return 0; }
+  if chmod 644 -- "$tmp" && printf '%s' "$srv" | timeout 5 tee -- "$tmp" >/dev/null &&
+    mv -fT -- "$tmp" "$f"; then :; else rm -f -- "$tmp"; fi
+  printf '%s' "$srv"
+}
+if [ -L "$f" ]; then rm -f -- "$f"; repair "$@"; exit 0; fi
 [ -e "$f" ] || exit 0
-if [ ! -f "$f" ]; then rm -rf -- "$f"; exit 0; fi
+if [ ! -f "$f" ]; then rm -rf -- "$f"; repair "$@"; exit 0; fi
 raw=$(rd)
 pid=$raw
 size=$(stat -c %s -- "$f" 2>/dev/null) || exit 0
@@ -675,33 +693,22 @@ case "$pid" in
 *) [ "$size" -eq "${#pid}" ] && bad= || bad=1 ;;
 esac
 if [ -n "$bad" ]; then
-  pid=$(printf '%s' "$raw" | tr -d ' \t\r\n')
-  case "$pid" in
-  ''|*[!0-9]*) live= ;;
-  *) [ "$size" -le 32 ] && [ -r "/proc/$pid/cmdline" ] && live=1 || live= ;;
-  esac
-  if [ -n "$live" ]; then
-` + scionServerTest + `
-    then
-      if tmp=$(mktemp -- "$f.XXXXXX"); then
-        printf '%s' "$pid" > "$tmp" && [ "$(rd)" = "$raw" ] && mv -f -- "$tmp" "$f" || rm -f -- "$tmp"
-      fi
-      printf '%s' "$pid"
-      exit 0
-    fi
-  fi
+  repair "$@" && exit 0
   [ "$(rd)" = "$raw" ] && rm -f -- "$f"
   exit 0
 fi
+named=$pid
 if [ ! -r "/proc/$pid/cmdline" ]; then
-  [ "$(rd)" = "$pid" ] && rm -f -- "$f"
+  repair "$@" && exit 0
+  [ "$(rd)" = "$named" ] && rm -f -- "$f"
   exit 0
 fi
 ` + scionServerTest + `
 then
   printf '%s' "$pid"
 else
-  rm -f -- "$f"; printf 'stale:%s' "$pid"
+  repair "$@" && exit 0
+  rm -f -- "$f"; printf 'stale:%s' "$named"
 fi`
 
 // scionServerTest is the condition of an if, true when $pid is a scion server

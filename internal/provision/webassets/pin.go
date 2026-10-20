@@ -18,7 +18,8 @@ import (
 // module proxy every time, even with the module cached. So every lever
 // command that converges the web UI (up, apply, conversation new) depended
 // on reaching proxy.golang.org. The binary's build stamp (scionbin) is the
-// same idea.
+// same idea, with the same assumption: an all-hex pin is a commit, not a
+// branch that happens to be spelled in hex.
 const pinsDir = "pins"
 
 var digestRe = regexp.MustCompile(`^[0-9a-f]{64}$`)

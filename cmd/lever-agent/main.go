@@ -127,16 +127,25 @@ func cmdVersion(ctx context.Context, args []string, stdout io.Writer) error {
 
 // managerBootstrapPath is where the manager's bootstrap.json sits inside its
 // container: `lever apply` stages it at <tree>/.lever and scion mounts the tree
-// at /workspace. It is absolute, so a command run from a subdirectory of the
-// workspace finds it (lever-manager uses the same path). A var for tests.
-var managerBootstrapPath = "/workspace/.lever/bootstrap.json"
+// at /workspace. workerBootstrapPath is a worker's read-only ticket mount. Both
+// are absolute, so a command run from a subdirectory of the workspace finds
+// its file. Vars for tests.
+var (
+	managerBootstrapPath = "/workspace/.lever/bootstrap.json"
+	workerBootstrapPath  = "/run/lever/bootstrap.json"
+)
 
-// defaultBootstrapPath is $LEVER_BOOTSTRAP (set for a worker, naming its
-// read-only ticket), else the manager's path. It never depends on the current
-// directory.
+// defaultBootstrapPath picks the file as the pre-start hook does:
+// $LEVER_BOOTSTRAP (the broker sets it for a worker), else the worker mount
+// when present, else the manager's path. A worker never falls back to the
+// manager's path, which sits in a tree agents can write. It never depends on
+// the current directory.
 func defaultBootstrapPath() string {
 	if p := os.Getenv("LEVER_BOOTSTRAP"); p != "" {
 		return p
+	}
+	if _, err := os.Lstat(workerBootstrapPath); err == nil {
+		return workerBootstrapPath
 	}
 	return managerBootstrapPath
 }
@@ -590,7 +599,7 @@ func resolveBrokerURL(brokerURL, bootstrapPath string) (string, error) {
 	bs, err := agent.LoadBootstrap(bootstrapPathOrDefault(bootstrapPath))
 	if err != nil {
 		if bootstrapPath == "" && os.Getenv("LEVER_BOOTSTRAP") == "" {
-			return "", fmt.Errorf("resolve broker URL: %w (the default is %s; name another file with --bootstrap or $LEVER_BOOTSTRAP, or the broker with --broker-url)", err, managerBootstrapPath)
+			return "", fmt.Errorf("resolve broker URL: %w (the default is %s, else %s; name another file with --bootstrap or $LEVER_BOOTSTRAP, or the broker with --broker-url)", err, workerBootstrapPath, managerBootstrapPath)
 		}
 		return "", fmt.Errorf("resolve broker URL: %w", err)
 	}

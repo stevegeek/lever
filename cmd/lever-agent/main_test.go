@@ -412,9 +412,9 @@ func TestResolveBrokerURLFallbackChain(t *testing.T) {
 			t.Fatal(err)
 		}
 		p := writeBootstrap(t, leverDir, "https://from-default.example")
-		old := managerBootstrapPath
-		managerBootstrapPath = p
-		t.Cleanup(func() { managerBootstrapPath = old })
+		oldM, oldW := managerBootstrapPath, workerBootstrapPath
+		managerBootstrapPath, workerBootstrapPath = p, filepath.Join(root, "run", "lever", "bootstrap.json")
+		t.Cleanup(func() { managerBootstrapPath, workerBootstrapPath = oldM, oldW })
 		// A subdirectory with its own ./.lever/bootstrap.json: the default
 		// must not depend on the current directory.
 		sub := filepath.Join(root, "workspace", "repo")
@@ -430,18 +430,33 @@ func TestResolveBrokerURLFallbackChain(t *testing.T) {
 		if got != "https://from-default.example" {
 			t.Errorf("got %q, want the URL from the manager path", got)
 		}
+		// A worker's mount, when present, wins over the manager's path.
+		wdir := filepath.Dir(workerBootstrapPath)
+		if err := os.MkdirAll(wdir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeBootstrap(t, wdir, "https://from-worker-mount.example")
+		got, err = resolveBrokerURL("", "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "https://from-worker-mount.example" {
+			t.Errorf("got %q, want the URL from the worker mount", got)
+		}
 	})
 
 	t.Run("a missing default names the path and the overrides", func(t *testing.T) {
 		t.Setenv("LEVER_BOOTSTRAP", "")
-		old := managerBootstrapPath
-		managerBootstrapPath = filepath.Join(t.TempDir(), "workspace", ".lever", "bootstrap.json")
-		t.Cleanup(func() { managerBootstrapPath = old })
+		oldM, oldW := managerBootstrapPath, workerBootstrapPath
+		tmp := t.TempDir()
+		managerBootstrapPath = filepath.Join(tmp, "workspace", ".lever", "bootstrap.json")
+		workerBootstrapPath = filepath.Join(tmp, "run", "lever", "bootstrap.json")
+		t.Cleanup(func() { managerBootstrapPath, workerBootstrapPath = oldM, oldW })
 		_, err := resolveBrokerURL("", "")
 		if err == nil {
 			t.Fatal("want an error for a missing bootstrap")
 		}
-		for _, want := range []string{managerBootstrapPath, "--bootstrap", "$LEVER_BOOTSTRAP", "--broker-url"} {
+		for _, want := range []string{managerBootstrapPath, workerBootstrapPath, "--bootstrap", "$LEVER_BOOTSTRAP", "--broker-url"} {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("error %q does not name %q", err, want)
 			}

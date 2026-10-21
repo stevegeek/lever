@@ -2,6 +2,7 @@ package broker
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -105,6 +106,53 @@ func TestOperatorWorkerListNoRecordAndContainerDown(t *testing.T) {
 	}
 	if got.Workers[0].Phase != PhaseNone || got.Workers[1].Phase != PhaseRunningContainerDownToken || *got.Workers[1].IdleAtPrompt {
 		t.Fatalf("%+v", got.Workers)
+	}
+}
+
+// T0320: a running record over a created container reads as down only when
+// podman says it was created in an earlier guest boot, and podman is asked
+// only for that shape of record.
+func TestOperatorWorkerListStrandedCreated(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		stranded func(context.Context, string) (bool, error)
+		want     string
+	}{
+		{"stranded", func(context.Context, string) (bool, error) { return true, nil }, PhaseRunningContainerDownToken},
+		{"starting", func(context.Context, string) (bool, error) { return false, nil }, "running"},
+		{"unreadable", func(context.Context, string) (bool, error) { return true, errors.New("podman: boom") }, "running"},
+		{"unwired", nil, "running"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := &fakeRuntime{agents: map[string][]scion.Agent{testInstanceProject: {
+				{Slug: "worker", Phase: "running", Activity: "working", ContainerStatus: "created"},
+			}}}
+			b := New(testConfig(t, withManager("test-manager", "assistant"), withRuntime(rt, msgWorkers...)))
+			var asked []string
+			if tc.stranded != nil {
+				b.containerStranded = func(ctx context.Context, w string) (bool, error) {
+					asked = append(asked, w)
+					return tc.stranded(ctx, w)
+				}
+			}
+			var got WorkerListResponse
+			rec := callOperator(t, b, http.MethodGet, PathOperatorWorkerList, "")
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			var entry *WorkerListEntry
+			for i := range got.Workers {
+				if got.Workers[i].Name == "worker" {
+					entry = &got.Workers[i]
+				}
+			}
+			if entry == nil || entry.Phase != tc.want {
+				t.Fatalf("%+v; want phase %q", got.Workers, tc.want)
+			}
+			if tc.stranded != nil && (len(asked) != 1 || asked[0] != "worker") {
+				t.Fatalf("podman asked for %v; want only the created worker", asked)
+			}
+		})
 	}
 }
 

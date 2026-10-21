@@ -356,3 +356,61 @@ func TestRemoteAgentMessagesOverTheOperatorSocket(t *testing.T) {
 		t.Fatal("no broker: no error")
 	}
 }
+
+// T0320: a running record that stays over a created container past
+// strandedCreatedAfter reads as down on the chat page; a record that leaves
+// created starts the count again.
+func TestCachedAgentRecordsStrandedCreated(t *testing.T) {
+	now := time.Unix(1000, 0)
+	status := "created"
+	recs, _ := cachedAgentRecords(func(context.Context) ([]hubapi.Agent, error) {
+		return []hubapi.Agent{
+			{Slug: "boss", ID: "id-b", Phase: "running", ContainerStatus: status},
+			{Slug: "w1", ID: "id-w1", Phase: "suspended", ContainerStatus: "created"},
+		}, nil
+	}, func() time.Time { return now })
+	down := func(step time.Duration) (bool, bool) {
+		t.Helper()
+		now = now.Add(step)
+		got, err := recs(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got["boss"].ContainerDown, got["w1"].ContainerDown
+	}
+	if b, w := down(0); b || w {
+		t.Fatal("down at first sight")
+	}
+	// Steady polls, createdGap/2 apart, until just before strandedCreatedAfter.
+	step := createdGap / 2
+	for range int(strandedCreatedAfter/step) - 1 {
+		if b, _ := down(step); b {
+			t.Fatal("down before strandedCreatedAfter")
+		}
+	}
+	if b, w := down(step); !b || w {
+		t.Fatalf("boss down %v, w1 down %v; want only the running record down", b, w)
+	}
+	// Polls further apart than createdGap: the record may have started in
+	// between, so the count starts again at each one.
+	for range 6 {
+		if b, _ := down(createdGap + time.Second); b {
+			t.Fatal("down across gaps longer than createdGap")
+		}
+	}
+	// Steady polls reach strandedCreatedAfter again.
+	for range int(strandedCreatedAfter/(createdGap/2)) + 1 {
+		down(createdGap / 2)
+	}
+	if b, _ := down(0); !b {
+		t.Fatal("not down after steady polls")
+	}
+	status = "Up 2 seconds"
+	if b, _ := down(10 * time.Second); b {
+		t.Fatal("down over a live container")
+	}
+	status = "created"
+	if b, _ := down(10 * time.Second); b {
+		t.Fatal("the count did not start again")
+	}
+}

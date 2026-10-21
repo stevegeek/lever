@@ -844,6 +844,13 @@ type agentSessionReader interface {
 	HarnessAlive(ctx context.Context, ref string) (bool, error)
 }
 
+// strandedReader is the optional part of an agentSessionReader that asks
+// podman whether a created container was made in an earlier guest boot
+// (jail.ContainerStrandedCreated).
+type strandedReader interface {
+	StrandedCreated(ctx context.Context, ref string) (bool, error)
+}
+
 // agentLister reads scion's agent records: phase and container status, which
 // the hub's record (hubapi.Agent) lacks.
 type agentLister func(ctx context.Context, project string) ([]scionpkg.Agent, error)
@@ -932,6 +939,15 @@ func checkManagerLive(ctx context.Context, project, name string, list agentListe
 			fmt.Sprintf("manager %q is not live: phase %s over a container podman lists as created (a start the VM's power-off interrupted leaves one) — the hub counts a created container as running, so a stop claim it holds on the manager is released only once that container is removed, and every resume is refused with `start_in_progress: A stop is in progress`",
 				name, scionpkg.BoundedQuote(a.Phase)),
 			"run `lever up`: when the hub refuses the resume that way, lever removes the stopped container (its writable layer, files outside the agent home and the tree, is lost as on any scion resume), waits for the hub to release the claim and resumes (the conversation is in the agent home and is kept). " + apply.StopClaimManualFix(ref)}
+	}
+	if a.Phase == scionpkg.PhaseRunning && strings.EqualFold(a.ContainerStatus, "created") {
+		if sr, ok := session.(strandedReader); ok {
+			if stranded, err := sr.StrandedCreated(ctx, ref); err == nil && stranded {
+				return checkResult{check, false,
+					fmt.Sprintf("manager %q is not live: the hub says running, but podman created its container in an earlier guest boot and never started it (the guest stopped between podman's create and its start), and nothing will start it now", name),
+					"run `lever up`: it removes that container (its writable layer, files outside the agent home and the tree, is lost as on any scion resume) and resumes the manager. When the hub still holds the start the guest interrupted, lever stops the record first to cancel it, and the manager comes back in a new claude session: the old conversation stays in the agent home (`lever attach`, then /resume)"}
+			}
+		}
 	}
 	fix := "run `lever up` to resume it"
 	if a.Phase == scionpkg.PhaseStopped {

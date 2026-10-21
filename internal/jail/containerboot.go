@@ -55,6 +55,12 @@ func ContainerStrandedCreated(ctx context.Context, r proc.Runner, ref string) (b
 	return ContainerCreatedBeforeBoot(ctx, r, st.ID)
 }
 
+// StrandedCreated is ContainerStrandedCreated through the probe's runner, for
+// `lever doctor`.
+func (p AgentProbe) StrandedCreated(ctx context.Context, ref string) (bool, error) {
+	return ContainerStrandedCreated(ctx, p.R, ref)
+}
+
 // RemoveStrandedCreated removes the container ref when ContainerStrandedCreated
 // holds for it, by the id it inspected and without --force (podman refuses a
 // container that started meanwhile). It reports whether it removed one.

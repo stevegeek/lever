@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/stevegeek/lever/internal/scion"
@@ -67,19 +68,25 @@ func (b *Broker) handleOperatorWorkerList(w http.ResponseWriter, r *http.Request
 	slices.Sort(names)
 	out := WorkerListResponse{Workers: make([]WorkerListEntry, 0, len(names))}
 	for _, name := range names {
-		out.Workers = append(out.Workers, workerListEntry(name, bySlug[name], bySlug[name].Slug == name))
+		stranded := func() bool { return b.strandedCreated(r.Context(), name) }
+		out.Workers = append(out.Workers, workerListEntry(name, bySlug[name], bySlug[name].Slug == name, stranded))
 	}
 	writeJSON(w, out)
 }
 
-func workerListEntry(name string, a scion.Agent, found bool) WorkerListEntry {
+// workerListEntry reads a running record over a created container as down
+// when stranded (nil = not asked) says podman created it in an earlier guest
+// boot (T0314, T0320): a guest kill between create and start leaves one, and only a
+// resume recovers it. stranded runs only for that shape of record.
+func workerListEntry(name string, a scion.Agent, found bool, stranded func() bool) WorkerListEntry {
 	e := WorkerListEntry{Name: name, Phase: PhaseNone, ActivitySource: WorkerActivitySource}
 	if !found {
 		e.IdleAtPrompt = new(bool)
 		return e
 	}
 	e.Phase = scion.PhaseLabel(a.Phase)
-	if scion.RunningContainerDown(e.Phase, a.ContainerStatus) {
+	if scion.RunningContainerDown(e.Phase, a.ContainerStatus) ||
+		(e.Phase == scion.PhaseRunning && strings.EqualFold(a.ContainerStatus, "created") && stranded != nil && stranded()) {
 		e.Phase = PhaseRunningContainerDownToken
 	}
 	e.Activity = scion.ActivityLabel(a.Activity)

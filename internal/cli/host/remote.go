@@ -432,6 +432,24 @@ func remoteHubAgents(st state.State, target *url.URL, dial func(ctx context.Cont
 // polls every few seconds during a wake.
 const agentRecordsTTL = 3 * time.Second
 
+// strandedCreatedAfter is how long the chat page lets a running record sit
+// over a container podman lists as created before it shows the agent down. A
+// start leaves created within seconds (the image is pulled before the
+// create); one a guest kill interrupted between create and start stays
+// there (T0314). The chat page reads the hub only, so it goes by time; the
+// broker's resume checks podman before it recovers one.
+const strandedCreatedAfter = 2 * time.Minute
+
+// createdGap is the longest gap between two refreshes over which the chat
+// page keeps counting how long a record has sat over a created container.
+// An open page lists agents every 15 s (chatui LIST_MS); a throttled hidden
+// tab starts the count again once it polls steadily.
+const createdGap = 30 * time.Second
+
+// createdSpan is when refreshes first and last saw a running record over a
+// created container, with no gap longer than createdGap between them.
+type createdSpan struct{ first, last time.Time }
+
 // agentRecordsRefresh bounds one hub list, which runs on its own context.
 const agentRecordsRefresh = 10 * time.Second
 
@@ -462,6 +480,10 @@ func cachedAgentRecords(list func(context.Context) ([]hubapi.Agent, error), now 
 		recs   map[string]remoteproxy.AgentRecord
 		lerr   error
 		flight *agentFlight
+		// createdSince: when a refresh first saw each running record over a
+		// created container, and last saw it so (by record id). Only refresh
+		// touches it, one at a time.
+		createdSince = map[string]createdSpan{}
 	)
 	refresh := func(f *agentFlight, ctx context.Context) {
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), agentRecordsRefresh)
@@ -477,11 +499,28 @@ func cachedAgentRecords(list func(context.Context) ([]hubapi.Agent, error), now 
 		}()
 		if err == nil {
 			f.recs = map[string]remoteproxy.AgentRecord{}
+			seen := map[string]createdSpan{}
 			for _, a := range agents {
-				if a.Slug != "" && a.ID != "" {
-					f.recs[a.Slug] = agentRecordOf(a)
+				if a.Slug == "" || a.ID == "" {
+					continue
 				}
+				rec := agentRecordOf(a)
+				if rec.Phase == scion.PhaseRunning && strings.EqualFold(a.ContainerStatus, "created") {
+					t := now()
+					span, ok := createdSince[a.ID]
+					// Refreshes run only while someone polls: after a gap the record may
+					// have started and come back over created since, so the count starts
+					// again.
+					if !ok || t.Sub(span.last) > createdGap {
+						span.first = t
+					}
+					span.last = t
+					seen[a.ID] = span
+					rec.ContainerDown = t.Sub(span.first) >= strandedCreatedAfter
+				}
+				f.recs[a.Slug] = rec
 			}
+			createdSince = seen
 		}
 		f.err = err
 		mu.Lock()

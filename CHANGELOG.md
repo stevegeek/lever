@@ -9,6 +9,14 @@ version bump moves the block under the new version heading.
 
 ### Fixed
 
+- **The agent image builds again after trixie-backports moved past the pinned tmux.** Debian
+  backports keeps only its latest version, and it replaced tmux 3.6b-1~bpo13+1 with 3.7c, so every
+  `make lever-image` and `make lever-image-slim` failed at the tmux step ("Version
+  '3.6b-1~bpo13+1' for 'tmux' was not found"). The image now installs the same pinned tmux from a
+  dated snapshot.debian.org copy of trixie-backports (`ARG TMUX_SNAPSHOT`, 2026-10-01), which never
+  changes. apt still checks the Debian archive signatures; it skips only the snapshot's expired
+  Valid-Until date, for that source alone. The tmux version is unchanged.
+
 - **A worker or manager stranded in a created container shows as down (T0320).** A guest killed
   between podman's create and its start leaves the agent's container created but never started.
   Since 1.0.0-beta.1 `lever up` and `lever worker resume` recover it, but three views still showed

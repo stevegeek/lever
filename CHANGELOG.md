@@ -27,6 +27,14 @@ version bump moves the block under the new version heading.
     shows as down. A real start leaves created within seconds.
   - `lever doctor`'s manager row now names the case and its fix.
 
+### Upgrade
+
+- **Jail ABI 9.** The image Dockerfile changed (the tmux apt source). The tmux in the image is the
+  same 3.6b, so an image built by an older lever works as before, but doctor's *agent lever version*
+  row fails until you rebuild the agent image (`make lever-image` or `make lever-image-slim`, then
+  any instance image built from it) and recreate the manager on it with `lever up --fresh
+  --keep-conversation`.
+
 ## [1.0.0-beta.1] - 2026-10-20
 
 ### Fixed

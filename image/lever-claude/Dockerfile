@@ -76,18 +76,22 @@ RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
 # likely, not proven (the operations guide, "tmux server crashes", keeps a
 # core of the next one). trixie-backports carries a newer tmux built
 # against trixie's own libraries, and apt checks it against the Debian archive
-# signatures the base already trusts. The version is pinned: a backports
-# update removes the old one from the archive, and the build then fails until
-# this ARG is bumped, rather than silently taking a new tmux. The backports
-# source is removed again, so instance Dockerfiles that extend this image get
-# trixie's apt sources unchanged. Only tmux comes from backports (no -t): its
-# dependencies stay trixie's. With the source gone, tmux fixes arrive only by
-# bumping this ARG.
+# signatures the base already trusts. The version is pinned, and so is the
+# archive it comes from: a backports update removes the old version from
+# deb.debian.org, so the source is a dated snapshot.debian.org copy of
+# trixie-backports (TMUX_SNAPSHOT), which never changes. Its Release file is
+# past its Valid-Until date, so apt is told not to check that date for this
+# source only; the signature check stays. The backports source is removed
+# again, so instance Dockerfiles that extend this image get trixie's apt
+# sources unchanged. Only tmux comes from backports (no -t): its dependencies
+# stay trixie's. With the source gone, tmux fixes arrive only by bumping both
+# ARGs, to a snapshot that lists the new version.
 ARG TMUX_VERSION=3.6b-1~bpo13+1
+ARG TMUX_SNAPSHOT=20261001T000000Z
 RUN . /etc/os-release \
   && test "$VERSION_CODENAME" = trixie \
   && test -s /usr/share/keyrings/debian-archive-keyring.gpg \
-  && echo "deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] http://deb.debian.org/debian trixie-backports main" > /etc/apt/sources.list.d/lever-trixie-backports.list \
+  && echo "deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg check-valid-until=no] http://snapshot.debian.org/archive/debian/${TMUX_SNAPSHOT}/ trixie-backports main" > /etc/apt/sources.list.d/lever-trixie-backports.list \
   && apt-get update \
   && apt-get install -y --no-install-recommends "tmux=${TMUX_VERSION}" \
   && rm -f /etc/apt/sources.list.d/lever-trixie-backports.list \

@@ -83,9 +83,10 @@ last rebuilt.
 Debian trixie's tmux 3.5a, whose server can crash and take the agent with it (see [tmux server
 crashes](/operations/#tmux-server-crashes)). The image replaces it with a pinned tmux from
 trixie-backports (`ARG TMUX_VERSION` in the Dockerfile, recorded in the `tmux_version` label),
-installed through apt, which checks the Debian archive signatures. When backports moves on, the old
-version leaves the archive and the build fails at that step: bump the ARG to the version
-`https://packages.debian.org/trixie-backports/tmux` shows and rebuild. An instance Dockerfile that
+installed through apt, which checks the Debian archive signatures. Backports keeps only its latest
+version, so the image takes tmux from a dated snapshot.debian.org copy of trixie-backports (`ARG
+TMUX_SNAPSHOT`), which still holds the pinned version when backports has moved on. To take a newer
+tmux, bump both ARGs to a snapshot that lists it and rebuild. An instance Dockerfile that
 copies the binaries in itself (below) does not get this step; copy it.
 
 **lever version:** the image tag names only the arch, so a rebuild from another lever checkout

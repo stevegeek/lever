@@ -68,6 +68,7 @@ import {
   voiceConfig,
   voiceErrorText,
   voiceRequestMs,
+  thinkingShown,
 } from './chatcore.js';
 
 test('historyItems reads either key and drops junk', () => {
@@ -708,4 +709,17 @@ test('activityErrorText: fixed words', () => {
   assert.equal(activityErrorText(409, { error: 'not-running', state: 'stopped' }, 'w1'), 'w1 is not running (stopped)');
   assert.equal(activityErrorText(403, { error: 'not-allowed' }, 'w1'), 'this login may not read the terminal');
   assert.equal(activityErrorText(500, 'boom', 'w1'), 'boom (HTTP 500)');
+});
+
+test("thinkingShown: only after the user's own delivered message, while working or pending", () => {
+  const mine = { id: '1', msg: 'hi', senderId: 'u1' };
+  const reply = { id: '2', msg: 'yo', senderId: 'a1' };
+  const state = { id: '3', msg: 'boss is working', type: 'state-change', senderId: 'hub' };
+  assert.equal(thinkingShown([mine], 'u1', 'a1', 'working', false), true);
+  assert.equal(thinkingShown([mine], 'u1', 'a1', 'idle', true), true, 'pending');
+  assert.equal(thinkingShown([mine], 'u1', 'a1', 'idle', false), false);
+  assert.equal(thinkingShown([mine, reply], 'u1', 'a1', 'working', true), false, 'answered');
+  assert.equal(thinkingShown([mine, state], 'u1', 'a1', 'working', false), true, 'a state line is not an answer');
+  assert.equal(thinkingShown([{ ...mine, dispatchState: 'failed' }], 'u1', 'a1', 'working', true), false);
+  assert.equal(thinkingShown([], 'u1', 'a1', 'working', true), false);
 });

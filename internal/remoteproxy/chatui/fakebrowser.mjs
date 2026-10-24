@@ -19,7 +19,18 @@ class FakeNode {
     return this.text + this.children.map((c) => c.textContent).join('');
   }
   append(...nodes) {
-    for (const n of nodes) this.children.push(...(n.tag === '#fragment' ? n.children : [n]));
+    for (const n of nodes) {
+      const add = n.tag === '#fragment' ? n.children : [n];
+      for (const c of add) {
+        if (c.parentNode && c.parentNode !== this) c.parentNode.children = c.parentNode.children.filter((x) => x !== c);
+        c.parentNode = this;
+      }
+      this.children.push(...add);
+    }
+  }
+  remove() {
+    if (this.parentNode) this.parentNode.children = this.parentNode.children.filter((x) => x !== this);
+    this.parentNode = null;
   }
   replaceChildren(...nodes) {
     this.children = [];

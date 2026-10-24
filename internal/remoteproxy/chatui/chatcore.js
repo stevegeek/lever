@@ -775,3 +775,24 @@ export function activityErrorText(status, body, name) {
   if (word === 'not-running') return `${name} is not running (${chipText({ state: str(body.state) })})`;
   return Object.hasOwn(ACTIVITY_WORDS, word) ? ACTIVITY_WORDS[word] : errorText(status, body);
 }
+
+// The thinking dots: an empty bubble on the agent's side while a reply is
+// likely on its way. The last message shown must be the user's own and
+// delivered (an agent's reply ends the dots; a failed send waits for nobody).
+// Then either the agent reports working, or a send was stored a moment ago
+// (pending): the dots come at once, not with the next list read, which can
+// be LIST_MS away. The page drops pending after THINKING_MS, or when the
+// agent, having reported working, reports anything else.
+export const THINKING_MS = 30000;
+
+export function thinkingShown(ordered, userId, agentId, activity, pending) {
+  let last = '';
+  let failed = false;
+  for (const m of ordered) {
+    const kind = classify(m, userId, agentId);
+    if (kind !== 'mine' && kind !== 'agent') continue;
+    last = kind;
+    failed = kind === 'mine' && m.dispatchState === 'failed';
+  }
+  return last === 'mine' && !failed && (activity === 'working' || !!pending);
+}

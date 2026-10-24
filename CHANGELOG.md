@@ -7,6 +7,16 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **The chat page shows three dots while the agent works on your message.** An empty bubble on
+  the agent's side, with three pulsing dots, follows your message once the hub has stored it. It
+  comes at once, without waiting for the next agent list read, and goes when the agent's reply
+  arrives. With no reply it goes after 30 seconds, unless the agent reports working, and when the
+  agent stops working without a reply. A reload shows it again while the agent works on an
+  unanswered message. The dots stay still with reduced motion, and a screen reader hears "working
+  on a reply".
+
 ### Fixed
 
 - **The agent image builds again after trixie-backports moved past the pinned tmux.** Debian

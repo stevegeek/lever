@@ -60,6 +60,11 @@ const loadChat = (hub, opts = {}) => load(hub, { ...opts, store: { 'lever-chat-o
 // sends: the message posts the page made (read marks are not sends).
 const sends = (env) => env.calls.filter((c) => c.method === 'POST' && c.path.endsWith('/messages'));
 
+// said: the message rows, without the thinking dots.
+const said = (env) => env.rows().filter((r) => !r.startsWith('msg agent thinking'));
+const openRow = (env, name) => env.els.agents.children.find((li) => li.children[0].textContent.startsWith(name)).children[0].dispatch('click');
+const dots = (env) => env.rows().filter((r) => r.startsWith('msg agent thinking'));
+
 async function type(env, text) {
   env.els.text.value = text;
   env.els.text.dispatch('input');
@@ -512,7 +517,7 @@ test('a sent message does not hide a hole behind it', async () => {
   await tick(10);
   hub.parts.history = () => ({ status: 200, body: { messages: [msg(301, { id: 'sent', msg: 'hello', senderId: 'u1' }), ...page(300, 49)], nextCursor: 'C2' } });
   await env.poll();
-  const rows = env.rows();
+  const rows = said(env);
   assert.equal(rows.length, 50, 'the list restarts from the newest page');
   assert.match(rows[0], /msg 252$/);
   assert.match(rows[49], /hello$/);
@@ -825,7 +830,7 @@ test('send: stored but the answer was lost: the retry is told so, and nothing is
   await env.runTimers();
   assert.equal(env.els.send.disabled, false);
   // The row comes from the history, never from the replay answer's thin body.
-  assert.deepEqual(env.rows().map((r) => r.split(':')[0]), ['msg mine']);
+  assert.deepEqual(said(env).map((r) => r.split(':')[0]), ['msg mine']);
   // One more press is a deliberate second message.
   env.els.composer.dispatch('submit');
   await tick(10);
@@ -843,7 +848,7 @@ test('send: not stored the first time: the retry stores it once and clears the d
   env.els.composer.dispatch('submit');
   await tick(10);
   assert.equal(env.els.text.value, '');
-  assert.equal(env.rows().length, 1);
+  assert.equal(said(env).length, 1);
   // The hub did not know the key. Either the first attempt never arrived, or
   // it did and the hub has forgotten: the page cannot tell, and says so.
   assert.equal(env.els.error.textContent, STORED_AGAIN);
@@ -906,7 +911,7 @@ test('send: after a reload the retry still goes under the first key', async () =
   await tick(10);
   const again = await loadChat(hub, { store: first.store });
   assert.equal(again.els.text.value, 'yes');
-  assert.equal(again.rows().length, 1, 'the stored message shows; the page still concludes nothing');
+  assert.equal(said(again).length, 1, 'the stored message shows; the page still concludes nothing');
   assert.equal(again.els.error.hidden, true);
   again.els.composer.dispatch('submit');
   await tick(10);
@@ -3051,4 +3056,140 @@ test('activity: an answer for another chat is dropped, and the panel closes with
   await tick(5);
   assert.equal(env.els.activitytext.textContent, '');
   assert.equal(env.els.activitypanel.hidden, true);
+});
+
+// The thinking dots. BOSS reports working by default; idle() is the same
+// manager, idle.
+const idle = () => roster([BOSS({ activity: 'idle' }), A('w1')]);
+
+test('thinking: a stored send shows the dots at once, before any list read says working', async () => {
+  const hub = hubWith({ agents: idle });
+  const env = await loadChat(hub);
+  assert.deepEqual(dots(env), []);
+  await type(env, 'hello');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  assert.deepEqual(dots(env), ['msg agent thinking: boss / working on a reply'], 'the dots, after the sent message');
+  assert.match(env.rows().at(-2), /^msg mine: .*hello$/);
+  const row = env.els.list.children.at(-1);
+  assert.deepEqual(row.children[1].children.slice(1).map((d) => `${d.className} ${d.attrs['aria-hidden']}`), ['dot true', 'dot true', 'dot true']);
+  // The agent's reply ends them.
+  hub.parts.history = () => ({ status: 200, body: { messages: [msg(2, { createdAt: new Date(1.9e12).toISOString() }), { id: 'sent1', msg: 'hello', senderId: 'u1', createdAt: new Date(1.8e12).toISOString() }] } });
+  env.streams[0].emit('update', { data: JSON.stringify({ subject: 'user.u1.chat.x' }) });
+  await env.poll();
+  assert.deepEqual(dots(env), []);
+  assert.match(env.rows().at(-1), /^msg agent: boss .* \/ msg 2$/);
+});
+
+test('thinking: the dots time out when the agent never reports working', async () => {
+  const env = await loadChat(hubWith({ agents: idle }));
+  await type(env, 'hello');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  await env.poll();
+  assert.equal(dots(env).length, 1, 'a list read before the time is up keeps them');
+  await env.runTimers(Infinity);
+  assert.deepEqual(dots(env), []);
+});
+
+test('thinking: working keeps the dots past the time', async () => {
+  const hub = hubWith({ agents: idle });
+  const env = await loadChat(hub);
+  await type(env, 'hello');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  hub.parts.agents = defaultAgents;
+  await env.poll();
+  await env.runTimers(Infinity);
+  assert.equal(dots(env).length, 1, 'working: the dots stay while the agent says so');
+  hub.parts.agents = idle;
+  await env.poll();
+  assert.deepEqual(dots(env), []);
+});
+
+test('thinking: idle after working ends the dots before the time is up', async () => {
+  const hub = hubWith({ agents: idle });
+  const env = await loadChat(hub);
+  await type(env, 'hello');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  hub.parts.agents = defaultAgents;
+  await env.poll();
+  hub.parts.agents = idle;
+  await env.poll();
+  assert.deepEqual(dots(env), [], 'it stopped working without a reply');
+  assert.ok(env.timers.some((t) => t.ms === 30000), 'the time is not up yet');
+});
+
+test('thinking: an unknown state keeps a pending send\'s dots', async () => {
+  const hub = hubWith({ agents: idle });
+  const env = await loadChat(hub);
+  await type(env, 'hello');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  hub.parts.agents = defaultAgents;
+  await env.poll();
+  hub.parts.agents = () => ({ status: 502, body: '' });
+  await env.poll();
+  assert.equal(dots(env).length, 1);
+});
+
+test('thinking: the dots come and go without rebuilding the messages', async () => {
+  const hub = hubWith({ agents: idle, history: () => ({ status: 200, body: { messages: [msg(2, { senderId: 'u1' }), msg(1)] } }) });
+  const env = await loadChat(hub);
+  assert.deepEqual(dots(env), []);
+  const first = env.els.list.children[0];
+  hub.parts.agents = defaultAgents;
+  await env.poll();
+  assert.equal(dots(env).length, 1);
+  assert.equal(env.els.list.children[0], first, 'the same row: the log was not rebuilt');
+  hub.parts.agents = idle;
+  await env.poll();
+  assert.deepEqual(dots(env), []);
+  assert.equal(env.els.list.children[0], first);
+});
+
+test('thinking: an agent working on the last, unanswered message shows the dots after a reload', async () => {
+  const mine = (over = {}) => ({ status: 200, body: { messages: [msg(2, { senderId: 'u1', ...over }), msg(1)] } });
+  let env = await loadChat(hubWith({ history: () => mine() }));
+  assert.equal(dots(env).length, 1);
+  env = await loadChat(hubWith({ agents: idle, history: () => mine() }));
+  assert.deepEqual(dots(env), [], 'idle: nothing is on its way');
+  env = await loadChat(hubWith({ history: () => mine({ dispatchState: 'failed' }) }));
+  assert.deepEqual(dots(env), [], 'a failed send waits for nobody');
+  env = await loadChat(hubWith({ history: () => ({ status: 200, body: { messages: [msg(2), msg(1, { senderId: 'u1' })] } }) }));
+  assert.deepEqual(dots(env), [], 'answered already');
+});
+
+test('thinking: the dots belong to the chat they were sent in', async () => {
+  const hub = hubWith({ agents: idle });
+  const env = await loadChat(hub);
+  hub.parts.history = () => ({ status: 200, body: { messages: [{ id: 'sent1', msg: 'hello', senderId: 'u1', createdAt: new Date(1.8e12).toISOString() }] } });
+  await type(env, 'hello');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  assert.equal(dots(env).length, 1);
+  env.els.back.dispatch('click');
+  assert.deepEqual(dots(env), []);
+  // Back within the time: the send is still on its way.
+  openRow(env, 'boss');
+  await tick(10);
+  assert.equal(dots(env).length, 1);
+});
+
+test('thinking: activity counts while another chat is open', async () => {
+  const hub = hubWith({ agents: idle });
+  const env = await loadChat(hub);
+  await type(env, 'hello');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  hub.parts.history = () => ({ status: 200, body: { messages: [{ id: 'sent1', msg: 'hello', senderId: 'u1', createdAt: new Date(1.8e12).toISOString() }] } });
+  env.els.back.dispatch('click');
+  hub.parts.agents = defaultAgents;
+  await env.poll();
+  hub.parts.agents = idle;
+  await env.poll();
+  openRow(env, 'boss');
+  await tick(10);
+  assert.deepEqual(dots(env), [], 'it worked and stopped while the chat was closed');
 });

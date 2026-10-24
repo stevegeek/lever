@@ -458,15 +458,15 @@ func TestChatPageHasNoMarkupSink(t *testing.T) {
 		t.Fatal(err)
 	}
 	for re, want := range map[string]int{
-		`createElement\(`:            20,
-		`createElement\('div'\)`:     8,
+		`createElement\(`:            25,
+		`createElement\('div'\)`:     11, // the thinking dots' row, meta and body
 		`createElement\('li'\)`:      4,
 		`createElement\('a'\)`:       1,
 		`createElement\('button'\)`:  4,
 		`createElement\('option'\)`:  1,
 		`createElement\('ul'\)`:      1,
-		`createElement\('span'\)`:    1,
-		`setAttribute\(`:             5, // the mic's name says when dictation is sent at once
+		`createElement\('span'\)`:    3, // the dots and their fixed spoken words
+		`setAttribute\(`:             6, // the mic's name says when dictation is sent at once; a dot is aria-hidden
 		`setAttribute\('href', `:     2,
 		`setAttribute\('download', `: 1,
 		`new XMLHttpRequest\(`:       1,

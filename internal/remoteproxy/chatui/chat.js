@@ -37,6 +37,8 @@ import {
   uploadNote,
   viewFilesPath,
   LIST_MS,
+  THINKING_MS,
+  thinkingShown,
   MAX_MESSAGE,
   NEW_CONVERSATION_PATH,
   NEW_CONVERSATION_POLLS,
@@ -183,6 +185,13 @@ let waking = ''; // the agent a send is waking ('' = none)
 let renewing = ''; // the agent a new conversation is starting ('' = none)
 let renewed = null; // {name, text, error}: how the last one ended, until a send
 let held = false; // Send rests after a note (see hold)
+// thinking: {name, conversation, seq, saw} from a stored send until
+// THINKING_MS pass, or until the agent, having reported working (saw),
+// reports anything else. See thinkingShown.
+let thinking = null;
+let thinkingSeq = 0;
+let dotsShown = false; // the list ends in the thinking dots
+let dotsNode = null; // their row, while shown
 let stream = null;
 let streamFailed = false;
 
@@ -305,6 +314,71 @@ function nearBottom() {
   return el.scroll.scrollHeight - el.scroll.scrollTop - el.scroll.clientHeight < 80;
 }
 
+function openAgent() {
+  return chat && roster ? roster.agents.find((x) => x.name === chat.name) : null;
+}
+
+function dotsWanted() {
+  if (!chat || !loaded) return false;
+  const a = openAgent();
+  const pending = !!thinking && thinking.name === chat.name && thinking.conversation === chat.conversation;
+  return thinkingShown(sortedMessages(messages), chat.userId, chat.id, a ? a.activity : '', pending);
+}
+
+// The dots carry no network text: the agent's name only, in its meta line.
+function dotsRow() {
+  const row = document.createElement('div');
+  row.className = 'msg agent thinking';
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  setText(meta, chat.name);
+  const body = document.createElement('div');
+  body.className = 'body';
+  const say = document.createElement('span');
+  say.className = 'sr';
+  setText(say, 'working on a reply');
+  body.append(say);
+  for (let i = 0; i < 3; i++) {
+    const dot = document.createElement('span');
+    dot.className = 'dot';
+    dot.setAttribute('aria-hidden', 'true');
+    body.append(dot);
+  }
+  row.append(meta, body);
+  return row;
+}
+
+// syncDots adds or removes only the dots row: a full render would rebuild
+// the log, which a screen reader may read again, and drop the focus.
+function syncDots() {
+  const want = dotsWanted();
+  if (want === dotsShown) return;
+  dotsShown = want;
+  if (dotsNode) dotsNode.remove();
+  dotsNode = null;
+  if (!want) return;
+  const stick = nearBottom();
+  dotsNode = dotsRow();
+  el.list.append(dotsNode);
+  if (stick) el.scroll.scrollTop = el.scroll.scrollHeight;
+}
+
+function startThinking(c) {
+  const seq = ++thinkingSeq;
+  thinking = { name: c.name, conversation: c.conversation, seq, saw: false };
+  setTimeout(() => {
+    if (!thinking || thinking.seq !== seq) return;
+    thinking = null;
+    syncDots();
+  }, THINKING_MS);
+}
+
+function noteActivity(a) {
+  if (!thinking || thinking.name !== a.name || a.state === 'unknown') return;
+  if (a.activity === 'working') thinking.saw = true;
+  else if (thinking.saw) thinking = null;
+}
+
 function render(toBottom) {
   const stick = toBottom || nearBottom();
   const frag = document.createDocumentFragment();
@@ -338,6 +412,9 @@ function render(toBottom) {
     }
     frag.append(row);
   }
+  dotsShown = dotsWanted();
+  dotsNode = dotsShown ? dotsRow() : null;
+  if (dotsNode) frag.append(dotsNode);
   el.list.replaceChildren(frag);
   showNotice(shown ? '' : 'No messages yet.');
   if (stick) el.scroll.scrollTop = el.scroll.scrollHeight;
@@ -709,6 +786,9 @@ function applyRoster(l) {
   if (l.seq < appliedSeq) return;
   appliedSeq = l.seq;
   roster = l;
+  // Every list read counts, the open chat's or not.
+  const busy = thinking && l.agents.find((x) => x.name === thinking.name);
+  if (busy) noteActivity(busy);
   renderRows();
   syncAttach();
   setLink(el.console, l.tier === 'operator' ? l.console : '');
@@ -760,6 +840,7 @@ async function reloadList() {
 
 function applyView(a) {
   if (!chat || a.name !== chat.name) return;
+  syncDots();
   const v = inputView(a, !!managerRow(), roster && roster.tier);
   chat.view = v;
   showState(chipText(a), v.input);
@@ -1582,6 +1663,8 @@ function resetHistory() {
   olderCursor = '';
   loaded = false;
   el.older.hidden = true;
+  dotsShown = false;
+  dotsNode = null;
   el.list.replaceChildren();
 }
 
@@ -1786,7 +1869,9 @@ async function send() {
     } else if (!here && (stored(draftKey(c.name)) || '').trim() === text) {
       store(draftKey(c.name), '');
     }
+    startThinking(c);
     if (chat === c && res.body && typeof res.body === 'object' && mergeMessages(messages, [res.body])) render(true);
+    else if (chat === c) syncDots();
     // The hub keeps a key for a few minutes, in memory. A 201 for a key
     // sent before means it did not know the key: the earlier attempt never
     // arrived, or it did and the hub has forgotten. The page cannot tell.
@@ -1797,6 +1882,8 @@ async function send() {
     // message; Send rests first so a double tap is not that press. After two or
     // more unclear attempts the hub may have stored each.
     setUnsent(c, null);
+    startThinking(c);
+    if (chat === c) syncDots();
     say(earlier > 1 ? `${NOTE_REPLAY} ${NOTE_TWICE}` : NOTE_REPLAY);
     hold();
     refreshSoon();

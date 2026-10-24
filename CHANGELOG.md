@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [1.0.0-beta.2] - 2026-10-24
+
 ### Added
 
 - **The chat page shows three dots while the agent works on your message.** An empty bubble on

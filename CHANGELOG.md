@@ -7,6 +7,26 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [1.0.0-beta.3] - 2026-11-02
+
+### Fixed
+
+- **The chat page keeps the newest message in view.** A reply could land out of sight below the
+  message box: the page checked at each redraw whether you were near the bottom, and an opening
+  keyboard or a growing message box made that check fail. The page now follows the newest
+  message until you scroll up yourself, and stays at the bottom when the keyboard, the message
+  box, a note or the Files panel changes size. A message you send always shows. Loading earlier
+  messages keeps your place.
+- **The chat header stays on screen with the keyboard up on iOS.** Safari slid the whole page,
+  header and buttons included, up off the screen to show the message box. The page is now sized
+  to the visible part of the screen above the keyboard. A pinch zoom leaves it alone.
+
+### Upgrade
+
+- **Jail ABI unchanged.** Only the chat page changed: no agent image rebuild. Run `lever apply`
+  after upgrading so the proxy serves the new page, then reload the chat page (on a phone, close
+  and reopen the Home Screen app).
+
 ## [1.0.0-beta.2] - 2026-10-24
 
 ### Added

@@ -3193,3 +3193,84 @@ test('thinking: activity counts while another chat is open', async () => {
   await tick(10);
   assert.deepEqual(dots(env), [], 'it worked and stopped while the chat was closed');
 });
+
+// Scrolling: the log follows its newest message until the person scrolls up.
+// layout gives the log box a browser's clamped scrollTop.
+const atEnd = (env) => env.els.scroll.scrollTop === env.els.scroll.scrollHeight - env.els.scroll.clientHeight;
+
+test('scroll: a reply shows after the keyboard has shortened the log', async () => {
+  const hub = hubWith({ history: () => ({ status: 200, body: { messages: page(10, 10) } }) });
+  const env = await loadChat(hub, { layout: true });
+  assert.deepEqual(env.observed, ['scroll', 'list']);
+  assert.ok(atEnd(env));
+  // The keyboard opens: the box is 300px shorter, scrollTop stays, and the
+  // end is 300px out of view until the observer runs.
+  env.els.scroll.clientHeight = 300;
+  env.relayout();
+  assert.ok(atEnd(env));
+  env.els.scroll.clientHeight = 200; // the message box grows a line
+  env.els.scroll.scrollHeight = 1300; // and a reply comes
+  hub.parts.history = () => ({ status: 200, body: { messages: page(11, 11) } });
+  await env.poll();
+  assert.equal(said(env).length, 11);
+  assert.ok(atEnd(env));
+});
+
+test('scroll: a person who scrolled up stays where they are', async () => {
+  const hub = hubWith({ history: () => ({ status: 200, body: { messages: page(10, 10) } }) });
+  const env = await loadChat(hub, { layout: true });
+  env.scrollTo(100);
+  env.els.scroll.scrollHeight = 1300;
+  hub.parts.history = () => ({ status: 200, body: { messages: page(11, 11) } });
+  await env.poll();
+  env.relayout();
+  assert.equal(env.els.scroll.scrollTop, 100);
+  // Back at the end, it follows again.
+  env.scrollTo(700);
+  env.els.scroll.scrollHeight = 1400;
+  env.relayout();
+  assert.ok(atEnd(env));
+});
+
+test('scroll: a sent message shows, from wherever the log was', async () => {
+  const hub = hubWith({ history: () => ({ status: 200, body: { messages: page(10, 10) } }) });
+  const env = await loadChat(hub, { layout: true });
+  env.scrollTo(0);
+  env.els.scroll.scrollHeight = 1200;
+  await type(env, 'hello');
+  env.els.composer.dispatch('submit');
+  await tick(5);
+  assert.match(said(env).at(-1), /hello$/);
+  assert.ok(atEnd(env));
+});
+
+test('scroll: loading earlier messages keeps the view', async () => {
+  const hub = hubWith({ history: (path) => ({ status: 200, body: path.includes('C1') ? { messages: page(50, 50) } : { messages: page(100), nextCursor: 'C1' } }) });
+  const env = await loadChat(hub, { layout: true });
+  env.scrollTo(0);
+  // The 50 earlier rows make the log 1000px taller as they render.
+  const replace = env.els.list.replaceChildren.bind(env.els.list);
+  env.els.list.replaceChildren = (...n) => {
+    replace(...n);
+    env.els.scroll.scrollHeight = 2000;
+  };
+  env.els.older.dispatch('click');
+  await tick(5);
+  env.relayout();
+  assert.equal(env.els.scroll.scrollTop, 1000);
+});
+
+test('viewport: the page is sized to what is seen above the keyboard; a zoom is left alone', async () => {
+  const env = await loadChat(hubWith(), { layout: true });
+  assert.deepEqual(env.rootProps, { '--vvh': '800px', '--vvtop': '0px' });
+  env.moveViewport({ height: 420.4, offsetTop: 310.6 });
+  assert.deepEqual(env.rootProps, { '--vvh': '420px', '--vvtop': '311px' });
+  env.moveViewport({ scale: 2 });
+  assert.deepEqual(env.rootProps, {});
+});
+
+test('viewport: a browser without visualViewport or ResizeObserver still runs', async () => {
+  const env = await loadChat(hubWith());
+  assert.deepEqual(env.rootProps, {});
+  assert.equal(env.relayout, undefined);
+});

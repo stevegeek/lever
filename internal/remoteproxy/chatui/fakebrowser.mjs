@@ -91,6 +91,44 @@ export async function load(hub, opts = {}) {
       return env.confirmAnswers.length ? env.confirmAnswers.shift() : true;
     },
   };
+  // Layout (opts.layout): a ResizeObserver whose callback a test runs
+  // (env.relayout), a visual viewport a test moves (env.moveViewport), and a
+  // log box (#scroll) that clamps its scrollTop as a browser does. Without
+  // it the page has neither, as an old browser.
+  delete globalThis.ResizeObserver;
+  const rootProps = {};
+  doc.documentElement = { style: { setProperty: (k, v) => (rootProps[k] = v), removeProperty: (k) => delete rootProps[k] } };
+  env.rootProps = rootProps;
+  if (opts.layout) {
+    env.observed = [];
+    globalThis.ResizeObserver = class {
+      constructor(f) {
+        env.relayout = () => f([]);
+      }
+      observe(n) {
+        env.observed.push(n.tag);
+      }
+    };
+    const vvl = {};
+    env.viewport = { height: 800, offsetTop: 0, scale: 1, addEventListener: (t, f) => (vvl[t] ||= []).push(f) };
+    env.moveViewport = (o) => {
+      Object.assign(env.viewport, o);
+      for (const f of [...(vvl.resize || []), ...(vvl.scroll || [])]) f({});
+    };
+    globalThis.window.visualViewport = env.viewport;
+    const box = doc.getElementById('scroll');
+    let top = 0;
+    Object.defineProperty(box, 'scrollTop', {
+      get: () => top,
+      set: (v) => (top = Math.max(0, Math.min(v, box.scrollHeight - box.clientHeight))),
+    });
+    Object.assign(box, { scrollHeight: 1000, clientHeight: 600 });
+    // The person scrolls the log to y.
+    env.scrollTo = (y) => {
+      box.scrollTop = y;
+      box.dispatch('scroll');
+    };
+  }
   // pagehide is the page being closed, navigated away from or frozen.
   env.hide = async () => {
     doc.visibilityState = 'hidden';

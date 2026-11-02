@@ -361,8 +361,13 @@ func TestMutualTLSRefusesOtherKeys(t *testing.T) {
 	if get(&http.Client{Transport: Transport(other.cert, r.server.fp)}) == nil {
 		t.Fatal("SECURITY: a client with another key was served")
 	}
-	if !strings.Contains(r.log.String(), string(other.fp)) {
-		t.Fatalf("the refused client's fingerprint is not in the log:\n%s", r.log)
+	// Under TLS 1.3 the server checks the client's key after the client's
+	// side of the handshake is done: the client can see the refusal before
+	// the server's connection goroutine has logged it.
+	for deadline := time.Now().Add(5 * time.Second); !strings.Contains(r.log.String(), string(other.fp)); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the refused client's fingerprint is not in the log:\n%s", r.log)
+		}
 	}
 	// The client side refuses a server whose key is not the pinned one.
 	wrongPin := newKeyPair(t, x509.ExtKeyUsageServerAuth).fp

@@ -7,6 +7,21 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [1.0.0-beta.4] - 2026-11-02
+
+### Fixed
+
+- **A flaky service host test.** `TestMutualTLSRefusesOtherKeys` read the log before the server had
+  written the refused client's fingerprint to it, and failed now and then in CI. Under TLS 1.3 the
+  server checks the client's key after the client's side of the handshake is done, so the client
+  sees the refusal before the server logs it. The test now waits for the line. No change to lever
+  itself.
+
+### Upgrade
+
+- **Jail ABI unchanged.** No agent image rebuild. Nothing changes at run time, so upgrading from
+  1.0.0-beta.3 is optional.
+
 ## [1.0.0-beta.3] - 2026-11-02
 
 ### Fixed

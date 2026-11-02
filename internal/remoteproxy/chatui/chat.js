@@ -779,9 +779,12 @@ async function loadOlder() {
   for (const m of items) fromHistory.add(m.id);
   if (mergeMessages(messages, items)) {
     // Earlier messages go on top, under the reader's eye: the view stays.
+    // A log that fitted was at its end and stays there; a scroll fires no
+    // event when scrollTop does not change, so pinned is measured here.
     pinned = false;
     render(false);
     el.scroll.scrollTop += el.scroll.scrollHeight - before;
+    pinned = nearBottom();
   }
 }
 
@@ -2369,34 +2372,39 @@ window.addEventListener('resize', grow);
 el.scroll.addEventListener('scroll', () => {
   pinned = nearBottom();
 }, { passive: true });
-// A pinned chat stays at its end when the log or its box changes size: a
-// message, the dots, the keyboard, the message box, a note or panel.
+// A pinned chat stays at its end when the log box or anything in it changes
+// size: a message, the dots, the Files panel, a notice, the keyboard, the
+// message box, a note or panel.
 if (typeof ResizeObserver === 'function') {
   const ro = new ResizeObserver(stickToEnd);
-  ro.observe(el.scroll);
-  ro.observe(el.list);
+  for (const n of [el.scroll, el.older, el.notice, el.viewonly, el.readonly, el.filespanel, el.list]) ro.observe(n);
 }
 // The page fills the visible part of the screen. iOS Safari keeps the page
 // its full height under an open keyboard and slides it up, header and all,
 // to show the message box; interactive-widget=resizes-content (chat.html)
 // does this for Chrome on Android only. chat.css sizes .app from --vvh and
 // moves it down by --vvtop, so the header stays at the top of what is seen.
-// A pinch zoom (scale not 1) leaves the page its own size.
+// A pinch zoom (scale not 1) leaves the page its own size. With the
+// keyboard up, the visible part much shorter than the window, the
+// composer drops the home indicator's inset, which iOS still reports.
 function fitViewport() {
   const vv = window.visualViewport;
   const root = document.documentElement.style;
   if (!vv || Math.abs(vv.scale - 1) > 0.01) {
-    root.removeProperty('--vvh');
-    root.removeProperty('--vvtop');
+    for (const k of ['--vvh', '--vvtop', '--kbinset']) root.removeProperty(k);
     return;
   }
-  root.setProperty('--vvh', `${Math.round(vv.height)}px`);
+  root.setProperty('--vvh', `${Math.floor(vv.height)}px`);
   root.setProperty('--vvtop', `${Math.round(vv.offsetTop)}px`);
+  if (window.innerHeight - vv.height > 150) root.setProperty('--kbinset', '0px');
+  else root.removeProperty('--kbinset');
   stickToEnd();
 }
 if (window.visualViewport) {
   window.visualViewport.addEventListener('resize', fitViewport);
   window.visualViewport.addEventListener('scroll', fitViewport);
+  // Some iOS releases report a rotation's size late, or only here.
+  window.addEventListener('resize', fitViewport);
   fitViewport();
 }
 document.addEventListener('visibilitychange', () => {

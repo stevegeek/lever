@@ -115,7 +115,13 @@ export async function load(hub, opts = {}) {
       Object.assign(env.viewport, o);
       for (const f of [...(vvl.resize || []), ...(vvl.scroll || [])]) f({});
     };
+    // A rotation reported to the window only.
+    env.rotate = (o) => {
+      Object.assign(env.viewport, o);
+      for (const f of winListeners.resize || []) f({});
+    };
     globalThis.window.visualViewport = env.viewport;
+    globalThis.window.innerHeight = 800;
     const box = doc.getElementById('scroll');
     let top = 0;
     Object.defineProperty(box, 'scrollTop', {

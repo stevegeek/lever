@@ -3201,7 +3201,7 @@ const atEnd = (env) => env.els.scroll.scrollTop === env.els.scroll.scrollHeight 
 test('scroll: a reply shows after the keyboard has shortened the log', async () => {
   const hub = hubWith({ history: () => ({ status: 200, body: { messages: page(10, 10) } }) });
   const env = await loadChat(hub, { layout: true });
-  assert.deepEqual(env.observed, ['scroll', 'list']);
+  assert.deepEqual(env.observed, ['scroll', 'older', 'notice', 'viewonly', 'readonly', 'filespanel', 'list']);
   assert.ok(atEnd(env));
   // The keyboard opens: the box is 300px shorter, scrollTop stays, and the
   // end is 300px out of view until the observer runs.
@@ -3260,13 +3260,37 @@ test('scroll: loading earlier messages keeps the view', async () => {
   assert.equal(env.els.scroll.scrollTop, 1000);
 });
 
+test('scroll: earlier messages loaded into a log that fitted leave it following', async () => {
+  const hub = hubWith({ history: (path) => ({ status: 200, body: path.includes('C1') ? { messages: page(50, 50) } : { messages: page(100), nextCursor: 'C1' } }) });
+  const env = await loadChat(hub, { layout: true });
+  // The log fits its box: at its end with scrollTop 0, so no scroll event.
+  env.els.scroll.scrollHeight = 600;
+  env.relayout();
+  const replace = env.els.list.replaceChildren.bind(env.els.list);
+  env.els.list.replaceChildren = (...n) => {
+    replace(...n);
+    env.els.scroll.scrollHeight += 1000;
+  };
+  env.els.older.dispatch('click');
+  await tick(5);
+  assert.ok(atEnd(env));
+  hub.parts.history = () => ({ status: 200, body: { messages: page(101) } });
+  await env.poll();
+  assert.ok(atEnd(env), `scrollTop ${env.els.scroll.scrollTop} of ${env.els.scroll.scrollHeight}`);
+});
+
 test('viewport: the page is sized to what is seen above the keyboard; a zoom is left alone', async () => {
   const env = await loadChat(hubWith(), { layout: true });
   assert.deepEqual(env.rootProps, { '--vvh': '800px', '--vvtop': '0px' });
-  env.moveViewport({ height: 420.4, offsetTop: 310.6 });
-  assert.deepEqual(env.rootProps, { '--vvh': '420px', '--vvtop': '311px' });
+  // The keyboard: the page shrinks to what is seen, and the composer drops
+  // the home indicator's inset.
+  env.moveViewport({ height: 420.6, offsetTop: 310.6 });
+  assert.deepEqual(env.rootProps, { '--vvh': '420px', '--vvtop': '311px', '--kbinset': '0px' });
   env.moveViewport({ scale: 2 });
   assert.deepEqual(env.rootProps, {});
+  env.rotate({ scale: 1, height: 390, offsetTop: 0 });
+  env.rotate({ height: 700 });
+  assert.deepEqual(env.rootProps, { '--vvh': '700px', '--vvtop': '0px' });
 });
 
 test('viewport: a browser without visualViewport or ResizeObserver still runs', async () => {

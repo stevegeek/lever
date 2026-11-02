@@ -314,6 +314,21 @@ function nearBottom() {
   return el.scroll.scrollHeight - el.scroll.scrollTop - el.scroll.clientHeight < 80;
 }
 
+// pinned: the chat follows its newest message. Only the person's own
+// scrolling unpins it. Measuring at each render would not do: an opening
+// keyboard, a growing message box or a note over the composer shortens the
+// log without a scroll, which leaves its bottom out of view and the next
+// reply hidden under it.
+let pinned = true;
+
+function toEnd() {
+  el.scroll.scrollTop = el.scroll.scrollHeight;
+}
+
+function stickToEnd() {
+  if (pinned) toEnd();
+}
+
 function openAgent() {
   return chat && roster ? roster.agents.find((x) => x.name === chat.name) : null;
 }
@@ -357,10 +372,9 @@ function syncDots() {
   if (dotsNode) dotsNode.remove();
   dotsNode = null;
   if (!want) return;
-  const stick = nearBottom();
   dotsNode = dotsRow();
   el.list.append(dotsNode);
-  if (stick) el.scroll.scrollTop = el.scroll.scrollHeight;
+  stickToEnd();
 }
 
 function startThinking(c) {
@@ -380,7 +394,7 @@ function noteActivity(a) {
 }
 
 function render(toBottom) {
-  const stick = toBottom || nearBottom();
+  if (toBottom) pinned = true;
   const frag = document.createDocumentFragment();
   speakButtons.clear();
   let shown = 0;
@@ -417,7 +431,7 @@ function render(toBottom) {
   if (dotsNode) frag.append(dotsNode);
   el.list.replaceChildren(frag);
   showNotice(shown ? '' : 'No messages yet.');
-  if (stick) el.scroll.scrollTop = el.scroll.scrollHeight;
+  stickToEnd();
 }
 
 function span(className, text) {
@@ -488,7 +502,7 @@ async function reloadContacts() {
 }
 
 function renderTranscript(toBottom) {
-  const stick = toBottom || nearBottom();
+  if (toBottom) pinned = true;
   const frag = document.createDocumentFragment();
   for (const m of sortedMessages(transcript)) {
     const row = document.createElement('div');
@@ -510,7 +524,7 @@ function renderTranscript(toBottom) {
     frag.append(row);
   }
   el.list.replaceChildren(frag);
-  if (stick) el.scroll.scrollTop = el.scroll.scrollHeight;
+  stickToEnd();
 }
 
 // One read at a time; an answer for a transcript no longer open is dropped.
@@ -552,6 +566,7 @@ function openTranscript(login, name) {
   const a = c && c.agents.find((x) => x.name === name);
   if (!a) return;
   closeChat();
+  pinned = true;
   view = { login, name, signedIn: !!c.signedIn, noFiles: !!c.noFiles };
   document.body.classList.add('chatting');
   document.title = name;
@@ -763,8 +778,13 @@ async function loadOlder() {
   const items = historyItems(res.body);
   for (const m of items) fromHistory.add(m.id);
   if (mergeMessages(messages, items)) {
+    // Earlier messages go on top, under the reader's eye: the view stays.
+    // A log that fitted was at its end and stays there; a scroll fires no
+    // event when scrollTop does not change, so pinned is measured here.
+    pinned = false;
     render(false);
     el.scroll.scrollTop += el.scroll.scrollHeight - before;
+    pinned = nearBottom();
   }
 }
 
@@ -1662,6 +1682,7 @@ function resetHistory() {
   generation++;
   olderCursor = '';
   loaded = false;
+  pinned = true;
   el.older.hidden = true;
   dotsShown = false;
   dotsNode = null;
@@ -1870,8 +1891,13 @@ async function send() {
       store(draftKey(c.name), '');
     }
     startThinking(c);
+    // A sent message shows at once, wherever the chat was scrolled to.
+    if (chat === c) pinned = true;
     if (chat === c && res.body && typeof res.body === 'object' && mergeMessages(messages, [res.body])) render(true);
-    else if (chat === c) syncDots();
+    else if (chat === c) {
+      syncDots();
+      toEnd();
+    }
     // The hub keeps a key for a few minutes, in memory. A 201 for a key
     // sent before means it did not know the key: the earlier attempt never
     // arrived, or it did and the hub has forgotten. The page cannot tell.
@@ -1883,7 +1909,11 @@ async function send() {
     // more unclear attempts the hub may have stored each.
     setUnsent(c, null);
     startThinking(c);
-    if (chat === c) syncDots();
+    if (chat === c) {
+      pinned = true;
+      syncDots();
+      toEnd();
+    }
     say(earlier > 1 ? `${NOTE_REPLAY} ${NOTE_TWICE}` : NOTE_REPLAY);
     hold();
     refreshSoon();
@@ -2339,6 +2369,44 @@ el.files.addEventListener('click', () => {
   void loadFiles();
 });
 window.addEventListener('resize', grow);
+el.scroll.addEventListener('scroll', () => {
+  pinned = nearBottom();
+}, { passive: true });
+// A pinned chat stays at its end when the log box or anything in it changes
+// size: a message, the dots, the Files panel, a notice, the keyboard, the
+// message box, a note or panel.
+if (typeof ResizeObserver === 'function') {
+  const ro = new ResizeObserver(stickToEnd);
+  for (const n of [el.scroll, el.older, el.notice, el.viewonly, el.readonly, el.filespanel, el.list]) ro.observe(n);
+}
+// The page fills the visible part of the screen. iOS Safari keeps the page
+// its full height under an open keyboard and slides it up, header and all,
+// to show the message box; interactive-widget=resizes-content (chat.html)
+// does this for Chrome on Android only. chat.css sizes .app from --vvh and
+// moves it down by --vvtop, so the header stays at the top of what is seen.
+// A pinch zoom (scale not 1) leaves the page its own size. With the
+// keyboard up, the visible part much shorter than the window, the
+// composer drops the home indicator's inset, which iOS still reports.
+function fitViewport() {
+  const vv = window.visualViewport;
+  const root = document.documentElement.style;
+  if (!vv || Math.abs(vv.scale - 1) > 0.01) {
+    for (const k of ['--vvh', '--vvtop', '--kbinset']) root.removeProperty(k);
+    return;
+  }
+  root.setProperty('--vvh', `${Math.floor(vv.height)}px`);
+  root.setProperty('--vvtop', `${Math.round(vv.offsetTop)}px`);
+  if (window.innerHeight - vv.height > 150) root.setProperty('--kbinset', '0px');
+  else root.removeProperty('--kbinset');
+  stickToEnd();
+}
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', fitViewport);
+  window.visualViewport.addEventListener('scroll', fitViewport);
+  // Some iOS releases report a rotation's size late, or only here.
+  window.addEventListener('resize', fitViewport);
+  fitViewport();
+}
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'hidden') return;
   dropHiddenDictation();

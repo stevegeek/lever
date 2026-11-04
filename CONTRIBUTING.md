@@ -63,7 +63,7 @@ Developer notes for working on lever itself. For using lever, start at the
 | `image/scion-slim` | The slim image's base (`make lever-image-slim`): what scion needs in an agent container, in place of `scion-claude`. |
 | `image/contract` | The agent-image contract check (`make image-contract IMAGE=...`) and its tests. |
 | `examples/` | Runnable instances used by docs and tests. |
-| `docs-site/` | Jekyll site for lever.to (`_guides`, `_reference`). |
+| `docs-site/` | Jekyll site for lever.diaconou.com (`_guides`, `_reference`). |
 | `tools/test` | Live end-to-end test scripts and the fake LLM upstream. |
 | `docs/` | Design specs, plans, and audits. Historical records, not user docs. |
 

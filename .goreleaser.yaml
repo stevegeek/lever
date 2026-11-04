@@ -113,7 +113,7 @@ homebrew_casks:
       token: '{{ .Env.HOMEBREW_TAP_TOKEN }}'
     skip_upload: '{{ if or (not (isEnvSet "HOMEBREW_TAP_TOKEN")) .Prerelease }}true{{ else }}false{{ end }}'
     commit_msg_template: "lever {{ .Tag }}"
-    homepage: https://lever.to
+    homepage: https://lever.diaconou.com
     description: Jailed multi-agent orchestration for Claude Code
     binaries:
       - lever

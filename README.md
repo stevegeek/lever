@@ -4,7 +4,7 @@
 
 # Lever
 
-Homepage: **[lever.to](https://lever.to)**
+Homepage: **[lever.diaconou.com](https://lever.diaconou.com)**
 
 **Containerised, jailed multi-agent orchestration.** A single *manager* agent drives a fleet of
 *worker* agents, each in its own container, and the whole stack runs inside a **jail** so that a
@@ -79,7 +79,7 @@ The jail is a contract, not one product. OrbStack and `lima` implement it. See [
 
 ## Core + instance
 
-`lever.to` ships the **generic core**: the orchestration engine, the manager role, jail
+`lever.diaconou.com` ships the **generic core**: the orchestration engine, the manager role, jail
 provisioning, the project model, and these docs. Your own setup is an **instance** built on top
 (knowledge base, tools, workers, the manager's prompt/skills), consuming the `lever` binary as a
 dependency. See [core vs instance](docs-site/_guides/core-vs-instance.md).

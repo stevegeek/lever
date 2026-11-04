@@ -6,7 +6,7 @@ nav_order: 7
 
 Lever separates the reusable framework from a particular operator's setup.
 
-- The **core** (`lever.to`) is the generic, open-source framework: the orchestration engine, the
+- The **core** (`lever.diaconou.com`) is the generic, open-source framework: the orchestration engine, the
   manager *runtime/role*, the security jail, the project model, the `lever` binary, and the docs.
 - An **instance** is a private setup built *on top of* the core: a knowledge base, personal or
   domain-specific tools, the actual workers, and the configuration that makes the manager *this*
@@ -17,7 +17,7 @@ Lever separates the reusable framework from a particular operator's setup.
 {% raw %}
 ```mermaid
 graph TD
-    subgraph core["CORE, lever.to (Go, open source)"]
+    subgraph core["CORE, lever.diaconou.com (Go, open source)"]
         ENG[orchestration engine<br/>agent / msg / lifecycle]
         MGR[manager runtime/role<br/>singleton, whole-tree workspace, event-watcher]
         BR[notification bridge<br/>mechanism]
@@ -41,7 +41,7 @@ graph TD
 
 ## What lives where
 
-| Area | Core (`lever.to`) | Instance (yours) |
+| Area | Core (`lever.diaconou.com`) | Instance (yours) |
 |---|---|---|
 | Orchestration | engine, manager runtime/role, notification bridge mechanism, directory-project model | - |
 | Manager identity | the *role* (singleton, whole-tree workspace, watches events) | its **prompt, skills, and tool/MCP config** |

@@ -151,20 +151,23 @@ func (b *Bridge) seedSeen() error {
 		return err
 	}
 	defer f.Close()
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64<<10), 4<<20)
-	for sc.Scan() {
+	// ReadBytes, not a Scanner: an over-long line is skipped, not the end.
+	br := bufio.NewReader(f)
+	for {
+		line, err := br.ReadBytes('\n')
 		var e scion.Event
-		if json.Unmarshal(sc.Bytes(), &e) == nil {
+		if len(line) > 0 && json.Unmarshal(line, &e) == nil {
 			if id := e.ID(); id != "" {
 				b.seen[id] = true
 			}
 		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
 	}
-	if err := sc.Err(); err != nil && !errors.Is(err, bufio.ErrTooLong) {
-		return err
-	}
-	return nil
 }
 
 // Run polls forever at the given interval. A transient failure (see

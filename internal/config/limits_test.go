@@ -41,3 +41,18 @@ func TestValidateBrokerLimitsAccepts(t *testing.T) {
 		}
 	}
 }
+
+// A supervised tool's backend may carry http:// or https://, as the broker
+// accepts; another scheme or no port is refused.
+func TestSupervisedToolBackend(t *testing.T) {
+	tool := func(backend string) string {
+		return limitsBase + "broker:\n  llm_auth: subscription\n  tools:\n    - {name: t, command: [x], backend: \"" + backend + "\", operations: [{name: read}]}\n"
+	}
+	for _, ok := range []string{"127.0.0.1:3201", "http://127.0.0.1:3201/mcp", "https://127.0.0.1:3201"} {
+		if _, err := LoadNoHostChecks(writeConfig(t, tool(ok))); err != nil {
+			t.Fatalf("%q: %v", ok, err)
+		}
+	}
+	rejectNoHost(t, tool("ftp://127.0.0.1:3201"), "broker tool", "backend")
+	rejectNoHost(t, tool("127.0.0.1"), "broker tool", "backend")
+}

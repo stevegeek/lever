@@ -535,7 +535,7 @@ async function readTranscript(cursor) {
   const v = view;
   if (!v) return;
   if (viewReading) {
-    if (viewAgain === null || cursor) viewAgain = cursor;
+    if (viewAgain === null || cursor) viewAgain = cursor || '';
     return;
   }
   viewReading = true;
@@ -1621,13 +1621,13 @@ async function upload(file) {
   }
   const shown = oneLine(file.name, 120);
   uploading = true;
-  syncAttach();
+  syncSend();
   showError('');
   showUpload(`Uploading ${shown}… 0%`);
   const res = await sendFile(c.name, file, (pct) => showUpload(`Uploading ${shown}… ${pct}%`));
   uploading = false;
   showUpload('');
-  syncAttach();
+  syncSend();
   const here = () => !!chat && chat.name === c.name;
   if (res.status !== 201 || !res.body || typeof res.body !== 'object' || typeof res.body.name !== 'string') {
     if (here()) showError(`Not uploaded: ${uploadErrorText(res.status, res.body)}`);

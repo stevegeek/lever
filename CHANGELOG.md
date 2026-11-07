@@ -17,8 +17,8 @@ version bump moves the block under the new version heading.
   `agent.key` and `ca.crt` in place while CLI verbs and the MCP server read them, so a reader could
   see a truncated file or a mismatched pair, and a crash between the writes left a new cert with
   the old key, which no renewal could use. Each file is now written to a synced temporary file and
-  renamed into place, and a key that does not match its cert counts as no identity, so the agent
-  enrols again.
+  renamed into place, and a key that does not match its cert counts as no identity: boot enrols
+  again while its ticket is valid, and otherwise the broker's heal re-enrols the agent.
 - **A failed certificate renewal is retried within minutes**, not at the next 12-hour tick, so a
   broker restart during an apply no longer leaves the 24-hour leaf half spent. `lever-agent renew
   -interval 0` is refused instead of panicking.

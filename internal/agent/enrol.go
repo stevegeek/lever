@@ -125,6 +125,12 @@ func (id Identity) Write(dir string) error {
 			return fmt.Errorf("agent: write %s: %w", f.name, err)
 		}
 	}
+	// Make the renames durable, so a power loss cannot keep the new cert
+	// and lose the new key. Best effort.
+	if d, err := r.Open(base); err == nil {
+		_ = d.Sync()
+		d.Close()
+	}
 	return nil
 }
 
@@ -161,6 +167,16 @@ func replaceFile(r *os.Root, name string, data []byte, mode os.FileMode) error {
 
 // LoadIdentity reads a previously-written identity from dir.
 func LoadIdentity(dir string) (Identity, bool) {
+	// A read that falls between Write's renames sees a new key beside the
+	// old cert: read once more before reporting no identity.
+	if id, ok := loadIdentityOnce(dir); ok {
+		return id, true
+	}
+	time.Sleep(50 * time.Millisecond)
+	return loadIdentityOnce(dir)
+}
+
+func loadIdentityOnce(dir string) (Identity, bool) {
 	cert, err1 := os.ReadFile(filepath.Join(dir, "agent.crt"))
 	key, err2 := os.ReadFile(filepath.Join(dir, "agent.key"))
 	caPEM, err3 := os.ReadFile(filepath.Join(dir, "ca.crt"))

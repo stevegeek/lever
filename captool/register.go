@@ -49,7 +49,9 @@ func (s *Server) freshEpoch(ctx context.Context) int {
 	// Bounded: a broker admin listener that accepts but never answers would
 	// otherwise hold every call past the cache (http.DefaultClient has no
 	// timeout). A failed refresh keeps the last good value, as documented.
-	ctx, cancel := context.WithTimeout(ctx, epochRefreshTimeout)
+	// WithoutCancel: a caller that hangs up must not fail the refresh and
+	// be verified against a stale floor; the timeout still bounds it.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), epochRefreshTimeout)
 	defer cancel()
 	var er wire.EpochResponse
 	if err := httpjson.Get(ctx, nil, s.adminURL+wire.PathEpoch, &er); err == nil {

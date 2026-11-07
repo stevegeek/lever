@@ -51,8 +51,9 @@ func TestFreshEpochRefreshesAfterTTL(t *testing.T) {
 	}
 }
 
-// An admin listener that accepts but never answers must not hold a call: the
-// refresh gives up with the request and keeps the last good epoch.
+// An admin listener that accepts but never answers must not hold a call
+// forever: the refresh is bounded and keeps the last good epoch. A caller
+// hanging up does not cut it short (that would verify against a stale floor).
 func TestFreshEpochGivesUpOnAStalledBroker(t *testing.T) {
 	release := make(chan struct{})
 	stalled := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -66,13 +67,17 @@ func TestFreshEpochGivesUpOnAStalledBroker(t *testing.T) {
 	s := testServer(t)
 	s.adminURL = stalled.URL
 	s.epoch, s.epochTTL = 4, 0
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the caller has hung up
 	start := time.Now()
 	if got := s.freshEpoch(ctx); got != 4 {
 		t.Fatalf("freshEpoch = %d, want the last good 4", got)
 	}
-	if took := time.Since(start); took > 3*time.Second {
-		t.Fatalf("freshEpoch took %s", took)
+	took := time.Since(start)
+	if took < epochRefreshTimeout-time.Second {
+		t.Fatalf("freshEpoch gave up after %s: a hang-up cut the refresh short", took)
+	}
+	if took > epochRefreshTimeout+3*time.Second {
+		t.Fatalf("freshEpoch took %s, past its bound", took)
 	}
 }

@@ -72,10 +72,12 @@ func (t Tool) validate() error {
 		if t.Backend == "" {
 			return fmt.Errorf("config: broker tool %q needs backend (the address its command listens on, host:port[/path])", t.Name)
 		}
-		hostport, _, _ := strings.Cut(t.Backend, "/")
-		if strings.Contains(t.Backend, "://") {
-			return fmt.Errorf("config: broker tool %q backend %q must not carry a scheme (want host:port[/path])", t.Name, t.Backend)
+		// The broker accepts an http:// or https:// backend too.
+		rest := strings.TrimPrefix(strings.TrimPrefix(t.Backend, "http://"), "https://")
+		if strings.Contains(rest, "://") {
+			return fmt.Errorf("config: broker tool %q backend %q: want host:port[/path], optionally after http:// or https://", t.Name, t.Backend)
 		}
+		hostport, _, _ := strings.Cut(rest, "/")
 		if _, _, err := net.SplitHostPort(hostport); err != nil {
 			return fmt.Errorf("config: broker tool %q backend %q: %v (want host:port[/path])", t.Name, t.Backend, err)
 		}

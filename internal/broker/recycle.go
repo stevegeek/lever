@@ -90,7 +90,7 @@ func (b *Broker) recycleWorker(ctx context.Context, w http.ResponseWriter, spec 
 		return
 	}
 	defer unlock()
-	if op && b.isRevoked(spec.Name) {
+	if b.isRevoked(spec.Name) {
 		// The fresh start would stage a revoked identity a ticket.
 		b.audit("worker", actor, "deny", verb+": revoked")
 		refuse(w, ReasonRevoked, "worker "+spec.Name+" is revoked; nothing was deleted", http.StatusForbidden)

@@ -117,6 +117,40 @@ func TestRenewLoopFlagsAcceptedByRealCmd(t *testing.T) {
 	}
 }
 
+// A failed renewal is retried after the short backoff, not a whole interval
+// later; a success goes back to the interval.
+func TestRenewLoopRetriesAFailureSoon(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var calls []time.Time
+	done := make(chan struct{})
+	go func() {
+		_ = renewLoop(ctx, time.Hour, 10*time.Millisecond, 40*time.Millisecond, func(context.Context) error {
+			calls = append(calls, time.Now())
+			if len(calls) == 3 {
+				close(done)
+			}
+			if len(calls) < 3 {
+				return errors.New("broker restarting")
+			}
+			return nil
+		})
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("two failures were not retried within 5s (calls %d); the interval is an hour", len(calls))
+	}
+	cancel()
+}
+
+func TestRenewLoopRefusesANonPositiveInterval(t *testing.T) {
+	err := run([]string{"lever-agent", "renew", "--id-dir", t.TempDir(), "--loop", "--interval", "0s"})
+	if err == nil || !strings.Contains(err.Error(), "-interval must be positive") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 // captureStdout returns what fn printed. Small outputs only: the pipe is not
 // drained concurrently.
 func captureStdout(t *testing.T, fn func()) string {

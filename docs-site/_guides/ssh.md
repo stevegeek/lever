@@ -62,7 +62,7 @@ SSH off.
 ## Using it
 
 ```bash
-lever ssh manager            # a shell in the manager (or: lever ssh, the app name works too)
+lever ssh manager            # a shell in the manager (its app name works too)
 lever ssh w1 -- git status   # a remote command in worker w1
 ```
 

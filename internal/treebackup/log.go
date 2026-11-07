@@ -2,6 +2,7 @@ package treebackup
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -225,7 +226,9 @@ func logAll(w io.Writer, s *logState, first int, o LogOptions) error {
 					return nil
 				},
 			})
-			if err != nil {
+			// errStopOutput only ends the walk: the output's own error (a
+			// closed pipe) or its limit marker says why, as in diff.
+			if err != nil && !errors.Is(err, errStopOutput) {
 				return err
 			}
 		} else {

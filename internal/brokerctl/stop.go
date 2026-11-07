@@ -65,7 +65,11 @@ func stopProcessByPIDFile(pidPath string, identify func(pid int) state.Identity)
 	gone := func() (bool, error) { return identify(pid) != state.IsServe, nil }
 	if retry.Until(context.Background(), stopPollAttempts, stopPollInterval, gone) != nil && identify(pid) == state.IsServe {
 		_ = proc.Signal(syscall.SIGKILL) // graceless fallback
-		_ = retry.Until(context.Background(), stopPollAttempts, stopPollInterval, gone)
+		if retry.Until(context.Background(), stopPollAttempts, stopPollInterval, gone) != nil && identify(pid) == state.IsServe {
+			// Not dead even after SIGKILL (stuck in the kernel): a caller
+			// that re-spawns now would hit EADDRINUSE. Keep the file.
+			return fmt.Errorf("brokerctl: pid %d (%s) is still running after SIGKILL; the file is kept", pid, pidPath)
+		}
 	}
 	_ = os.Remove(pidPath)
 	return nil

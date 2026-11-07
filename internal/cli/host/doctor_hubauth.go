@@ -62,10 +62,11 @@ const hubAuthFix = "run `lever apply`; it installs the key, pins the hub's auth 
 // hubAuthState is the jail-side evidence the authentication row reads besides
 // the hub's answers: scion's dev token, the owner, mode and type of the key's
 // directory and file (stat without -L, so a symlink shows as one), and the
-// public key file.
+// public key file. It exits 0 when the key is missing: a non-zero exit would
+// throw away the output, the dev-token line included.
 const hubAuthStateScript = `[ -e "$HOME/$1" ] && echo devtoken
 printf 'stat %s|%s\n' "$(stat -c '%u:%a:%F' "$3" 2>/dev/null)" "$(stat -c '%u:%a:%F' "$2" 2>/dev/null)"
-[ -f "$2" ] && cat "$2"`
+if [ -f "$2" ]; then cat "$2"; fi`
 
 // keyOwnershipProblem reads one `uid:octal-mode:type` stat line: root-owned,
 // of the wanted type, and writable by nobody else.

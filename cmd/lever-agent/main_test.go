@@ -39,6 +39,11 @@ func TestCLICapabilityVerbsValidateArgsBeforeAnythingElse(t *testing.T) {
 		{"delegate without -tool", "delegate", `"-tool"`, []string{"-op", "read", "-to", "worker"}},
 		{"request without -tool", "request", `"-tool"`, []string{"-op", "read"}},
 		{"request without -op", "request", `"-op"`, []string{"-tool", "db"}},
+		// A positional argument that is not key=value would be dropped,
+		// minting a broader token than asked for.
+		{"request bare constraint", "request", `"table"`, []string{"-tool", "db", "-op", "read", "table"}},
+		{"request empty key", "request", `"=users"`, []string{"-tool", "db", "-op", "read", "=users"}},
+		{"call bare constraint", "call", `"table"`, []string{"-tool", "db", "-op", "read", "-token", "x", "table"}},
 	} {
 		err := cmdCLI(context.Background(), tc.verb, append([]string{"-id-dir", missingID}, tc.args...))
 		if err == nil {
@@ -109,6 +114,40 @@ func TestRenewLoopFlagsAcceptedByRealCmd(t *testing.T) {
 	err := run([]string{"lever-agent", "renew", "--id-dir", tmp, "--loop", "--interval", "24h"})
 	if isFlagParseError(err) {
 		t.Fatalf("real cmdRenew rejected --loop/--interval (manifest sidecar would break): %v", err)
+	}
+}
+
+// A failed renewal is retried after the short backoff, not a whole interval
+// later; a success goes back to the interval.
+func TestRenewLoopRetriesAFailureSoon(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var calls []time.Time
+	done := make(chan struct{})
+	go func() {
+		_ = renewLoop(ctx, time.Hour, 10*time.Millisecond, 40*time.Millisecond, func(context.Context) error {
+			calls = append(calls, time.Now())
+			if len(calls) == 3 {
+				close(done)
+			}
+			if len(calls) < 3 {
+				return errors.New("broker restarting")
+			}
+			return nil
+		})
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("two failures were not retried within 5s (calls %d); the interval is an hour", len(calls))
+	}
+	cancel()
+}
+
+func TestRenewLoopRefusesANonPositiveInterval(t *testing.T) {
+	err := run([]string{"lever-agent", "renew", "--id-dir", t.TempDir(), "--loop", "--interval", "0s"})
+	if err == nil || !strings.Contains(err.Error(), "-interval must be positive") {
+		t.Fatalf("err = %v", err)
 	}
 }
 

@@ -19,5 +19,26 @@ func newRoot(c brokerCaller) *cobra.Command {
 		Version: agent.BuildLine("lever-manager", cli.Version)}
 	root.SetVersionTemplate("{{.Version}}\n")
 	root.AddCommand(newVersionCmd(c), newAgentCmd(c), newMsgCmd(c), newWatchCmd(c))
+	cli.RejectUnknownSubcommands(root)
+	silenceUsageOnRunErrors(root)
 	return root
+}
+
+// silenceUsageOnRunErrors wraps every RunE under c so a returned error (a
+// broker refusal, say) is not followed by cobra's usage text, which would
+// read as a flag problem. Cobra's own flag and argument checks run before
+// RunE and keep it.
+func silenceUsageOnRunErrors(c *cobra.Command) {
+	if run := c.RunE; run != nil {
+		c.RunE = func(cmd *cobra.Command, args []string) error {
+			err := run(cmd, args)
+			if err != nil {
+				cmd.SilenceUsage = true
+			}
+			return err
+		}
+	}
+	for _, sub := range c.Commands() {
+		silenceUsageOnRunErrors(sub)
+	}
 }

@@ -96,7 +96,9 @@ func (c mtlsCaller) Call(ctx context.Context, endpoint string, body, out any) er
 			// here means the gateway could not reach the broker.
 			return fmt.Errorf("via the agent gateway: %w", gerr)
 		}
-		return fmt.Errorf("bootstrap %s: %w; and the agent gateway at %s did not answer: %v", c.bootstrapPath, err, c.gatewayURL, gerr)
+		// Both wrapped: the gateway's transport error (*url.Error) is what
+		// lever-manager watch reads as transient, and retries.
+		return fmt.Errorf("bootstrap %s: %w; and the agent gateway at %s did not answer: %w", c.bootstrapPath, err, c.gatewayURL, gerr)
 	}
 	id, ok := agent.LoadIdentity(c.idDir)
 	if !ok {

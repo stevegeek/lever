@@ -157,6 +157,11 @@ func (r RealRunner) runCapped(ctx context.Context, n int, dir string, stdin io.R
 	stderr := &cappedBuffer{max: n, over: cancel}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	err := cmd.Run()
+	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success() {
+		// As in run: the command succeeded and only a background child it
+		// left held the pipes. A stream over its cap is still refused below.
+		err = nil
+	}
 	res := Result{Stdout: stdout.String(), Stderr: stderr.String()}
 	if ee, ok := err.(*exec.ExitError); ok {
 		res.Code = ee.ExitCode()

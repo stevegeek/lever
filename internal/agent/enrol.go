@@ -12,6 +12,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -98,32 +99,94 @@ func (id Identity) Write(dir string) error {
 	if err := r.Chmod(base, 0o700); err != nil {
 		return fmt.Errorf("agent: chmod dir: %w", err)
 	}
-	for _, f := range []struct {
+	// Each file is replaced by rename, never rewritten in place: the renew
+	// sidecar rewrites the identity while CLI verbs and the MCP server read it,
+	// and a crash mid-write must not leave a truncated file. The key goes
+	// first, so the files left by a crash between two renames are a new key
+	// beside an old cert, which LoadIdentity reports as no identity (the
+	// pair does not match) rather than as a valid one.
+	files := []struct {
 		name string
 		data []byte
 		mode os.FileMode
 	}{
-		{"agent.crt", id.CertPEM, 0o644},
 		{"agent.key", id.KeyPEM, 0o600},
+		{"agent.crt", id.CertPEM, 0o644},
 		{"ca.crt", id.CAPEM, 0o644},
-	} {
-		p := filepath.Join(base, f.name)
-		if err := refuseLink(r, p, false); err != nil {
+	}
+	// Refuse a link at any of the three names before replacing the first.
+	for _, f := range files {
+		if err := refuseLink(r, filepath.Join(base, f.name), false); err != nil {
 			return err
 		}
-		if err := r.WriteFile(p, f.data, f.mode); err != nil {
+	}
+	for _, f := range files {
+		if err := replaceFile(r, filepath.Join(base, f.name), f.data, f.mode); err != nil {
 			return fmt.Errorf("agent: write %s: %w", f.name, err)
 		}
+	}
+	// Make the renames durable, so a power loss cannot keep the new cert
+	// and lose the new key. Best effort.
+	if d, err := r.Open(base); err == nil {
+		_ = d.Sync()
+		d.Close()
 	}
 	return nil
 }
 
+// replaceFile writes data to a fresh temporary file beside name, syncs it and
+// renames it over name, all inside r.
+func replaceFile(r *os.Root, name string, data []byte, mode os.FileMode) error {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return err
+	}
+	tmp := filepath.Join(filepath.Dir(name), "."+filepath.Base(name)+".tmp-"+hex.EncodeToString(b[:]))
+	f, err := r.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(data)
+	if err == nil {
+		err = f.Chmod(mode) // O_CREATE's mode is filtered by the umask
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = r.Rename(tmp, name)
+	}
+	if err != nil {
+		_ = r.Remove(tmp)
+	}
+	return err
+}
+
 // LoadIdentity reads a previously-written identity from dir.
 func LoadIdentity(dir string) (Identity, bool) {
+	// A read that falls between Write's renames sees a new key beside the
+	// old cert: read once more before reporting no identity.
+	if id, ok := loadIdentityOnce(dir); ok {
+		return id, true
+	}
+	time.Sleep(50 * time.Millisecond)
+	return loadIdentityOnce(dir)
+}
+
+func loadIdentityOnce(dir string) (Identity, bool) {
 	cert, err1 := os.ReadFile(filepath.Join(dir, "agent.crt"))
 	key, err2 := os.ReadFile(filepath.Join(dir, "agent.key"))
 	caPEM, err3 := os.ReadFile(filepath.Join(dir, "ca.crt"))
 	if err1 != nil || err2 != nil || err3 != nil {
+		return Identity{}, false
+	}
+	// A key that does not match the cert (a crash between Write's renames)
+	// is no identity: Boot then enrols again instead of keeping a pair no
+	// TLS client can use.
+	if _, err := tls.X509KeyPair(cert, key); err != nil {
 		return Identity{}, false
 	}
 	return Identity{CertPEM: cert, KeyPEM: key, CAPEM: caPEM}, true

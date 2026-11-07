@@ -1,5 +1,6 @@
 // Command lever-tool-db is the reference first-party capability-aware tool:
-// a read-only SQLite DB exposed over MCP via captool, with a hard table
+// a SQLite DB (seeded with tables A, B and C at start) whose read operation
+// is exposed over MCP via captool, with a hard table
 // allowlist backstop. It is the acceptance vehicle.
 package main
 

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -266,4 +267,18 @@ func TestStopKeepsAPidItCannotIdentify(t *testing.T) {
 		t.Fatalf("the pid file was removed: %v", serr)
 	}
 	assertAlive(t, p, "an unidentifiable process")
+}
+
+// A daemon that outlives even SIGKILL (stuck in the kernel) is reported, and
+// its file kept: a caller that re-spawns would hit the port it still holds.
+func TestStopReportsADaemonThatDoesNotDie(t *testing.T) {
+	s := newStopState(t)
+	startSleeper(t, s, brokerTarget)
+	err := stopProcessByPIDFile(s.PID(), func(int) state.Identity { return state.IsServe })
+	if err == nil || !strings.Contains(err.Error(), "still running after SIGKILL") {
+		t.Fatalf("err = %v", err)
+	}
+	if _, serr := os.Stat(s.PID()); serr != nil {
+		t.Fatalf("the pid file was removed: %v", serr)
+	}
 }

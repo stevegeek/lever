@@ -395,20 +395,40 @@ func cmdRenew(ctx context.Context, args []string) error {
 		return renewOnce(ctx, opts)
 	}
 
-	if err := renewOnce(ctx, opts); err != nil {
-		slog.Warn("renewal failed; trying again at the next interval", "err", err, "interval", *interval)
+	if *interval <= 0 {
+		return fmt.Errorf("renew: -interval must be positive, got %s", *interval)
 	}
+	return renewLoop(ctx, *interval, renewRetryMin, renewRetryMax, func(ctx context.Context) error { return renewOnce(ctx, opts) })
+}
 
-	ticker := time.NewTicker(*interval)
-	defer ticker.Stop()
+// A failed renewal is tried again after renewRetryMin, doubling up to
+// renewRetryMax (never past the interval), not a whole interval later: a
+// broker restarting during an apply would otherwise leave a 24 h leaf 12 h
+// older, and a resumed container could then find it lapsed.
+const (
+	renewRetryMin = time.Minute
+	renewRetryMax = 30 * time.Minute
+)
+
+// renewLoop calls once now and then every interval until ctx ends, retrying
+// a failure after a backoff from retryMin doubling to retryMax.
+func renewLoop(ctx context.Context, interval, retryMin, retryMax time.Duration, once func(context.Context) error) error {
+	backoff := retryMin
 	for {
+		wait := interval
+		if err := once(ctx); err != nil {
+			wait = min(backoff, interval)
+			slog.Warn("renewal failed; trying again", "err", err, "in", wait)
+			backoff = min(backoff*2, retryMax)
+		} else {
+			backoff = retryMin
+		}
+		t := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
+			t.Stop()
 			return nil
-		case <-ticker.C:
-			if err := renewOnce(ctx, opts); err != nil {
-				slog.Warn("renewal failed; trying again at the next interval", "err", err, "interval", *interval)
-			}
+		case <-t.C:
 		}
 	}
 }
@@ -517,10 +537,15 @@ func parseCLIArgs(verb string, args []string) (cliArgs, error) {
 		return cliArgs{}, err
 	}
 	a.idDir, a.brokerURL, a.bootstrapPath = *idDir, *brokerURL, *bootstrapPath
+	// Every positional argument is a key=value constraint. One that is not
+	// is refused, never dropped: a dropped constraint mints a broader token
+	// than the caller asked for and reports success.
 	for _, arg := range fs.Args() {
-		if k, v, ok := strings.Cut(arg, "="); ok {
-			a.constraints[k] = v
+		k, v, ok := strings.Cut(arg, "=")
+		if !ok || k == "" {
+			return cliArgs{}, fmt.Errorf("%s: %q is not a key=value constraint", verb, arg)
 		}
+		a.constraints[k] = v
 	}
 	return a, nil
 }

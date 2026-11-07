@@ -5,12 +5,14 @@
 package bridge
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -31,9 +33,10 @@ type Inboxer interface {
 }
 
 type Bridge struct {
-	in   Inboxer
-	file string
-	seen map[string]bool
+	in     Inboxer
+	file   string
+	seen   map[string]bool
+	seeded bool // seen holds the ids already in the events file
 	// Log receives one line per failed poll that Run retries, and one when the
 	// inbox answers again. New sets it to os.Stderr.
 	Log io.Writer
@@ -91,6 +94,15 @@ func logErr(err error) string {
 // PollOnce appends every event with an unseen id to the events file and
 // returns the new events.
 func (b *Bridge) PollOnce(ctx context.Context) ([]scion.Event, error) {
+	if !b.seeded {
+		// The poll reads the whole inbox, read or not: a restarted watch
+		// would append every past event again, and a manager tailing the
+		// file could relay an old question once more.
+		if err := b.seedSeen(); err != nil {
+			return nil, err
+		}
+		b.seeded = true
+	}
 	events, err := b.in.Inbox(ctx, false, "")
 	if err != nil {
 		return nil, inboxError{err}
@@ -126,6 +138,36 @@ func (b *Bridge) PollOnce(ctx context.Context) ([]scion.Event, error) {
 		b.seen[e.ID()] = true
 	}
 	return fresh, nil
+}
+
+// seedSeen records the ids of the events already in the file. A missing
+// file holds none; a line that does not parse is skipped.
+func (b *Bridge) seedSeen() error {
+	f, err := os.Open(b.file)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	// ReadBytes, not a Scanner: an over-long line is skipped, not the end.
+	br := bufio.NewReader(f)
+	for {
+		line, err := br.ReadBytes('\n')
+		var e scion.Event
+		if len(line) > 0 && json.Unmarshal(line, &e) == nil {
+			if id := e.ID(); id != "" {
+				b.seen[id] = true
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
 }
 
 // Run polls forever at the given interval. A transient failure (see

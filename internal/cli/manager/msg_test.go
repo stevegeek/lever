@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/cli/clitest"
 	"github.com/stevegeek/lever/internal/testutil"
 )
@@ -192,5 +193,28 @@ func TestMsgSendHelp_statesTheAddressForms(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("help lacks %q:\n%s", want, out)
 		}
+	}
+}
+
+// A broker refusal through the binary's Execute prints the sanitized error
+// and no usage text (which would read as a flag problem).
+func TestRefusalPrintsNoUsageAndIsSanitized(t *testing.T) {
+	root := newRoot(fakeBroker(t, func(w http.ResponseWriter, _ string, _ map[string]any) {
+		http.Error(w, "refused \x1b[31mred\x1b[0m", http.StatusConflict)
+	}))
+	root.SetArgs([]string{"msg", "send", "hello", "--to", "scratch"})
+	var out, errOut strings.Builder
+	root.SetOut(&out)
+	root.SetErr(&errOut)
+	code := cli.Execute(root, &errOut)
+	if code == 0 {
+		t.Fatal("a refusal exited 0")
+	}
+	got := errOut.String()
+	if strings.Contains(got, "Usage:") || strings.Contains(out.String(), "Usage:") {
+		t.Fatalf("usage printed after a refusal:\n%s%s", out.String(), got)
+	}
+	if strings.Contains(got, "\x1b") {
+		t.Fatalf("control characters reached the terminal: %q", got)
 	}
 }

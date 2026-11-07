@@ -40,6 +40,10 @@ type ServeConfig struct {
 	Stamp func() error
 }
 
+// shutdownGrace is how long requests under way may finish at shutdown before
+// their contexts end.
+const shutdownGrace = 2 * time.Second
+
 // Serve runs the proxy until ctx is cancelled, then shuts it down and removes
 // the pid file. The caller opens the audit log (OpenAudit) before building
 // Handler.
@@ -62,15 +66,33 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 	}
 
 	srv := newServer(cfg.Handler)
+	// An open chat page holds a streaming /events request that never goes
+	// idle. Shutdown first gives every request a short grace (a send or an
+	// upload under way finishes), then ends the request contexts, which ends
+	// the streams.
+	base, cancelBase := context.WithCancel(context.Background())
+	defer cancelBase()
+	srv.BaseContext = func(net.Listener) context.Context { return base }
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
 
 	select {
 	case <-ctx.Done():
+		graceCtx, cancelGrace := context.WithTimeout(context.Background(), shutdownGrace)
+		err := srv.Shutdown(graceCtx)
+		cancelGrace()
+		if err == nil {
+			<-serveErr
+			return nil
+		}
+		cancelBase()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("remoteproxy: shutdown: %w", err)
+			// A handler that ignores its context: close what is left. A
+			// routine stop is not an error.
+			slog.Warn("remote proxy: connections still open at shutdown; closing them", "err", err)
+			_ = srv.Close()
 		}
 		<-serveErr
 		return nil

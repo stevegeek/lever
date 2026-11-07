@@ -8,12 +8,14 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/broker/brokertest"
 	"github.com/stevegeek/lever/internal/broker/registry"
+	"github.com/stevegeek/lever/internal/cap/ca"
 )
 
 // testBroker builds a broker that permits provisioning worker "worker".
@@ -104,8 +106,17 @@ func TestEnrolRejectsCNMismatch(t *testing.T) {
 	}
 }
 
+func testIdentity(t *testing.T) Identity {
+	t.Helper()
+	caInst, err := ca.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return enrolManager(t, caInst)
+}
+
 func TestWriteIdentityPermissions(t *testing.T) {
-	id := Identity{CertPEM: []byte("c"), KeyPEM: []byte("k"), CAPEM: []byte("a")}
+	id := testIdentity(t)
 	dir := t.TempDir() + "/id"
 	if err := id.Write(dir); err != nil {
 		t.Fatal(err)
@@ -115,8 +126,46 @@ func TestWriteIdentityPermissions(t *testing.T) {
 	assertMode(t, dir+"/agent.key", 0o600)
 	assertMode(t, dir+"/ca.crt", 0o644)
 	got, ok := LoadIdentity(dir)
-	if !ok || string(got.KeyPEM) != "k" {
+	if !ok || string(got.KeyPEM) != string(id.KeyPEM) {
 		t.Fatalf("LoadIdentity round-trip failed: ok=%v", ok)
+	}
+	// A rewrite (the renew sidecar's) leaves only the three files: no
+	// temporary file behind.
+	id2 := testIdentity(t)
+	if err := id2.Write(dir); err != nil {
+		t.Fatal(err)
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range ents {
+		names = append(names, e.Name())
+	}
+	if strings.Join(names, ",") != "agent.crt,agent.key,ca.crt" {
+		t.Fatalf("identity dir holds %v", names)
+	}
+	assertMode(t, dir+"/agent.key", 0o600)
+	if got, ok := LoadIdentity(dir); !ok || string(got.CertPEM) != string(id2.CertPEM) {
+		t.Fatalf("rewritten identity not loaded: ok=%v", ok)
+	}
+}
+
+// A crash between Write's renames leaves a new key beside the old cert. That
+// pair is no identity, so Boot enrols again instead of keeping a cert it
+// cannot use.
+func TestLoadIdentityRefusesMismatchedPair(t *testing.T) {
+	a, b := testIdentity(t), testIdentity(t)
+	dir := t.TempDir() + "/id"
+	if err := a.Write(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir+"/agent.key", b.KeyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := LoadIdentity(dir); ok {
+		t.Fatal("LoadIdentity accepted a key that does not match the cert")
 	}
 }
 

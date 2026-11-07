@@ -151,6 +151,58 @@ func TestStorePruneKeepsNewest(t *testing.T) {
 	}
 }
 
+// TestStorePruneProtectsTheNewBackup: backups dated ahead by a wrong host
+// clock outrank the one just saved; protecting it keeps it anyway.
+func TestStorePruneProtectsTheNewBackup(t *testing.T) {
+	s := newStore(t)
+	future := time.Now().Add(48 * time.Hour).UTC()
+	for i := range 3 {
+		save(t, s, future.Add(time.Duration(i)*time.Second))
+	}
+	now := save(t, s, time.Now().UTC())
+	removed, err := s.Prune(3, now.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 0 {
+		t.Fatalf("removed %v; the protected backup is the only one past the keep", removed)
+	}
+	if _, err := s.Get(now.ID); err != nil {
+		t.Fatalf("the new backup is gone: %v", err)
+	}
+}
+
+// TestStorePruneSweepsStaleTemps: a Save killed midway leaves a temporary
+// directory (a full copy of the conversation); Prune removes it once it is
+// old, and leaves a young one, which may be a Save still running.
+func TestStorePruneSweepsStaleTemps(t *testing.T) {
+	s := newStore(t)
+	save(t, s, time.Now().UTC())
+	stale := filepath.Join(s.Dir, ".tmp-20260101T000000Z-aaaaaaaaaaaa")
+	young := filepath.Join(s.Dir, ".tmp-20260101T000000Z-bbbbbbbbbbbb")
+	for _, d := range []string{stale, young} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, archiveName), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Prune(Keep); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale temp left: %v", err)
+	}
+	if _, err := os.Lstat(young); err != nil {
+		t.Fatalf("young temp removed: %v", err)
+	}
+}
+
 // TestStoreListMissingIsEmpty: no store directory is no backups.
 func TestStoreListMissingIsEmpty(t *testing.T) {
 	s := newStore(t)

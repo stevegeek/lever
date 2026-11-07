@@ -61,7 +61,7 @@ func TestResolveSourceCrossCompiles(t *testing.T) {
 		t.Fatalf("calls = %+v", f.Calls)
 	}
 	c := f.Calls[0]
-	if c.Name != "go" || c.Dir != src || c.Env["GOOS"] != "linux" || c.Env["GOARCH"] != "arm64" {
+	if c.Name != "go" || c.Dir != src || c.Env["GOOS"] != "linux" || c.Env["GOARCH"] != "arm64" || c.Env["CGO_ENABLED"] != "0" {
 		t.Fatalf("build call = %+v", c)
 	}
 	if strings.Join(c.Args, " ") != "build -trimpath -ldflags=-s -w -o "+out+" ./cmd/scion" {

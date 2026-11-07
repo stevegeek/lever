@@ -32,6 +32,9 @@ func (s *Server) Register(ctx context.Context) error {
 	return nil
 }
 
+// epochRefreshTimeout bounds one /epoch refresh.
+const epochRefreshTimeout = 5 * time.Second
+
 // freshEpoch returns the epoch floor, cached for epochTTL. On a refresh
 // error it keeps the last good value.
 func (s *Server) freshEpoch(ctx context.Context) int {
@@ -43,6 +46,13 @@ func (s *Server) freshEpoch(ctx context.Context) int {
 	}
 	s.mu.Unlock()
 
+	// Bounded: a broker admin listener that accepts but never answers would
+	// otherwise hold every call past the cache (http.DefaultClient has no
+	// timeout). A failed refresh keeps the last good value, as documented.
+	// WithoutCancel: a caller that hangs up must not fail the refresh and
+	// be verified against a stale floor; the timeout still bounds it.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), epochRefreshTimeout)
+	defer cancel()
 	var er wire.EpochResponse
 	if err := httpjson.Get(ctx, nil, s.adminURL+wire.PathEpoch, &er); err == nil {
 		s.mu.Lock()

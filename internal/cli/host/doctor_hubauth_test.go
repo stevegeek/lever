@@ -9,6 +9,9 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"math/big"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -272,4 +275,26 @@ func TestDoctorHubIdentitiesOnAMigratedHub(t *testing.T) {
 	// An agent renamed the controller since the last apply.
 	d.hub.user(devUserID).Email = "someone@example.com"
 	hiWantRow(t, checkHubIdentities(ctx, d.auth()), false, `"someone@example.com" role "member"`)
+}
+
+// The real script, with the dev token present and no public key: it must
+// exit 0, or the runner's error would discard the dev-token line.
+func TestHubAuthStateScriptKeepsTheDevTokenWithoutAKey(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".scion"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".scion", "dev-token"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(t.TempDir(), "nokey", "hub.pub")
+	cmd := exec.Command("sh", "-c", hubAuthStateScript, "_", ".scion/dev-token", missing, filepath.Dir(missing))
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("script failed with no key: %v (%q)", err, out)
+	}
+	if !strings.HasPrefix(string(out), "devtoken\n") {
+		t.Fatalf("output %q lacks the dev-token line", out)
+	}
 }

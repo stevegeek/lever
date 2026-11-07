@@ -3,8 +3,12 @@ package manager
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io/fs"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -186,5 +190,26 @@ func TestMTLSCaller_gatewayWhenTheTicketBelongsToAnotherUser(t *testing.T) {
 		if err != nil || calls != before+1 {
 			t.Fatalf("%s: err=%v gateway calls=%d, want one call through the gateway", name, err, calls-before)
 		}
+	}
+}
+
+// With no readable bootstrap and a gateway that does not answer, the error
+// keeps the transport error, which lever-manager watch retries.
+func TestCallerKeepsTheGatewayTransportError(t *testing.T) {
+	dir := t.TempDir()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := "http://" + ln.Addr().String()
+	ln.Close()
+	c := mtlsCaller{bootstrapPath: filepath.Join(dir, "missing.json"), idDir: filepath.Join(dir, "id"), gatewayURL: closed}
+	err = c.Call(context.Background(), "/x", nil, nil)
+	var ue *url.Error
+	if err == nil || !errors.As(err, &ue) {
+		t.Fatalf("err = %v, want it to wrap the *url.Error", err)
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("err = %v, want it to keep the bootstrap error too", err)
 	}
 }

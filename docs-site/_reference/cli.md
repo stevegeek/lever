@@ -80,7 +80,7 @@ commands that write the store (`snapshot`, `gc`, `delete`, `verify --fix`, `lock
 | Command | What it does |
 |---|---|
 | `lever broker serve [config]` | Run the capability broker + first-party tools in the foreground (normally `up`/`apply` daemonize it for you — this is for debugging and supervised setups). |
-| `lever broker revoke <agent> [config]` / `lever revoke <agent>` | Revoke one agent on the running broker: its capability tokens stop verifying immediately. |
+| `lever revoke <agent> [config]` | Revoke one agent on the running broker: its capability tokens stop verifying immediately. |
 | `lever broker bump-epoch [config]` | Revoke **all** outstanding tokens at once by raising the epoch floor. |
 | `lever service-host pair <name> [config] [--rotate]` | On the lever host: make the broker's client key for the declared [service host](/service-hosts/) `<name>` in `.lever-state/service-hosts/<name>/` (`client.key` `0600`) and print its fingerprint for the service host's `client_fingerprint`. An existing key is kept and its fingerprint printed again; `--rotate` replaces it, and the broker uses the new key from its next call. Refused while the state directory is inside `tree`. |
 | `lever service-host init <service-host config>` | On the service host: make its server key and self-signed certificate (the config's `cert` and `key`, default `server.crt` and `server.key` beside it; the config need not exist or be complete yet) unless both exist, and print the key's fingerprint for `broker.service_hosts[].fingerprint`. |

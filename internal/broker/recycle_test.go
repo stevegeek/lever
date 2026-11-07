@@ -406,3 +406,27 @@ func TestWorkerRecycle_checksTheContainerItself(t *testing.T) {
 		}
 	})
 }
+
+// A revoked worker is refused to the manager as to the operator: a fresh
+// start or a recycle would stage the revoked identity a new ticket.
+func TestManagerStartAndRecycleRefuseARevokedWorker(t *testing.T) {
+	b, rt, audit, _ := recycleBroker(t, scion.PhaseSuspended, true)
+	b.Revoke("worker")
+	rec := callWorker(t, b, "/worker/recycle", recycleBody, "test-manager")
+	if rec.Code != http.StatusForbidden || rec.Header().Get(ReasonHeader) != ReasonRevoked {
+		t.Fatalf("recycle: status = %d %s, want 403 revoked", rec.Code, rec.Header().Get(ReasonHeader))
+	}
+	assertNothingRecycled(t, rt)
+	b, rt, audit, _ = recycleBroker(t, "", false) // no record: a fresh start
+	b.Revoke("worker")
+	rec = callWorker(t, b, "/worker/start", `{"worker":"worker"}`, "test-manager")
+	if rec.Code != http.StatusForbidden || rec.Header().Get(ReasonHeader) != ReasonRevoked {
+		t.Fatalf("start: status = %d %s, want 403 revoked", rec.Code, rec.Header().Get(ReasonHeader))
+	}
+	if len(rt.started) != 0 || len(rt.staged) != 0 {
+		t.Fatalf("started %d, staged %v", len(rt.started), rt.staged)
+	}
+	if !strings.Contains(audit.String(), "revoked") {
+		t.Fatalf("audit:\n%s", audit)
+	}
+}

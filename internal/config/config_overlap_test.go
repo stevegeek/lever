@@ -25,6 +25,8 @@ func TestValidateRejectsOverlappingWorkerDirs(t *testing.T) {
 		{"ancestor second", "workers/child", "workers"},
 		{"unclean but identical", "workers/x", "./workers/x/"},
 		{"unclean ancestor", "workers/./x", "workers/x/deep"},
+		{"case differs (APFS)", "work/Proj", "work/proj/sub"},
+		{"case differs, identical", "Workers/X", "workers/x"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			app := testApp(t, tc.a, tc.b)

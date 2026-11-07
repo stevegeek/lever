@@ -570,7 +570,7 @@ func (b *Broker) startWorker(ctx context.Context, w http.ResponseWriter, spec Wo
 		return
 	}
 	defer unlock()
-	if actor == operatorActor && b.isRevoked(spec.Name) {
+	if b.isRevoked(spec.Name) {
 		// Under the lock: a revoke that landed while this start waited must
 		// not get the worker a fresh ticket.
 		b.audit("worker", actor, "deny", "start "+spec.Name+": revoked")

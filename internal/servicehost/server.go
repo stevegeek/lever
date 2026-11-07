@@ -174,6 +174,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// A response from the client: the service host never asks one.
 		w.WriteHeader(http.StatusAccepted)
 		return
+	case "notifications/initialized":
+		if hasID {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		// A stdio tool is initialized by the service host itself. An
+		// upstream gets the client's notification: a stateful MCP server
+		// refuses every later request on the session without it.
+		if _, isStdio := s.stdio[t.Name]; isStdio {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
 	default:
 		if !hasID {
 			// notifications/initialized and the rest: nothing to forward.

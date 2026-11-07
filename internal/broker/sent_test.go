@@ -495,6 +495,40 @@ func TestServeListenersRefusesATCPOperatorListener(t *testing.T) {
 	}
 }
 
+// failingListener's Accept fails at once with a permanent error.
+type failingListener struct{ net.Listener }
+
+func (failingListener) Accept() (net.Conn, error) { return nil, errors.New("accept: boom") }
+
+// TestServeListenersStopsEveryServerWhenOneFails: the error returns only
+// after the other servers stopped, so the caller never removes the pid file
+// under a live jail listener.
+func TestServeListenersStopsEveryServerWhenOneFails(t *testing.T) {
+	b, _, _ := sentBroker(t, false)
+	listen := func() net.Listener {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ln
+	}
+	jail, admin := listen(), listen()
+	done := make(chan error, 1)
+	go func() { done <- b.ServeListeners(context.Background(), jail, failingListener{admin}, nil, nil, nil) }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "boom") {
+			t.Fatalf("err = %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ServeListeners kept running after the admin server failed")
+	}
+	if c, err := net.DialTimeout("tcp", jail.Addr().String(), time.Second); err == nil {
+		c.Close()
+		t.Fatal("the jail listener still accepts connections")
+	}
+}
+
 // fleetWith replaces one agent's phase in runningFleet; "" removes its record.
 func fleetWith(slug, phase string) *fakeRuntime {
 	rt := runningFleet()

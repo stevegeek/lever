@@ -203,6 +203,7 @@ const openContacts = new Set(); // contact logins whose agents show
 let view = null;
 let viewSeq = 0; // counts transcript opens and closes
 let viewReading = false;
+let viewAgain = null; // the cursor of a read asked for while one was under way
 let viewOlder = '';
 const transcript = new Map();
 
@@ -528,9 +529,15 @@ function renderTranscript(toBottom) {
 }
 
 // One read at a time; an answer for a transcript no longer open is dropped.
+// A read asked for meanwhile (another transcript opened, Refresh, Load
+// earlier) runs when the current one ends; Load earlier's cursor wins.
 async function readTranscript(cursor) {
   const v = view;
-  if (!v || viewReading) return;
+  if (!v) return;
+  if (viewReading) {
+    if (viewAgain === null || cursor) viewAgain = cursor || '';
+    return;
+  }
   viewReading = true;
   const seq = viewSeq;
   try {
@@ -549,12 +556,18 @@ async function readTranscript(cursor) {
     if (changed || first) renderTranscript(first);
   } finally {
     viewReading = false;
+    if (viewAgain !== null) {
+      const next = viewAgain;
+      viewAgain = null;
+      void readTranscript(next);
+    }
   }
 }
 
 function leaveTranscript() {
   view = null;
   viewSeq++;
+  viewAgain = null; // a cursor belongs to the transcript it was read from
   transcript.clear();
   viewOlder = '';
   el.readonly.hidden = true;
@@ -874,7 +887,7 @@ function applyView(a) {
 }
 
 function syncSend() {
-  el.send.disabled = sending || held || !chat || !chat.view || !chat.view.input;
+  el.send.disabled = sending || uploading || held || !chat || !chat.view || !chat.view.input;
   syncAttach();
 }
 
@@ -1608,13 +1621,13 @@ async function upload(file) {
   }
   const shown = oneLine(file.name, 120);
   uploading = true;
-  syncAttach();
+  syncSend();
   showError('');
   showUpload(`Uploading ${shown}… 0%`);
   const res = await sendFile(c.name, file, (pct) => showUpload(`Uploading ${shown}… ${pct}%`));
   uploading = false;
   showUpload('');
-  syncAttach();
+  syncSend();
   const here = () => !!chat && chat.name === c.name;
   if (res.status !== 201 || !res.body || typeof res.body !== 'object' || typeof res.body.name !== 'string') {
     if (here()) showError(`Not uploaded: ${uploadErrorText(res.status, res.body)}`);
@@ -1622,6 +1635,13 @@ async function upload(file) {
   }
   const name = oneLine(res.body.name, 120);
   if (filesOpen && here()) void loadFiles();
+  if (c.unsent) {
+    // A message with no clear answer holds the unsent record and its key:
+    // the note would replace it, and a press of Send would then post that
+    // message under a new key, perhaps a second time.
+    if (here()) showError(`Uploaded ${name}. No chat message was sent about it while your last message has no clear answer: tell ${c.name} yourself.`);
+    return;
+  }
   sending = true;
   syncSend();
   syncAttach();
@@ -1856,7 +1876,9 @@ function replayed(res) {
 async function send() {
   const c = chat;
   const text = el.text.value.trim();
-  if (sending || held || !text || !c || !c.conversation) return;
+  // Not during an upload: its chat note goes through deliver too, and two
+  // sends at once would share the one unsent record.
+  if (sending || uploading || held || !text || !c || !c.conversation) return;
   const length = messageLength(text);
   if (length > MAX_MESSAGE) {
     showError(`The message is ${length} characters; the limit is ${MAX_MESSAGE}.`);

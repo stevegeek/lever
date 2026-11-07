@@ -48,7 +48,7 @@ func whisperCmd(extra string) string {
 }
 
 func supervisedTool(cmd string) string {
-	return "broker:\n  llm_auth: subscription\n  tools:\n    - name: t\n      backend: 127.0.0.1:3201\n      command: " + cmd + "\n"
+	return "broker:\n  llm_auth: subscription\n  tools:\n    - name: t\n      backend: 127.0.0.1:3201\n      operations: [{name: read}]\n      command: " + cmd + "\n"
 }
 
 func TestHostPathsRefusedInsideTree(t *testing.T) {
@@ -183,7 +183,7 @@ func TestHostProgramInWorkerDirRefused(t *testing.T) {
 	a := &App{dir: root, Tree: filepath.Join(root, "ws"),
 		Manager: Manager{ReadOnly: []string{"workers"}},
 		Workers: []Worker{{Name: "w", Dir: "workers/w"}},
-		Broker:  Broker{Tools: []Tool{{Name: "t", Command: []string{"ws/workers/w/bin"}}}},
+		Broker:  Broker{Tools: []Tool{{Name: "t", Command: []string{"ws/workers/w/bin"}, Backend: "127.0.0.1:3201", Operations: []Op{{Name: "read"}}}}},
 	}
 	testutil.WantErrContaining(t, a.checkHostPathsOutsideTree(), `worker "w"`, "read-write")
 }
@@ -439,9 +439,9 @@ func TestToolsOnReadOnly(t *testing.T) {
 	outside := filepath.Join(t.TempDir(), "bin")
 	mustWrite(t, outside)
 	body := "manager:\n  read_only: [tools]\nbroker:\n  llm_auth: subscription\n  tools:\n" +
-		"    - {name: in, backend: 127.0.0.1:3201, command: [ws/tools/bin]}\n" +
-		"    - {name: script, backend: 127.0.0.1:3202, command: [ruby, ws/tools/bin]}\n" +
-		"    - {name: out, backend: 127.0.0.1:3203, command: [" + outside + "]}\n" +
+		"    - {name: in, backend: 127.0.0.1:3201, operations: [{name: read}], command: [ws/tools/bin]}\n" +
+		"    - {name: script, backend: 127.0.0.1:3202, operations: [{name: read}], command: [ruby, ws/tools/bin]}\n" +
+		"    - {name: out, backend: 127.0.0.1:3203, operations: [{name: read}], command: [" + outside + "]}\n" +
 		"    - {name: ext, external: true, gate: coarse, backend: 127.0.0.1:3204}\n"
 	p, _ := hostPathsInstance(t, body)
 	a, err := LoadNoHostChecks(p)

@@ -132,6 +132,16 @@ func TestValidateConstraintsUnrestrictedKeyPasses(t *testing.T) {
 	}
 }
 
+// An empty key passes no Params check when the op declares none, and
+// token.Mint then fails: the broker would answer 500 instead of a refusal.
+func TestValidateConstraintsRejectsAnEmptyKey(t *testing.T) {
+	r := New()
+	_ = r.Register(dbTool())
+	if err := r.ValidateConstraints("db", "read", map[string]string{"": "x"}); err == nil {
+		t.Fatal("an empty constraint key must be rejected")
+	}
+}
+
 func TestValidateConstraintsUnknownTool(t *testing.T) {
 	r := New()
 	if err := r.ValidateConstraints("ghost", "read", map[string]string{"table": "A"}); err == nil {

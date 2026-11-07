@@ -71,3 +71,24 @@ func Execute(root *cobra.Command, stderr io.Writer) int {
 	}
 	return 0
 }
+
+// RejectUnknownSubcommands gives every command under c that only groups
+// subcommands a RunE: bare, it prints the help as before; with an argument,
+// it fails. Without one, cobra answers `lever broker revoke` (no such
+// subcommand) with the parent's help and exit status 0, so a script takes
+// the typo for success.
+func RejectUnknownSubcommands(c *cobra.Command) {
+	for _, sub := range c.Commands() {
+		RejectUnknownSubcommands(sub)
+	}
+	if c.Runnable() || !c.HasSubCommands() || !c.HasParent() {
+		return // the root is checked by cobra itself
+	}
+	c.Args = cobra.ArbitraryArgs
+	c.RunE = func(cmd *cobra.Command, args []string) error {
+		if len(args) > 0 {
+			return fmt.Errorf("unknown command %q for %q", args[0], cmd.CommandPath())
+		}
+		return cmd.Help()
+	}
+}

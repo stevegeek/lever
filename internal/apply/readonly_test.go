@@ -593,7 +593,7 @@ func TestStartManagerWarnsAboutToolsOnReadOnly(t *testing.T) {
 	}
 	cfg := filepath.Join(dir, config.CanonicalName)
 	body := "name: hello\nbackend: orbstack\ntree: workspace\nbroker:\n  llm_auth: subscription\n  tools:\n" +
-		"    - {name: asst, backend: 127.0.0.1:3201, command: [workspace/assistant/tools/asst]}\n" +
+		"    - {name: asst, backend: 127.0.0.1:3201, operations: [{name: read}], command: [workspace/assistant/tools/asst]}\n" +
 		"manager:\n  image: img\n  read_only:\n    - assistant/tools\n"
 	if err := os.WriteFile(cfg, []byte(body), 0o644); err != nil {
 		t.Fatal(err)

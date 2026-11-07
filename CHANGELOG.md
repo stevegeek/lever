@@ -13,6 +13,73 @@ version bump moves the block under the new version heading.
   repo's `main` from GitHub, and that fetch went out without the token. A private repo refuses an
   anonymous fetch, so every push to one failed with "could not read Username". The fetch now
   carries the token, like the push itself.
+- **Agent identity files are replaced atomically.** The renew sidecar rewrote `agent.crt`,
+  `agent.key` and `ca.crt` in place while CLI verbs and the MCP server read them, so a reader could
+  see a truncated file or a mismatched pair, and a crash between the writes left a new cert with
+  the old key, which no renewal could use. Each file is now written to a synced temporary file and
+  renamed into place, and a key that does not match its cert counts as no identity: boot enrols
+  again while its ticket is valid, and otherwise the broker's heal re-enrols the agent.
+- **A failed certificate renewal is retried within minutes**, not at the next 12-hour tick, so a
+  broker restart during an apply no longer leaves the 24-hour leaf half spent. `lever-agent renew
+  -interval 0` is refused instead of panicking.
+- **The manager can no longer start or recycle a revoked worker.** The revoke check ran for the
+  operator's verbs only.
+- **`lever-agent request`, `delegate` and `call` refuse a constraint that is not `key=value`.** One
+  without `=` was dropped, minting a broader token than asked for. An empty constraint key sent to
+  the broker is now a refusal (403), not an internal error (500).
+- **The controller token is sent from the jail as the hub assertion is**: curl ignores a `.curlrc`
+  and proxy variables in the guest, and the header goes on stdin, not curl's command line.
+- **Conversation backups.** A backup whose gzip checksum is damaged is now refused before a restore
+  installs it (the check stopped at the tar's end). The backup just saved is never pruned, even
+  when older ones carry dates ahead of it from a host clock that was wrong. Temporary directories
+  left by a killed save are removed after an hour, and a save is synced to disk before `up --fresh`
+  deletes the guest's copy.
+- **`issue_read` returns the newest 30 comments.** It read only the last, partly full page: an issue
+  with 31 comments returned one.
+- **Service host upstream tools get `notifications/initialized`.** It was answered locally, so a
+  stateful MCP server refused every request after `initialize`.
+- **Broker and daemons.** When one broker listener fails, the others now stop too, before the pid
+  file is removed. A broker or proxy that survives SIGKILL is reported, not taken as stopped. A
+  capped jail command that succeeded but left a background child holding its output stays a
+  success. A tool's epoch refresh is bounded at 5 s and ends with the call.
+- **The remote proxy stops promptly and without an error** while a chat page is open.
+- **Chat page.** A file upload no longer replaces the record of a message that had no clear answer,
+  so a resend keeps its key and the hub stores it once; Send waits for an upload. Opening a contact's
+  transcript while another is still loading now loads it.
+- **`lever-manager watch` does not re-append the whole inbox after a restart**, and logs and retries
+  a gateway hiccup instead of exiting.
+- **`lever-manager` errors** are sanitized, carry no usage text after a broker refusal, and keep
+  their exit codes.
+- **An unknown subcommand is an error.** `lever broker revoke w1` (never a command; `lever revoke`
+  is) or a typo such as `lever worker resme` printed the help and exited 0, in both binaries.
+- **Config checks at load.** Worker dirs that differ only in case (one tree on macOS) are refused as
+  overlapping. A supervised tool needs `backend` and `operations` (the broker refused it later, as a
+  health timeout). Ports outside 1-65535, equal `jail_port` and `admin_port`, a negative
+  `remote.port`, `grant_ttl` or `ticket_ttl`, and a `grant_ttl` no longer than the 12-hour renewal
+  while an agent uses `llm_auth: api-key` are refused.
+- **`lever apply` refuses an empty credential file** instead of clearing the hub's working
+  `CLAUDE_CODE_OAUTH_TOKEN`.
+- **Smaller CLI fixes.** `lever ssh-config --config` works (the flag was documented but missing).
+  `lever ssh manager` and `lever ssh-config manager` name the manager, as the guide says.
+  `lever stop --machine OTHER` run from an instance root no longer suspends this instance's agents
+  through the other jail. `lever init` creates `.lever-state` 0700. `lever doctor` keeps the
+  dev-token warning when the hub key is missing. `lever tree log --all | head` reports the closed
+  pipe, not "output stopped".
+- **scion is built with `CGO_ENABLED=0`** from source and versions too, as release builds are, so a
+  Linux host does not link its own glibc into the guest's scion. Stamped builds are redone once.
+- **Docs.** Tree backup retention counts UTC days and ISO weeks. `lever-tool-db` is not read-only.
+
+### Upgrade
+
+- **Jail ABI 10.** The in-jail code changed (`lever-agent`: identity writes, renewal retries,
+  constraint parsing; `lever-manager`: errors, watch). Rebuild the agent image (`make lever-image`
+  or `make lever-image-slim`), then `lever up --fresh --keep-conversation`. Until then the old
+  `lever-agent` keeps its old behaviour; the host-side fixes take effect after `lever apply`.
+- **Config load is stricter.** A config with a supervised tool lacking `backend` or `operations`,
+  an out-of-range port, or a short `grant_ttl` with api-key agents now fails to load with the
+  reason; it failed later before.
+- **`.lever-state` mode.** If `lever init` was the first command you ran, the state directory may
+  be 0755: `chmod 700 .lever-state`.
 
 ## [1.0.0-beta.4] - 2026-11-02
 

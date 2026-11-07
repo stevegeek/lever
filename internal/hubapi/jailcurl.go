@@ -52,7 +52,13 @@ func ReplyCap(ctx context.Context) int {
 // curlScript runs one request from inside the jail. The Authorization header is
 // built from $SCION_HUB_TOKEN by the in-guest shell; the token reaches the jail
 // through the runner's env, and the jail runner keeps that key off the host
-// command line, so it is never visible to ps on the host.
+// command line, so it is never visible to ps on the host. In the guest, printf
+// (a shell builtin) feeds the header line to curl on stdin (-H @-), so the
+// token is in no guest argv either.
+//
+// -q skips any .curlrc and --noproxy '*' ignores proxy variables in the guest
+// environment: either could add headers or route the controller PAT through
+// another host. -g turns off URL globbing, as in assertCurlScript.
 //
 // -w appends a final line holding the status code; curl expands the \n
 // itself. --fail is deliberately not set, so a 403 or 404 arrives as a status
@@ -61,15 +67,17 @@ func ReplyCap(ctx context.Context) int {
 // --max-filesize takes the reply cap from $3. It stops a transfer whose
 // Content-Length or received size passes the cap; the runner's output limit
 // backs it for a curl that only checks Content-Length.
-const curlScript = `exec curl -sS --connect-timeout 5 --max-time 20 --max-filesize "$3" ` +
+const curlScript = `printf 'Authorization: Bearer %s\n' "$SCION_HUB_TOKEN" | ` +
+	`exec curl -q -g -sS --noproxy '*' --connect-timeout 5 --max-time 20 --max-filesize "$3" ` +
 	`-o - -w '\n%{http_code}' -X "$1" ` +
-	`-H "Authorization: Bearer $SCION_HUB_TOKEN" -H 'Accept: application/json' "$2"`
+	`-H @- -H 'Accept: application/json' "$2"`
 
 // curlBodyScript is curlScript for a request with a JSON body. The body rides
 // the environment so lever never quotes JSON into script text.
-const curlBodyScript = `exec curl -sS --connect-timeout 5 --max-time 20 --max-filesize "$3" ` +
+const curlBodyScript = `printf 'Authorization: Bearer %s\n' "$SCION_HUB_TOKEN" | ` +
+	`exec curl -q -g -sS --noproxy '*' --connect-timeout 5 --max-time 20 --max-filesize "$3" ` +
 	`-o - -w '\n%{http_code}' -X "$1" ` +
-	`-H "Authorization: Bearer $SCION_HUB_TOKEN" -H 'Accept: application/json' ` +
+	`-H @- -H 'Accept: application/json' ` +
 	`-H 'Content-Type: application/json' --data-binary "$LEVER_HUB_BODY" "$2"`
 
 // JailCurl is a Doer that runs each request inside the jail with curl. The

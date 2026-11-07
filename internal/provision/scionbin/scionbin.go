@@ -153,7 +153,10 @@ func Resolve(ctx context.Context, r proc.Runner, spec Spec, goarch, machine stri
 	if err := os.Remove(stampPath(out)); err != nil && !os.IsNotExist(err) {
 		return "", fmt.Errorf("scion build stamp: %w", err)
 	}
-	if _, err := r.RunIn(ctx, buildDir, map[string]string{"GOOS": "linux", "GOARCH": goarch},
+	// CGO off, as genrelease builds it: a Linux host building for its own
+	// arch with a C compiler would otherwise link the host's glibc, which the
+	// guest may not have.
+	if _, err := r.RunIn(ctx, buildDir, map[string]string{"GOOS": "linux", "GOARCH": goarch, "CGO_ENABLED": "0"},
 		goBin, buildArgs(out)...); err != nil {
 		return "", fmt.Errorf("cross-compile scion: %w", err)
 	}
@@ -197,7 +200,7 @@ func buildKey(version, goarch, goBin string) string {
 		return ""
 	}
 	h := sha256.New()
-	fields := []string{"lever scion build v1", version, "linux", goarch, root, goVersion, strings.Join(buildArgs("OUT"), " ")}
+	fields := []string{"lever scion build v2", version, "linux", goarch, root, goVersion, strings.Join(buildArgs("OUT"), " ")}
 	for _, k := range buildEnvKeys {
 		fields = append(fields, k+"="+os.Getenv(k))
 	}

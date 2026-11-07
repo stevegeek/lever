@@ -2,7 +2,9 @@ package treebackup
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 )
@@ -121,5 +123,34 @@ func TestLogEmpty(t *testing.T) {
 	var out bytes.Buffer
 	if err := Log(&out, nil, LogOptions{}); err != nil || out.Len() != 0 {
 		t.Fatal(err, out.String())
+	}
+}
+
+// failAfter accepts n bytes, then fails every write as a closed pipe would.
+type failAfter struct{ n int }
+
+func (f *failAfter) Write(p []byte) (int, error) {
+	if f.n <= 0 {
+		return 0, io.ErrClosedPipe
+	}
+	k := min(len(p), f.n)
+	f.n -= k
+	if k < len(p) {
+		return k, io.ErrClosedPipe
+	}
+	return k, nil
+}
+
+// With --all, a writer that fails partway (lever tree log --all | head -1)
+// reports its own error, not the walk's internal "output stopped".
+func TestLogAllReportsTheWriteError(t *testing.T) {
+	var es []Entry
+	for i := range logChangedPaths + 5 {
+		es = append(es, fileE(nil, fmt.Sprintf("f%02d", i), "x"))
+	}
+	snaps := []LogSnapshot{{ID: "s1", Open: memManifest(hdr("s1"), es)}}
+	err := Log(&failAfter{n: 200}, snaps, LogOptions{All: true})
+	if !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("err = %v, want io.ErrClosedPipe", err)
 	}
 }

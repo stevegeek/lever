@@ -266,6 +266,29 @@ func TestStopWithExplicitMachineDoesNotStopBroker(t *testing.T) {
 	}
 }
 
+// Run from an instance root, --machine naming another jail powers that jail
+// off and suspends nothing through it: this instance's agents are not there.
+func TestStopOtherMachineFromAnInstanceSuspendsNothing(t *testing.T) {
+	dir := writeInstance(t, managerYAML)
+	t.Chdir(dir)
+	f := scionOKRunner()
+	sb := &stubBackend{runner: f}
+	root := stubRoot(sb)
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"stop", "--machine", "lever-other"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if !sb.stopped {
+		t.Fatal("stop must call Backend.Stop")
+	}
+	if len(f.Calls) != 0 {
+		t.Fatalf("scion was called on another instance's jail: %+v", f.Calls)
+	}
+}
+
 // TestStopHostDaemonsIsQuietWhenNothingRuns: with no broker.pid and no
 // remote.pid both stops are no-ops and nothing is warned about.
 func TestStopHostDaemonsIsQuietWhenNothingRuns(t *testing.T) {

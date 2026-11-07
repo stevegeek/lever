@@ -572,3 +572,23 @@ func TestPushOverallDeadline(t *testing.T) {
 	}
 	unlock()
 }
+
+// A private repo refuses anonymous requests, so the first push (a mirror that
+// has never fetched) must authenticate the mirror refresh too.
+func TestPushPrivateRepoFreshMirror(t *testing.T) {
+	r, work := newTestRemote(t, repo)
+	r.private = true
+	p, tree, _ := newPusher(t, r)
+	commitOn(t, work, "agent/x", "b.txt")
+	bundle(t, work, tree, "x.bundle", "main..agent/x")
+	res, err := p.Push(context.Background(), "manager", repo, "agent/x", "x.bundle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.NewSHA != r.headSHA(t, repo, "agent/x") {
+		t.Fatalf("res %+v remote %s", res, r.headSHA(t, repo, "agent/x"))
+	}
+	if len(r.auths) == 0 || slices.Contains(r.auths, "") {
+		t.Fatalf("a request reached the remote without credentials: %q", r.auths)
+	}
+}

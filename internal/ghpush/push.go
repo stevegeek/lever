@@ -137,7 +137,14 @@ func (p *Pusher) Push(ctx context.Context, caller, repo, branch, bundle string) 
 		return Result{}, err
 	}
 	remote := p.BaseURL + "/" + repo
-	if _, err := p.Git.Run(ctx, mirror, RunOpts{GitDir: mirror}, "fetch", "--no-tags", "--no-write-fetch-head", remote, "+refs/heads/main:refs/remotes/origin/main"); err != nil {
+	// Every call to GitHub carries the token, the mirror refresh included:
+	// a private repo refuses an anonymous fetch.
+	token, err := p.Tokens.Token(ctx, repo)
+	if err != nil {
+		return Result{}, err
+	}
+	auth := &Auth{BaseURL: p.BaseURL, Token: token}
+	if _, err := p.Git.Run(ctx, mirror, RunOpts{GitDir: mirror, Auth: auth}, "fetch", "--no-tags", "--no-write-fetch-head", remote, "+refs/heads/main:refs/remotes/origin/main"); err != nil {
 		return Result{}, fmt.Errorf("refresh mirror: %w", err)
 	}
 	// The mirror only receives main from GitHub. The bundle goes into a
@@ -180,11 +187,6 @@ func (p *Pusher) Push(ctx context.Context, caller, repo, branch, bundle string) 
 	res = Result{Repo: repo, Branch: branch, NewSHA: strings.TrimSpace(newSHA),
 		CompareURL: p.BaseURL + "/" + repo + "/compare/main..." + branch}
 
-	token, err := p.Tokens.Token(ctx, repo)
-	if err != nil {
-		return res, err
-	}
-	auth := &Auth{BaseURL: p.BaseURL, Token: token}
 	if out, err := p.Git.Run(ctx, work, RunOpts{GitDir: work, Auth: auth}, "ls-remote", remote, "refs/heads/"+branch); err != nil {
 		return res, fmt.Errorf("read remote branch: %w", err)
 	} else {

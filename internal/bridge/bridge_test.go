@@ -289,3 +289,22 @@ func TestRunBacksOffToCap(t *testing.T) {
 		t.Fatalf("waits = %s, want %s\n%s", got, want, log.String())
 	}
 }
+
+// A restarted watch starts from the events file: the inbox read covers
+// every event, so without it each past one would be appended again.
+func TestPollOnceAfterARestartAppendsNothingOld(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "events.log")
+	old := []scion.Event{{"id": "e1", "type": "input-needed"}, {"id": "e2", "type": "state-change"}}
+	if _, err := New(&fakeInbox{batches: [][]scion.Event{old}}, file).PollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	restarted := New(&fakeInbox{batches: [][]scion.Event{append(old, scion.Event{"id": "e3", "type": "state-change"})}}, file)
+	fresh, err := restarted.PollOnce(context.Background())
+	if err != nil || len(fresh) != 1 || fresh[0].ID() != "e3" {
+		t.Fatalf("after a restart: fresh=%v err=%v, want only e3", fresh, err)
+	}
+	data, _ := os.ReadFile(file)
+	if n := strings.Count(string(data), "\n"); n != 3 {
+		t.Fatalf("want 3 lines, got %d: %q", n, data)
+	}
+}

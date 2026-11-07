@@ -600,8 +600,8 @@ load error. Sizes take a number of bytes or a unit (`KiB`, `MiB`, `GiB`, `TiB`, 
 | `enabled` | bool | no | `false` | Turns tree backups on. |
 | `at_stop` | bool | no | `true` | Snapshot at `lever stop` (also `--keep-vm`) and `lever destroy`, after the VM is off. |
 | `keep.last` | int | no | `20` | Keep the newest N snapshots (at least 1). |
-| `keep.daily` | int | no | `7` | Keep the newest snapshot of each of the last N days that have one. |
-| `keep.weekly` | int | no | `8` | Keep the newest snapshot of each of the last N ISO weeks that have one. |
+| `keep.daily` | int | no | `7` | Keep the newest snapshot of each of the last N days (UTC) that have one. |
+| `keep.weekly` | int | no | `8` | Keep the newest snapshot of each of the last N ISO weeks (UTC) that have one. |
 | `reverify` | duration | no | `7d` | Re-read a cached file verified longer ago than this, from the read budget left over (`0`: never). |
 | `lock_wait` | duration | no | `2m` | How long a snapshot waits for the store's locks before it is skipped with a warning. |
 | `min_free` | size | no | `2GiB` | Free space (plus 1% of the inodes) below which no new content is stored; the snapshot then commits as incomplete. It is also the room the manifest may count on beyond its reserve (see [a full disk](/operations/#retention-and-garbage-collection)). |

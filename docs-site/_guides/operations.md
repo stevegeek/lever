@@ -1165,9 +1165,9 @@ directory or the store. `--path` restores those subtrees (and their parent direc
 
 ### Retention and garbage collection
 
-lever keeps the `keep.last` (20) newest snapshots, the newest of each day for the last
-`keep.daily` (7) days with snapshots, and the newest of each ISO week for the last `keep.weekly`
-(8) weeks with snapshots, plus always the newest complete snapshot, the newest `vm-off` one, and
+lever keeps the `keep.last` (20) newest snapshots, the newest of each day (UTC) for the
+last `keep.daily` (7) days with snapshots, and the newest of each ISO week (UTC) for the last
+`keep.weekly` (8) weeks with snapshots, plus always the newest complete snapshot, the newest `vm-off` one, and
 every snapshot taken with `lever tree snapshot --pin`.
 
 **Store size.** The store holds every retained snapshot's content, and agents choose that content.

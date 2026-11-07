@@ -11,8 +11,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/stevegeek/lever/internal/hostledger"
@@ -150,6 +152,13 @@ func (s Store) Save(m Meta, write func(w io.Writer) (Stats, error)) (Meta, error
 		return Meta{}, fmt.Errorf("conversation backups: %w", err)
 	}
 	ok = true
+	// Make the rename durable: `up --fresh` deletes the guest's copy next.
+	// Best effort, as a store that cannot sync its directory still holds
+	// the backup.
+	if d, err := r.Open("."); err == nil {
+		_ = d.Sync()
+		d.Close()
+	}
 	return m, nil
 }
 
@@ -287,21 +296,33 @@ func (s Store) Open(id string) (io.ReadCloser, error) {
 	return f, nil
 }
 
-// Prune removes all but the keep newest backups and returns the ids it
-// removed. Only directories with a backup id's name are ever removed.
-func (s Store) Prune(keep int) ([]string, error) {
+// staleTemp is the age past which a temporary directory a Save left behind
+// (the process was killed mid-save) is removed by Prune.
+const staleTemp = time.Hour
+
+// Prune removes all but the keep newest backups, never one named in protect,
+// and returns the ids it removed. Only directories with a backup id's name
+// are ever removed, and temporary directories an interrupted Save left
+// behind more than an hour ago. Protect the backup just saved: "newest" is
+// by the recorded creation time, and backups dated ahead by a host clock
+// that was wrong would otherwise outrank it.
+func (s Store) Prune(keep int, protect ...string) ([]string, error) {
+	r, err := s.open(false)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer r.Close()
+	sweepTemps(r, time.Now())
 	all, err := s.List()
 	if err != nil || len(all) <= keep {
 		return nil, err
 	}
-	r, err := s.open(false)
-	if err != nil {
-		return nil, err
-	}
-	defer r.Close()
 	var removed []string
 	for _, m := range all[keep:] {
-		if !ValidID(m.ID) {
+		if !ValidID(m.ID) || slices.Contains(protect, m.ID) {
 			continue
 		}
 		if err := r.RemoveAll(m.ID); err != nil {
@@ -310,4 +331,26 @@ func (s Store) Prune(keep int) ([]string, error) {
 		removed = append(removed, m.ID)
 	}
 	return removed, nil
+}
+
+// sweepTemps removes Save's temporary directories older than staleTemp. A
+// younger one may belong to a Save still running.
+func sweepTemps(r *os.Root, now time.Time) {
+	d, err := r.Open(".")
+	if err != nil {
+		return
+	}
+	ents, err := d.ReadDir(-1)
+	d.Close()
+	if err != nil {
+		return
+	}
+	for _, e := range ents {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), ".tmp-") {
+			continue
+		}
+		if fi, err := e.Info(); err == nil && now.Sub(fi.ModTime()) > staleTemp {
+			_ = r.RemoveAll(e.Name())
+		}
+	}
 }

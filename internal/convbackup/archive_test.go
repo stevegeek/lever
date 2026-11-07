@@ -182,3 +182,17 @@ func TestCopyRefusesATruncatedFile(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// tar stops reading at its end-of-archive blocks, before gzip's trailer: a
+// damaged CRC must still refuse the archive.
+func TestCopyRefusesABadChecksum(t *testing.T) {
+	b := mkTar(t, entry{name: "projects/a.jsonl", body: "hello"})
+	if _, err := Copy(io.Discard, bytes.NewReader(b), "projects", DefaultLimits); err != nil {
+		t.Fatalf("good archive: %v", err)
+	}
+	bad := append([]byte(nil), b...)
+	bad[len(bad)-8] ^= 0xff // the CRC32 is the trailer's first four bytes
+	if _, err := Copy(io.Discard, bytes.NewReader(bad), "projects", DefaultLimits); !errors.Is(err, ErrRefused) {
+		t.Fatalf("bad CRC: err = %v, want ErrRefused", err)
+	}
+}

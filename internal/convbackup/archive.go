@@ -61,6 +61,7 @@ const (
 	maxNameLen      = 1024
 	maxComponentLen = 255
 	maxDepth        = 16
+	maxTrailer      = 1 << 20 // bytes allowed after the tar's end (padding)
 )
 
 // ErrRefused wraps every reason Copy refuses an archive.
@@ -171,6 +172,15 @@ func Copy(dst io.Writer, src io.Reader, prefix string, lim Limits) (Stats, error
 		if n, err := io.CopyN(tw, tr, h.Size); err != nil {
 			return st, refused("%q: read %d of %d bytes: %v", name, n, h.Size, err)
 		}
+	}
+	// tar stops at its end-of-archive blocks; gzip checks its CRC and length
+	// only at the end of the stream. Read on to that end, so a damaged
+	// archive is refused rather than installed. What follows the tar's end
+	// is padding, at most a record or so.
+	if n, err := io.Copy(io.Discard, io.LimitReader(zr, maxTrailer+1)); err != nil {
+		return st, refused("reading the archive: %v", err)
+	} else if n > maxTrailer {
+		return st, refused("more than %d bytes after the end of the archive", maxTrailer)
 	}
 	if err := tw.Close(); err != nil {
 		return st, err

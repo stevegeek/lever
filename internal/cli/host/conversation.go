@@ -133,7 +133,7 @@ func (o convOps) backupIf(ctx context.Context, reason string, skipEmpty bool) (m
 		o.log("conversation: note: %d links or special files in the manager's .claude/projects were not backed up", m.Skipped)
 	}
 	o.log("conversation: backed up manager %q's conversation (%d files, %s) to %s", o.app.Name, m.Files, humanBytes(m.Bytes), store.Path(m.ID))
-	if removed, perr := store.Prune(convbackup.Keep); perr != nil {
+	if removed, perr := store.Prune(convbackup.Keep, m.ID); perr != nil {
 		o.log("conversation: warning: removing old backups: %v", perr)
 	} else if len(removed) > 0 {
 		o.log("conversation: removed %d older backup(s); lever keeps the last %d", len(removed), convbackup.Keep)

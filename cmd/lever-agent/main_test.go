@@ -39,6 +39,11 @@ func TestCLICapabilityVerbsValidateArgsBeforeAnythingElse(t *testing.T) {
 		{"delegate without -tool", "delegate", `"-tool"`, []string{"-op", "read", "-to", "worker"}},
 		{"request without -tool", "request", `"-tool"`, []string{"-op", "read"}},
 		{"request without -op", "request", `"-op"`, []string{"-tool", "db"}},
+		// A positional argument that is not key=value would be dropped,
+		// minting a broader token than asked for.
+		{"request bare constraint", "request", `"table"`, []string{"-tool", "db", "-op", "read", "table"}},
+		{"request empty key", "request", `"=users"`, []string{"-tool", "db", "-op", "read", "=users"}},
+		{"call bare constraint", "call", `"table"`, []string{"-tool", "db", "-op", "read", "-token", "x", "table"}},
 	} {
 		err := cmdCLI(context.Background(), tc.verb, append([]string{"-id-dir", missingID}, tc.args...))
 		if err == nil {

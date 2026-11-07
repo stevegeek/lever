@@ -517,10 +517,15 @@ func parseCLIArgs(verb string, args []string) (cliArgs, error) {
 		return cliArgs{}, err
 	}
 	a.idDir, a.brokerURL, a.bootstrapPath = *idDir, *brokerURL, *bootstrapPath
+	// Every positional argument is a key=value constraint. One that is not
+	// is refused, never dropped: a dropped constraint mints a broader token
+	// than the caller asked for and reports success.
 	for _, arg := range fs.Args() {
-		if k, v, ok := strings.Cut(arg, "="); ok {
-			a.constraints[k] = v
+		k, v, ok := strings.Cut(arg, "=")
+		if !ok || k == "" {
+			return cliArgs{}, fmt.Errorf("%s: %q is not a key=value constraint", verb, arg)
 		}
+		a.constraints[k] = v
 	}
 	return a, nil
 }

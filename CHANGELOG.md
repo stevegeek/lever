@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [1.0.0-beta.5] - 2026-11-07
+
 ### Fixed
 
 - **`github.push` to a private repo.** The first step of a push refreshes the host's copy of the

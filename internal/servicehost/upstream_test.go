@@ -125,3 +125,58 @@ func TestResponseFromSSE(t *testing.T) {
 		t.Fatal("a server request was taken for the response")
 	}
 }
+
+// A stateful upstream refuses requests on a session until the client's
+// notifications/initialized arrives: the service host forwards it, with the
+// session header, as it forwards initialize.
+func TestUpstreamGetsTheInitializedNotification(t *testing.T) {
+	var mu sync.Mutex
+	initialized := false
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		var msg struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		_ = json.Unmarshal(b, &msg)
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case msg.Method == "initialize":
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Mcp-Session-Id", "s1")
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":`+string(msg.ID)+`,"result":{}}`)
+		case msg.Method == "notifications/initialized" && r.Header.Get("Mcp-Session-Id") == "s1":
+			initialized = true
+			w.WriteHeader(http.StatusAccepted)
+		case !initialized:
+			http.Error(w, "Received request before initialization was complete", http.StatusBadRequest)
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":`+string(msg.ID)+`,"result":{"tools":[{"name":"search"}]}}`)
+		}
+	}))
+	t.Cleanup(up.Close)
+	r := newRig(t, 0, Tool{Name: "notes", Upstream: up.URL + "/mcp", Allow: []string{"search"}})
+	send := func(body string) *http.Response {
+		req, _ := http.NewRequest(http.MethodPost, r.ts.URL+"/mcp/notes", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Mcp-Session-Id", "s1")
+		resp, err := r.http.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		return resp
+	}
+	if resp := send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`); resp.StatusCode != 200 {
+		t.Fatalf("initialize: %d", resp.StatusCode)
+	}
+	if resp := send(`{"jsonrpc":"2.0","method":"notifications/initialized"}`); resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("initialized: %d", resp.StatusCode)
+	}
+	if resp := send(`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`); resp.StatusCode != 200 {
+		t.Fatalf("tools/list after initialized: %d (the notification did not reach the upstream)", resp.StatusCode)
+	}
+}

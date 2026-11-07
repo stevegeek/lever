@@ -162,6 +162,9 @@ func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn, directiveL
 			return fmt.Errorf("broker: %s listener must be a unix socket, got %T", what, ln)
 		}
 	}
+	// One server failing stops them all: cancel runs the shutdown below.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	onLapse := b.lapseFunc()
 	tlsCfg := b.ca.ServerTLSConfigSource(certSrc, onLapse)
 	if onLapse != nil {
@@ -215,10 +218,14 @@ func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn, directiveL
 			_ = operatorSrv.Shutdown(shutCtx)
 		}
 	}()
+	// Wait for every server: returning while one still serves would let the
+	// caller remove the pid file under a live listener.
+	var first error
 	for i := 0; i < numServers; i++ {
-		if err := <-errc; err != nil && !errors.Is(err, http.ErrServerClosed) {
-			return err
+		if err := <-errc; err != nil && !errors.Is(err, http.ErrServerClosed) && first == nil {
+			first = err
+			cancel()
 		}
 	}
-	return nil
+	return first
 }

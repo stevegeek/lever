@@ -19,6 +19,7 @@ func newRoot(c brokerCaller) *cobra.Command {
 		Version: agent.BuildLine("lever-manager", cli.Version)}
 	root.SetVersionTemplate("{{.Version}}\n")
 	root.AddCommand(newVersionCmd(c), newAgentCmd(c), newMsgCmd(c), newWatchCmd(c))
+	cli.RejectUnknownSubcommands(root)
 	silenceUsageOnRunErrors(root)
 	return root
 }

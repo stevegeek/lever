@@ -154,9 +154,9 @@ func (r *Registry) MapParams(tool, op string, args map[string]string) (map[strin
 	return mcp.MapConstraintParams(o.CaveatParam, args), nil
 }
 
-// ValidateConstraints is the mint-time defense-in-depth check: a constraint
-// value AllowedValues forbids, or a key outside a declared Params set, is an
-// error.
+// ValidateConstraints is the mint-time defense-in-depth check: an empty key,
+// a constraint value AllowedValues forbids, or a key outside a declared
+// Params set, is an error.
 func (r *Registry) ValidateConstraints(tool, op string, constraints map[string]string) error {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -167,6 +167,9 @@ func (r *Registry) ValidateConstraints(tool, op string, constraints map[string]s
 	o, ok := t.Operations[op]
 	if !ok {
 		return fmt.Errorf("registry: tool %q has no operation %q", tool, op)
+	}
+	if _, ok := constraints[""]; ok {
+		return fmt.Errorf("registry: %s.%s: a constraint needs a key", tool, op)
 	}
 	if len(o.Params) > 0 {
 		declared := make(map[string]bool, len(o.Params)+len(o.CaveatParam))

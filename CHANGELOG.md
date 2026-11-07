@@ -7,6 +7,13 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`github.push` to a private repo.** The first step of a push refreshes the host's copy of the
+  repo's `main` from GitHub, and that fetch went out without the token. A private repo refuses an
+  anonymous fetch, so every push to one failed with "could not read Username". The fetch now
+  carries the token, like the push itself.
+
 ## [1.0.0-beta.4] - 2026-11-02
 
 ### Fixed

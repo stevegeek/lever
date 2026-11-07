@@ -31,7 +31,7 @@ type Auth struct{ BaseURL, Token string }
 
 type RunOpts struct {
 	AllowFile bool   // the bundle import reads a local file
-	Auth      *Auth  // ls-remote and push only
+	Auth      *Auth  // every call that reaches GitHub: mirror fetch, ls-remote, push
 	GitDir    string // pin the repository: git never searches parent directories
 }
 

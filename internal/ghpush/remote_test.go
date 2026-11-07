@@ -19,6 +19,9 @@ type testRemote struct {
 	srv   *httptest.Server
 	mu    sync.Mutex
 	auths []string
+	// private makes the remote answer 401 to a request without credentials,
+	// as GitHub does for a private repo.
+	private bool
 }
 
 func gitT(t *testing.T, dir string, args ...string) string {
@@ -65,7 +68,13 @@ func newTestRemote(t *testing.T, repo string) (*testRemote, string) {
 	r.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		r.mu.Lock()
 		r.auths = append(r.auths, req.Header.Get("Authorization"))
+		private := r.private
 		r.mu.Unlock()
+		if private && req.Header.Get("Authorization") == "" {
+			w.Header().Set("WWW-Authenticate", `Basic realm="test"`)
+			http.Error(w, "authentication required", http.StatusUnauthorized)
+			return
+		}
 		h.ServeHTTP(w, req)
 	}))
 	t.Cleanup(r.srv.Close)

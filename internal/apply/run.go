@@ -1054,6 +1054,12 @@ func runCredential(ctx context.Context, s Step, d Deps) error {
 	if err != nil {
 		return fmt.Errorf("reading credential %s: %w", s.Target, err)
 	}
+	if tok == "" {
+		// An empty secret would replace the working one on the hub, and the
+		// manager would then fail to authenticate (lever doctor refuses an
+		// empty credential file too).
+		return fmt.Errorf("credential file %s is empty", s.Target)
+	}
 	return d.Scion.SecretSet(ctx, "CLAUDE_CODE_OAUTH_TOKEN", tok)
 }
 

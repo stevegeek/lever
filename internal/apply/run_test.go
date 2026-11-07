@@ -1732,6 +1732,26 @@ func TestRunCredentialStep(t *testing.T) {
 	}
 }
 
+// An empty credential file must not overwrite the hub's working secret.
+func TestRunCredentialStepRefusesAnEmptyFile(t *testing.T) {
+	f := scionOKRunner()
+	app := &config.App{
+		Name: "hello", Backend: "orbstack", Tree: t.TempDir(),
+		Manager: config.Manager{Image: "img", CredentialFile: "/x/token"},
+	}
+	deps := Deps{
+		ReadCred: func(string) (string, error) { return "", nil }, // a file of "\n", trimmed
+		Scion:    hubScion(f, app),
+	}
+	err := runApply(app, deps)
+	if err == nil || !strings.Contains(err.Error(), "is empty") {
+		t.Fatalf("Run: %v", err)
+	}
+	if j := joinedCalls(f); strings.Contains(j, "CLAUDE_CODE_OAUTH_TOKEN") {
+		t.Fatalf("the empty secret was set: %q", j)
+	}
+}
+
 // TestRunScionServerEmitsWebFlagsWhenRemoteEnabled: with remote access on,
 // `server start` carries --enable-web but not the tailnet base_url (see the
 // agent-endpoint test below).

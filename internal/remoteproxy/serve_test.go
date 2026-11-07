@@ -91,6 +91,44 @@ func TestServeWritesAndRemovesPIDFile(t *testing.T) {
 	}
 }
 
+// An open chat page holds a streaming request that never goes idle: the
+// stop still returns promptly and without an error.
+func TestServeStopsPromptlyWithAnOpenStream(t *testing.T) {
+	pidPath := filepath.Join(t.TempDir(), "remote.pid")
+	port := freePort(t)
+	streaming := make(chan struct{})
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		close(streaming)
+		<-r.Context().Done() // as /events: until the client or the server ends it
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Serve(ctx, ServeConfig{Port: port, Handler: h, PIDPath: pidPath}) }()
+	waitFor(t, 2*time.Second, func() bool { return fileExists(pidPath) })
+	resp, err := http.Get("http://127.0.0.1:" + strconv.Itoa(port) + "/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	<-streaming
+	start := time.Now()
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Serve returned error on shutdown: %v", err)
+		}
+		if took := time.Since(start); took > 3*time.Second {
+			t.Fatalf("Serve took %s to stop", took)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Serve did not return after ctx cancel")
+	}
+}
+
 // TestServeStampsWhatThisProcessIsServing: Stamp runs after the bind and
 // the pid file, since brokerctl keys its record on that pid.
 func TestServeStampsWhatThisProcessIsServing(t *testing.T) {

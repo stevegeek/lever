@@ -62,6 +62,13 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 	}
 
 	srv := newServer(cfg.Handler)
+	// Every request's context ends when shutdown starts: an open chat page
+	// holds a streaming /events request that would otherwise never go idle,
+	// and Shutdown would wait for it until its deadline.
+	base, cancelBase := context.WithCancel(context.Background())
+	defer cancelBase()
+	srv.BaseContext = func(net.Listener) context.Context { return base }
+	srv.RegisterOnShutdown(cancelBase)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
 
@@ -70,7 +77,10 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("remoteproxy: shutdown: %w", err)
+			// A handler that ignores its context: close what is left. A
+			// routine stop is not an error.
+			slog.Warn("remote proxy: connections still open at shutdown; closing them", "err", err)
+			_ = srv.Close()
 		}
 		<-serveErr
 		return nil

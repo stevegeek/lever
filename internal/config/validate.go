@@ -328,6 +328,9 @@ func (a *App) Validate() error {
 	if !a.Broker.AutoReenrol.valid() {
 		return fmt.Errorf("config: broker.auto_reenrol %q must be one of all|manager|off (or unset = all)", a.Broker.AutoReenrol)
 	}
+	if err := a.validateBrokerLimits(); err != nil {
+		return err
+	}
 	if !a.Scion.Telemetry.valid() {
 		return fmt.Errorf("config: scion.telemetry %q must be one of off|scion-default (or unset = off)", a.Scion.Telemetry)
 	}
@@ -571,11 +574,52 @@ func (a *App) validateOperator() error {
 	return nil
 }
 
+// renewInterval is the agents' certificate renewal interval (lever-agent
+// renew -interval): an api-key agent's LLM token is refreshed only then.
+const renewInterval = 12 * time.Hour
+
+// validateBrokerLimits refuses ports outside 1-65535 (0 is "the default"),
+// the broker's two listeners on one port, and durations that cannot work.
+func (a *App) validateBrokerLimits() error {
+	for _, f := range []struct {
+		key  string
+		port int
+	}{{"broker.jail_port", a.Broker.JailPort}, {"broker.admin_port", a.Broker.AdminPort}} {
+		if f.port < 0 || f.port > 65535 {
+			return fmt.Errorf("config: %s %d is not a TCP port (1-65535, or unset for the default)", f.key, f.port)
+		}
+	}
+	if a.EffectiveJailPort() == a.EffectiveAdminPort() {
+		return fmt.Errorf("config: broker.jail_port and broker.admin_port are both %d; the broker listens on each separately", a.EffectiveJailPort())
+	}
+	for _, p := range a.Manager.AllowPorts {
+		if p < 1 || p > 65535 {
+			return fmt.Errorf("config: manager.allow_ports lists %d, which is not a TCP port (1-65535)", p)
+		}
+	}
+	if a.Broker.GrantTTL < 0 {
+		return fmt.Errorf("config: broker.grant_ttl %s is negative", a.Broker.GrantTTL)
+	}
+	if a.Broker.TicketTTL < 0 {
+		return fmt.Errorf("config: broker.ticket_ttl %s is negative", a.Broker.TicketTTL)
+	}
+	// An api-key agent's LLM token lives grant_ttl and is refreshed at each
+	// renewal: a shorter lifetime leaves the agent without a token for the
+	// rest of every cycle.
+	if a.Broker.GrantTTL > 0 && a.Broker.GrantTTL <= renewInterval && a.AnyAPIKeyAgent() {
+		return fmt.Errorf("config: broker.grant_ttl %s must be longer than the %s certificate renewal while an agent uses llm_auth: api-key (its LLM token is refreshed only at renewal)", a.Broker.GrantTTL, renewInterval)
+	}
+	return nil
+}
+
 // validateRemote rejects a remote block that could not serve safely. It is
 // skipped while remote is disabled, so stale settings do not block loading.
 func (a *App) validateRemote() error {
 	if !a.Remote.Enabled {
 		return nil
+	}
+	if a.Remote.Port < 0 || a.Remote.Port > 65535 {
+		return fmt.Errorf("config: remote.port %d is not a TCP port (1-65535, or unset for %d)", a.Remote.Port, DefaultRemotePort)
 	}
 	rp := a.EffectiveRemotePort()
 	if rp == a.EffectiveJailPort() || rp == a.EffectiveAdminPort() {

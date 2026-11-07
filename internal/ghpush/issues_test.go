@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -83,7 +85,17 @@ func (f *fakeIssues) serve(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(p, "/issues/") && strings.HasSuffix(p, "/comments") && r.Method == "GET":
 		var n int
 		json.Unmarshal([]byte(strings.TrimSuffix(strings.TrimPrefix(p, "/issues/"), "/comments")), &n)
-		j(200, f.comments[n])
+		// Paged as GitHub pages: per_page (default 30) from page 1.
+		per, page := 30, 1
+		if v, err := strconv.Atoi(r.URL.Query().Get("per_page")); err == nil {
+			per = v
+		}
+		if v, err := strconv.Atoi(r.URL.Query().Get("page")); err == nil {
+			page = v
+		}
+		all := f.comments[n]
+		lo, hi := min((page-1)*per, len(all)), min(page*per, len(all))
+		j(200, all[lo:hi])
 	case strings.HasPrefix(p, "/issues/") && strings.HasSuffix(p, "/comments") && r.Method == "POST":
 		f.posted = append(f.posted, body["body"].(string))
 		f.order = append(f.order, "comment")
@@ -157,6 +169,29 @@ func TestIssueReadCleansTextAndRefusesPRs(t *testing.T) {
 	wantErr(t, err, "is a pull request")
 	_, err = o.IssueRead(context.Background(), "mgr", repo, "404")
 	wantErr(t, err, "not found")
+}
+
+// The newest 30 comments, when the last page is only partly full: 31
+// comments are pages of 30 and 1.
+func TestIssueReadReturnsTheNewestComments(t *testing.T) {
+	f := newFakeIssues(t)
+	o, _, _ := f.ops()
+	for _, n := range []int{31, 61, 60} {
+		f.mu.Lock()
+		f.issues[29]["comments"] = n
+		f.comments[29] = nil
+		for i := 1; i <= n; i++ {
+			f.comments[29] = append(f.comments[29], map[string]any{"user": map[string]any{"login": "a"}, "body": fmt.Sprintf("c%d", i), "created_at": "t"})
+		}
+		f.mu.Unlock()
+		res, err := o.IssueRead(context.Background(), "mgr", repo, "29")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.Comments) != 30 || res.Comments[0].Body != fmt.Sprintf("c%d", n-29) || res.Comments[29].Body != fmt.Sprintf("c%d", n) {
+			t.Fatalf("%d comments: got %d, first %+v", n, len(res.Comments), res.Comments)
+		}
+	}
 }
 
 func TestIssueCommentChecksTheText(t *testing.T) {

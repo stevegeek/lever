@@ -271,14 +271,27 @@ func (o *Ops) IssueRead(ctx context.Context, caller, repo, number string) (res I
 	res = IssueReadResult{OK: true, Repo: repo, Issue: summary(i), Comments: []IssueComment{}, Note: issueNote}
 	res.Body, res.BodyTruncated = longText(i.Body, issueBodyMax)
 	if i.Comments > 0 {
-		page := (i.Comments + issueCommentsMax - 1) / issueCommentsMax
-		q := url.Values{"per_page": {strconv.Itoa(issueCommentsMax)}, "page": {strconv.Itoa(page)}}
+		// The newest issueCommentsMax comments: the last page, and the one
+		// before it when the last is only partly full.
+		last := (i.Comments + issueCommentsMax - 1) / issueCommentsMax
+		first := last
+		if last > 1 && i.Comments%issueCommentsMax != 0 {
+			first = last - 1
+		}
 		var cs []ghIssueComment
-		if err := o.API.do(ctx, tok, http.MethodGet, "/repos/"+repo+"/issues/"+number+"/comments?"+q.Encode(), nil, &cs); err != nil {
-			return IssueReadResult{}, fmt.Errorf("read comments of #%s: %w", number, err)
+		for page := first; page <= last; page++ {
+			q := url.Values{"per_page": {strconv.Itoa(issueCommentsMax)}, "page": {strconv.Itoa(page)}}
+			var got []ghIssueComment
+			if err := o.API.do(ctx, tok, http.MethodGet, "/repos/"+repo+"/issues/"+number+"/comments?"+q.Encode(), nil, &got); err != nil {
+				return IssueReadResult{}, fmt.Errorf("read comments of #%s: %w", number, err)
+			}
+			if len(got) > issueCommentsMax {
+				return IssueReadResult{}, fmt.Errorf("read comments of #%s: more than requested", number)
+			}
+			cs = append(cs, got...)
 		}
 		if len(cs) > issueCommentsMax {
-			return IssueReadResult{}, fmt.Errorf("read comments of #%s: more than requested", number)
+			cs = cs[len(cs)-issueCommentsMax:]
 		}
 		for _, c := range cs {
 			ic := IssueComment{CreatedAt: label(c.CreatedAt)}

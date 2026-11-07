@@ -469,7 +469,9 @@ func (a *App) validateWorkerDirsDisjoint() error {
 			if i >= j {
 				continue
 			}
-			if pathOverlaps(outer.Dir, inner.Dir) {
+			// Case-folded, as every other overlap check: APFS ignores case,
+			// so work/Proj and work/proj/sub are one tree on macOS.
+			if fsutil.RelOverlapFold(outer.Dir, inner.Dir) {
 				return fmt.Errorf("config: workers %q (dir %q) and %q (dir %q) overlap — one is the other, or contains it; "+
 					"each worker must mount a subtree no other worker can reach, or it can read and write its sibling's workspace",
 					outer.Name, outer.Dir, inner.Name, inner.Dir)
@@ -477,17 +479,6 @@ func (a *App) validateWorkerDirsDisjoint() error {
 		}
 	}
 	return nil
-}
-
-// pathOverlaps compares components, so "workers/x" does not contain
-// "workers/xy".
-func pathOverlaps(a, b string) bool {
-	ca, cb := filepath.Clean(a), filepath.Clean(b)
-	if ca == cb {
-		return true
-	}
-	sep := string(filepath.Separator)
-	return strings.HasPrefix(ca, cb+sep) || strings.HasPrefix(cb, ca+sep)
 }
 
 func (a *App) validateWorker(g Worker) error {

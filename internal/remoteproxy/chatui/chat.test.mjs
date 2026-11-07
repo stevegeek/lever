@@ -1701,6 +1701,24 @@ test('Load earlier reads with the cursor', async () => {
   assert.equal(env.els.older.hidden, true);
 });
 
+test('a transcript opened while another is still being read is read when that read ends', async () => {
+  let releaseW1;
+  const env = await load(hubWith({
+    contacts: () => ({ status: 200, body: { contacts: [{ login: 'c@x', signedIn: true, agents: [{ name: 'w1', label: '', state: 'running' }, { name: 'w2', label: '', state: 'running' }] }] } }),
+    transcript: (p) => p.includes('/agents/w1/')
+      ? new Promise((r) => (releaseW1 = () => r({ status: 200, body: { matched: true, messages: [T(1, 'agent', 'from w1', true)] } })))
+      : { status: 200, body: { matched: true, messages: [T(2, 'agent', 'from w2', true)] } },
+  }));
+  await env.clickContact(0);
+  await env.clickContactAgent(0, 0);
+  await env.clickContactAgent(0, 1);
+  releaseW1();
+  await tick(10);
+  assert.equal(env.els.agent.textContent, 'c@x · w2');
+  assert.equal(env.rows().length, 1);
+  assert.match(env.rows()[0], /from w2$/);
+});
+
 test('opening an agent chat leaves the transcript', async () => {
   const env = await load(hubWith({ contacts: CONTACTS }));
   await env.clickContact(0);
@@ -1890,6 +1908,28 @@ test('uploaded, but the chat note was refused: says so', async () => {
   await env.pick({ name: 'a.pdf', size: 3 });
   await env.runTimers();
   assert.match(env.els.error.textContent, /^Uploaded report\.pdf, but the chat message was not sent/);
+});
+
+test('an upload after a send with no clear answer posts no note, and the resend keeps its key', async () => {
+  let n = 0;
+  const env = await loadChat(hubWith({
+    agents: withFiles([BOSS()]),
+    post: (body) => (++n === 1 ? { down: true } : { status: 201, body: { id: `s${n}`, content: body.content, senderId: 'u1', createdAt: new Date().toISOString() } }),
+  }));
+  await type(env, 'hello');
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  assert.match(env.els.error.textContent, /^No clear answer/);
+  await env.pick({ name: 'report.pdf', size: 3 });
+  await env.runTimers();
+  assert.equal(sends(env).length, 1, 'no note while the message is unclear');
+  assert.match(env.els.error.textContent, /^Uploaded report\.pdf\. No chat message was sent about it/);
+  env.els.composer.dispatch('submit');
+  await tick(10);
+  const posts = sends(env);
+  assert.equal(posts.length, 2);
+  assert.equal(posts[1].body.content, 'hello');
+  assert.equal(posts[0].body.idempotency_key, posts[1].body.idempotency_key, 'the resend must reuse the key');
 });
 
 test('files panel: names are text, links only to lever\'s download route', async () => {

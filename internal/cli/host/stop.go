@@ -95,7 +95,10 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 			// suspended stays true only while every suspend took: --keep-vm must not claim
 			// otherwise, since those containers go on running in the VM.
 			suspended := true
-			if appName != "" {
+			// Only this instance's own machine holds its manager and workers:
+			// --machine naming another jail must not suspend them through it
+			// (as destroy, which locks only its own machine).
+			if appName != "" && (*machine == "" || *machine == machineName(appName)) {
 				if err := b.ResolveRunUser(cmd.Context()); err == nil {
 					// HubTokenSource authenticates with the controller PAT. Empty agent
 					// role: only start emits --role.

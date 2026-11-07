@@ -12,7 +12,7 @@ import (
 
 // handleToolsCall verifies the token independently of the broker, then runs
 // the backstop.
-func (s *Server) handleToolsCall(id any, msg map[string]any, caller string) []byte {
+func (s *Server) handleToolsCall(ctx context.Context, id any, msg map[string]any, caller string) []byte {
 	if caller == "" {
 		s.audit("", "", "deny", "missing X-Lever-Caller")
 		return mcp.Error(id, mcp.CodeServerError, "forbidden")
@@ -51,7 +51,7 @@ func (s *Server) handleToolsCall(id any, msg map[string]any, caller string) []by
 	params := mcp.MapConstraintParams(o.CaveatParam, args)
 	if err := token.Verify(pubKey, rawTok, token.Request{
 		Caller: caller, Capability: token.Capability{Tool: s.name, Operation: op},
-		Params: params, Now: time.Now(), MinEpoch: s.freshEpoch(context.Background()),
+		Params: params, Now: time.Now(), MinEpoch: s.freshEpoch(ctx),
 	}); err != nil {
 		s.audit(op, caller, "deny", "verify: "+err.Error())
 		return mcp.Error(id, mcp.CodeServerError, "forbidden")

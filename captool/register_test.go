@@ -2,7 +2,10 @@ package captool
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/broker/brokertest"
 )
@@ -45,5 +48,31 @@ func TestFreshEpochRefreshesAfterTTL(t *testing.T) {
 	br.Epoch.Store(7) // broker bumps epoch
 	if got := s.freshEpoch(context.Background()); got != 7 {
 		t.Fatalf("freshEpoch = %d, want 7 after refresh", got)
+	}
+}
+
+// An admin listener that accepts but never answers must not hold a call: the
+// refresh gives up with the request and keeps the last good epoch.
+func TestFreshEpochGivesUpOnAStalledBroker(t *testing.T) {
+	release := make(chan struct{})
+	stalled := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer stalled.Close()
+	defer close(release)
+	s := testServer(t)
+	s.adminURL = stalled.URL
+	s.epoch, s.epochTTL = 4, 0
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if got := s.freshEpoch(ctx); got != 4 {
+		t.Fatalf("freshEpoch = %d, want the last good 4", got)
+	}
+	if took := time.Since(start); took > 3*time.Second {
+		t.Fatalf("freshEpoch took %s", took)
 	}
 }

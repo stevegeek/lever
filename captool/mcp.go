@@ -22,8 +22,8 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			Name:    s.name,
 			Version: s.version,
 			Tools:   s.toolSchemas,
-			Call: func(_ context.Context, id any, msg map[string]any) []byte {
-				return s.handleToolsCall(id, msg, caller)
+			Call: func(ctx context.Context, id any, msg map[string]any) []byte {
+				return s.handleToolsCall(ctx, id, msg, caller)
 			},
 		})
 	})

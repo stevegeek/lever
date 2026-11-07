@@ -67,6 +67,21 @@ func (t Tool) validate() error {
 		if len(t.Command) == 0 {
 			return fmt.Errorf("config: broker tool %q has no command (a supervised tool needs one; did you mean external: true?)", t.Name)
 		}
+		// The broker's registry refuses these too, but only once broker
+		// serve runs, where apply sees a health timeout, not the reason.
+		if t.Backend == "" {
+			return fmt.Errorf("config: broker tool %q needs backend (the address its command listens on, host:port[/path])", t.Name)
+		}
+		hostport, _, _ := strings.Cut(t.Backend, "/")
+		if strings.Contains(t.Backend, "://") {
+			return fmt.Errorf("config: broker tool %q backend %q must not carry a scheme (want host:port[/path])", t.Name, t.Backend)
+		}
+		if _, _, err := net.SplitHostPort(hostport); err != nil {
+			return fmt.Errorf("config: broker tool %q backend %q: %v (want host:port[/path])", t.Name, t.Backend, err)
+		}
+		if len(t.Operations) == 0 {
+			return fmt.Errorf("config: broker tool %q needs operations (the tool calls agents may be granted)", t.Name)
+		}
 		return nil
 	}
 	if len(t.Command) != 0 {

@@ -167,4 +167,10 @@ func TestRealRunnerReturnsAtTheDeadlineDespiteAHeldPipe(t *testing.T) {
 	if took := time.Since(start); took > 5*time.Second {
 		t.Fatalf("Run waited %s for the background child", took)
 	}
+	// The same holds under an output cap, which every jail exec runs with.
+	capped := WithOutputLimit(context.Background(), 1024)
+	res, err = RealRunner{}.Run(capped, nil, "sh", "-c", "echo done; (sleep 8) &")
+	if err != nil || res.Code != 0 || res.Stdout != "done\n" {
+		t.Fatalf("capped, a successful command with a background child: res=%+v err=%v", res, err)
+	}
 }

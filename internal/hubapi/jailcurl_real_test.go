@@ -131,3 +131,37 @@ func TestJailCurlOutputLimitStopsACurlThatIgnoresTheCap(t *testing.T) {
 	_, _, err := j.Do(ctx, "GET", "/api/v1/agents")
 	assertTooLarge(t, err, "GET /api/v1/agents", "1 MiB")
 }
+
+// The real script sends the PAT as a bearer, with and without a body, and
+// ignores a proxy variable and a .curlrc in the guest environment.
+func TestJailCurlScriptSendsTheBearerDirectly(t *testing.T) {
+	needCurl(t)
+	var got []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Header.Get("Authorization")+"|"+r.Header.Get("X-Curlrc"))
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Write([]byte("{}"))
+	}))
+	t.Cleanup(srv.Close)
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, ".curlrc"), []byte("header = \"X-Curlrc: yes\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("http_proxy", "http://127.0.0.1:9") // nothing listens there
+	j := &JailCurl{Runner: proc.RealRunner{}, BaseURL: srv.URL, Token: func() string { return "pat-%s-1" }}
+	if status, _, err := j.Do(context.Background(), "GET", "/x"); err != nil || status != 200 {
+		t.Fatalf("GET: status=%d err=%v", status, err)
+	}
+	if status, _, err := j.DoBody(context.Background(), "POST", "/x", []byte(`{"a":1}`)); err != nil || status != 200 {
+		t.Fatalf("POST: status=%d err=%v", status, err)
+	}
+	if len(got) != 2 || got[0] != "Bearer pat-%s-1|" || got[1] != "Bearer pat-%s-1|" {
+		t.Fatalf("server saw %q", got)
+	}
+	for _, script := range []string{curlScript, curlBodyScript} {
+		if strings.Contains(script, `"Authorization: Bearer $SCION_HUB_TOKEN"`) || !strings.Contains(script, "-H @-") {
+			t.Fatalf("the PAT must reach curl on stdin, not argv: %q", script)
+		}
+	}
+}

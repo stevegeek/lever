@@ -128,6 +128,10 @@ func sshAllowed(app *config.App, st state.State) error {
 // sshAgentNames resolves NAME ("" or the app name = manager) to a slug,
 // refusing anything that is not one of the instance's agents.
 func sshAgentName(app *config.App, name string) (string, error) {
+	if name == "manager" {
+		// The guide's name for it; config reserves "manager" from workers.
+		name = app.Name
+	}
 	slug, _, err := attachTarget(app, "", name)
 	if err != nil {
 		return "", fmt.Errorf("ssh: %s", strings.TrimPrefix(err.Error(), "attach: "))

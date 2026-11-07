@@ -293,3 +293,13 @@ func TestSSHGateKeepsThePolicyWhenTheProbeFails(t *testing.T) {
 		t.Fatalf("a hub without the policy env: %+v", g)
 	}
 }
+
+// The ssh guide names the manager "manager"; its app name works too.
+func TestSSHAgentNameTakesManager(t *testing.T) {
+	app, _, _ := sshTestApp(t)
+	for _, n := range []string{"manager", app.Name} {
+		if got, err := sshAgentName(app, n); err != nil || got != app.Name {
+			t.Fatalf("sshAgentName(%q) = %q, %v; want %q", n, got, err, app.Name)
+		}
+	}
+}

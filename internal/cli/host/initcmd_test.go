@@ -125,6 +125,12 @@ func TestInitScaffoldsAndIsIdempotent(t *testing.T) {
 			t.Fatalf("missing %s", p)
 		}
 	}
+	// init may be the first to create the state dir: 0700, as up makes it.
+	if fi, err := os.Stat(filepath.Join(root, ".lever-state")); err != nil {
+		t.Fatal(err)
+	} else if fi.Mode().Perm() != 0o700 {
+		t.Fatalf(".lever-state is %v, want 0700", fi.Mode().Perm())
+	}
 	out2, err := clitest.Exec(t, newInitCmd())
 	if err != nil {
 		t.Fatal(err)

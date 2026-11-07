@@ -88,9 +88,11 @@ func loadHashState(path string) (map[string]string, error) {
 }
 
 // saveHashState writes 0644 (hashes are not secrets), atomically, so a crash
-// never leaves a torn record that misreports every skill as edited.
+// never leaves a torn record that misreports every skill as edited. Its
+// directory is the state dir, which `lever init` may create first: 0700, as
+// every other creator makes it (MkdirAll leaves an existing dir's mode).
 func saveHashState(path string, m map[string]string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	b, err := json.MarshalIndent(m, "", "  ")

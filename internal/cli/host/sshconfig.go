@@ -27,7 +27,7 @@ var vscodeSSHSettings = [][2]string{
 
 func newSSHConfigCmd() *cobra.Command {
 	var configPath string
-	return &cobra.Command{
+	c := &cobra.Command{
 		Use:   "ssh-config [--config PATH] [NAME...]",
 		Short: "Print ssh Host blocks for `lever ssh`, for VS Code Remote-SSH (opt-in: ssh.enabled)",
 		Long: `Print one ssh Host block per agent (the manager and every worker, or the
@@ -64,6 +64,8 @@ settings Remote-SSH needs, as comments. Nothing is written: add the blocks to
 			return writeSSHConfig(cmd.OutOrStdout(), app, st, exe, p, names)
 		},
 	}
+	c.Flags().StringVar(&configPath, "config", "", "the instance's lever.yaml (default: lever.yaml in the current directory)")
+	return c
 }
 
 func writeSSHConfig(w io.Writer, app *config.App, st state.State, exe, configPath string, names []string) error {

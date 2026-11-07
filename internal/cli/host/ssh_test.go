@@ -144,6 +144,13 @@ func TestSSHConfigOutput(t *testing.T) {
 	}
 }
 
+// ssh-config documents --config PATH, as ssh has it.
+func TestSSHConfigTakesConfigFlag(t *testing.T) {
+	if newSSHConfigCmd().Flags().Lookup("config") == nil {
+		t.Fatal("ssh-config has no --config flag")
+	}
+}
+
 func TestSSHAllowed(t *testing.T) {
 	app, st, _ := sshTestApp(t)
 	if err := sshAllowed(app, st); err != nil {

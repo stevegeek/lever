@@ -7,6 +7,18 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Docs
+
+- **Voice on a Linux host with no GPU.** The whisper tool guide has a new section on a CPU-only
+  Linux host: how to build `whisper-server` for the CPU alone, the pinned models, and measured
+  latency. On a fast desktop CPU, `large-v3-turbo` took 8 to 10 s for an 11 s clip; on an older
+  6-core Intel, expect about real time or slower. On the CPU the full `large-v3-turbo` model was
+  faster than the quantized `q5_0`. The section also says how to lower the clip limits on a slow
+  host. The tts guide covers the same host. sherpa-onnx's engine runs at about a quarter of real
+  time there, and the guide now says to use a sherpa-onnx 1.x release: sherpa-onnx 2.0 dropped
+  espeak-ng and refuses to speak with lever's pinned `kokoro-en-v0_19` ("No lexicon available").
+  (T0353)
+
 ## [1.0.0-beta.6] - 2026-11-08
 
 ### Added

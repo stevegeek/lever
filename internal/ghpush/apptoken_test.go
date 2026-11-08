@@ -176,3 +176,46 @@ func TestMinterTokenForNarrowsPermissions(t *testing.T) {
 		t.Fatalf("a refused permission set must not mint: %d mints", len(got))
 	}
 }
+
+// With PushPerms set (lever-tool-github -push-workflows) the push token asks
+// for exactly that set; TokenFor, which the other operations use, is
+// unaffected.
+func TestMinterPushPermsOptIn(t *testing.T) {
+	_, key := writeKey(t, 0o600)
+	now := time.Unix(1_800_000_000, 0)
+	var got []map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Permissions map[string]string `json:"permissions"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		got = append(got, body.Permissions)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]string{"token": "ghs_test", "expires_at": now.Add(time.Hour).Format(time.RFC3339)})
+	}))
+	defer srv.Close()
+	m := &Minter{AppID: "7", InstallationID: "42", Key: key, APIBase: srv.URL, HTTP: srv.Client(),
+		Now: func() time.Time { return now }, PushPerms: PushWorkflowsPermissions}
+	if _, err := m.Token(context.Background(), "stevegeek/lever"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.TokenFor(context.Background(), "stevegeek/lever", OpPermissions[OpPROpen]); err != nil {
+		t.Fatal(err)
+	}
+	want := []map[string]string{
+		{"contents": "write", "workflows": "write"},
+		{"contents": "read", "pull_requests": "write"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("mints %v, want %v", got, want)
+	}
+	for i := range want {
+		if !maps.Equal(got[i], want[i]) {
+			t.Fatalf("mint %d asked for %v, want %v", i, got[i], want[i])
+		}
+	}
+	// The defaults are untouched by the opt-in set.
+	if !maps.Equal(PushPermissions, Permissions{"contents": "write"}) || !maps.Equal(OpPermissions[OpPush], PushPermissions) {
+		t.Fatalf("default push permissions changed: %v %v", PushPermissions, OpPermissions[OpPush])
+	}
+}

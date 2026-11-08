@@ -31,7 +31,9 @@ var AllOps = []string{OpPush, OpPROpen, OpPRStatus, OpPRMerge, OpRelease, OpCIRu
 	OpIssueList, OpIssueRead, OpIssueComment, OpIssueClose}
 
 // OpPermissions is the App permission set each operation's token is
-// narrowed to. GitHub adds metadata: read to every token.
+// narrowed to. GitHub adds metadata: read to every token. Push mints its
+// token through Minter.Token (Minter.PushPerms): its entry here is the
+// default set only.
 var OpPermissions = map[string]Permissions{
 	OpPush:     PushPermissions,
 	OpPROpen:   {"contents": "read", "pull_requests": "write"},

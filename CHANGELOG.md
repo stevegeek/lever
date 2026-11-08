@@ -7,6 +7,19 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A service-host tool stays listed while its host is away.** If the host was down when an
+  agent's MCP client started or reconnected, `initialize` and `tools/list` failed, the client
+  marked that tool's server failed, and its tools stayed missing after the host came back, until
+  a reconnect nobody may run in the container. The broker now keeps each service-host tool's last
+  good `initialize` and `tools/list` answers in `.lever-state` and serves them while the host
+  cannot answer, so the tools stay listed; calls still get `503` until the host is back and then
+  work. The same applies when the host is up but answers `502`, `503` or `504` for the tool. No
+  copy is kept for a server that opens sessions (a copied `initialize` carries no session), and
+  the copy is served only for the `protocolVersion` it answered. The service hosts guide lists
+  the cases. Host-only: the Jail ABI does not change.
+
 ## [1.0.0-beta.6] - 2026-11-08
 
 ### Added

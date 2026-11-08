@@ -16,3 +16,10 @@ func (s State) ServiceHostClientCert(name string) string {
 func (s State) ServiceHostClientKey(name string) string {
 	return filepath.Join(s.ServiceHostDir(name), "client.key")
 }
+
+// ServiceHostDiscovery keeps a service-host tool's last good initialize and
+// tools/list answers (0600), which the broker serves while the host is away.
+// tool is a config tool name ([a-z0-9_-]).
+func (s State) ServiceHostDiscovery(host, tool string) string {
+	return filepath.Join(s.ServiceHostDir(host), "discovery-"+tool+".json")
+}

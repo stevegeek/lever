@@ -1640,7 +1640,8 @@ browser).
    `whisper-server` from whisper.cpp with GPU support: CUDA on a Linux host with an NVIDIA GPU,
    Metal on Apple Silicon (its default there). Install it outside the tree, owned by you or root
    and writable by no one else, for example under `/usr/local/bin`. Without a GPU it still works
-   with `-gpu=false`, much more slowly. The model needs disk space (about 1.6 GB for
+   with `-gpu=false`, more slowly: about real time on an older 6-core CPU (see the whisper tool
+   guide's [CPU-only Linux host](/whisper-tool/#a-cpu-only-linux-host-no-gpu) section). The model needs disk space (about 1.6 GB for
    `large-v3-turbo`, 0.55 GB for `large-v3-turbo-q5_0`) and about as much GPU memory, or memory
    with `-gpu=false`.
 2. **Add the tool to `broker.tools`.** `make install` builds `lever-tool-whisper` next to

@@ -40,8 +40,10 @@ nothing to speak with, and no agent can call it without an `obtain` grant.
 - Disk space for the model: about 350 MB for `kokoro-en-v0_19` and 80 MB for
   `piper-en_GB-alba-medium`, espeak-ng's data included, and as much again while `lever voice
   fetch` unpacks it (the archives are 320 MB and 67 MB). The engine runs on the CPU.
-- A sherpa-onnx release that runs Kokoro models (`--kokoro-model` in
-  `sherpa-onnx-offline-tts --help`).
+- A sherpa-onnx 1.x release that runs Kokoro models (`--kokoro-model` in
+  `sherpa-onnx-offline-tts --help`), such as 1.13.8. sherpa-onnx 2.0 dropped espeak-ng: it ignores
+  `--kokoro-data-dir` and refuses to speak with `kokoro-en-v0_19` ("No lexicon available"), so it
+  does not work with lever's pinned Kokoro model.
 - Install the tool with `make install`. Releases ship it for darwin and linux.
 - [Remote access](/remote-access/) with the chat page and `remote.voice` on (read-aloud is part of
   it).
@@ -53,7 +55,7 @@ platform from the project's GitHub releases. From source:
 
 ```sh
 git clone https://github.com/k2-fsa/sherpa-onnx
-cd sherpa-onnx && git checkout <a release tag>
+cd sherpa-onnx && git checkout <a 1.x release tag, such as v1.13.8>
 mkdir build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF ..
 make -j4 sherpa-onnx-offline-tts
@@ -67,6 +69,21 @@ and point `-server` at `/opt/sherpa-onnx/bin/sherpa-onnx-offline-tts`. Check it 
 libraries next to it: keep `lib/` as safe from other users as the program. The tool resolves the program's real path once at start and
 refuses it if it later resolves to another file; restart the tool (`lever reload`) after an
 upgrade.
+
+### A CPU-only Linux host
+
+The engine always runs on the CPU, so a headless Linux host with no GPU needs nothing more. On
+x86-64 Linux, sherpa-onnx's prebuilt `linux-x64` archive from its GitHub releases and a build from
+source as above both work; pick a 1.x release.
+
+**Expected latency.** Measured with sherpa-onnx 1.13.8 (its x86-64 Linux binary) and
+`kokoro-en-v0_19`, voice `bf_emma`, on an AMD Ryzen 9 9950X: a 41-character sentence (2.4 s of
+audio) took 1.1 s with the default 2 threads and 0.8 s with 4; a 207-character paragraph (10.7 s
+of audio) took 2.8 s with 2 threads and 2.0 s with 4. That is about a quarter of real time. An
+older 6-core Intel CPU is slower per core: expect two to three times these times, still faster
+than the audio plays and well inside the 2-minute bound of one run. On a host with cores to spare,
+raise `-threads` to 4. This was not measured on such a host, and `piper-en_GB-alba-medium` was not
+measured.
 
 ## 1. Configure the tool
 

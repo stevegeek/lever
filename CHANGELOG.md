@@ -7,6 +7,33 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Changed
+
+- **Read-aloud needs sherpa-onnx 2.0 and uses Kokoro v1.0.** sherpa-onnx 2.0 dropped espeak-ng, so
+  it could not speak lever's pinned `kokoro-en-v0_19` ("No lexicon available"), and lever's checks
+  did not notice: the tool looked ready and every read-aloud failed. The default speech model is
+  now `kokoro-multi-lang-v1_0` (Kokoro v1.0, with 28 English voices, `bf_emma` still the default).
+  It is given sherpa-onnx's English lexicon, `lexicon-en-us.txt`, which `lever voice fetch` now
+  downloads beside the model and pins like the archive, and then the voice's own American or
+  British lexicon. `piper-en_GB-alba-medium` gets the English lexicon too. sherpa-onnx 2.x skips any
+  word in no lexicon, so the tool now rewrites the text first: numbers become words, and a word the
+  lexicons lack is split at its case changes and spelled where still unknown ("3 PRs" is "three
+  p r s"), so nothing is silently dropped. Before it serves, the tool speaks a short probe text and
+  reports itself not ready, with the reason in its log, if the program cannot speak with the
+  model; that is what a sherpa-onnx 1.x now hits. `-models` with a comma is refused, since
+  sherpa-onnx reads several lexicons as one comma-separated option. The voice `af` (a blend in
+  v0.19) is gone. Host-only: the Jail ABI does not change.
+
+### Upgrade
+
+- **Read-aloud (`lever-tool-tts`):** install sherpa-onnx 2.0 or later (for example `pip install
+  sherpa-onnx-bin` in a virtual environment, or a 2.x release archive) and point `-server` at it;
+  run `lever voice fetch kokoro-multi-lang-v1_0`; set `-model kokoro-multi-lang-v1_0` (or drop
+  `-model` for the default) in the tool's command, and replace `-voice af` if you used it; then
+  `lever reload`. With `piper-en_GB-alba-medium`, run `lever voice fetch piper-en_GB-alba-medium`
+  again for its lexicon. The old `kokoro-en-v0_19` directory in `-models` can be deleted. A config
+  naming `kokoro-en-v0_19` no longer loads.
+
 ## [1.0.0-beta.7] - 2026-11-08
 
 ### Fixed

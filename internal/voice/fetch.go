@@ -62,6 +62,9 @@ type Fetcher struct {
 	// archive.
 	AllowHost func(*url.URL) bool
 	Progress  io.Writer
+	// ExtraURL, when set, is where a speech model's extra file is
+	// downloaded from instead of its pinned URL (tests).
+	ExtraURL func(SpeechExtra) string
 }
 
 const maxRedirects = 10

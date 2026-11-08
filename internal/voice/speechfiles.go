@@ -95,6 +95,30 @@ func (f Fetcher) FetchSpeechFrom(ctx context.Context, m SpeechModel, dir, src st
 	if err != nil {
 		return "", err
 	}
+	for _, e := range m.Extras {
+		if slices.ContainsFunc(files, func(sf SpeechFile) bool { return sf.Path == e.Path }) {
+			return "", fmt.Errorf("%w: %s's archive has its own %s, which lever fetches on its own", ErrModel, m.Name, e.Path)
+		}
+		src := e.URL
+		if f.ExtraURL != nil {
+			src = f.ExtraURL(e)
+		}
+		got, err := f.download(ctx, download{name: m.Name + " " + e.Path, src: src, size: e.Size, sha256: e.SHA256,
+			allow: GitHubReleaseHost, hosts: "a GitHub release host"}, dir)
+		if err != nil {
+			return "", err
+		}
+		sub, err := privateDirs(tmp, path.Dir(e.Path), true)
+		if err == nil {
+			err = os.Rename(got, filepath.Join(sub, path.Base(e.Path)))
+		}
+		if err != nil {
+			os.Remove(got)
+			return "", err
+		}
+		files = append(files, SpeechFile{Path: e.Path, Size: e.Size, SHA256: e.SHA256})
+	}
+	slices.SortFunc(files, func(a, b SpeechFile) int { return strings.Compare(a.Path, b.Path) })
 	if err := writeSpeechManifest(tmp, m, files); err != nil {
 		return "", err
 	}
@@ -334,6 +358,13 @@ func readSpeechManifest(root string, m SpeechModel) ([]SpeechFile, error) {
 	}
 	if why := speechMissingRole(m, man.Files); why != "" {
 		return nil, fmt.Errorf("%w: %s: %s", ErrModel, p, why)
+	}
+	// An extra is fetched on its own, so its record must also match its own
+	// pin: a manifest from an older pin of it is refused.
+	for _, e := range m.Extras {
+		if !slices.ContainsFunc(man.Files, func(f SpeechFile) bool { return f.Path == e.Path && f.Size == e.Size && f.SHA256 == e.SHA256 }) {
+			return nil, fmt.Errorf("%w: %s does not record %s as this lever pins it (sha256 %s)", ErrModel, p, e.Path, e.SHA256)
+		}
 	}
 	return man.Files, nil
 }

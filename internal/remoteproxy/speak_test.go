@@ -30,7 +30,7 @@ func (s *speakRec) available() (voice.SpeakHealth, bool) {
 	if !s.up.Load() {
 		return voice.SpeakHealth{}, false
 	}
-	return voice.SpeakHealth{Ready: true, Model: "kokoro-en-v0_19", Voice: "bf_emma",
+	return voice.SpeakHealth{Ready: true, Model: "kokoro-multi-lang-v1_0", Voice: "bf_emma",
 		Voices: []voice.SpeakVoice{{Name: "bf_emma", Lang: "en-GB"}, {Name: "am_adam", Lang: "en-US"}}, MaxChars: 100}, true
 }
 

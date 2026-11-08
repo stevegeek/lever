@@ -46,6 +46,12 @@ type Speaker struct {
 	bad     string // speechStamp of the files at their last full verify that failed
 	badErr  error
 	checked time.Time
+	// probed is the program and files the probe ran with, probeErr its
+	// result; lexStamp and lex the files the lexicons were read from.
+	probed   string
+	probeErr error
+	lexStamp string
+	lex      map[string]Lexicon // by voice language
 }
 
 func (s *Speaker) logf(format string, a ...any) {
@@ -55,11 +61,57 @@ func (s *Speaker) logf(format string, a ...any) {
 }
 
 // Check runs before every run: the program must pass CheckServer and still
-// resolve to the file it resolved to the first time, and the model must
-// verify. Files are hashed only when their stamp changed; a stamp that
-// failed before fails again without a hash. It returns the program's real
-// path.
+// resolve to the file it resolved to the first time, the model must verify,
+// and the program must have spoken a short probe text with it (once for a
+// program and its files: a sherpa-onnx older than 2.0 fails here). Files
+// are hashed only when their stamp changed; a stamp that failed before
+// fails again without a hash. It returns the program's real path.
 func (s *Speaker) Check() (string, error) {
+	real, err := s.checkFiles()
+	if err != nil {
+		return "", err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if key := real + "\x00" + s.stamp; s.probed != key {
+		s.probeErr = s.probe(real)
+		s.probed = key
+		if s.probeErr != nil {
+			s.logf("voice: %v", s.probeErr)
+		}
+	}
+	if s.probeErr != nil {
+		return "", s.probeErr
+	}
+	return real, nil
+}
+
+// probeText is what the probe speaks.
+const probeText = "Ready."
+
+// probe speaks probeText with the default voice and checks the WAV.
+func (s *Speaker) probe(real string) error {
+	v, ok := s.Model.Voice(s.Model.DefaultVoice)
+	if !ok {
+		return fmt.Errorf("the model %s has no voice %q", s.Model.Name, s.Model.DefaultVoice)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), s.maxWait())
+	defer cancel()
+	if _, err := s.synth(ctx, real, v, probeText); err != nil {
+		return fmt.Errorf("%s could not speak with the model %s (%v): lever needs sherpa-onnx 2.0 or later, which reads the model's lexicons (1.x refuses them)", real, s.Model.Name, err)
+	}
+	return nil
+}
+
+func (s *Speaker) maxWait() time.Duration {
+	if s.MaxWait > 0 {
+		return s.MaxWait
+	}
+	return 2 * time.Minute
+}
+
+// checkFiles is Check without the probe.
+func (s *Speaker) checkFiles() (string, error) {
 	if why := s.Model.Pinned(); why != "" {
 		return "", fmt.Errorf("%w: %s", ErrUnpinned, why)
 	}
@@ -131,12 +183,44 @@ func (s *Speaker) Speak(ctx context.Context, text, voice string) ([]byte, error)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrSpeakNotSent, err)
 	}
-	wait := s.MaxWait
-	if wait <= 0 {
-		wait = 2 * time.Minute
+	lex, err := s.lexicon(v)
+	if err != nil {
+		return nil, fmt.Errorf("%w: reading the lexicons: %v", ErrSpeakNotSent, err)
 	}
-	ctx, cancel := context.WithTimeout(ctx, wait)
+	if in = SpeakableText(in, lex); in == "" {
+		return nil, fmt.Errorf("%w: %w: nothing to speak", ErrSpeakNotSent, ErrBadText)
+	}
+	ctx, cancel := context.WithTimeout(ctx, s.maxWait())
 	defer cancel()
+	return s.synth(ctx, real, v, in)
+}
+
+// lexicon is the words of v's lexicons, read once for the files that last
+// verified.
+func (s *Speaker) lexicon(v SpeechVoice) (Lexicon, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lex == nil || s.lexStamp != s.stamp {
+		s.lex, s.lexStamp = map[string]Lexicon{}, s.stamp
+	}
+	if l, ok := s.lex[v.Lang]; ok {
+		return l, nil
+	}
+	var paths []string
+	for _, p := range s.Model.LexiconFiles(v) {
+		paths = append(paths, SpeechPath(s.ModelDir, s.Model, p))
+	}
+	l, err := LoadLexicon(paths...)
+	if err != nil {
+		return nil, err
+	}
+	s.lex[v.Lang] = l
+	return l, nil
+}
+
+// synth runs the engine once on text (which passed SpeechInput) and returns
+// the checked WAV.
+func (s *Speaker) synth(ctx context.Context, real string, v SpeechVoice, in string) ([]byte, error) {
 	tmp, err := os.MkdirTemp(s.ModelDir, speakTempPrefix)
 	if err != nil {
 		return nil, fmt.Errorf("%w: a private directory for the output: %v", ErrSpeakNotSent, err)

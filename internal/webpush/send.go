@@ -175,7 +175,8 @@ type Sender struct {
 // here: a stored subscription is never trusted to still pass. An error
 // names the endpoint's host, never its path (the path is the capability).
 // status is the push service's answer: its 2xx on success (services answer
-// 200, 201 or 202), 0 when no answer came.
+// 200, 201 or 202), its other status with an *HTTPError, and 0 when no
+// answer came.
 func (s *Sender) Send(ctx context.Context, sub Subscription, payload []byte) (status int, err error) {
 	u, err := CheckEndpoint(sub.Endpoint, s.Test)
 	if err != nil {

@@ -276,11 +276,14 @@ func TestWakeBrokerRefusalGivesTheSlotBack(t *testing.T) {
 		secondCode int
 		calls      int
 	}{
-		"broker 409":    {&WakeError{Status: 409, Err: errors.New("not asleep")}, http.StatusConflict, 2},
-		"broker 403":    {&WakeError{Status: 403, Err: errors.New("revoked")}, http.StatusConflict, 2},
-		"broker 503":    {&WakeError{Status: 503, Err: errors.New("busy")}, http.StatusTooManyRequests, 1},
-		"broker 502":    {&WakeError{Status: 502, Err: errors.New("runtime")}, http.StatusTooManyRequests, 1},
-		"broker absent": {&WakeError{Err: errors.New("dial")}, http.StatusTooManyRequests, 1},
+		"broker 409": {&WakeError{Status: 409, Err: errors.New("not asleep")}, http.StatusConflict, 2},
+		"broker 403": {&WakeError{Status: 403, Err: errors.New("revoked")}, http.StatusConflict, 2},
+		// The hub refused a resume the broker did start: the slot stays
+		// spent, so a contact cannot drive repeated resumes.
+		"hub refused 409": {&WakeError{Status: 409, Reason: ReasonHubRefused, Err: errors.New("hub refused")}, http.StatusTooManyRequests, 1},
+		"broker 503":      {&WakeError{Status: 503, Err: errors.New("busy")}, http.StatusTooManyRequests, 1},
+		"broker 502":      {&WakeError{Status: 502, Err: errors.New("runtime")}, http.StatusTooManyRequests, 1},
+		"broker absent":   {&WakeError{Err: errors.New("dial")}, http.StatusTooManyRequests, 1},
 	} {
 		t.Run(name, func(t *testing.T) {
 			hub := newPageHub(t)

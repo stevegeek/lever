@@ -85,7 +85,7 @@ func resumeClearingStopClaim(ctx context.Context, d Deps, name, project, subject
 			case errors.Is(serr, jail.ErrNoContainer):
 				cleared, lastState = true, "gone"
 			case serr != nil:
-				return stopClaimFailure(subject, ref, "lever could not read the container's state from podman ("+termsafe.Sanitize(serr.Error())+"), so it removed nothing", err)
+				return stopClaimFailure(subject, ref, "lever could not read the container's state from podman ("+termsafe.Sanitize(serr.Error())+"), so it removed nothing", err, serr)
 			case st.Removable():
 				if cerr := clearStaleContainer(ctx, d, subject, ref, st); cerr != nil {
 					return cerr
@@ -154,14 +154,15 @@ func clearStaleContainer(ctx context.Context, d Deps, subject, ref string, st ja
 // set, is what failed last (the hub's answer, or podman's when lever could
 // not inspect or remove the container); its text comes last, sanitized, as
 // in ResumeFailed, and it stays reachable with errors.Is and errors.As.
-func stopClaimFailure(subject, ref, why string, cause error) error {
+// also are further causes the error unwraps to; only cause is quoted.
+func stopClaimFailure(subject, ref, why string, cause error, also ...error) error {
 	tail := ""
 	if cause != nil {
 		tail = " Cause: " + termsafe.Sanitize(scion.ErrSummary(cause))
 	}
 	msg := fmt.Sprintf("%s: %s: %s. lever did NOT delete the manager: its record and its conversation are kept. "+
 		"%s.%s", subject, ErrStopClaimHeld, why, StopClaimManualFix(ref), tail)
-	return cli.WithExitCode(&stopClaimError{msg: msg, cause: cause}, cli.ExitManagerResumeFailed)
+	return cli.WithExitCode(&stopClaimError{msg: msg, cause: cause, also: also}, cli.ExitManagerResumeFailed)
 }
 
 // stopClaimError is stopClaimFailure's error: its text is the sanitized
@@ -169,15 +170,22 @@ func stopClaimFailure(subject, ref, why string, cause error) error {
 type stopClaimError struct {
 	msg   string
 	cause error
+	also  []error
 }
 
 func (e *stopClaimError) Error() string { return e.msg }
 
 func (e *stopClaimError) Unwrap() []error {
-	if e.cause == nil {
-		return []error{ErrStopClaimHeld}
+	out := []error{ErrStopClaimHeld}
+	if e.cause != nil {
+		out = append(out, e.cause)
 	}
-	return []error{ErrStopClaimHeld, e.cause}
+	for _, a := range e.also {
+		if a != nil {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // StopClaimManualFix is the fix by hand for a stop claim a stopped container

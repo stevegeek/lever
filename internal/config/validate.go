@@ -88,7 +88,7 @@ func (t Tool) validate() error {
 		// word for who calls it, on the network. Only a literal IP is checked
 		// without trusting a resolver, as for external tools.
 		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
-			return fmt.Errorf("config: broker tool %q backend %q is not a literal loopback IP: the broker starts the tool listening there, so anything else would expose it beyond this host (use 127.0.0.1:PORT)", t.Name, t.Backend)
+			return fmt.Errorf("config: broker tool %q backend %q is not a literal loopback IP: the broker starts the tool listening there, so anything else would expose it beyond this host (use 127.0.0.1:PORT, keeping any scheme and path)", t.Name, t.Backend)
 		}
 		if len(t.Operations) == 0 {
 			return fmt.Errorf("config: broker tool %q needs operations (the tool calls agents may be granted)", t.Name)

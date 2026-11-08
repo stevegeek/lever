@@ -7,6 +7,18 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **The manager hears when a service host is back.** An agent that holds back work while a service
+  host is away (writes queued while a laptop sleeps) had no way to know when to try again. The
+  broker now checks each service host once a minute, and a failed tool call checks its host at
+  once. When a host it saw down answers again, the broker sends the manager one message, marked
+  `[lever: service host back]`, naming the host and its tools. It goes out at most once every 10
+  minutes per host, never on the first check after the broker starts, and not to a manager that is
+  not running. The manager's skill gains the `service-host-notice` kind, only on instances with a
+  service host, so other instances keep their skill unchanged. Host-only: the Jail ABI does not
+  change. (T0352)
+
 ### Fixed
 
 - **Hub lists are read past their first page.** lever looked up an access constraint by name, and
@@ -18,11 +30,11 @@ version bump moves the block under the new version heading.
   page, is an error rather than "none found". Host-only: the Jail ABI does not change.
 - **A refused wake no longer locks the agent's wake for a minute.** The chat page's wake button
   allows one wake per agent a minute, and took that slot before asking the broker. When the broker
-  refused (the agent was not asleep after all, it is revoked, or the hub refused the resume and
-  kept the record), nothing had started, but the next wake was still refused with "rate-limited"
-  for 60 s. A broker refusal now gives the slot back. A broker that is busy with another resume,
-  fails, or cannot be reached still spends it, so a failing broker is not retried more than once a
-  minute. Host-only: the Jail ABI does not change.
+  refused before starting anything (the agent was not asleep after all, it is revoked, or the
+  worker cap is reached), the next wake was still refused with "rate-limited" for 60 s. Such a
+  refusal now gives the slot back. The hub refusing a resume the broker did start still spends
+  it, as do a broker busy with another resume, a broker that fails, and one that cannot be reached,
+  so none of them is retried more than once a minute. Host-only: the Jail ABI does not change.
 - **Four HTTP answers carry the right status.**
   - A push subscription whose body could not be read (a dropped connection, a bad chunked body)
     was answered 413 `too-large`; it is now 400 `bad-body`. Only a body over the limit gets 413.
@@ -51,8 +63,9 @@ version bump moves the block under the new version heading.
   temporary directory once it is an hour old, which is how a backup killed midway is cleaned up.
   A backup still being written by another lever command after an hour (a very large conversation,
   a slow disk) lost its directory the same way and failed. A backup in progress now holds a lock
-  in its directory, which the sweep checks first; a killed one has released its lock and is still
-  removed. Host-only: the Jail ABI does not change.
+  in its directory until it is renamed into place, which the sweep checks first; a killed one has
+  released its lock and is still removed. A store on a filesystem with no file locks saves as
+  before, unlocked. Host-only: the Jail ABI does not change.
 - **A supervised tool's `backend` must be loopback.** The broker starts a tool with
   `-backend <backend>` as its listen address, and config load only checked that it parsed as
   `host:port`, so `backend: 0.0.0.0:3210` loaded and the tool listened on every interface. A
@@ -65,18 +78,9 @@ version bump moves the block under the new version heading.
 
 - **Supervised tool backends.** A config whose supervised tool sets `backend` to anything but a
   literal loopback IP (`0.0.0.0`, a LAN address, or a name such as `localhost`) no longer loads;
-  write `127.0.0.1:PORT`. Every tool lever ships, and every example, already does.
-### Added
-
-- **The manager hears when a service host is back.** An agent that holds back work while a service
-  host is away (writes queued while a laptop sleeps) had no way to know when to try again. The
-  broker now checks each service host once a minute, and a failed tool call checks its host at
-  once. When a host it saw down answers again, the broker sends the manager one message, marked
-  `[lever: service host back]`, naming the host and its tools. It goes out at most once every 10
-  minutes per host, never on the first check after the broker starts, and not to a manager that is
-  not running. The manager's skill gains the `service-host-notice` kind, only on instances with a
-  service host, so other instances keep their skill unchanged. Host-only: the Jail ABI does not
-  change. (T0352)
+  write `127.0.0.1:PORT`. Every tool lever ships, and every example, already does. A running
+  instance whose config is refused keeps running until the next `lever apply`, `lever up` or
+  broker restart, which then stops with the reason.
 
 ## [1.0.0-beta.7] - 2026-11-08
 

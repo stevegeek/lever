@@ -591,13 +591,37 @@ func remoteWake(app *config.App, st state.State) func(ctx context.Context, login
 	}
 	client := udsClient(st.OperatorSock())
 	return func(ctx context.Context, login, tier, worker string) error {
-		err := httpjson.Post(ctx, client, udsURL+broker.PathOperatorWorkerResume,
+		// The broker's refusal reason rides in a header that httpjson does
+		// not keep; a recording transport per call reads it.
+		rec := &reasonRecorder{base: client.Transport}
+		c := *client
+		c.Transport = rec
+		err := httpjson.Post(ctx, &c, udsURL+broker.PathOperatorWorkerResume,
 			broker.WorkerResumeRequest{For: &broker.ResumeFor{Worker: worker, Login: login, Tier: tier}}, nil)
 		if err != nil {
-			return &remoteproxy.WakeError{Status: httpjson.Status(err), Err: err}
+			return &remoteproxy.WakeError{Status: httpjson.Status(err), Reason: rec.reason, Err: err}
 		}
 		return nil
 	}
+}
+
+// reasonRecorder keeps the broker's refusal reason header of the answer it
+// carries.
+type reasonRecorder struct {
+	base   http.RoundTripper
+	reason string
+}
+
+func (r *reasonRecorder) RoundTrip(req *http.Request) (*http.Response, error) {
+	base := r.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	resp, err := base.RoundTrip(req)
+	if resp != nil {
+		r.reason = resp.Header.Get(broker.ReasonHeader)
+	}
+	return resp, err
 }
 
 // agentMessagesTimeout bounds one match question; the proxy holds the

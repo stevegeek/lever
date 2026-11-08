@@ -34,6 +34,8 @@ const (
 // WakeError carries the broker's HTTP status (0: the broker was not reached).
 type WakeError struct {
 	Status int
+	// Reason is the broker's X-Lever-Reason on a refusal (broker.Reason*).
+	Reason string
 	Err    error
 }
 
@@ -176,13 +178,14 @@ func (g *gate) serveWake(w http.ResponseWriter, r *http.Request, line *AuditLine
 	case err := <-done:
 		if err != nil {
 			status, word := wakeFailure(err)
-			// A broker 4xx is a refusal before any resume started (not a
-			// worker, revoked, role mismatch, not asleep, the hub refused
-			// and kept the record): it gives the slot back, like a refusal
-			// here. Busy (another resume under way), a runtime error or an
-			// unreachable broker keep it spent, so a failing broker or hub
-			// is not retried faster than once a minute.
-			if status == http.StatusConflict {
+			// A broker 4xx refused before any resume started (not a worker,
+			// revoked, role mismatch, not asleep, the worker cap): it gives
+			// the slot back, like a refusal here. The hub refusing a resume
+			// the broker did start keeps it spent: that refusal came after
+			// a ticket was staged and scion ran, and can persist, so it must
+			// not be retried faster than once a minute. So do busy (another
+			// resume under way), a runtime error or an unreachable broker.
+			if status == http.StatusConflict && wakeReason(err) != ReasonHubRefused {
 				g.wakes.give(name)
 			}
 			refuse(status, word, nil)
@@ -192,6 +195,18 @@ func (g *gate) serveWake(w http.ResponseWriter, r *http.Request, line *AuditLine
 		go g.auditLateWake(*line, done)
 	}
 	g.answerWakeJSON(w, r, line, DecisionWake, http.StatusAccepted, map[string]string{"state": "starting"})
+}
+
+// ReasonHubRefused mirrors broker.ReasonHubRefused (the proxy must not
+// import the broker). Keep the two in step.
+const ReasonHubRefused = "hub-refused"
+
+func wakeReason(err error) string {
+	var we *WakeError
+	if errors.As(err, &we) {
+		return we.Reason
+	}
+	return ""
 }
 
 // wakeFailure: a broker 4xx is "refused", anything else "failed".

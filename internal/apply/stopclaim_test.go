@@ -260,10 +260,16 @@ func TestStopClaimNoContainerWaits(t *testing.T) {
 		t.Fatalf("calls %v", j.calls)
 	}
 	// Any other podman failure removes nothing and stops at once.
-	j = &fakeJanitor{stateErr: errors.New("cannot connect to podman")}
+	podmanDown := errors.New("cannot connect to podman")
+	j = &fakeJanitor{stateErr: podmanDown}
 	n = 0
-	if err := resumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, held)); !errors.Is(err, ErrStopClaimHeld) || n != 1 {
+	err := resumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, held))
+	if !errors.Is(err, ErrStopClaimHeld) || n != 1 {
 		t.Fatalf("err %v resumes %d", err, n)
+	}
+	// Both the podman error and the hub's refusal stay reachable.
+	if !errors.Is(err, podmanDown) || !errors.Is(err, held) {
+		t.Fatalf("the causes are lost: %v", err)
 	}
 	// Unwired: the manual fix, nothing else.
 	n = 0

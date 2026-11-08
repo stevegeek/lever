@@ -55,7 +55,9 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 	}
 	rp := newToolProxy(target)
 	sh, onServiceHost := b.serviceHosts[toolName]
+	var disc *hostDiscovery
 	if onServiceHost {
+		disc = loadHostDiscovery(sh.DiscoveryCache)
 		rp.Transport = sh.Transport
 		// Set on the outbound request, after hop-by-hop removal, so an agent's
 		// Connection header cannot drop it. For the service host's audit log
@@ -72,6 +74,23 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 			if resp.StatusCode == http.StatusForbidden && resp.Request != nil {
 				b.audit(toolName, callerFrom(resp.Request.Context()), "deny", "service_host.refused", "host", sh.Host)
 			}
+			// The host is up but cannot answer (its tool is down or busy):
+			// discovery comes from the copy, like when the host is away.
+			if resp.Request != nil && isUnavailable(resp.StatusCode) {
+				if out, ok := b.discoveryFromCopy(disc, toolName, resp.Request.Context()); ok {
+					replaceResponse(resp, out)
+					return nil
+				}
+				if initializedFromCopy(disc, resp.Request.Context()) {
+					replaceResponse(resp, nil)
+					return nil
+				}
+			}
+			if err := disc.captureDiscovery(resp, func(err error) {
+				b.log.Warn("gateway.discovery_copy", "op", toolName, "err", err.Error())
+			}); err != nil {
+				return err
+			}
 			return augment(resp)
 		}
 	}
@@ -86,6 +105,15 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 		if ok, suppressed := limit.allow(time.Now()); ok {
 			b.audit(toolName, callerFrom(r.Context()), "error", "gateway.backend_unavailable",
 				"backend", target.Host, "err", logging.Redact(err.Error()), "suppressed", suppressed)
+		}
+		if out, ok := b.discoveryFromCopy(disc, toolName, r.Context()); ok {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(out)
+			return
+		}
+		if initializedFromCopy(disc, r.Context()) {
+			w.WriteHeader(http.StatusAccepted)
+			return
 		}
 		// The backend host is operator topology the agent has no use for: it
 		// goes to the log only.
@@ -155,7 +183,13 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 		// messages would cross unauthorized, and fails a malformed one with
 		// agent-chosen text before dialing. MCP never upgrades.
 		r.Header.Del("Upgrade")
-		rp.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), callerKey{}, caller)))
+		ctx := context.WithValue(r.Context(), callerKey{}, caller)
+		if disc != nil {
+			if m := r.Header.Get("X-Lever-Method"); discoveryMethods[m] || m == "notifications/initialized" {
+				ctx = context.WithValue(ctx, discoveryKey{}, newDiscoveryRequest(m, body))
+			}
+		}
+		rp.ServeHTTP(w, r.WithContext(ctx))
 	}), nil
 }
 

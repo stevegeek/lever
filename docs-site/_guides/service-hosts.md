@@ -258,6 +258,7 @@ on that port: the service host terminates TLS itself.
 | What happens | What the agent sees | What is logged |
 |---|---|---|
 | The service host is down, asleep or off the tailnet | That call gets `503` (`tool <name>: backend unavailable; try again later`). Other hosts' tools keep working. The next call after it is back works: each call dials again if needed. | `broker.log`: one `gateway.backend_unavailable` line per tool per minute, with the address and the error. |
+| An agent's MCP client starts or reconnects while the service host is away, or while the host answers `502`, `503` or `504` for the tool | The tool's tools are still listed: the broker answers `initialize` and `tools/list` from the last good answers it kept for that tool, and `notifications/initialized` with `202`. Calls get `503` until the host is back, then work. See [Discovery while a host is away](#discovery-while-a-host-is-away) for when no copy exists. | `broker.log`: `gateway.discovery_from_copy` with the tool and method. |
 | The service host restarted | Nothing: the service host keeps no sessions. For an `upstream` tool, a restarted upstream's own `404` for an unknown session reaches the client, which opens a new session. | |
 | A stdio server exited | Calls in flight get `503`; the next call starts it again. | Service host log: the exit. |
 | A call ran past `call_timeout` | `504`. | Service host log. |
@@ -265,6 +266,24 @@ on that port: the service host terminates TLS itself.
 | The service host's key changed (re-`init`, or a machine pretending to be it) | `503`, as for a down host. | `broker.log`: the certificate pin mismatch. *service host* doctor row fails. |
 | The broker's key changed (`pair --rotate`) and the service host was not updated | `503`. | Service host log: the refused client fingerprint. Doctor row fails and prints the fingerprint to set. |
 | Not paired yet | The broker does not start; `lever apply` names the service host. | |
+
+### Discovery while a host is away
+
+The broker keeps each service-host tool's last good `initialize` and `tools/list` answers in
+`.lever-state/service-hosts/<host>/discovery-<tool>.json` (`0600`), and replaces them whenever a
+live answer differs. It serves them only while the host cannot answer. There is no copy, and an
+agent's client fails to start that tool as before, when:
+
+- the tool has not answered `initialize` and `tools/list` since it was configured;
+- the tool's server opens sessions (its `initialize` sets `Mcp-Session-Id`): a copied `initialize`
+  has no session, so later calls would be refused for it;
+- the server answers over an event stream instead of plain JSON (some `upstream` servers do; stdio
+  tools always answer JSON);
+- the client asks for another MCP `protocolVersion` than the copy's, or for a later page of a
+  paginated `tools/list`.
+
+A copy can list tools the host no longer has, until the next live answer: a call to one is refused
+by the host. To drop a copy, delete its file.
 
 ## Doctor
 

@@ -44,7 +44,8 @@ func ServiceHostRoutes(app *config.App, st state.State) (map[string]broker.Servi
 		}
 		tr := servicehost.FileTransport(certPath, keyPath, pin)
 		for _, t := range tools {
-			routes[t.Name] = broker.ServiceHostRoute{Host: h.Name, Transport: tr}
+			routes[t.Name] = broker.ServiceHostRoute{Host: h.Name, Transport: tr,
+				DiscoveryCache: st.ServiceHostDiscovery(h.Name, t.Name)}
 		}
 	}
 	return routes, nil

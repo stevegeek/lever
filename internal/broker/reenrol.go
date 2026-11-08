@@ -10,9 +10,11 @@ import (
 	"github.com/stevegeek/lever/internal/scion"
 )
 
-// Natural-lapse auto-re-enrol: the mTLS listener reports a client cert that
-// is our CA's and otherwise valid but expired (ca.LapseFunc; the check is
-// cryptographic, so a forged or foreign cert never counts as a lapse). The
+// Natural-lapse auto-re-enrol: the jail server reports a client that proved
+// in the handshake it holds the key of a cert that is our CA's and otherwise
+// valid but expired (ca.LapseFunc, from ca.LapseGate; the check is
+// cryptographic, so a forged or foreign cert, or a copy without its key,
+// never counts as a lapse). The
 // healer re-stages a fresh one-use ticket and bounces the agent so its boot
 // re-enrols. Every heal is still gated: the CN must be configured, not
 // revoked, and allowed by auto_reenrol, and a per-CN cooldown and attempt cap
@@ -31,8 +33,8 @@ const (
 )
 
 // lapseFunc returns nil when the healer is disabled. The hook runs on
-// handshake goroutines, so it only enqueues; a full queue drops the event and
-// the next failing handshake re-emits it.
+// request goroutines, so it only enqueues; a full queue drops the event and
+// the next refused request re-emits it.
 func (b *Broker) lapseFunc() ca.LapseFunc {
 	if b.autoReenrol == autoReenrolOff || b.runtime == nil {
 		return nil

@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stevegeek/lever/internal/backend/registry"
 	"github.com/stevegeek/lever/internal/broker"
@@ -113,7 +114,7 @@ func (f *fakeWorkerRuntime) Inbox(_ context.Context, _ bool, _ string) ([]scion.
 func fakeTLSWithCN(cn string) *tls.ConnectionState {
 	return &tls.ConnectionState{
 		PeerCertificates: []*x509.Certificate{
-			{Subject: pkix.Name{CommonName: cn}},
+			{Subject: pkix.Name{CommonName: cn}, NotAfter: time.Now().Add(time.Hour)},
 		},
 	}
 }

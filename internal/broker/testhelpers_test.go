@@ -348,7 +348,7 @@ func directiveTestBroker(t *testing.T) (b *Broker, priv string, allowedSigners s
 func fakeTLSWithCN(cn string) *tls.ConnectionState {
 	return &tls.ConnectionState{
 		PeerCertificates: []*x509.Certificate{
-			{Subject: pkix.Name{CommonName: cn}},
+			{Subject: pkix.Name{CommonName: cn}, NotAfter: time.Now().Add(time.Hour)},
 		},
 	}
 }

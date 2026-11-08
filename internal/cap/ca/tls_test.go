@@ -1,6 +1,7 @@
 package ca
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -169,14 +170,16 @@ func caSignedCert(t *testing.T, c *CA, cn string, notBefore, notAfter time.Time,
 func lapseServerFor(t *testing.T, c *CA, onLapse LapseFunc) *httptest.Server {
 	t.Helper()
 	cfg := serverTLSConfig(t, c, onLapse)
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv := httptest.NewUnstartedServer(LapseGate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}), onLapse, nil))
+	srv.Config.ConnContext = ConnContext
 	srv.TLS = cfg
 	srv.StartTLS()
 	return srv
 }
 
-// The handshake rejects every expired leaf; the hook fires only for our
-// CA's otherwise-valid, merely expired cert.
+// A lapse-shaped leaf completes the handshake (which proves the key) and is
+// refused with 401 by LapseGate, which fires the hook. Every other expired or
+// foreign leaf fails the handshake, and the hook never fires for it.
 func TestLapseHookFiresOnlyForOurExpiredCert(t *testing.T) {
 	c, err := Generate()
 	if err != nil {
@@ -192,17 +195,20 @@ func TestLapseHookFiresOnlyForOurExpiredCert(t *testing.T) {
 	pool := x509.NewCertPool()
 	pool.AddCert(c.Cert)
 
-	dial := func(cert *tls.Certificate) error {
+	// dial returns the HTTP status, or an error when the handshake fails.
+	dial := func(cert *tls.Certificate) (int, error) {
 		cfg := &tls.Config{RootCAs: pool, ServerName: "example.test"}
 		if cert != nil {
 			cfg.Certificates = []tls.Certificate{*cert}
 		}
 		client := &http.Client{Transport: &http.Transport{TLSClientConfig: cfg}}
+		defer client.CloseIdleConnections()
 		resp, err := client.Get(srv.URL)
-		if err == nil {
-			resp.Body.Close()
+		if err != nil {
+			return 0, err
 		}
-		return err
+		resp.Body.Close()
+		return resp.StatusCode, nil
 	}
 	drainLapse := func() (string, bool) {
 		select {
@@ -212,46 +218,57 @@ func TestLapseHookFiresOnlyForOurExpiredCert(t *testing.T) {
 			return "", false
 		}
 	}
+	mustFailHandshake := func(what string, cert *tls.Certificate) {
+		t.Helper()
+		if code, err := dial(cert); err == nil {
+			t.Fatalf("%s must fail the handshake, got HTTP %d", what, code)
+		}
+		if cn, ok := drainLapse(); ok {
+			t.Fatalf("lapse hook must not fire for %s, fired with %q", what, cn)
+		}
+	}
 
-	// (a) our expired cert: handshake fails, hook fires with the CN.
+	// (a) our expired cert, with its key: handshake succeeds, the request is
+	// refused, the hook fires with the CN.
 	ours := expiredClientCert(t, c, "scratch")
-	if err := dial(&ours); err == nil {
-		t.Fatal("expired cert must fail the handshake")
+	if code, err := dial(&ours); err != nil || code != http.StatusServiceUnavailable {
+		t.Fatalf("lapsed cert: got (%d, %v), want 503 after a completed handshake", code, err)
 	}
 	if cn, ok := drainLapse(); !ok || cn != "scratch" {
 		t.Fatalf("lapse hook: got (%q,%v), want (scratch,true)", cn, ok)
 	}
 
-	// (b) foreign CA's EXPIRED cert: handshake fails, no hook.
+	// (a2) the same expired cert presented WITHOUT its key (someone holding a
+	// copy of the public cert): the handshake's CertificateVerify fails, and
+	// the hook must not fire. This is the case the gate exists for: Go runs
+	// VerifyConnection before CertificateVerify.
+	stranger, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copied := tls.Certificate{Certificate: ours.Certificate, PrivateKey: stranger}
+	mustFailHandshake("an expired cert presented without its key", &copied)
+
+	// (b) foreign CA's EXPIRED cert.
 	foreignExpired := expiredClientCert(t, other, "scratch")
-	if err := dial(&foreignExpired); err == nil {
-		t.Fatal("foreign expired cert must fail the handshake")
-	}
-	if cn, ok := drainLapse(); ok {
-		t.Fatalf("lapse hook must not fire for a foreign CA's cert, fired with %q", cn)
-	}
+	mustFailHandshake("a foreign CA's expired cert", &foreignExpired)
 
-	// (c) foreign CA's VALID cert: handshake fails, no hook.
+	// (c) foreign CA's VALID cert.
 	foreignValid := signedClientCert(t, other, "scratch")
-	if err := dial(&foreignValid); err == nil {
-		t.Fatal("foreign valid cert must fail the handshake")
-	}
-	if cn, ok := drainLapse(); ok {
-		t.Fatalf("lapse hook must not fire for a foreign CA's valid cert, fired with %q", cn)
-	}
+	mustFailHandshake("a foreign CA's valid cert", &foreignValid)
 
-	// (d) our valid cert: handshake succeeds, no hook.
+	// (d) our valid cert: served, no hook.
 	valid := signedClientCert(t, c, "scratch")
-	if err := dial(&valid); err != nil {
-		t.Fatalf("valid cert handshake: %v", err)
+	if code, err := dial(&valid); err != nil || code != http.StatusOK {
+		t.Fatalf("valid cert: got (%d, %v), want 200", code, err)
 	}
 	if cn, ok := drainLapse(); ok {
 		t.Fatalf("lapse hook must not fire for a valid cert, fired with %q", cn)
 	}
 
-	// (e) certless: handshake succeeds (per-route gates enforce), no hook.
-	if err := dial(nil); err != nil {
-		t.Fatalf("certless handshake: %v", err)
+	// (e) certless: served (per-route gates enforce identity), no hook.
+	if code, err := dial(nil); err != nil || code != http.StatusOK {
+		t.Fatalf("certless: got (%d, %v), want 200", code, err)
 	}
 	if cn, ok := drainLapse(); ok {
 		t.Fatalf("lapse hook must not fire for a certless connection, fired with %q", cn)
@@ -259,28 +276,115 @@ func TestLapseHookFiresOnlyForOurExpiredCert(t *testing.T) {
 
 	// (f) our NOT-YET-VALID cert (future window): x509 reports this with the
 	// same Reason (Expired) as a genuine age-out, but it is clock skew, not a
-	// lapse — handshake fails, no hook, no automated bounce.
+	// lapse.
 	future := caSignedCert(t, c, "scratch",
 		time.Now().Add(10*time.Minute), time.Now().Add(50*time.Minute),
 		x509.ExtKeyUsageClientAuth)
-	if err := dial(&future); err == nil {
-		t.Fatal("not-yet-valid cert must fail the handshake")
-	}
-	if cn, ok := drainLapse(); ok {
-		t.Fatalf("lapse hook must not fire for a not-yet-valid cert, fired with %q", cn)
-	}
+	mustFailHandshake("a not-yet-valid cert", &future)
 
 	// (g) our EXPIRED cert with the WRONG EKU (server-auth): the time defect
 	// surfaces first in Verify, but the midpoint re-verify must catch the EKU
-	// mismatch — handshake fails, no hook.
+	// mismatch.
 	wrongEKU := caSignedCert(t, c, "scratch",
 		time.Now().Add(-50*time.Minute), time.Now().Add(-10*time.Minute),
 		x509.ExtKeyUsageServerAuth)
-	if err := dial(&wrongEKU); err == nil {
-		t.Fatal("expired wrong-EKU cert must fail the handshake")
+	mustFailHandshake("an expired wrong-EKU cert", &wrongEKU)
+
+	// (h) our cert expired less than LapseGrace ago: it fails the handshake
+	// as before, so a connection accepted before its NotAfter can never pass
+	// as a lapse or as valid.
+	justExpired := caSignedCert(t, c, "scratch",
+		time.Now().Add(-50*time.Minute), time.Now().Add(-LapseGrace/2),
+		x509.ExtKeyUsageClientAuth)
+	mustFailHandshake("a cert within the lapse grace", &justExpired)
+}
+
+// Without a hook the server keeps refusing every expired leaf in the
+// handshake.
+func TestNoLapseHookRejectsExpiredInHandshake(t *testing.T) {
+	c, err := Generate()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if cn, ok := drainLapse(); ok {
-		t.Fatalf("lapse hook must not fire for an expired wrong-EKU cert, fired with %q", cn)
+	srv := lapseServerFor(t, c, nil)
+	defer srv.Close()
+	pool := x509.NewCertPool()
+	pool.AddCert(c.Cert)
+	ours := expiredClientCert(t, c, "scratch")
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
+		RootCAs: pool, ServerName: "example.test", Certificates: []tls.Certificate{ours},
+	}}}
+	if resp, err := client.Get(srv.URL); err == nil {
+		resp.Body.Close()
+		t.Fatalf("expired cert without a lapse hook must fail the handshake, got HTTP %d", resp.StatusCode)
+	}
+}
+
+// lapsedLeaf refuses a leaf that had expired at accept or is now past the
+// grace, and reports only one that was past the grace before the accept.
+// Without a recorded accept time it fails closed and never reports.
+func TestLapsedLeafUsesTheAcceptTime(t *testing.T) {
+	now := time.Now()
+	req := func(notAfter time.Time, accepted *time.Time) *http.Request {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{{
+			Subject: pkix.Name{CommonName: "scratch"}, NotAfter: notAfter,
+		}}}
+		if accepted != nil {
+			r = r.WithContext(context.WithValue(r.Context(), acceptTimeKey{}, *accepted))
+		}
+		return r
+	}
+	at := func(d time.Duration) *time.Time { v := now.Add(d); return &v }
+	cases := []struct {
+		name                  string
+		notAfter              time.Time
+		accepted              *time.Time
+		refuse, report, known bool
+	}{
+		{"lapsed before accept", now.Add(-3 * time.Minute), at(-time.Minute), true, true, true},
+		{"expired just before accept", now.Add(-30 * time.Second), at(-10 * time.Second), true, false, true},
+		{"expired while open, within grace", now.Add(-30 * time.Second), at(-2 * time.Minute), false, false, true},
+		{"expired while open, past grace", now.Add(-2 * time.Minute), at(-time.Hour), true, false, true},
+		{"accept after a clock step", now.Add(-2 * time.Minute), at(time.Hour), true, true, true},
+		{"valid", now.Add(time.Hour), at(-time.Minute), false, false, true},
+		{"no accept time, expired", now.Add(-time.Minute), nil, true, false, false},
+		{"no accept time, valid", now.Add(time.Hour), nil, false, false, false},
+	}
+	for _, tc := range cases {
+		_, refuse, report, known := lapsedLeaf(req(tc.notAfter, tc.accepted))
+		if refuse != tc.refuse || report != tc.report || known != tc.known {
+			t.Errorf("%s: got (refuse %v, report %v, known %v), want (%v, %v, %v)",
+				tc.name, refuse, report, known, tc.refuse, tc.report, tc.known)
+		}
+		_, err := RequireAgent(req(tc.notAfter, tc.accepted))
+		if (err != nil) != tc.refuse {
+			t.Errorf("%s: RequireAgent err = %v, want refused %v", tc.name, err, tc.refuse)
+		}
+	}
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.TLS = &tls.ConnectionState{}
+	if _, refuse, _, _ := lapsedLeaf(r); refuse {
+		t.Error("a certless request is not a lapse")
+	}
+}
+
+// A refused request that is not a lapse (no accept time here) is not
+// reported: it may be a valid connection whose leaf expired while open.
+func TestLapseGateReportsOnlyALapse(t *testing.T) {
+	fired := 0
+	gate := LapseGate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("a lapsed request reached the handler")
+	}), func(string) { fired++ }, nil)
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{{
+		Subject: pkix.Name{CommonName: "scratch"}, NotAfter: time.Now().Add(-time.Hour),
+	}}}
+	w := httptest.NewRecorder()
+	gate.ServeHTTP(w, r)
+	if w.Code != http.StatusServiceUnavailable || w.Header().Get("Retry-After") == "" || fired != 0 {
+		t.Fatalf("got %d (Retry-After %q) with %d reports, want 503 with Retry-After and none",
+			w.Code, w.Header().Get("Retry-After"), fired)
 	}
 }
 

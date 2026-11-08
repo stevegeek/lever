@@ -7,6 +7,22 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [1.0.0-beta.6] - 2026-11-08
+
+### Added
+
+- **`lever-tool-github -push-workflows` (opt-in).** Push tokens asked only for `contents: write`,
+  so GitHub refused every push that added or changed a file under `.github/workflows/`, even when
+  the App had the Workflows permission. With the new flag, push tokens also ask for
+  `workflows: write`. It is off by default: a pushed workflow runs before any review, with the
+  secrets visible to the repository, so the agent can run code of its choice on GitHub's runners.
+  The tool logs a warning when it starts with the flag. The GitHub tool guide's new section 9 lists
+  the guards to set up first: no repository or organization secrets outside an Environment limited
+  to `main`, no self-hosted runners, OIDC trust pinned to `main`, a code owner's review of
+  `/.github/` on `main`, and Actions not allowed to approve PRs. Other operations keep their permission sets, and `pr_merge`
+  still cannot merge a PR that changes `.github/workflows/`. Host-only: the Jail ABI does not
+  change.
+
 ### Fixed
 
 - **The certificate-lapse healer needs the agent's key.** When an agent's mTLS certificate has
@@ -35,6 +51,13 @@ version bump moves the block under the new version heading.
   backend does. A stopped machine whose OrbStack record mismatches is not started; one that fails
   only the in-guest check is stopped again. A machine lever created passes unchanged.
   Host-only: the Jail ABI does not change.
+
+### Upgrade
+
+- **Jail ABI unchanged.** No agent image rebuild. Everything here is host-side and takes effect
+  after `lever apply` or `lever up`, which restarts the broker on the new version.
+  `-push-workflows` is off until you add it to the github tool's command, after reading section 9
+  of the GitHub tool guide.
 
 ## [1.0.0-beta.5] - 2026-11-07
 

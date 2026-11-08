@@ -46,7 +46,8 @@ tag and trigger the release workflow on unreviewed code, and an admin bypass def
 2. Give it **Contents: read and write** and no other permission. It has no Workflows permission, so
    GitHub rejects any push that changes `.github/workflows/`. Agents cannot change CI. The opt-in
    operations need more permissions (see [section 6](#6-prs-merges-and-releases-opt-in)). Add only
-   those for the operations you offer. Never add Workflows or Administration.
+   those for the operations you offer. Never add Administration. Add Workflows only together with
+   `-push-workflows`, after reading [section 9](#9-workflow-pushes-opt-in).
 3. Install it on one repository only.
 4. Generate a private key. Save it as a regular file with mode `0600`, owned by the user that runs
    the broker, outside the instance tree (the agent can read the tree). The tool refuses to start
@@ -54,7 +55,8 @@ tag and trigger the release workflow on unreviewed code, and an admin bypass def
 5. Note the app id and the installation id.
 
 The tool mints an installation token from the key, narrowed to the one repository and
-`contents: write`. The token lasts 1 hour and stays in memory. The tool reuses it for later pushes
+`contents: write` (and `workflows: write` with `-push-workflows`, see
+[section 9](#9-workflow-pushes-opt-in)). The token lasts 1 hour and stays in memory. The tool reuses it for later pushes
 to that repository until less than 10 minutes remain, then mints a new one. Each opt-in operation
 gets its own token, narrowed to the one repository and the permissions that operation needs, and
 cached the same way.
@@ -184,6 +186,7 @@ The broker adds `-backend` and `-admin` itself. Every other setting is a flag in
 | `-app-slug` | no | The GitHub App's slug. Reviews by this account never count as an approval. Reviews by any bot never count either, so this is a second guard. |
 | `-release-tag` | no | Pattern that a `release` tag must match, against the whole tag (Go regular expression). Default `^v[0-9]+\.[0-9]+\.[0-9]+$`. A matching tag must also be a semantic version, with an optional leading `v`. |
 | `-text-max` | no | Bytes of a PR body. Default 8000, at most 65536. |
+| `-push-workflows` | no | Push tokens also ask for `workflows: write`, so a push may add or change files under `.github/workflows/`. The App must have the Workflows permission. Default off. A pushed workflow runs before any review, with the repository's Actions secrets: read [section 9](#9-workflow-pushes-opt-in) first. The tool logs a warning when it starts with this flag. |
 
 The tool keeps a bare mirror of each repository under `-state`. The mirror has no hooks and no
 checkout, so no code from a bundle runs on the host. The mirror receives only `main` from GitHub.
@@ -246,7 +249,8 @@ SHA-256 hash, never the text. The tool does not retry a call to GitHub.
 
 Add the permissions to the App, then accept the new permissions on the installation (GitHub asks
 the repository owner). A token request for a permission that the App does not have fails, and the
-call returns that error. Keep the Workflows permission off: agents still cannot change CI.
+call returns that error. Keep the Workflows permission off unless you use `-push-workflows`
+([section 9](#9-workflow-pushes-opt-in)): without it agents cannot change CI.
 
 ### `pr_open`
 
@@ -308,7 +312,7 @@ retargeted the PR between the check and the merge), the result has `retargeted: 
 it merged into and a `warning`, and the tool writes a warning audit line. Check that branch.
 
 GitHub refuses to merge a PR that changes `.github/workflows/` with the App's token, because the
-App has no Workflows permission. Merge such a PR yourself.
+`pr_merge` token has no Workflows permission, even with `-push-workflows`. Merge such a PR yourself.
 
 **Which PRs:** `pr_merge` can merge any PR in the repository whose head is a prefix branch of the
 same repository. That includes a PR from another agent's branch, or a PR that a person opened from a
@@ -474,6 +478,51 @@ never the text.
 
 **Risk:** comments appear on GitHub under the App's name, and closing an issue is visible to its
 author. Grant `issue_comment` and `issue_close` only to agents whose triage you accept in public.
+
+## 9. Workflow pushes (opt-in)
+
+By default the push token carries only `contents: write`, and GitHub refuses any push that adds or
+changes a file under `.github/workflows/`:
+
+```text
+refusing to allow a GitHub App to create or update workflow `.github/workflows/ci.yml` without `workflows` permission
+```
+
+To let an agent push workflow files, for example to add a repository's first CI workflow through a
+PR:
+
+1. Give the App the **Workflows: read and write** permission, and accept it on the installation.
+2. Add `-push-workflows` to the tool's command.
+
+Push tokens then ask for `contents: write` and `workflows: write`. Nothing else changes: every other
+operation keeps its own permission set, and `pr_merge` still cannot merge a PR that changes
+`.github/workflows/`.
+
+**Risk:** CI on `agent/**` already runs code the agent wrote. What the flag adds is that the agent
+also writes the workflow itself: its triggers, its `permissions:`, the secrets it references, its
+`environment:`, its `runs-on` and whether it asks for an OIDC token. A workflow runs from the branch
+it is pushed to, before any review or merge, with the secrets visible to the repository and a
+`GITHUB_TOKEN` with whatever `permissions:` the file asks for. So the agent can run code of its
+choice on GitHub's runners, with those credentials, outside the jail. Turn the flag on only knowing
+that, and set up these guards on GitHub first:
+
+- **No Actions secrets visible to the repository**, neither repository nor organization secrets,
+  or only ones kept in an Environment whose deployment branches are limited to `main` (and that
+  requires approval as well).
+- **No self-hosted runners** available to the repository: `runs-on: self-hosted` would run the
+  agent's code on your own machines.
+- **OIDC trust pinned to `main`:** a cloud role that trusts the repository's OIDC tokens must be
+  limited to `ref:refs/heads/main` (or to a protected environment), not `repo:owner/name:*`, since
+  a workflow can ask for `id-token: write`.
+- **A code owner's review of `/.github/` on `main`:** a `CODEOWNERS` entry for `/.github/` and a
+  `main` ruleset that requires review from code owners, so a workflow change still needs a person
+  to merge it. Keep `CODEOWNERS` itself under `.github/`, or give it its own entry.
+- **"Allow GitHub Actions to create and approve pull requests" off** (Settings, Actions, General):
+  otherwise a workflow's `GITHUB_TOKEN` could approve a PR.
+- The workflow permissions setting from [section 2](#2-add-rulesets) (read-only `GITHUB_TOKEN` by
+  default) still applies, but a workflow file can ask for more in its `permissions:` block. With
+  `contents: write` that token can push to any branch the rulesets allow, so the `main` ruleset
+  stays the backstop.
 
 ## Bundle limits
 

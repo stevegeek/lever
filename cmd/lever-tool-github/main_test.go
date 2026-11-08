@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/stevegeek/lever/captool"
+	"github.com/stevegeek/lever/internal/ghpush"
 )
 
 func TestPushBackstop(t *testing.T) {
@@ -370,5 +372,30 @@ func TestIssueBackstops(t *testing.T) {
 		if (err == nil) != c.ok {
 			t.Errorf("%s %v: err=%v, want ok=%v", c.op, c.args, err, c.ok)
 		}
+	}
+}
+
+// -push-workflows is off by default: push tokens ask only for contents:
+// write, with no warning. On, they add workflows: write and the tool warns at
+// start, unless push is not offered.
+func TestPushWorkflowsFlag(t *testing.T) {
+	o := mustParse(t)
+	if o.pushWorkflows || !maps.Equal(pushPermissions(o), ghpush.Permissions{"contents": "write"}) || len(startupWarnings(o)) != 0 {
+		t.Fatalf("default: %v %v %v", o.pushWorkflows, pushPermissions(o), startupWarnings(o))
+	}
+	o = mustParse(t, "-push-workflows")
+	w := startupWarnings(o)
+	if !maps.Equal(pushPermissions(o), ghpush.Permissions{"contents": "write", "workflows": "write"}) ||
+		len(w) != 1 || !strings.Contains(w[0], "Actions secrets") {
+		t.Fatalf("on: %v %v", pushPermissions(o), w)
+	}
+	if m := newMinter(o, nil); !maps.Equal(m.PushPerms, ghpush.PushWorkflowsPermissions) {
+		t.Fatalf("the minter's push set %v ignores -push-workflows", m.PushPerms)
+	}
+	if m := newMinter(mustParse(t), nil); !maps.Equal(m.PushPerms, ghpush.PushPermissions) {
+		t.Fatalf("default minter push set %v", m.PushPerms)
+	}
+	if w := startupWarnings(mustParse(t, "-push-workflows", "-ops", "issue_list")); len(w) != 0 {
+		t.Fatalf("no push offered, yet warned: %v", w)
 	}
 }

@@ -32,7 +32,16 @@ type TokenSource interface {
 // A minted token carries exactly these (GitHub adds metadata: read).
 type Permissions map[string]string
 
+// PushPermissions is what a push token carries by default. Without the
+// Workflows permission GitHub refuses any push that adds or changes a file
+// under .github/workflows/.
 var PushPermissions = Permissions{"contents": "write"}
+
+// PushWorkflowsPermissions is a push token's set when the operator opts in
+// to workflow pushes (lever-tool-github -push-workflows). A workflow runs
+// from the branch it is pushed to, before any review, with the repository's
+// Actions secrets: this lets the agent run code on GitHub's runners.
+var PushWorkflowsPermissions = Permissions{"contents": "write", "workflows": "write"}
 
 // key is a canonical form of p for the token cache.
 func (p Permissions) key() string {
@@ -105,7 +114,7 @@ func LoadAppKey(path string) (*rsa.PrivateKey, error) {
 }
 
 // Minter mints GitHub App installation tokens narrowed to one repository and
-// one permission set (Token: contents:write), and caches each until it has
+// one permission set (Token: PushPerms, by default contents:write), and caches each until it has
 // less than 10 minutes left.
 type Minter struct {
 	AppID, InstallationID string
@@ -113,6 +122,9 @@ type Minter struct {
 	APIBase               string // https://api.github.com
 	HTTP                  *http.Client
 	Now                   func() time.Time
+	// PushPerms is the permission set Token (the push token) requests; nil
+	// means PushPermissions. TokenFor is unaffected.
+	PushPerms Permissions
 
 	mu    sync.Mutex
 	cache map[string]cachedToken
@@ -140,6 +152,9 @@ func (m *Minter) jwt() (string, error) {
 }
 
 func (m *Minter) Token(ctx context.Context, repo string) (string, error) {
+	if m.PushPerms != nil {
+		return m.TokenFor(ctx, repo, m.PushPerms)
+	}
 	return m.TokenFor(ctx, repo, PushPermissions)
 }
 

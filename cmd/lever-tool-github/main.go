@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"crypto/rsa"
 	"errors"
 	"flag"
 	"fmt"
@@ -40,7 +41,7 @@ type opts struct {
 	ops                                                              []string // offered operations, in ghpush.AllOps order
 	mergeMethods                                                     []string
 	mergeChecks                                                      ghpush.CheckPolicy
-	mergeRequireReview                                               bool
+	mergeRequireReview, pushWorkflows                                bool
 	appSlug                                                          string
 	releaseTag                                                       *regexp.Regexp
 	textMax                                                          int
@@ -55,12 +56,34 @@ var appSlugRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,99}$`)
 // logged when the tool starts.
 func startupWarnings(o opts) []string {
 	var w []string
+	if o.pushWorkflows && slices.Contains(o.ops, ghpush.OpPush) {
+		w = append(w, "-push-workflows: push tokens carry workflows: write, so the agent can push workflow files; "+
+			"a workflow runs from the pushed branch before any review, with the repository's Actions secrets. "+
+			"Keep secrets out of the repo (or in an Environment that needs approval) and require a code owner's review of /.github/ on main")
+	}
 	if slices.Contains(o.ops, ghpush.OpPRMerge) && !o.mergeRequireReview {
 		w = append(w, "-merge-require-review=false: pr_merge merges without a person's approving review; "+
 			"CI runs the agent's own code, so an agent that can open and merge PRs can make CI pass (for example by deleting tests) and merge. "+
 			"Require approvals in the default branch's ruleset, or turn the review gate back on")
 	}
 	return w
+}
+
+// pushPermissions is the set a push token requests: contents: write, plus
+// workflows: write with -push-workflows.
+func pushPermissions(o opts) ghpush.Permissions {
+	if o.pushWorkflows {
+		return ghpush.PushWorkflowsPermissions
+	}
+	return ghpush.PushPermissions
+}
+
+// newMinter mints the tool's installation tokens: push tokens with
+// pushPermissions(o), the other operations' with their own sets.
+func newMinter(o opts, key *rsa.PrivateKey) *ghpush.Minter {
+	return &ghpush.Minter{AppID: o.appID, InstallationID: o.instID, Key: key,
+		APIBase: "https://api.github.com", HTTP: &http.Client{Timeout: 30 * time.Second}, Now: time.Now,
+		PushPerms: pushPermissions(o)}
 }
 
 // maxTextMax is GitHub's limit on a PR body.
@@ -90,6 +113,8 @@ func parseFlags(args []string) (opts, error) {
 	fs.StringVar(&o.appSlug, "app-slug", "", "the GitHub App's slug: its reviews never count for -merge-require-review (bots never count either)")
 	fs.StringVar(&releaseTag, "release-tag", ghpush.DefaultReleaseTag, "pattern a release tag must match (whole tag)")
 	fs.IntVar(&o.textMax, "text-max", 8000, "bytes of a PR body")
+	fs.BoolVar(&o.pushWorkflows, "push-workflows", false, "push tokens also request workflows: write, so a push may add or change .github/workflows/. "+
+		"A pushed workflow runs before any review, with the repository's Actions secrets: the agent can run code on GitHub's runners. Off by default")
 	err := fs.Parse(args)
 	if err != nil {
 		return o, err
@@ -307,10 +332,16 @@ func operations(o opts, p *ghpush.Pusher, g *ghpush.Ops) []captool.Operation {
 	if !o.mergeRequireReview {
 		reviewNote = " (no review is required)"
 	}
+	pushDesc := "push one agent/* branch from a git bundle in /workspace/.lever-files/github/ (no force); returns the compare URL"
+	if o.pushWorkflows {
+		pushDesc += "; the branch may add or change .github/workflows/"
+	} else {
+		pushDesc += "; GitHub refuses a branch that adds or changes .github/workflows/"
+	}
 	all := map[string]captool.Operation{
 		ghpush.OpPush: {
 			Name:        "push",
-			Description: "push one agent/* branch from a git bundle in /workspace/.lever-files/github/ (no force); returns the compare URL",
+			Description: pushDesc,
 			Params: []captool.ParamSpec{
 				{Name: "repo", Type: "string", Description: "owner/name, e.g. stevegeek/lever"},
 				{Name: "branch", Type: "string", Description: "branch name, must start with " + o.prefix},
@@ -521,8 +552,7 @@ func main() {
 	if err := g.CheckVersion(context.Background(), o.state); err != nil {
 		log.Fatal(err)
 	}
-	minter := &ghpush.Minter{AppID: o.appID, InstallationID: o.instID, Key: key,
-		APIBase: "https://api.github.com", HTTP: &http.Client{Timeout: 30 * time.Second}, Now: time.Now}
+	minter := newMinter(o, key)
 	p := &ghpush.Pusher{
 		Tree: o.tree, State: o.state, Prefix: o.prefix, BaseURL: "https://github.com",
 		Repos: o.repos, MaxBundle: o.maxBundle, ImportBudget: o.importBudget, LockWait: 30 * time.Second,

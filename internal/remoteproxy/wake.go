@@ -19,9 +19,10 @@ import (
 
 // The wake route: POST /lever/api/agents/<name>/wake asks the broker (over its
 // 0600 operator socket, Config.Wake) to resume a suspended worker, or for the
-// operator a stopped one. The limiter runs last, so a refused request never
-// spends the agent's one wake a minute. Refusals are fixed words; the broker's
-// text never reaches the page or the audit line.
+// operator a stopped one. The limiter runs last, and a broker refusal (4xx)
+// gives the slot back, so a refused request never spends the agent's one wake
+// a minute. Refusals are fixed words; the broker's text never reaches the page
+// or the audit line.
 
 // Wake audit decisions.
 const (
@@ -175,6 +176,15 @@ func (g *gate) serveWake(w http.ResponseWriter, r *http.Request, line *AuditLine
 	case err := <-done:
 		if err != nil {
 			status, word := wakeFailure(err)
+			// A broker 4xx is a refusal before any resume started (not a
+			// worker, revoked, role mismatch, not asleep, the hub refused
+			// and kept the record): it gives the slot back, like a refusal
+			// here. Busy (another resume under way), a runtime error or an
+			// unreachable broker keep it spent, so a failing broker or hub
+			// is not retried faster than once a minute.
+			if status == http.StatusConflict {
+				g.wakes.give(name)
+			}
 			refuse(status, word, nil)
 			return
 		}

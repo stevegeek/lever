@@ -226,7 +226,7 @@ type VerifiedMessage struct {
 	Login string `json:"login,omitempty"`
 	Tier  string `json:"tier,omitempty"`
 	// Kind names who in lever sent it: manager, worker:<slug>,
-	// operator-note, directive-notice or service-host-notice.
+	// operator-note or directive-notice.
 	Kind string `json:"kind,omitempty"`
 	From string `json:"from"`
 	// Timestamp is the hub's creation time (web) or the send's start (lever).

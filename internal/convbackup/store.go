@@ -127,10 +127,12 @@ func (s Store) Save(m Meta, write func(w io.Writer) (Stats, error)) (Meta, error
 		}
 	}()
 	// The lock tells a sweep in another process that this Save is alive,
-	// however long it writes; the kernel drops it if this process dies.
+	// however long it writes; the kernel drops it if this process dies. A
+	// store that cannot lock (a network filesystem without flock) saves
+	// unlocked, as before the lock existed: only a sweep could then race it.
 	unlock, err := hostledger.LockFile(filepath.Join(s.Dir, tmp, saveLockName))
 	if err != nil {
-		return Meta{}, fmt.Errorf("conversation backups: %w", err)
+		unlock = func() {}
 	}
 	locked := true
 	defer func() {
@@ -160,18 +162,20 @@ func (s Store) Save(m Meta, write func(w io.Writer) (Stats, error)) (Meta, error
 	if err := writeNew(r, filepath.Join(tmp, metaName), append(b, '\n')); err != nil {
 		return Meta{}, err
 	}
-	// The lock file is not part of the backup. Removing it also renews the
-	// directory's mtime, so a sweep never sees this Save as stale before the
-	// rename.
-	unlock()
-	locked = false
-	if err := r.Remove(filepath.Join(tmp, saveLockName)); err != nil {
-		return Meta{}, fmt.Errorf("conversation backups: %w", err)
-	}
+	// Rename while still locked: a sweep that judged this Save stale and
+	// opens the lock before the rename finds it held, and one that opens it
+	// after finds no temporary directory. Only then is the lock file (not
+	// part of the backup) removed and the lock dropped. A stray .lock left
+	// in the backup (a crash, a failed remove) is never read.
 	if err := r.Rename(tmp, m.ID); err != nil {
 		return Meta{}, fmt.Errorf("conversation backups: %w", err)
 	}
 	ok = true
+	// Best effort: the backup is already in place, and a stray .lock is
+	// harmless.
+	_ = r.Remove(filepath.Join(m.ID, saveLockName))
+	unlock()
+	locked = false
 	// Make the rename durable: `up --fresh` deletes the guest's copy next.
 	// Best effort, as a store that cannot sync its directory still holds
 	// the backup.

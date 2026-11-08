@@ -1,10 +1,14 @@
 package host
 
 import (
+	"net/http"
+	"net/http/httptest"
+
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"github.com/stevegeek/lever/internal/httpjson"
 	"io"
 	"net"
 	"os"
@@ -17,10 +21,12 @@ import (
 	"time"
 
 	"github.com/stevegeek/lever/internal/backend"
+	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/brokerctl"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/cli/clitest"
 	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/remoteproxy"
 	"github.com/stevegeek/lever/internal/state"
 	"github.com/stevegeek/lever/internal/testutil"
 )
@@ -422,5 +428,28 @@ func TestRemoteContactUser(t *testing.T) {
 	}
 	if _, ok := f("c@example.com"); ok {
 		t.Fatal("an unreadable record binds no one")
+	}
+}
+
+// The proxy keeps the wake slot spent on the broker's hub-refused reason,
+// which it names without importing the broker: the two must agree.
+func TestWakeHubRefusedReasonMatchesTheBroker(t *testing.T) {
+	if remoteproxy.ReasonHubRefused != broker.ReasonHubRefused {
+		t.Fatalf("remoteproxy %q != broker %q", remoteproxy.ReasonHubRefused, broker.ReasonHubRefused)
+	}
+}
+
+// remoteWake's recording transport hands the broker's refusal reason to the
+// proxy, which keeps the wake slot spent on a hub refusal.
+func TestReasonRecorderKeepsTheBrokersReason(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(broker.ReasonHeader, broker.ReasonHubRefused)
+		http.Error(w, "refused", http.StatusConflict)
+	}))
+	defer srv.Close()
+	rec := &reasonRecorder{base: srv.Client().Transport}
+	err := httpjson.Post(context.Background(), &http.Client{Transport: rec}, srv.URL, map[string]string{}, nil)
+	if httpjson.Status(err) != http.StatusConflict || rec.reason != broker.ReasonHubRefused {
+		t.Fatalf("status %d, reason %q", httpjson.Status(err), rec.reason)
 	}
 }

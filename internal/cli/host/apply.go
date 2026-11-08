@@ -216,7 +216,8 @@ func (rc *remoteController) Start(ctx context.Context) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("lever remote serve: %w", err)
 	}
-	if err := rc.awaitListening(ctx, cmd); err != nil {
+	child := watchChild(cmd.Process)
+	if err := rc.awaitListening(ctx, child); err != nil {
 		return err
 	}
 	// A proxy with no matching stamp costs the next bring-up a restart, never
@@ -228,7 +229,7 @@ func (rc *remoteController) Start(ctx context.Context) error {
 	if err := rc.awaitStamp(ctx, cmd.Process.Pid, hash); err != nil {
 		if errors.Is(err, errRemoteProxyNotRecorded) && !rc.inTree() {
 			_ = cmd.Process.Kill()
-			_, _ = cmd.Process.Wait()
+			child.awaitExit(childReapTimeout)
 			return fmt.Errorf("lever remote serve: %w; another process may hold %s (see `lever doctor`)", err, rc.addr())
 		}
 		rc.log.printf("lever: the remote proxy runs, but it did not stamp this config (%v) — the next bring-up restarts it", err)
@@ -281,17 +282,62 @@ const (
 
 var errChildGone = errors.New("child exited")
 
+// childReapTimeout bounds the wait for a killed child to be reaped.
+const childReapTimeout = 5 * time.Second
+
+// watchedChild is a spawned daemon whose exit this process notices. Its one
+// goroutine is the only caller of Process.Wait: an exited child that nobody
+// reaps stays a zombie, and signal 0 still reaches a zombie, so probing with
+// it never saw a child that died at once. A child that keeps running leaves
+// the goroutine blocked until this process exits, which reaps nothing early
+// and keeps nothing else alive.
+type watchedChild struct {
+	proc   *os.Process
+	exited chan struct{} // closed once the child has exited and been reaped
+}
+
+func watchChild(p *os.Process) *watchedChild {
+	c := &watchedChild{proc: p, exited: make(chan struct{})}
+	go func() {
+		_, _ = p.Wait()
+		close(c.exited)
+	}()
+	return c
+}
+
+// gone reports whether the child has exited.
+func (c *watchedChild) gone() bool {
+	select {
+	case <-c.exited:
+		return true
+	default:
+		return false
+	}
+}
+
+// awaitExit waits up to d for the child to exit; it reports whether it did.
+func (c *watchedChild) awaitExit(d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-c.exited:
+		return true
+	case <-t.C:
+		return false
+	}
+}
+
 // awaitListening fails the apply when the spawned proxy does not bind (a port
 // already taken), quoting the log's tail: the child owns that file and this
 // process never sees its stderr. A listener alone is not enough: child must
 // still be alive, since another process (a leaked older proxy) may hold the
 // port, and stamping then would record a config nothing enforces.
-func (rc *remoteController) awaitListening(ctx context.Context, child *exec.Cmd) error {
+func (rc *remoteController) awaitListening(ctx context.Context, child *watchedChild) error {
 	timeout := cmp.Or(rc.startTimeout, remoteProxyStartTimeout)
 	interval := cmp.Or(rc.startInterval, remoteProxyStartInterval)
 	attempts := int(timeout/interval) + 1
 	err := retry.Until(ctx, attempts, interval, func() (bool, error) {
-		if err := child.Process.Signal(syscall.Signal(0)); err != nil {
+		if child.gone() {
 			return false, errChildGone
 		}
 		return tcpDial(rc.addr()) == nil, nil

@@ -7,6 +7,15 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`lever apply` notices a remote proxy that exits at once.** After starting the remote proxy,
+  apply polled until it was listening and checked it was still alive with signal 0. An exited
+  child that nobody has reaped is a zombie, which signal 0 still reaches, so a proxy that died
+  straight away (a config it refused, a panic) was waited on for the whole 5 s budget before the
+  apply failed. Apply now reaps the child in the background and fails as soon as it exits, quoting
+  the proxy log as before. Host-only: the Jail ABI does not change.
+
 ### Docs
 
 - **Voice on a Linux host with no GPU.** The whisper tool guide has a new section on a CPU-only

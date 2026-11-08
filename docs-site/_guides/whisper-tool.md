@@ -32,10 +32,11 @@ change.
 ## Requirements
 
 - whisper.cpp's `whisper-server`, which you build or install yourself: with CUDA on a Linux host
-  with an NVIDIA GPU, with Metal on Apple Silicon. Install it outside the tree, owned by you or
-  root and writable by no one else. Lever never builds or installs it.
+  with an NVIDIA GPU, with Metal on Apple Silicon, or for the CPU alone on a host with no usable
+  GPU (see [A CPU-only Linux host](#a-cpu-only-linux-host-no-gpu)). Install it outside the tree,
+  owned by you or root and writable by no one else. Lever never builds or installs it.
 - Disk space and GPU memory for the model: about 1.6 GB for `large-v3-turbo`, 0.55 GB for
-  `large-v3-turbo-q5_0`. With `-gpu=false` it runs on the CPU, much more slowly.
+  `large-v3-turbo-q5_0`. With `-gpu=false` it runs on the CPU and needs that much RAM instead.
 - Install the binary with `make install`. Releases ship it for darwin and linux.
 
 ## 1. Configure the tool
@@ -114,6 +115,53 @@ ready, or ready with the model), and `voice model` checks the `-model` file in `
 lever's pinned size and sha256. With `remote.voice` on they check the tool that serves
 `remote.voice.socket`; with it off, the first whisper tool in `broker.tools`. The `voice` row is
 about dictation only: off, or on with the socket, the limits and the tool's port.
+
+## A CPU-only Linux host (no GPU)
+
+The tool works on a headless Linux host with no usable GPU, such as an Intel box with integrated
+graphics. Build whisper-server for the CPU alone and give the tool `-gpu=false`.
+
+**Build.** You need CMake and a C++17 compiler (on Debian or Ubuntu, `sudo apt install cmake
+g++ git`). From a whisper.cpp release:
+
+```sh
+git clone https://github.com/ggml-org/whisper.cpp
+cd whisper.cpp && git checkout v1.9.5        # or a later release
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+      -DGGML_CUDA=OFF -DGGML_VULKAN=OFF -DGGML_METAL=OFF
+cmake --build build -j 4 --target whisper-server
+sudo install -m 0755 build/bin/whisper-server /usr/local/bin/
+```
+
+Build it on the host that runs it: the default build uses every instruction set that host's CPU
+has (AVX2, and AVX-512 where present). The static build (`BUILD_SHARED_LIBS=OFF`) is one file.
+
+**Configure.** Add `-gpu=false` (with `=`) to the tool's `command`. The pinned models are the
+same: `large-v3-turbo` (1.6 GB) and `large-v3-turbo-q5_0` (0.55 GB), fetched with `lever voice
+fetch`. On the CPU, keep `large-v3-turbo`: in the measurements below it was faster than the
+quantized `q5_0` model, which saves only RAM and disk. whisper-server uses 4 threads; lever passes
+no thread flag.
+
+**Expected latency.** Measured with whisper.cpp v1.9.5, built for the CPU alone and run with
+lever's flags (`--no-gpu`, so 4 threads) on an AMD Ryzen 9 9950X (8 vCPUs available), transcribing
+English speech:
+
+| Clip | `large-v3-turbo` | `large-v3-turbo-q5_0` |
+|---|---|---|
+| 11 s | 8 to 10 s | 11 to 12 s |
+| 33 s | 17 to 20 s | 22 to 30 s |
+| 110 s | 52 to 61 s | 66 to 78 s |
+
+A build limited to AVX2 (no AVX-512) was as fast on that CPU. These come from a fast desktop CPU.
+An older 6-core Intel CPU (for example an 8th-generation Core i5 or i7, as in a 2018 Mac mini) has
+slower cores: expect two to three times these times, so about real time or slower, and a
+10-second dictation that takes 10 to 30 seconds. This was not measured on such a host.
+
+**Time limits.** One dictation clip may take up to 10 minutes, and with `-gpu=false` one agent
+clip four times its length (at least 2 minutes). With the default limits that fits a CPU that
+runs at up to about twice real time. On a slower host, lower `remote.voice.max_seconds` (default
+300) and `-agent-max-seconds` so the longest clip finishes in time. One clip runs at a time, so a
+dictation clip can wait for a whole agent clip to finish.
 
 ## 3. Agents: the transcribe operation
 

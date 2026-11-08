@@ -83,6 +83,19 @@ version bump moves the block under the new version heading.
   a slow disk) lost its directory the same way and failed. A backup in progress now holds a lock
   in its directory, which the sweep checks first; a killed one has released its lock and is still
   removed. Host-only: the Jail ABI does not change.
+- **A supervised tool's `backend` must be loopback.** The broker starts a tool with
+  `-backend <backend>` as its listen address, and config load only checked that it parsed as
+  `host:port`, so `backend: 0.0.0.0:3210` loaded and the tool listened on every interface. A
+  supervised tool trusts the broker's word for who calls it, so it must not be on the network.
+  Config load now refuses a supervised tool's `backend` unless its host is a literal loopback IP
+  (`127.0.0.1`, `[::1]`), as it already did for external tools. `lever apply`'s plan in the CLI
+  reference now lists its last steps, `worker-autostart`. Host-only: the Jail ABI does not change.
+
+### Upgrade
+
+- **Supervised tool backends.** A config whose supervised tool sets `backend` to anything but a
+  literal loopback IP (`0.0.0.0`, a LAN address, or a name such as `localhost`) no longer loads;
+  write `127.0.0.1:PORT`. Every tool lever ships, and every example, already does.
 
 ## [1.0.0-beta.7] - 2026-11-08
 

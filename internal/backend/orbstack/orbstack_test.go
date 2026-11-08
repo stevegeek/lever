@@ -81,6 +81,7 @@ func orbVersionScript(f *proc.FakeRunner) {
 func scriptedMachine(f *proc.FakeRunner) {
 	orbVersionScript(f)
 	scriptList(f, listRunning) // machine already exists
+	scriptConforming(f)
 	orbGuest.ScriptProvision(f, "501", backendtest.AhostsDual)
 }
 
@@ -90,7 +91,7 @@ func TestEnsureUpIsIdempotentWhenMachineExists(t *testing.T) {
 	b := New(f, machine, common.Options{})
 
 	err := b.EnsureUp(context.Background(), backend.Config{
-		MachineName: machine, ProjectTree: "/Users/x/tree", AllowedPorts: []int{3305},
+		MachineName: machine, ProjectTree: testTree, AllowedPorts: []int{3305},
 	})
 	if err != nil {
 		t.Fatalf("EnsureUp: %v", err)
@@ -106,7 +107,7 @@ func TestEnsureUpCreatesIsolatedMachineWhenAbsent(t *testing.T) {
 	orbGuest.ScriptProvision(f, "501", backendtest.AhostsDual)
 	b := New(f, machine, common.Options{})
 
-	if err := b.EnsureUp(context.Background(), backend.Config{MachineName: machine, ProjectTree: "/Users/x/tree"}); err != nil {
+	if err := b.EnsureUp(context.Background(), backend.Config{MachineName: machine, ProjectTree: testTree}); err != nil {
 		t.Fatalf("EnsureUp: %v", err)
 	}
 	want := "orb create --isolated --mount /Users/x/tree:/lever ubuntu:resolute " + machine
@@ -173,10 +174,11 @@ func TestRunUIDReflectsResolvedUIDAfterEnsureUp(t *testing.T) {
 	f := proc.NewFakeRunner()
 	orbVersionScript(f)
 	scriptList(f, listRunning)
+	scriptConforming(f)
 	orbGuest.ScriptProvision(f, "1000", backendtest.AhostsDual) // non-default uid
 	b := New(f, machine, common.Options{})
 
-	if err := b.EnsureUp(context.Background(), backend.Config{MachineName: machine, ProjectTree: "/Users/x/tree"}); err != nil {
+	if err := b.EnsureUp(context.Background(), backend.Config{MachineName: machine, ProjectTree: testTree}); err != nil {
 		t.Fatalf("EnsureUp: %v", err)
 	}
 	if got := b.RunUID(); got != "1000" {
@@ -245,11 +247,12 @@ func TestStopOnAlreadyStoppedMachineIsHarmless(t *testing.T) {
 func TestEnsureMachineStartsStoppedMachine(t *testing.T) {
 	f := proc.NewFakeRunner()
 	scriptList(f, listStopped)
+	scriptConforming(f)
 	f.Script("orb start "+machine, proc.Result{})
 	f.Script(orbGuest.User+" true", proc.Result{})
 	b := New(f, machine, common.Options{})
 
-	if _, err := b.ensureMachine(context.Background(), "/Users/x/tree"); err != nil {
+	if _, err := b.ensureMachine(context.Background(), testTree); err != nil {
 		t.Fatalf("ensureMachine: %v", err)
 	}
 	if !f.Called(proc.Subcommand("orb", "start")) {
@@ -261,9 +264,10 @@ func TestEnsureMachineStartsStoppedMachine(t *testing.T) {
 func TestEnsureMachineRunningIsNoop(t *testing.T) {
 	f := proc.NewFakeRunner()
 	scriptList(f, listRunning)
+	scriptConforming(f)
 	b := New(f, machine, common.Options{})
 
-	if _, err := b.ensureMachine(context.Background(), "/Users/x/tree"); err != nil {
+	if _, err := b.ensureMachine(context.Background(), testTree); err != nil {
 		t.Fatalf("ensureMachine: %v", err)
 	}
 	// Neither start nor create for an already-running machine.
@@ -273,6 +277,7 @@ func TestEnsureMachineRunningIsNoop(t *testing.T) {
 func TestEnsureMachineStartTimesOutWhenUnreachable(t *testing.T) {
 	f := proc.NewFakeRunner()
 	scriptList(f, listStopped)
+	scriptConforming(f)
 	f.Script("orb start "+machine, proc.Result{})
 	// "orb -m lever-jail true" is deliberately unscripted: FakeRunner errors on
 	// every unscripted call, simulating a machine that never becomes reachable.
@@ -330,7 +335,7 @@ func TestEnsureUpRejectsOldOrb(t *testing.T) {
 
 	err := b.EnsureUp(context.Background(), backend.Config{
 		MachineName: machine,
-		ProjectTree: "/Users/x/tree",
+		ProjectTree: testTree,
 	})
 	if err == nil {
 		t.Fatal("expected error for OrbStack 2.1.0, got nil")
@@ -347,7 +352,7 @@ func TestEnsureUpInstallsPodman(t *testing.T) {
 	f := proc.NewFakeRunner()
 	scriptedMachine(f)
 	b := New(f, machine, common.Options{})
-	if err := b.EnsureUp(context.Background(), backend.Config{MachineName: machine, ProjectTree: "/t", AllowedPorts: nil}); err != nil {
+	if err := b.EnsureUp(context.Background(), backend.Config{MachineName: machine, ProjectTree: testTree, AllowedPorts: nil}); err != nil {
 		t.Fatalf("EnsureUp: %v", err)
 	}
 	if !f.Called(proc.ArgvContains("apt-get install", "podman")) {
@@ -368,7 +373,7 @@ func TestEnsureScionBuildsAndInstalls(t *testing.T) {
 	b := New(f, machine, common.Options{})
 
 	if err := b.EnsureUp(context.Background(), backend.Config{
-		MachineName: machine, ProjectTree: "/t", ScionSource: src,
+		MachineName: machine, ProjectTree: testTree, ScionSource: src,
 	}); err != nil {
 		t.Fatalf("EnsureUp: %v", err)
 	}
@@ -395,7 +400,7 @@ func TestEnsureScionSkippedWhenEmpty(t *testing.T) {
 	b := New(f, machine, common.Options{})
 
 	if err := b.EnsureUp(context.Background(), backend.Config{
-		MachineName: machine, ProjectTree: "/t", ScionSource: "",
+		MachineName: machine, ProjectTree: testTree, ScionSource: "",
 	}); err != nil {
 		t.Fatalf("EnsureUp: %v", err)
 	}
@@ -414,7 +419,7 @@ func TestEnsureScionSourceMissing(t *testing.T) {
 	b := New(f, machine, common.Options{})
 
 	err := b.EnsureUp(context.Background(), backend.Config{
-		MachineName: machine, ProjectTree: "/t", ScionSource: missing,
+		MachineName: machine, ProjectTree: testTree, ScionSource: missing,
 	})
 	var srcErr *scionbin.SourceError
 	if !errors.As(err, &srcErr) || srcErr.Path != missing {
@@ -536,7 +541,7 @@ func TestRunUserUIDAfterEnsureUp(t *testing.T) {
 	b := New(f, machine, common.Options{})
 
 	if err := b.EnsureUp(context.Background(), backend.Config{
-		MachineName: machine, ProjectTree: "/Users/x/tree",
+		MachineName: machine, ProjectTree: testTree,
 	}); err != nil {
 		t.Fatalf("EnsureUp: %v", err)
 	}
@@ -560,7 +565,7 @@ func TestEnsureUpInstallsScionInBinaryMode(t *testing.T) {
 	b := New(f, machine, common.Options{})
 
 	if err := b.EnsureUp(context.Background(), backend.Config{
-		MachineName: machine, ProjectTree: "/t", ScionBinary: bin,
+		MachineName: machine, ProjectTree: testTree, ScionBinary: bin,
 	}); err != nil {
 		t.Fatalf("EnsureUp: %v", err)
 	}
@@ -589,7 +594,7 @@ func TestEnsureUpBuildsWebAssetsWhenAsked(t *testing.T) {
 	b := New(f, machine, common.Options{})
 
 	err := b.EnsureUp(context.Background(), backend.Config{
-		MachineName: machine, ProjectTree: "/Users/x/tree",
+		MachineName: machine, ProjectTree: testTree,
 		ScionSource: backendtest.FakeScionCheckout(t), ScionWebUI: true,
 	})
 	// node is deliberately not scripted: the web build stops at its toolchain
@@ -610,7 +615,7 @@ func TestEnsureUpSkipsWebAssetsByDefault(t *testing.T) {
 	b := New(f, machine, common.Options{})
 
 	if err := b.EnsureUp(context.Background(), backend.Config{
-		MachineName: machine, ProjectTree: "/Users/x/tree",
+		MachineName: machine, ProjectTree: testTree,
 		ScionSource: backendtest.FakeScionCheckout(t),
 	}); err != nil {
 		t.Fatalf("EnsureUp: %v", err)

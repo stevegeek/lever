@@ -15,21 +15,13 @@ version bump moves the block under the new version heading.
   straight away (a config it refused, a panic) was waited on for the whole 5 s budget before the
   apply failed. Apply now reaps the child in the background and fails as soon as it exits, quoting
   the proxy log as before. Host-only: the Jail ABI does not change.
-
-### Docs
-
-- **Voice on a Linux host with no GPU.** The whisper tool guide has a new section on a CPU-only
-  Linux host: how to build `whisper-server` for the CPU alone, the pinned models, and measured
-  latency. On a fast desktop CPU, `large-v3-turbo` took 8 to 10 s for an 11 s clip; on an older
-  6-core Intel, expect about real time or slower. On the CPU the full `large-v3-turbo` model was
-  faster than the quantized `q5_0`. The section also says how to lower the clip limits on a slow
-  host. The tts guide covers the same host. sherpa-onnx's engine runs at about a quarter of real
-  time there, and the guide now says to use a sherpa-onnx 1.x release: sherpa-onnx 2.0 dropped
-  espeak-ng and refuses to speak with lever's pinned `kokoro-en-v0_19` ("No lexicon available").
-  (T0353)
-
-### Fixed
-
+- **`memory` sizes are read as Lima reads them.** lever passes `memory` and `disk` to Lima
+  unchanged, and Lima reads `MB` and `GB` as binary (`2GB` is 2 GiB). lever read them as decimal,
+  so its own checks disagreed with the VM: `memory: 2GB` was refused as below the 2GiB minimum
+  though Lima would have given 2 GiB, an agent's `resources.memory: 4GiB` was refused as more than
+  a `memory: 4GB` VM, and `lever apply` could warn of a memory change that was not there. lever now
+  reads `MB` and `GB` as `MiB` and `GiB`. A size too large for 64 bits (such as
+  `17179869186GiB`) was wrapped round to a small one and passed the checks; it is now refused.
 - **`lever reload` runs the checks `apply` and `up` run.** It stopped the broker and applied the
   config with none of them, so a contact login that the contact gate refuses (an agent not yet on
   this version's skills, or the state directory inside the tree) went live through `reload`, the
@@ -47,6 +39,18 @@ version bump moves the block under the new version heading.
   copy is kept for a server that opens sessions (a copied `initialize` carries no session), and
   the copy is served only for the `protocolVersion` it answered. The service hosts guide lists
   the cases. Host-only: the Jail ABI does not change.
+
+### Docs
+
+- **Voice on a Linux host with no GPU.** The whisper tool guide has a new section on a CPU-only
+  Linux host: how to build `whisper-server` for the CPU alone, the pinned models, and measured
+  latency. On a fast desktop CPU, `large-v3-turbo` took 8 to 10 s for an 11 s clip; on an older
+  6-core Intel, expect about real time or slower. On the CPU the full `large-v3-turbo` model was
+  faster than the quantized `q5_0`. The section also says how to lower the clip limits on a slow
+  host. The tts guide covers the same host. sherpa-onnx's engine runs at about a quarter of real
+  time there, and the guide now says to use a sherpa-onnx 1.x release: sherpa-onnx 2.0 dropped
+  espeak-ng and refuses to speak with lever's pinned `kokoro-en-v0_19` ("No lexicon available").
+  (T0353)
 
 ## [1.0.0-beta.6] - 2026-11-08
 

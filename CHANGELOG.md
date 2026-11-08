@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [1.0.0-beta.6] - 2026-11-08
+
 ### Fixed
 
 - **The certificate-lapse healer needs the agent's key.** When an agent's mTLS certificate has
@@ -35,6 +37,11 @@ version bump moves the block under the new version heading.
   backend does. A stopped machine whose OrbStack record mismatches is not started; one that fails
   only the in-guest check is stopped again. A machine lever created passes unchanged.
   Host-only: the Jail ABI does not change.
+
+### Upgrade
+
+- **Jail ABI unchanged.** No agent image rebuild. Both fixes are host-side and take effect after
+  `lever apply` or `lever up`, which restarts the broker on the new version.
 
 ## [1.0.0-beta.5] - 2026-11-07
 

@@ -7,6 +7,16 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Hub lists are read past their first page.** lever looked up an access constraint by name, and
+  a project by name or slug, from the first page of the hub's list only. With more than 200
+  constraints matching the name, the exact one could be on a later page; lever then found none and
+  created a duplicate. With more than 500 visible projects, a project past the first page read as
+  "no project". Both lookups now follow the hub's page token or cursor, so a same-named project on
+  a later page also counts as ambiguous. A list that does not end within 200 pages, or repeats a
+  page, is an error rather than "none found". Host-only: the Jail ABI does not change.
+
 ## [1.0.0-beta.7] - 2026-11-08
 
 ### Fixed

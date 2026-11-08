@@ -88,6 +88,20 @@ func fakeTool(t *testing.T, fakeLog string, allow ...string) Tool {
 	}
 }
 
+// waitForLog reads the fake server's log until it holds want, for up to 10s,
+// and returns what it read last.
+func waitForLog(t *testing.T, path, want string) []byte {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		logged, _ := os.ReadFile(path)
+		if strings.Contains(string(logged), want) || time.Now().After(deadline) {
+			return logged
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func newRig(t *testing.T, timeout time.Duration, tools ...Tool) *rig {
 	t.Helper()
 	return newRigFor(t, newKeyPair(t, x509.ExtKeyUsageClientAuth), timeout, tools...)
@@ -197,7 +211,10 @@ func TestBridgeInitializeListAndCall(t *testing.T) {
 	if txt := resultText(t, body); !strings.HasSuffix(txt, "msg=hi") {
 		t.Fatalf("echo = %q", txt)
 	}
-	logged, _ := os.ReadFile(fakeLog)
+	// The fake sends its roots/list request and its answer together, so the
+	// bridge's error reply to the request can reach the fake (and its log)
+	// after the call has been answered: wait for it.
+	logged := waitForLog(t, fakeLog, `"id":9999,"error"`)
 	if !strings.Contains(string(logged), `12345678901234567`) {
 		t.Fatalf("argument number changed on the way: %s", logged)
 	}

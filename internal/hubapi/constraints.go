@@ -117,30 +117,66 @@ var ErrConstraintPreviewBlocked = errors.New("the hub's preview blocks this acce
 
 // AccessConstraintsNamed lists the constraints whose name is exactly name
 // (GET /api/v1/admin/access-constraints?nameContains=...). The hub filters by
-// substring; the exact match is decided here.
+// substring; the exact match is decided here. Every page is read (pageToken
+// and nextPageToken): the exact match can be past the first 200 substring
+// matches, and "none found" makes the caller create a duplicate.
 func (c *Client) AccessConstraintsNamed(ctx context.Context, name string) ([]AccessConstraint, error) {
-	q := url.Values{"nameContains": {name}, "pageSize": {"200"}}
-	var raw map[string]json.RawMessage
-	if err := c.get(ctx, "/api/v1/admin/access-constraints?"+q.Encode(), &raw); err != nil {
-		return nil, err
-	}
-	// Require the key: a renamed field would decode to "none" and the caller
-	// would create a duplicate.
-	field, ok := raw["items"]
-	if !ok {
-		return nil, &APIError{Msg: "access constraint list has no \"items\" field; the hub API changed shape"}
-	}
-	var items []wireConstraint
-	if err := json.Unmarshal(field, &items); err != nil {
-		return nil, &APIError{Msg: fmt.Sprintf("decoding access constraint list: %v", err)}
-	}
 	var out []AccessConstraint
-	for _, w := range items {
-		if w.Name == name {
-			out = append(out, w.constraint())
+	seen := map[string]bool{}
+	token := ""
+	for page := 0; ; page++ {
+		if page == listPageLimit {
+			return nil, &APIError{Msg: fmt.Sprintf("the hub's access constraint list did not end after %d pages", listPageLimit)}
 		}
+		q := url.Values{"nameContains": {name}, "pageSize": {"200"}}
+		if token != "" {
+			q.Set("pageToken", token)
+		}
+		var raw map[string]json.RawMessage
+		if err := c.get(ctx, "/api/v1/admin/access-constraints?"+q.Encode(), &raw); err != nil {
+			return nil, err
+		}
+		// Require the key: a renamed field would decode to "none" and the caller
+		// would create a duplicate.
+		field, ok := raw["items"]
+		if !ok {
+			return nil, &APIError{Msg: "access constraint list has no \"items\" field; the hub API changed shape"}
+		}
+		var items []wireConstraint
+		if err := json.Unmarshal(field, &items); err != nil {
+			return nil, &APIError{Msg: fmt.Sprintf("decoding access constraint list: %v", err)}
+		}
+		for _, w := range items {
+			if w.Name == name {
+				out = append(out, w.constraint())
+			}
+		}
+		next, err := pageCursor(raw, "nextPageToken", "access constraint list")
+		if err != nil {
+			return nil, err
+		}
+		if next == "" {
+			return out, nil
+		}
+		if seen[next] {
+			return nil, &APIError{Msg: "the hub's access constraint list repeated a page token"}
+		}
+		seen[next] = true
+		token = next
 	}
-	return out, nil
+}
+
+// pageCursor reads a list's next-page cursor field; "" ends the walk.
+func pageCursor(raw map[string]json.RawMessage, field, what string) (string, error) {
+	n, ok := raw[field]
+	if !ok {
+		return "", nil
+	}
+	var next string
+	if err := json.Unmarshal(n, &next); err != nil {
+		return "", &APIError{Msg: fmt.Sprintf("decoding %s %s: %v", what, field, err)}
+	}
+	return next, nil
 }
 
 // AccessConstraint reads one constraint with its maximum permission set

@@ -79,8 +79,16 @@ func (t Tool) validate() error {
 			return fmt.Errorf("config: broker tool %q backend %q: want host:port[/path], optionally after http:// or https://", t.Name, t.Backend)
 		}
 		hostport, _, _ := strings.Cut(rest, "/")
-		if _, _, err := net.SplitHostPort(hostport); err != nil {
+		host, _, err := net.SplitHostPort(hostport)
+		if err != nil {
 			return fmt.Errorf("config: broker tool %q backend %q: %v (want host:port[/path])", t.Name, t.Backend, err)
+		}
+		// The broker passes backend to the command as its listen address, so
+		// anything but loopback would put the tool, which trusts the broker's
+		// word for who calls it, on the network. Only a literal IP is checked
+		// without trusting a resolver, as for external tools.
+		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+			return fmt.Errorf("config: broker tool %q backend %q is not a literal loopback IP: the broker starts the tool listening there, so anything else would expose it beyond this host (use 127.0.0.1:PORT)", t.Name, t.Backend)
 		}
 		if len(t.Operations) == 0 {
 			return fmt.Errorf("config: broker tool %q needs operations (the tool calls agents may be granted)", t.Name)

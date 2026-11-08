@@ -89,6 +89,10 @@ type ServiceHostRoute struct {
 	// Transport presents the broker's client key and pins the service
 	// host's server key.
 	Transport http.RoundTripper
+	// DiscoveryCache is the file that keeps the tool's last good initialize
+	// and tools/list answers, served while the host is away ("" keeps them
+	// in memory only).
+	DiscoveryCache string
 }
 
 // IdentityConfig is the broker's keys, CA and policy: everything that decides

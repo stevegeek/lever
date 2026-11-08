@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/stevegeek/lever/internal/hostledger"
 )
 
 func newStore(t *testing.T) Store {
@@ -211,5 +213,57 @@ func TestStoreListMissingIsEmpty(t *testing.T) {
 	}
 	if _, err := s.Get(""); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("get newest of none: %v", err)
+	}
+}
+
+// TestStorePruneLeavesALiveSave: a Save in another process that is still
+// writing after an hour holds its lock, so the sweep leaves its directory
+// alone however old; an abandoned one (lock free, or no lock file) goes.
+func TestStorePruneLeavesALiveSave(t *testing.T) {
+	s := newStore(t)
+	save(t, s, time.Now().UTC())
+	live := filepath.Join(s.Dir, ".tmp-20260101T000000Z-cccccccccccc")
+	dead := filepath.Join(s.Dir, ".tmp-20260101T000000Z-dddddddddddd")
+	for _, d := range []string{live, dead} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, archiveName), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The dead Save's lock file is there but nobody holds it: the process
+	// that held it is gone.
+	if err := os.WriteFile(filepath.Join(dead, saveLockName), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := hostledger.LockFile(filepath.Join(live, saveLockName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	old := time.Now().Add(-3 * time.Hour)
+	for _, d := range []string{live, dead} {
+		if err := os.Chtimes(d, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.Prune(Keep); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(live, archiveName)); err != nil {
+		t.Fatalf("a live Save's temp was swept: %v", err)
+	}
+	if _, err := os.Lstat(dead); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("an abandoned temp was left: %v", err)
+	}
+}
+
+// TestStoreSaveLeavesNoLockFile: the Save lock is not part of the backup.
+func TestStoreSaveLeavesNoLockFile(t *testing.T) {
+	s := newStore(t)
+	m := save(t, s, time.Now().UTC())
+	if _, err := os.Lstat(filepath.Join(s.Dir, m.ID, saveLockName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the saved backup holds the lock file: %v", err)
 	}
 }

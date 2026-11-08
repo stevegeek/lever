@@ -218,6 +218,12 @@ func (rc *remoteController) Start(ctx context.Context) error {
 	}
 	child := watchChild(cmd.Process)
 	if err := rc.awaitListening(ctx, child); err != nil {
+		if !errors.Is(err, errChildGone) {
+			// Alive but never listening (or the wait was cancelled): a
+			// half-started proxy must not linger outside remote.pid's control.
+			_ = cmd.Process.Kill()
+			child.awaitExit(childReapTimeout)
+		}
 		return err
 	}
 	// A proxy with no matching stamp costs the next bring-up a restart, never

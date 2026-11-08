@@ -63,7 +63,7 @@ func grantDigest(app *config.App, u config.RemoteUser) string {
 
 // fenceRemoteLogins is Deps.FenceRemoteLogins: it writes the grants before
 // anything else in the apply, and stops the proxy when remote access is off.
-// `lever apply` and `lever up` also run it before anything that can refuse
+// `lever apply`, `lever up` and `lever reload` also run it before anything that can refuse
 // to go on (the contact gate reads agent-writable skill files), and `up` on
 // every path, also when it applies nothing.
 func fenceRemoteLogins(app *config.App, st state.State, stop func() error) error {

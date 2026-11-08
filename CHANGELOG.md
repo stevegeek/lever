@@ -14,14 +14,18 @@ version bump moves the block under the new version heading.
   child that nobody has reaped is a zombie, which signal 0 still reaches, so a proxy that died
   straight away (a config it refused, a panic) was waited on for the whole 5 s budget before the
   apply failed. Apply now reaps the child in the background and fails as soon as it exits, quoting
-  the proxy log as before. Host-only: the Jail ABI does not change.
-- **`memory` sizes are read as Lima reads them.** lever passes `memory` and `disk` to Lima
+  the proxy log as before. A proxy that stays up but never listens is now stopped when apply
+  gives up on it, instead of being left running outside `remote.pid`. Host-only: the Jail ABI does
+  not change.
+- **`memory` and `disk` sizes are read as Lima reads them.** lever passes `memory` and `disk` to Lima
   unchanged, and Lima reads `MB` and `GB` as binary (`2GB` is 2 GiB). lever read them as decimal,
   so its own checks disagreed with the VM: `memory: 2GB` was refused as below the 2GiB minimum
   though Lima would have given 2 GiB, an agent's `resources.memory: 4GiB` was refused as more than
   a `memory: 4GB` VM, and `lever apply` could warn of a memory change that was not there. lever now
   reads `MB` and `GB` as `MiB` and `GiB`. A size too large for 64 bits (such as
-  `17179869186GiB`) was wrapped round to a small one and passed the checks; it is now refused.
+  `17179869186GiB`) was wrapped round to a small one and passed the checks; it is now refused,
+  for `memory` and `disk` alike. `tree_backup` sizes are not passed to Lima and still read `KB`,
+  `MB` and `GB` as decimal.
 - **`lever reload` runs the checks `apply` and `up` run.** It stopped the broker and applied the
   config with none of them, so a contact login that the contact gate refuses (an agent not yet on
   this version's skills, or the state directory inside the tree) went live through `reload`, the

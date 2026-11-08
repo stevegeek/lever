@@ -170,6 +170,9 @@ func validateDisk(d string) error {
 	if !diskRE.MatchString(d) {
 		return fmt.Errorf("config: disk %q invalid (want e.g. 24GiB, 40GiB)", d)
 	}
+	if _, ok := sizeBytes(d); !ok {
+		return fmt.Errorf("config: disk %q is too large", d)
+	}
 	return nil
 }
 

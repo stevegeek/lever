@@ -52,3 +52,19 @@ func TestValidateLimaMemorySizes(t *testing.T) {
 		}
 	}
 }
+
+// A disk size past int64 would overflow in Lima's parser: refused like memory.
+func TestValidateDiskRefusesOverflow(t *testing.T) {
+	for _, tc := range []struct {
+		disk string
+		ok   bool
+	}{
+		{"", true}, {"24GiB", true}, {"40GB", true}, {"8589934591GiB", true},
+		{"17179869186GiB", false}, {"24G", false},
+	} {
+		err := validateDisk(tc.disk)
+		if (err == nil) != tc.ok {
+			t.Errorf("disk %q: err %v, want ok=%v", tc.disk, err, tc.ok)
+		}
+	}
+}

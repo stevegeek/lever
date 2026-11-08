@@ -48,6 +48,9 @@ const (
 	KindOperatorNote = "operator-note"
 	// KindDirectiveNotice: the broker's notice that a directive is pending.
 	KindDirectiveNotice = "directive-notice"
+	// KindServiceHostNotice: the broker's notice that a service host it
+	// could not reach answers again.
+	KindServiceHostNotice = "service-host-notice"
 	// KindWorkerPrefix + slug: that worker sent it. The slug is the sender's
 	// identity from its certificate, never a value from the request.
 	KindWorkerPrefix = "worker:"
@@ -61,7 +64,7 @@ func WorkerKind(slug string) string { return KindWorkerPrefix + slug }
 
 func ValidKind(k string) bool {
 	switch k {
-	case KindManager, KindOperatorNote, KindDirectiveNotice:
+	case KindManager, KindOperatorNote, KindDirectiveNotice, KindServiceHostNotice:
 		return true
 	}
 	slug, ok := strings.CutPrefix(k, KindWorkerPrefix)

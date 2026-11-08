@@ -27,7 +27,7 @@ var agentSrc string
 // carries no trace of those blocks, so no skill changes for an instance that
 // does not use them.
 func Operator(version string, verifiedChat, agentMessages, files bool) []byte {
-	return OperatorWith(version, verifiedChat, agentMessages, Files{On: files}, false)
+	return OperatorWith(version, verifiedChat, agentMessages, Files{On: files}, false, false)
 }
 
 // Agent returns the rendered worker skill (lever-agent), with
@@ -44,10 +44,12 @@ type Files struct {
 }
 
 // OperatorWith is Operator with the file directions. recycle (some worker
-// has workers[].recyclable) keeps the "recycle on" blocks; off renders no
-// trace of them.
-func OperatorWith(version string, verifiedChat, agentMessages bool, f Files, recycle bool) []byte {
+// has workers[].recyclable) keeps the "recycle on" blocks, and serviceHosts
+// (some tool runs on a service host) the "service-hosts on" blocks; off
+// renders no trace of them.
+func OperatorWith(version string, verifiedChat, agentMessages bool, f Files, recycle, serviceHosts bool) []byte {
 	src := pickBlocks(pickFiles(pick(operatorSrc, agentMessages), f), recycle, recycleOn, recycleOff)
+	src = pickBlocks(src, serviceHosts, serviceHostsOn, serviceHostsOff)
 	return renderChat(src, version, verifiedChat)
 }
 
@@ -77,6 +79,9 @@ var (
 	sharesOff  = block("shares", "off")
 	recycleOn  = block("recycle", "on")
 	recycleOff = block("recycle", "off")
+	// One variant: the "off" blocks do not exist.
+	serviceHostsOn  = block("service-hosts", "on")
+	serviceHostsOff = block("service-hosts", "off")
 )
 
 // block matches one marked block of a skill, markers included.

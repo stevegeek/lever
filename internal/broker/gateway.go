@@ -102,6 +102,9 @@ func (b *Broker) gatewayHandler(toolName string) (http.Handler, error) {
 			w.WriteHeader(http.StatusBadGateway)
 			return
 		}
+		if onServiceHost {
+			b.checkHostAfterFailure(sh.Host)
+		}
 		if ok, suppressed := limit.allow(time.Now()); ok {
 			b.audit(toolName, callerFrom(r.Context()), "error", "gateway.backend_unavailable",
 				"backend", target.Host, "err", logging.Redact(err.Error()), "suppressed", suppressed)

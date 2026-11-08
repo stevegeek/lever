@@ -267,6 +267,17 @@ on that port: the service host terminates TLS itself.
 | The broker's key changed (`pair --rotate`) and the service host was not updated | `503`. | Service host log: the refused client fingerprint. Doctor row fails and prints the fingerprint to set. |
 | Not paired yet | The broker does not start; `lever apply` names the service host. | |
 
+### The manager hears when a host is back
+
+The broker asks each service host for its info page once a minute, and a failed tool call checks
+its host at once. When a host it saw down answers again, the broker sends the manager one
+message, marked `[lever: service host back]`, naming the host and its tools, so an agent that held
+back work for them (for example writes queued while a laptop slept) knows to try again. The
+manager's skill reads it as the `service-host-notice` kind of lever message. The first check after
+the broker starts announces nothing, a host that comes and goes is announced at most once every 10
+minutes, and a manager that is not running is not messaged: it lists the tools afresh when it
+starts. `broker.log` audits each notice, sent or skipped.
+
 ### Discovery while a host is away
 
 The broker keeps each service-host tool's last good `initialize` and `tools/list` answers in

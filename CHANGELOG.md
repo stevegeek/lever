@@ -66,6 +66,17 @@ version bump moves the block under the new version heading.
 - **Supervised tool backends.** A config whose supervised tool sets `backend` to anything but a
   literal loopback IP (`0.0.0.0`, a LAN address, or a name such as `localhost`) no longer loads;
   write `127.0.0.1:PORT`. Every tool lever ships, and every example, already does.
+### Added
+
+- **The manager hears when a service host is back.** An agent that holds back work while a service
+  host is away (writes queued while a laptop sleeps) had no way to know when to try again. The
+  broker now checks each service host once a minute, and a failed tool call checks its host at
+  once. When a host it saw down answers again, the broker sends the manager one message, marked
+  `[lever: service host back]`, naming the host and its tools. It goes out at most once every 10
+  minutes per host, never on the first check after the broker starts, and not to a manager that is
+  not running. The manager's skill gains the `service-host-notice` kind, only on instances with a
+  service host, so other instances keep their skill unchanged. Host-only: the Jail ABI does not
+  change. (T0352)
 
 ## [1.0.0-beta.7] - 2026-11-08
 

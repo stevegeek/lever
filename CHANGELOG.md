@@ -47,6 +47,12 @@ version bump moves the block under the new version heading.
   podman's error only as text inside its reason. The error is now the refusal's cause: it shows
   once, sanitized, at the end, and stays available to code that checks for it. Host-only: the
   Jail ABI does not change. (T0483)
+- **A slow conversation backup is no longer swept from under itself.** Pruning removes a backup's
+  temporary directory once it is an hour old, which is how a backup killed midway is cleaned up.
+  A backup still being written by another lever command after an hour (a very large conversation,
+  a slow disk) lost its directory the same way and failed. A backup in progress now holds a lock
+  in its directory, which the sweep checks first; a killed one has released its lock and is still
+  removed. Host-only: the Jail ABI does not change.
 
 ## [1.0.0-beta.7] - 2026-11-08
 

@@ -16,6 +16,13 @@ version bump moves the block under the new version heading.
   "no project". Both lookups now follow the hub's page token or cursor, so a same-named project on
   a later page also counts as ambiguous. A list that does not end within 200 pages, or repeats a
   page, is an error rather than "none found". Host-only: the Jail ABI does not change.
+- **A refused wake no longer locks the agent's wake for a minute.** The chat page's wake button
+  allows one wake per agent a minute, and took that slot before asking the broker. When the broker
+  refused (the agent was not asleep after all, it is revoked, or the hub refused the resume and
+  kept the record), nothing had started, but the next wake was still refused with "rate-limited"
+  for 60 s. A broker refusal now gives the slot back. A broker that is busy with another resume,
+  fails, or cannot be reached still spends it, so a failing broker is not retried more than once a
+  minute. Host-only: the Jail ABI does not change.
 
 ## [1.0.0-beta.7] - 2026-11-08
 

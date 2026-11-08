@@ -266,6 +266,34 @@ func TestWakeStateAndBrokerAnswers(t *testing.T) {
 	}
 }
 
+// A broker refusal (4xx) started nothing, so it gives the agent's wake back:
+// a second wake at once reaches the broker again. A broker failure (5xx, or
+// not reached) keeps the wake spent, so a failing broker is not retried
+// faster than once a minute.
+func TestWakeBrokerRefusalGivesTheSlotBack(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err        error
+		secondCode int
+		calls      int
+	}{
+		"broker 409":    {&WakeError{Status: 409, Err: errors.New("not asleep")}, http.StatusConflict, 2},
+		"broker 403":    {&WakeError{Status: 403, Err: errors.New("revoked")}, http.StatusConflict, 2},
+		"broker 503":    {&WakeError{Status: 503, Err: errors.New("busy")}, http.StatusTooManyRequests, 1},
+		"broker 502":    {&WakeError{Status: 502, Err: errors.New("runtime")}, http.StatusTooManyRequests, 1},
+		"broker absent": {&WakeError{Err: errors.New("dial")}, http.StatusTooManyRequests, 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			hub := newPageHub(t)
+			wr := &wakeRec{err: tc.err}
+			h := NewHandler(wakeConfig(t, hub, wr))
+			wakePost(h, "c@x", "w1")
+			if rw := wakePost(h, "c@x", "w1"); rw.Code != tc.secondCode || len(wr.got()) != tc.calls {
+				t.Fatalf("second wake: %d %s, broker calls %d; want %d, %d calls", rw.Code, rw.Body, len(wr.got()), tc.secondCode, tc.calls)
+			}
+		})
+	}
+}
+
 // A broker that takes longer than the answer wait: the page gets 202 at
 // once, and the late result is one more audit line, with no error text.
 func TestWakeAnswersBeforeTheResumeEnds(t *testing.T) {

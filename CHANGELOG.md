@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [1.0.0-beta.7] - 2026-11-08
+
 ### Fixed
 
 - **`lever apply` notices a remote proxy that exits at once.** After starting the remote proxy,
@@ -64,8 +66,9 @@ version bump moves the block under the new version heading.
 
 ### Upgrade
 
-- **Jail ABI 11.** The in-jail code behaves as before (`lever-manager` only imports the changed
-  package); the fix is host-side and works once lever is upgraded. Doctor's *agent lever version*
+- **Jail ABI 11.** Every fix here is host-side and takes effect after `lever apply` or `lever up`,
+  which restarts the broker on the new version. The in-jail code behaves as before:
+  `lever-manager` only imports a changed package (the hub wait). Doctor's *agent lever version*
   row fails until you rebuild the agent image (`make lever-image` or `make lever-image-slim`) and
   run `lever up --fresh --keep-conversation`.
 

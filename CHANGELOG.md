@@ -35,6 +35,13 @@ version bump moves the block under the new version heading.
     broker's gateway does. The gateway bounds bodies first, so this was not reachable through it.
 
   Host-only: the Jail ABI does not change.
+- **Agent probes name a timeout and the output cap.** When the exec into an agent container hung
+  past its deadline, or printed more than its cap, three probes reported "exit status -1" or
+  "error" instead of "timed out" or "output over its limit": the harness check, the session
+  report and the detach of stale tmux clients. They now class their failures as the hub-token
+  probe does. The detach also runs under the guest's own `timeout`, as every other exec into an
+  agent container does, so a tmux the agent made hang is cut off inside the VM too. Host-only:
+  the Jail ABI does not change. (T0478)
 
 ## [1.0.0-beta.7] - 2026-11-08
 

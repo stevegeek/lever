@@ -190,8 +190,11 @@ func (p AgentProbe) HarnessAlive(ctx context.Context, ref string) (bool, error) 
 	}
 	s := strings.ToLower(res.Stderr)
 	switch {
-	case errors.Is(err, ErrProbeTimedOut):
+	case ctx.Err() != nil, errors.Is(err, ErrProbeTimedOut):
 		return false, fmt.Errorf("probing agent harness in %s: %w", ref, ErrProbeTimedOut)
+	case errors.Is(err, proc.ErrOutputLimit):
+		// Checked before the stderr matches: a capped stderr says nothing.
+		return false, fmt.Errorf("probing agent harness in %s: %w", ref, proc.ErrOutputLimit)
 	case noSuchContainer(res.Stderr):
 		return false, fmt.Errorf("probing agent harness in %s: %w", ref, ErrNoContainer)
 	case strings.Contains(s, "can't find window"), strings.Contains(s, "can't find session"):
@@ -204,7 +207,7 @@ func (p AgentProbe) HarnessAlive(ctx context.Context, ref string) (bool, error) 
 	if strings.Contains(s, "no server running") || strings.Contains(s, "error connecting to") {
 		return false, fmt.Errorf("probing agent harness in %s: %w", ref, ErrNoTmuxServer)
 	}
-	return false, fmt.Errorf("probing agent harness in %s: exit status %d", ref, res.Code)
+	return false, fmt.Errorf("probing agent harness in %s: %w", ref, &ProbeExitError{Code: res.Code})
 }
 
 // ReportSessionRunning makes the agent report its own session running to the
@@ -220,12 +223,24 @@ func (p AgentProbe) ReportSessionRunning(ctx context.Context, ref string) error 
 	defer cancel()
 	res, err := runGuestBounded(ctx, p.R, "podman", "exec", "--user", AgentUser, ref, "sciontool", "hook", "--dialect=claude", "SessionStart")
 	if err != nil {
-		if noSuchContainer(res.Stderr) {
-			return fmt.Errorf("reporting agent session in %s: %w", ref, ErrNoContainer)
-		}
-		return fmt.Errorf("reporting agent session in %s: exit status %d", ref, res.Code)
+		return fmt.Errorf("reporting agent session in %s: %w", ref, probeFailure(ctx, err, res))
 	}
 	return nil
+}
+
+// probeFailure classes a failed probe exec as HubToken does: a missing
+// container, the output cap, the deadline (the host's or the guest's), or
+// else the bare exit code. It carries no text from the container.
+func probeFailure(ctx context.Context, err error, res proc.Result) error {
+	switch {
+	case noSuchContainer(res.Stderr):
+		return ErrNoContainer
+	case errors.Is(err, proc.ErrOutputLimit):
+		return proc.ErrOutputLimit
+	case ctx.Err() != nil, errors.Is(err, ErrProbeTimedOut):
+		return ErrProbeTimedOut
+	}
+	return &ProbeExitError{Code: res.Code}
 }
 
 // checkRef refuses a container reference podman would read as a flag.
@@ -278,12 +293,9 @@ func (p AgentProbe) DetachClients(ctx context.Context, ref string) (int, error) 
 	}
 	ctx, cancel := BoundAgentExec(ctx)
 	defer cancel()
-	res, err := p.R.Run(ctx, nil, "podman", "exec", "--user", AgentUser, ref, "sh", "-c", detachClientsScript, "sh", "/proc")
+	res, err := runGuestBounded(ctx, p.R, "podman", "exec", "--user", AgentUser, ref, "sh", "-c", detachClientsScript, "sh", "/proc")
 	if err != nil {
-		if noSuchContainer(res.Stderr) {
-			return 0, fmt.Errorf("detaching tmux clients in %s: %w", ref, ErrNoContainer)
-		}
-		return 0, fmt.Errorf("detaching tmux clients in %s: exit status %d", ref, res.Code)
+		return 0, fmt.Errorf("detaching tmux clients in %s: %w", ref, probeFailure(ctx, err, res))
 	}
 	n := 0
 	for _, f := range strings.Fields(res.Stdout) {

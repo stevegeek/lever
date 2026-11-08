@@ -3,6 +3,8 @@ package jail
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"reflect"
 	"testing"
 	"time"
@@ -74,12 +76,56 @@ func TestAgentExecsRunUnderGuestTimeout(t *testing.T) {
 	_, _ = p.BackgroundSessions(ctx, "c")
 	_, _ = p.LogTail(ctx, "c")
 	_, _ = ContainerHasCharDevice(ctx, r, "c", "/dev/kvm")
-	if len(calls) != 7 {
+	_, _ = p.DetachClients(ctx, "c")
+	if len(calls) != 8 {
 		t.Fatalf("calls = %q", calls)
 	}
 	for _, c := range calls {
 		if len(c) < len("timeout --kill-after=1s 8s podman ") || c[:len("timeout --kill-after=1s 8s podman ")] != "timeout --kill-after=1s 8s podman " {
 			t.Fatalf("not under the guest timeout: %q", c)
+		}
+	}
+}
+
+// killRunner fails every exec with err and exit code -1, as the host does
+// when it kills limactl/orb at the deadline or the output cap trips.
+type killRunner struct{ err error }
+
+func (e killRunner) Run(context.Context, map[string]string, string, ...string) (proc.Result, error) {
+	return proc.Result{Code: -1}, e.err
+}
+func (e killRunner) RunIn(ctx context.Context, _ string, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return e.Run(ctx, env, name, args...)
+}
+func (e killRunner) RunStdin(ctx context.Context, _ io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return e.Run(ctx, env, name, args...)
+}
+
+// Every probe names a host-side timeout and the output cap in its error
+// class, not "exit status -1" or "error".
+func TestAgentProbeErrorClasses(t *testing.T) {
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	probes := map[string]func(ctx context.Context, p AgentProbe) error{
+		"HubToken":             func(ctx context.Context, p AgentProbe) error { _, err := p.HubToken(ctx, "c"); return err },
+		"HarnessAlive":         func(ctx context.Context, p AgentProbe) error { _, err := p.HarnessAlive(ctx, "c"); return err },
+		"ReportSessionRunning": func(ctx context.Context, p AgentProbe) error { return p.ReportSessionRunning(ctx, "c") },
+		"DetachClients":        func(ctx context.Context, p AgentProbe) error { _, err := p.DetachClients(ctx, "c"); return err },
+	}
+	for name, probe := range probes {
+		for _, c := range []struct {
+			what string
+			ctx  context.Context
+			err  error
+			want string
+		}{
+			{"host deadline", cancelled, errors.New("signal: killed"), "timed out"},
+			{"output cap", context.Background(), fmt.Errorf("orb: %w", proc.ErrOutputLimit), "output over its limit"},
+			{"plain exit", context.Background(), errors.New("exit status 3"), "exit status -1"},
+		} {
+			if got := ProbeErrorClass(probe(c.ctx, AgentProbe{R: killRunner{c.err}})); got != c.want {
+				t.Errorf("%s, %s: class %q, want %q", name, c.what, got, c.want)
+			}
 		}
 	}
 }

@@ -71,6 +71,9 @@ func TestValidateResources(t *testing.T) {
 		{"no unit", App{}, Resources{Memory: "2048"}, "invalid"},
 		{"over VM", App{Memory: "4GiB"}, Resources{Memory: "5GiB"}, `more than the VM's memory "4GiB"`},
 		{"equal VM", App{Memory: "4GiB"}, Resources{Memory: "4096MiB"}, ""},
+		// Lima reads GB as GiB: a 4GB VM has 4 GiB.
+		{"equal VM in GB", App{Memory: "4GB"}, Resources{Memory: "4GiB"}, ""},
+		{"over VM in GB", App{Memory: "4GB"}, Resources{Memory: "4097MiB"}, `more than the VM's memory "4GB"`},
 		{"cpu int", App{}, Resources{CPU: "1"}, ""},
 		{"cpu decimal", App{}, Resources{CPU: "1.25"}, ""},
 		{"cpu millis", App{}, Resources{CPU: "250m"}, ""},

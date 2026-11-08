@@ -7,6 +7,43 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`lever apply` notices a remote proxy that exits at once.** After starting the remote proxy,
+  apply polled until it was listening and checked it was still alive with signal 0. An exited
+  child that nobody has reaped is a zombie, which signal 0 still reaches, so a proxy that died
+  straight away (a config it refused, a panic) was waited on for the whole 5 s budget before the
+  apply failed. Apply now reaps the child in the background and fails as soon as it exits, quoting
+  the proxy log as before. A proxy that stays up but never listens is now stopped when apply
+  gives up on it, instead of being left running outside `remote.pid`. Host-only: the Jail ABI does
+  not change.
+- **`memory` and `disk` sizes are read as Lima reads them.** lever passes `memory` and `disk` to Lima
+  unchanged, and Lima reads `MB` and `GB` as binary (`2GB` is 2 GiB). lever read them as decimal,
+  so its own checks disagreed with the VM: `memory: 2GB` was refused as below the 2GiB minimum
+  though Lima would have given 2 GiB, an agent's `resources.memory: 4GiB` was refused as more than
+  a `memory: 4GB` VM, and `lever apply` could warn of a memory change that was not there. lever now
+  reads `MB` and `GB` as `MiB` and `GiB`. A size too large for 64 bits (such as
+  `17179869186GiB`) was wrapped round to a small one and passed the checks; it is now refused,
+  for `memory` and `disk` alike. `tree_backup` sizes are not passed to Lima and still read `KB`,
+  `MB` and `GB` as decimal.
+- **`lever reload` runs the checks `apply` and `up` run.** It stopped the broker and applied the
+  config with none of them, so a contact login that the contact gate refuses (an agent not yet on
+  this version's skills, or the state directory inside the tree) went live through `reload`, the
+  remote-exposure warnings were never printed, and the remote login grants were not fenced first.
+  `reload` now restates the warnings, fences the grants, refuses on the contact gate and names the
+  agent sessions a contact would reach on an old skill, all before it stops the broker, so a
+  refusal leaves the running broker on the old config. Host-only: the Jail ABI does not change.
+- **A service-host tool stays listed while its host is away.** If the host was down when an
+  agent's MCP client started or reconnected, `initialize` and `tools/list` failed, the client
+  marked that tool's server failed, and its tools stayed missing after the host came back, until
+  a reconnect nobody may run in the container. The broker now keeps each service-host tool's last
+  good `initialize` and `tools/list` answers in `.lever-state` and serves them while the host
+  cannot answer, so the tools stay listed; calls still get `503` until the host is back and then
+  work. The same applies when the host is up but answers `502`, `503` or `504` for the tool. No
+  copy is kept for a server that opens sessions (a copied `initialize` carries no session), and
+  the copy is served only for the `protocolVersion` it answered. The service hosts guide lists
+  the cases. Host-only: the Jail ABI does not change.
+
 ### Docs
 
 - **Voice on a Linux host with no GPU.** The whisper tool guide has a new section on a CPU-only
@@ -18,35 +55,6 @@ version bump moves the block under the new version heading.
   time there, and the guide now says to use a sherpa-onnx 1.x release: sherpa-onnx 2.0 dropped
   espeak-ng and refuses to speak with lever's pinned `kokoro-en-v0_19` ("No lexicon available").
   (T0353)
-
-## [1.0.0-beta.6] - 2026-11-08
-
-### Added
-
-- **`lever-tool-github -push-workflows` (opt-in).** Push tokens asked only for `contents: write`,
-  so GitHub refused every push that added or changed a file under `.github/workflows/`, even when
-  the App had the Workflows permission. With the new flag, push tokens also ask for
-  `workflows: write`. It is off by default: a pushed workflow runs before any review, with the
-  secrets visible to the repository, so the agent can run code of its choice on GitHub's runners.
-  The tool logs a warning when it starts with the flag. The GitHub tool guide's new section 9 lists
-  the guards to set up first: no repository or organization secrets outside an Environment limited
-  to `main`, no self-hosted runners, OIDC trust pinned to `main`, a code owner's review of
-  `/.github/` on `main`, and Actions not allowed to approve PRs. Other operations keep their permission sets, and `pr_merge`
-  still cannot merge a PR that changes `.github/workflows/`. Host-only: the Jail ABI does not
-  change.
-
-### Fixed
-
-- **A service-host tool stays listed while its host is away.** If the host was down when an
-  agent's MCP client started or reconnected, `initialize` and `tools/list` failed, the client
-  marked that tool's server failed, and its tools stayed missing after the host came back, until
-  a reconnect nobody may run in the container. The broker now keeps each service-host tool's last
-  good `initialize` and `tools/list` answers in `.lever-state` and serves them while the host
-  cannot answer, so the tools stay listed; calls still get `503` until the host is back and then
-  work. The same applies when the host is up but answers `502`, `503` or `504` for the tool. No
-  copy is kept for a server that opens sessions (a copied `initialize` carries no session), and
-  the copy is served only for the `protocolVersion` it answered. The service hosts guide lists
-  the cases. Host-only: the Jail ABI does not change.
 
 ## [1.0.0-beta.6] - 2026-11-08
 

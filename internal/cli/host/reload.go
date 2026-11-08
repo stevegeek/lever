@@ -31,6 +31,12 @@ func newReloadCmd(bf BackendFactory) *cobra.Command {
 				return err
 			}
 			defer unlock()
+			// The checks apply and up run, before the broker is stopped: a config
+			// the contact gate refuses must not go live through reload, and a
+			// refusal leaves the running broker on the old config.
+			if err := preBringupChecks(cmd, app, stateFor(path)); err != nil {
+				return err
+			}
 			// Stop the broker first, or apply's start-broker would keep the stale one and
 			// the old config. A no-op if none runs.
 			if err := brokerctl.StopBroker(stateFor(path)); err != nil {

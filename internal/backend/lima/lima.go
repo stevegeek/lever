@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -275,7 +276,8 @@ func (inst realizedInstance) sizingDrift(cpus int, memory string) []string {
 
 var memRE = regexp.MustCompile(`^([0-9]+(?:\.[0-9]+)?)\s*(B|KiB|MiB|GiB|TiB|KB|MB|GB|TB)$`)
 
-// memBytes accepts Lima's fractional form ("3.906GiB") too.
+// memBytes accepts Lima's fractional form ("3.906GiB") too. Like Lima
+// (go-units RAMInBytes), it reads KB, MB, GB and TB as binary.
 func memBytes(s string) (int64, bool) {
 	m := memRE.FindStringSubmatch(strings.TrimSpace(s))
 	if m == nil {
@@ -285,8 +287,11 @@ func memBytes(s string) (int64, bool) {
 	if err != nil {
 		return 0, false
 	}
-	unit := map[string]float64{"B": 1, "KiB": 1 << 10, "MiB": 1 << 20, "GiB": 1 << 30, "TiB": 1 << 40, "KB": 1e3, "MB": 1e6, "GB": 1e9, "TB": 1e12}[m[2]]
-	return int64(n * unit), true
+	unit := map[string]float64{"B": 1, "KiB": 1 << 10, "MiB": 1 << 20, "GiB": 1 << 30, "TiB": 1 << 40, "KB": 1 << 10, "MB": 1 << 20, "GB": 1 << 30, "TB": 1 << 40}[m[2]]
+	if v := n * unit; v < float64(math.MaxInt64) {
+		return int64(v), true
+	}
+	return 0, false
 }
 
 // matchesContainment reports whether the realized config is exactly the

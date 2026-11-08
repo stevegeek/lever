@@ -226,6 +226,18 @@ func TestSizingDrift(t *testing.T) {
 	if d := inst.sizingDrift(4, "4096MiB"); d != nil {
 		t.Fatalf("equal sizes in other units must not warn, got %q", d)
 	}
+	// Lima reads GB as GiB (go-units RAMInBytes): 4GB is this 4GiB VM.
+	if d := inst.sizingDrift(4, "4GB"); d != nil {
+		t.Fatalf("4GB against a 4GiB VM must not warn, got %q", d)
+	}
+	for in, want := range map[string]int64{"4GB": 4 << 30, "512MB": 512 << 20, "3.5GiB": 3584 << 20} {
+		if got, ok := memBytes(in); !ok || got != want {
+			t.Fatalf("memBytes(%q) = %d, %v; want %d", in, got, ok, want)
+		}
+	}
+	if _, ok := memBytes("99999999999TB"); ok {
+		t.Fatal("a size past int64 must not parse")
+	}
 	d := inst.sizingDrift(8, "24GiB")
 	if len(d) != 2 || !strings.Contains(d[0], "cpus is 8 but the existing VM has 4") || !strings.Contains(d[1], "memory is 24GiB but the existing VM has 4GiB") {
 		t.Fatalf("drift = %q", d)

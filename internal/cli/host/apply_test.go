@@ -627,11 +627,7 @@ func TestRemoteProxyStartFailsLoudlyWhenItNeverBinds(t *testing.T) {
 
 	// The stand-in must outlive the test: awaitListening gives up once the child
 	// is gone.
-	child := exec.Command("sleep", "60")
-	if err := child.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = child.Process.Kill(); _ = child.Wait() })
+	child := startWatched(t, "sleep", "60")
 
 	rc := shortenRemoteProxyStartWait(&remoteController{state: st, configPath: filepath.Join(dir, "lever.yaml"), port: port, cfgHash: func() string { return "hash-test" }})
 	err = rc.awaitListening(context.Background(), child)
@@ -878,11 +874,7 @@ func TestAwaitListeningHonoursContext(t *testing.T) {
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
 	_ = ln.Close()
-	child := exec.Command("sleep", "60")
-	if err := child.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = child.Process.Kill(); _ = child.Wait() })
+	child := startWatched(t, "sleep", "60")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -1028,5 +1020,43 @@ func TestConvergeNotice(t *testing.T) {
 	}
 	if got := convergeNotice(in, inTree); got != "" {
 		t.Fatalf("a record inside the tree was read: %q", got)
+	}
+}
+
+// startWatched starts name args as a watched child and kills it at cleanup.
+func startWatched(t *testing.T, name string, args ...string) *watchedChild {
+	t.Helper()
+	cmd := exec.Command(name, args...)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	child := watchChild(cmd.Process)
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		if !child.awaitExit(5 * time.Second) {
+			t.Error("the child was not reaped after kill")
+		}
+	})
+	return child
+}
+
+// A proxy that exits at once (a config it refuses, a panic) fails the apply
+// straight away, not after the whole listen budget: an unreaped child is a
+// zombie, which signal 0 still reaches, so the exit must come from a reaper.
+func TestAwaitListeningNoticesAChildThatExitedAtOnce(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	child := startWatched(t, "sh", "-c", "exit 3")
+	rc := &remoteController{state: state.ForConfig(t.TempDir()), port: port,
+		startTimeout: 30 * time.Second, startInterval: 20 * time.Millisecond}
+	start := time.Now()
+	err = rc.awaitListening(context.Background(), child)
+	testutil.WantErrIs(t, err, errRemoteProxyNotListening)
+	if el := time.Since(start); el > 3*time.Second {
+		t.Fatalf("an exited child took %s to notice, against a 30s budget", el)
 	}
 }

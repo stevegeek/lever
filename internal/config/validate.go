@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"maps"
+	"math"
 	"net"
 	"net/url"
 	"path"
@@ -169,9 +170,16 @@ func validateDisk(d string) error {
 	if !diskRE.MatchString(d) {
 		return fmt.Errorf("config: disk %q invalid (want e.g. 24GiB, 40GiB)", d)
 	}
+	if _, ok := sizeBytes(d); !ok {
+		return fmt.Errorf("config: disk %q is too large", d)
+	}
 	return nil
 }
 
+// sizeBytes reads a memory or disk size as Lima does, which is what the VM
+// gets: lever passes the string to Lima unchanged, and Lima parses it with
+// go-units RAMInBytes, where MB and GB are binary like MiB and GiB (2GB is
+// 2 GiB). A size past int64 is refused, not wrapped.
 func sizeBytes(s string) (int64, bool) {
 	m := sizeRE.FindStringSubmatch(s)
 	if m == nil {
@@ -181,7 +189,10 @@ func sizeBytes(s string) (int64, bool) {
 	if err != nil {
 		return 0, false
 	}
-	unit := map[string]int64{"MiB": 1 << 20, "GiB": 1 << 30, "MB": 1e6, "GB": 1e9}[m[2]]
+	unit := map[string]int64{"MiB": 1 << 20, "GiB": 1 << 30, "MB": 1 << 20, "GB": 1 << 30}[m[2]]
+	if n > math.MaxInt64/unit {
+		return 0, false
+	}
 	return n * unit, true
 }
 

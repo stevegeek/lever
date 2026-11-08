@@ -268,17 +268,38 @@ func (c *Client) waitHubReady(ctx context.Context, notify func(format string, ar
 // healthzScript exits 0 once /healthz answers 200, waitedExit when it never
 // did, 127 without curl, and 4 at once when something answers but not with a
 // 200 or not as plain HTTP, so a hub without /healthz does not cost every
-// attempt the whole window. Each request is bounded, so a hub that accepts
-// and hangs cannot stretch the loop.
+// attempt the whole window. $2 is the window in whole seconds. The loop ends
+// on elapsed time read from the guest's clock, and each request is bounded by
+// what is left of the window (at most 2 s), so a hub that accepts and hangs
+// cannot stretch the wait past its window by more than about a second. A
+// guest whose date fails exits 125: the in-guest path is then unusable, as
+// without curl.
 const healthzScript = `command -v curl >/dev/null 2>&1 || exit 127
-i=0
+now=$(date +%s) || exit 125
+end=$((now + $2))
 while :; do
-  curl -fs -o /dev/null --connect-timeout 1 --max-time 2 "$1/healthz"
+  left=$((end - now))
+  [ "$left" -gt 2 ] && left=2
+  [ "$left" -lt 1 ] && left=1
+  curl -fs -o /dev/null --connect-timeout 1 --max-time "$left" "$1/healthz"
   case $? in 0) exit 0 ;; 22|35|60) exit 4 ;; esac
-  [ "$i" -ge "$2" ] && exit 3
   sleep 0.15
-  i=$((i+1))
+  now=$(date +%s) || exit 125
+  [ "$now" -ge "$end" ] && exit 3
 done`
+
+// healthzWindow is the script's window argument: d in whole seconds, rounded
+// up, at least 1.
+func healthzWindow(d time.Duration) string {
+	secs := int((d + time.Second - 1) / time.Second)
+	return strconv.Itoa(max(secs, 1))
+}
+
+// healthzCallSlack is how far past its window one in-guest wait's jail call
+// may run before it is cut. The script ends itself within about a second of
+// the window; the slack covers the jail exec. A cut call reads as the
+// in-guest path being unusable, so the slack is generous.
+const healthzCallSlack = 10 * time.Second
 
 // waitedExit is how the in-guest wait says it polled for its whole window
 // without success. A code of its own, so a jail transport failure or a
@@ -296,8 +317,9 @@ const (
 // awaitHealthz: only waitedExit means "not up yet"; any other failure means
 // the in-guest path is unusable here.
 func (c *Client) awaitHealthz(ctx context.Context, d time.Duration) healthzResult {
-	n := int(d / (150 * time.Millisecond))
-	res, err := c.r.Run(ctx, nil, "sh", "-c", healthzScript, "_", strings.TrimRight(c.hubEndpoint, "/"), strconv.Itoa(n))
+	ctx, cancel := context.WithTimeout(ctx, d+healthzCallSlack)
+	defer cancel()
+	res, err := c.r.Run(ctx, nil, "sh", "-c", healthzScript, "_", strings.TrimRight(c.hubEndpoint, "/"), healthzWindow(d))
 	switch {
 	case err == nil:
 		return healthzUp

@@ -43,6 +43,12 @@ version bump moves the block under the new version heading.
   copy is kept for a server that opens sessions (a copied `initialize` carries no session), and
   the copy is served only for the `protocolVersion` it answered. The service hosts guide lists
   the cases. Host-only: the Jail ABI does not change.
+- **The in-guest wait for the hub keeps to its window.** While `lever up` waited for a cold scion
+  hub, each 5 s check in the jail turned its window into a count of 150 ms steps, and each step's
+  request could take up to 2 s. Against a hub that accepted connections but did not answer, one
+  check ran for about 70 s instead of 5 s, so the start-up progress and the dead-server check fell
+  behind. The check now ends on elapsed time, reads the jail's clock, and bounds each request by
+  what is left of the window; the jail call itself is cut 10 s past the window. (T0481)
 
 ### Docs
 
@@ -55,6 +61,13 @@ version bump moves the block under the new version heading.
   time there, and the guide now says to use a sherpa-onnx 1.x release: sherpa-onnx 2.0 dropped
   espeak-ng and refuses to speak with lever's pinned `kokoro-en-v0_19` ("No lexicon available").
   (T0353)
+
+### Upgrade
+
+- **Jail ABI 11.** The in-jail code behaves as before (`lever-manager` only imports the changed
+  package); the fix is host-side and works once lever is upgraded. Doctor's *agent lever version*
+  row fails until you rebuild the agent image (`make lever-image` or `make lever-image-slim`) and
+  run `lever up --fresh --keep-conversation`.
 
 ## [1.0.0-beta.6] - 2026-11-08
 

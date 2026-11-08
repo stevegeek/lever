@@ -72,6 +72,11 @@ version bump moves the block under the new version heading.
   probe does. The detach also runs under the guest's own `timeout`, as every other exec into an
   agent container does, so a tmux the agent made hang is cut off inside the VM too. Host-only:
   the Jail ABI does not change. (T0478)
+- **A stop-claim refusal keeps podman's error.** When lever could not read the manager's container
+  a second time, or failed to remove it, while clearing a hub stop claim, the refusal carried
+  podman's error only as text inside its reason. The error is now the refusal's cause: it shows
+  once, sanitized, at the end, and stays available to code that checks for it. Host-only: the
+  Jail ABI does not change. (T0483)
 
 ## [1.0.0-beta.7] - 2026-11-08
 

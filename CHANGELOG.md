@@ -30,6 +30,13 @@ version bump moves the block under the new version heading.
 
 ### Fixed
 
+- **`lever reload` runs the checks `apply` and `up` run.** It stopped the broker and applied the
+  config with none of them, so a contact login that the contact gate refuses (an agent not yet on
+  this version's skills, or the state directory inside the tree) went live through `reload`, the
+  remote-exposure warnings were never printed, and the remote login grants were not fenced first.
+  `reload` now restates the warnings, fences the grants, refuses on the contact gate and names the
+  agent sessions a contact would reach on an old skill, all before it stops the broker, so a
+  refusal leaves the running broker on the old config. Host-only: the Jail ABI does not change.
 - **A service-host tool stays listed while its host is away.** If the host was down when an
   agent's MCP client started or reconnected, `initialize` and `tools/list` failed, the client
   marked that tool's server failed, and its tools stayed missing after the host came back, until

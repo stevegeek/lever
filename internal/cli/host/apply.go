@@ -528,6 +528,25 @@ func applySignalContext(parent context.Context) (ctx context.Context, stop func(
 	return ctx, stop
 }
 
+// preBringupChecks is what `lever apply`, `lever up` and `lever reload` run
+// once they hold the lifecycle lock and before they change anything else:
+// restate the remote-exposure warnings, fence the remote logins (write the
+// grants, and stop the proxy when remote access is off) before anything that
+// can refuse, then refuse a contact login the agents cannot yet tell from
+// lever (checkContactGate) and name each agent session a contact would reach
+// on an old skill. A refusal leaves the broker and the agents as they were.
+func preBringupChecks(cmd *cobra.Command, app *config.App, st state.State) error {
+	printRemoteWarnings(cmd, app)
+	if err := fenceNow(app, st); err != nil {
+		return err
+	}
+	if err := checkContactGate(app, st); err != nil {
+		return err
+	}
+	printContactSessionWarnings(cmd, app, st)
+	return nil
+}
+
 func newApplyCmd(bf BackendFactory) *cobra.Command {
 	var dryRun, resetHubIdentity bool
 	var progressMode string
@@ -569,14 +588,9 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 				return err
 			}
 			defer run.finishOnReturn(&err)
-			printRemoteWarnings(cmd, app)
-			if err := fenceNow(app, stateFor(path)); err != nil {
+			if err := preBringupChecks(cmd, app, stateFor(path)); err != nil {
 				return err
 			}
-			if err := checkContactGate(app, stateFor(path)); err != nil {
-				return err
-			}
-			printContactSessionWarnings(cmd, app, stateFor(path))
 			ctx, stop := applySignalContext(pctx)
 			defer stop()
 			run.rep.Group("jail", 0)

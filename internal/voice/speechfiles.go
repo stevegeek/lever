@@ -74,6 +74,28 @@ func (f Fetcher) FetchSpeechFrom(ctx context.Context, m SpeechModel, dir, src st
 		// A model that is there but wrong is replaced below, never used.
 		f.say("%s: the files there do not verify (%v); downloading again\n", m.Name, err)
 	}
+	// The extra files (a few MB) come first, so a failure there costs no
+	// archive download.
+	extras := make([]string, len(m.Extras))
+	defer func() {
+		for _, p := range extras {
+			if p != "" {
+				os.Remove(p)
+			}
+		}
+	}()
+	for i, e := range m.Extras {
+		esrc := e.URL
+		if f.ExtraURL != nil {
+			esrc = f.ExtraURL(e)
+		}
+		got, err := f.download(ctx, download{name: m.Name + " " + e.Path, src: esrc, size: e.Size, sha256: e.SHA256,
+			allow: GitHubReleaseHost, hosts: "a GitHub release host"}, dir)
+		if err != nil {
+			return "", err
+		}
+		extras[i] = got
+	}
 	archive, err := f.download(ctx, download{name: m.Name, src: src, size: m.ArchiveSize, sha256: m.ArchiveSHA256,
 		allow: GitHubReleaseHost, hosts: "a GitHub release host"}, dir)
 	if err != nil {
@@ -95,27 +117,18 @@ func (f Fetcher) FetchSpeechFrom(ctx context.Context, m SpeechModel, dir, src st
 	if err != nil {
 		return "", err
 	}
-	for _, e := range m.Extras {
+	for i, e := range m.Extras {
 		if slices.ContainsFunc(files, func(sf SpeechFile) bool { return sf.Path == e.Path }) {
 			return "", fmt.Errorf("%w: %s's archive has its own %s, which lever fetches on its own", ErrModel, m.Name, e.Path)
 		}
-		src := e.URL
-		if f.ExtraURL != nil {
-			src = f.ExtraURL(e)
-		}
-		got, err := f.download(ctx, download{name: m.Name + " " + e.Path, src: src, size: e.Size, sha256: e.SHA256,
-			allow: GitHubReleaseHost, hosts: "a GitHub release host"}, dir)
-		if err != nil {
-			return "", err
-		}
 		sub, err := privateDirs(tmp, path.Dir(e.Path), true)
 		if err == nil {
-			err = os.Rename(got, filepath.Join(sub, path.Base(e.Path)))
+			err = os.Rename(extras[i], filepath.Join(sub, path.Base(e.Path)))
 		}
 		if err != nil {
-			os.Remove(got)
 			return "", err
 		}
+		extras[i] = ""
 		files = append(files, SpeechFile{Path: e.Path, Size: e.Size, SHA256: e.SHA256})
 	}
 	slices.SortFunc(files, func(a, b SpeechFile) int { return strings.Compare(a.Path, b.Path) })

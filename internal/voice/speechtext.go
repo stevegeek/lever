@@ -89,7 +89,7 @@ func SpeakableText(text string, lex Lexicon) string {
 			out[len(out)-1] += string(r)
 		}
 	}
-	rs := []rune(strings.ReplaceAll(text, "’", "'"))
+	rs := []rune(foldLatin(strings.ReplaceAll(text, "’", "'")))
 	for i := 0; i < len(rs); {
 		r := rs[i]
 		switch {
@@ -99,6 +99,19 @@ func SpeakableText(text string, lex Lexicon) string {
 				j++
 			}
 			add(speakWord(string(rs[i:j]), lex)...)
+			i = j
+		case (r == '-' || r == '−') && i+1 < len(rs) && isDigit(rs[i+1]) && (i == 0 || !isWordRune(rs[i-1]) && !isDigit(rs[i-1])):
+			// A sign, not a range's or a word's hyphen: "-5", "(−3)".
+			add("minus")
+			i++
+		case currencyWord(r) != "" && i+1 < len(rs) && isDigit(rs[i+1]):
+			j, words := readNumber(rs, i+1)
+			add(words...)
+			if len(words) == 1 && words[0] == "one" {
+				add(currencyWord(r))
+			} else {
+				add(currencyWord(r) + "s")
+			}
 			i = j
 		case r >= '0' && r <= '9':
 			j, words := readNumber(rs, i)
@@ -140,11 +153,71 @@ func SpeakableText(text string, lex Lexicon) string {
 
 func isWordRune(r rune) bool { return unicode.IsLetter(r) || unicode.Is(unicode.Mn, r) }
 
+func isDigit(r rune) bool { return r >= '0' && r <= '9' }
+
+// currencyWord is the unit a currency sign before a number is read as.
+func currencyWord(r rune) string {
+	switch r {
+	case '$':
+		return "dollar"
+	case '£':
+		return "pound"
+	case '€':
+		return "euro"
+	}
+	return ""
+}
+
+// latinFold is the plain letters of the accented Latin letters (Latin-1
+// and Latin Extended-A): the pinned lexicons are English and hold no
+// accented words, so "café" is read as "cafe" and spelled with its "e".
+var latinFold = map[rune]string{
+	'à': "a", 'á': "a", 'â': "a", 'ã': "a", 'ä': "a", 'å': "a", 'ā': "a", 'ă': "a", 'ą': "a",
+	'À': "A", 'Á': "A", 'Â': "A", 'Ã': "A", 'Ä': "A", 'Å': "A", 'Ā': "A", 'Ă': "A", 'Ą': "A",
+	'æ': "ae", 'Æ': "AE", 'ç': "c", 'Ç': "C", 'ć': "c", 'Ć': "C", 'č': "c", 'Č': "C", 'ĉ': "c", 'ċ': "c",
+	'ď': "d", 'Ď': "D", 'đ': "d", 'Đ': "D", 'ð': "d", 'Ð': "D",
+	'è': "e", 'é': "e", 'ê': "e", 'ë': "e", 'ē': "e", 'ĕ': "e", 'ė': "e", 'ę': "e", 'ě': "e",
+	'È': "E", 'É': "E", 'Ê': "E", 'Ë': "E", 'Ē': "E", 'Ĕ': "E", 'Ė': "E", 'Ę': "E", 'Ě': "E",
+	'ĝ': "g", 'ğ': "g", 'ġ': "g", 'ģ': "g", 'Ğ': "G", 'ĥ': "h", 'ħ': "h",
+	'ì': "i", 'í': "i", 'î': "i", 'ï': "i", 'ĩ': "i", 'ī': "i", 'ĭ': "i", 'į': "i", 'ı': "i",
+	'Ì': "I", 'Í': "I", 'Î': "I", 'Ï': "I", 'Ī': "I", 'İ': "I", 'ĵ': "j", 'ķ': "k",
+	'ĺ': "l", 'ļ': "l", 'ľ': "l", 'ł': "l", 'Ł': "L", 'ñ': "n", 'Ñ': "N", 'ń': "n", 'ņ': "n", 'ň': "n", 'Ń': "N",
+	'ò': "o", 'ó': "o", 'ô': "o", 'õ': "o", 'ö': "o", 'ø': "o", 'ō': "o", 'ŏ': "o", 'ő': "o",
+	'Ò': "O", 'Ó': "O", 'Ô': "O", 'Õ': "O", 'Ö': "O", 'Ø': "O", 'Ō': "O", 'Ő': "O", 'œ': "oe", 'Œ': "OE",
+	'ŕ': "r", 'ř': "r", 'Ř': "R", 'ś': "s", 'ş': "s", 'š': "s", 'ŝ': "s", 'Ś': "S", 'Ş': "S", 'Š': "S", 'ß': "ss",
+	'ţ': "t", 'ť': "t", 'ŧ': "t", 'Ť': "T", 'þ': "th", 'Þ': "TH",
+	'ù': "u", 'ú': "u", 'û': "u", 'ü': "u", 'ũ': "u", 'ū': "u", 'ŭ': "u", 'ů': "u", 'ű': "u", 'ų': "u",
+	'Ù': "U", 'Ú': "U", 'Û': "U", 'Ü': "U", 'Ū': "U", 'Ů': "U", 'Ű': "U",
+	'ŵ': "w", 'ý': "y", 'ÿ': "y", 'ŷ': "y", 'Ý': "Y", 'Ÿ': "Y", 'ź': "z", 'ż': "z", 'ž': "z", 'Ź': "Z", 'Ż': "Z", 'Ž': "Z",
+}
+
+// foldLatin replaces accented Latin letters with plain ones and drops the
+// combining marks after a letter (a decomposed "é"). Other scripts are left
+// as they are.
+func foldLatin(s string) string {
+	var b strings.Builder
+	var prev rune
+	for _, r := range s {
+		f, folded := latinFold[r]
+		switch {
+		case folded:
+			b.WriteString(f)
+		case unicode.Is(unicode.Mn, r) && prev < 0x250 && unicode.IsLetter(prev):
+			// A mark on a Latin letter is dropped.
+		default:
+			b.WriteRune(r)
+		}
+		prev = r
+	}
+	return b.String()
+}
+
 // speakWord returns w as words the lexicon holds: w itself; else its parts
 // at case changes ("GitHub" -> "Git Hub", "HTTPServer" -> "HTTP Server"),
 // each kept, or its singular kept ("configs" -> "config" when only that is
-// known), or spelled a letter at a time; a part with no letter of a to z
-// ("été" unknown) is dropped.
+// known), or spelled a letter at a time. Accents were folded before
+// (foldLatin), so a part with no letter of a to z is one of another script
+// ("привет"), which is dropped.
 func speakWord(w string, lex Lexicon) []string {
 	if lex.has(w) {
 		return []string{w}

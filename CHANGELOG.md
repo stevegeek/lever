@@ -18,9 +18,13 @@ version bump moves the block under the new version heading.
   British lexicon. `piper-en_GB-alba-medium` gets the English lexicon too. sherpa-onnx 2.x skips any
   word in no lexicon, so the tool now rewrites the text first: numbers become words, and a word the
   lexicons lack is split at its case changes and spelled where still unknown ("3 PRs" is "three
-  p r s"), so nothing is silently dropped. Before it serves, the tool speaks a short probe text and
-  reports itself not ready, with the reason in its log, if the program cannot speak with the
-  model; that is what a sherpa-onnx 1.x now hits. `-models` with a comma is refused, since
+  p r s"), so nothing is silently dropped. Accented Latin letters are read plain ("café" is
+  "cafe"), and a sign or currency before a number is spoken ("-5", "$5"). A text with nothing
+  speakable left (another script, emoji) is refused as bad text, and one that numbers would grow
+  past four times the request limit is refused before the engine runs. Before it serves, the tool
+  speaks a short probe text and reports itself not ready, with the reason in its log, if the
+  program cannot speak with the model; that is what a sherpa-onnx 1.x now hits. A failed probe is
+  tried again after a minute, and at once when the program file changes. `-models` with a comma is refused, since
   sherpa-onnx reads several lexicons as one comma-separated option. The voice `af` (a blend in
   v0.19) is gone. Host-only: the Jail ABI does not change.
 

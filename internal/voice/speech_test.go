@@ -448,8 +448,17 @@ func TestFetchAndVerifySpeech(t *testing.T) {
 	if _, err := f.FetchSpeechFrom(context.Background(), u, dir, srv.URL); !errors.Is(err, ErrUnpinned) {
 		t.Fatalf("unpinned: %v", err)
 	}
+	// A failed extra download costs no archive download: the extra comes
+	// first.
+	before := *asked
+	if _, err := f.FetchSpeechFrom(context.Background(), bad, filepath.Join(t.TempDir(), "m5"), srv.URL+"/a.tar.bz2"); err == nil {
+		t.Fatal("a wrong extra was accepted")
+	}
+	if *asked != before {
+		t.Fatalf("the archive was downloaded before the extra failed (%d requests)", *asked-before)
+	}
 	// The real source is GitHub's release hosts only.
-	if _, err := (Fetcher{}).FetchSpeechFrom(context.Background(), m, filepath.Join(t.TempDir(), "m2"), srv.URL); err == nil || !strings.Contains(err.Error(), "not a GitHub release host") {
+	if _, err := (Fetcher{ExtraURL: f.ExtraURL}).FetchSpeechFrom(context.Background(), m, filepath.Join(t.TempDir(), "m2"), srv.URL); err == nil || !strings.Contains(err.Error(), "not a GitHub release host") {
 		t.Fatalf("loopback source: %v", err)
 	}
 }
@@ -580,7 +589,8 @@ func TestFetchSpeechRefusesABadArchive(t *testing.T) {
 	m.ArchiveRoot = "other"
 	srv, _ := serveArchive(t, testSpeechArchive)
 	dir := filepath.Join(t.TempDir(), "models")
-	if _, err := (Fetcher{AllowHost: loopbackOnly(srv)}).FetchSpeechFrom(context.Background(), m, dir, srv.URL); !errors.Is(err, ErrModel) || !strings.Contains(err.Error(), "not below other/") {
+	f := Fetcher{AllowHost: loopbackOnly(srv), ExtraURL: func(SpeechExtra) string { return srv.URL + "/lexicon-en-us.txt" }}
+	if _, err := f.FetchSpeechFrom(context.Background(), m, dir, srv.URL); !errors.Is(err, ErrModel) || !strings.Contains(err.Error(), "not below other/") {
 		t.Fatal(err)
 	}
 	if entries, _ := os.ReadDir(dir); len(entries) != 0 {

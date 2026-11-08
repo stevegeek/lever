@@ -2,6 +2,7 @@ package broker
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -25,6 +26,22 @@ import (
 // would cut a quiet, long-lived MCP event stream. Their handlers are
 // unbounded; the agent-side client and runtime calls carry their own
 // timeouts, and a client that goes away cancels the request context.
+// jailHandshakeTimeout bounds a jail connection's TLS handshake (net/http
+// uses ReadHeaderTimeout for it here). It must stay well below ca.LapseGrace.
+const jailHandshakeTimeout = 10 * time.Second
+
+// jailServer is the mTLS server for the jail listener. No
+// ReadTimeout/WriteTimeout: /llm streams; deadlines are per route.
+// ConnContext and LapseGate go with tlsCfg: a lapsed leaf completes the
+// handshake (which proves its key) and is reported and refused there.
+func (b *Broker) jailServer(tlsCfg *tls.Config, onLapse ca.LapseFunc) *http.Server {
+	return &http.Server{
+		Handler: ca.LapseGate(b.JailHandler(), onLapse, b.log), TLSConfig: tlsCfg,
+		ConnContext:       ca.ConnContext,
+		ReadHeaderTimeout: jailHandshakeTimeout, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 16,
+	}
+}
+
 func (b *Broker) JailHandler() http.Handler {
 	mux := http.NewServeMux()
 	control := func(h http.HandlerFunc) http.Handler { return b.bounded(h, b.timeouts.Control) }
@@ -175,11 +192,7 @@ func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn, directiveL
 		// nothing else notices.
 		go b.runTokenWatch(ctx)
 	}
-	// No ReadTimeout/WriteTimeout: /llm streams. Deadlines are per route.
-	jailSrv := &http.Server{
-		Handler: b.JailHandler(), TLSConfig: tlsCfg,
-		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 16,
-	}
+	jailSrv := b.jailServer(tlsCfg, onLapse)
 	adminSrv := &http.Server{
 		Handler:           b.AdminHandler(),
 		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 16,

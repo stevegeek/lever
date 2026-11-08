@@ -7,10 +7,21 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
-## [1.0.0-beta.5] - 2026-11-07
-
 ### Fixed
 
+- **The certificate-lapse healer needs the agent's key.** When an agent's mTLS certificate has
+  expired, the broker re-enrols it: it stages a fresh ticket and restarts the agent. The broker
+  decided this while checking the certificate, but Go checks a client's certificate before it checks
+  that the client holds the matching key. So anyone on the jail network with a copy of an agent's
+  expired certificate, which is not secret, could make the broker restart that agent (rate-limited:
+  three times, then a ten-minute cooldown). An expired certificate of lever's own now completes the
+  handshake, which proves the key. The broker then answers its requests with 503 and `Retry-After`
+  on every jail route, `/enrol` included, and only then heals the agent. A certificate presented
+  without its key fails the handshake and heals nothing. Two changes in timing: a certificate
+  expired less than a minute ago is still refused in the handshake and not healed, and the agent's
+  next attempt after that minute heals it; and a kept-alive connection whose certificate expired
+  more than a minute ago is now refused once (503) instead of served, so the client reconnects with
+  its renewed certificate. Host-only: the Jail ABI does not change.
 - **OrbStack refuses to reuse a machine that does not match lever's containment.** `lever up`
   and `lever apply` reused any machine with the lever name, started it if it was stopped, and never
   checked how it was made. A machine made by hand, or changed after creation, could see the Mac's
@@ -24,6 +35,11 @@ version bump moves the block under the new version heading.
   backend does. A stopped machine whose OrbStack record mismatches is not started; one that fails
   only the in-guest check is stopped again. A machine lever created passes unchanged.
   Host-only: the Jail ABI does not change.
+
+## [1.0.0-beta.5] - 2026-11-07
+
+### Fixed
+
 - **`github.push` to a private repo.** The first step of a push refreshes the host's copy of the
   repo's `main` from GitHub, and that fetch went out without the token. A private repo refuses an
   anonymous fetch, so every push to one failed with "could not read Username". The fetch now

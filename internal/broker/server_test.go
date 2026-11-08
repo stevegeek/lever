@@ -3,6 +3,9 @@ package broker
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -12,6 +15,7 @@ import (
 	"time"
 
 	registry "github.com/stevegeek/lever/internal/broker/registry"
+	"github.com/stevegeek/lever/internal/cap/ca"
 	"github.com/stevegeek/lever/internal/wire"
 )
 
@@ -205,5 +209,44 @@ func TestEpochReportsTheInstanceID(t *testing.T) {
 	New(cfg).AdminHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, wire.PathEpoch, nil))
 	if strings.Contains(w.Body.String(), "instance_id") {
 		t.Fatalf("empty id serialized: %s", w.Body.String())
+	}
+}
+
+// The jail server carries the lapse wiring: ConnContext records each accept
+// time, the handshake is bounded well below the lapse grace, and LapseGate
+// fronts every route, the certless ones included.
+func TestJailServerCarriesTheLapseGate(t *testing.T) {
+	b := New(testConfig(t))
+	reported := make(chan string, 1)
+	srv := b.jailServer(nil, func(cn string) { reported <- cn })
+	if srv.ConnContext == nil {
+		t.Fatal("jail server has no ConnContext: lapses would be refused but never healed")
+	}
+	if srv.ReadHeaderTimeout <= 0 || srv.ReadHeaderTimeout > ca.LapseGrace/2 {
+		t.Fatalf("jail handshake bound %v must be positive and well below the lapse grace %v", srv.ReadHeaderTimeout, ca.LapseGrace)
+	}
+	ctx := srv.ConnContext(context.Background(), nil)
+	for _, path := range []string{wire.PathEnrol, wire.PathVersion, wire.PathRenew} {
+		method := "POST"
+		if path == wire.PathVersion {
+			method = "GET"
+		}
+		r := httptest.NewRequest(method, path, strings.NewReader("{}")).WithContext(ctx)
+		r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{{
+			Subject: pkix.Name{CommonName: "scratch"}, NotAfter: time.Now().Add(-time.Hour),
+		}}}
+		w := httptest.NewRecorder()
+		srv.Handler.ServeHTTP(w, r)
+		if w.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%s with a lapsed leaf: got %d, want 503 from the gate", path, w.Code)
+		}
+		select {
+		case cn := <-reported:
+			if cn != "scratch" {
+				t.Fatalf("reported %q, want scratch", cn)
+			}
+		default:
+			t.Fatalf("%s: the lapse was not reported", path)
+		}
 	}
 }

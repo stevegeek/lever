@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [1.0.0-beta.6] - 2026-11-08
+
 ### Added
 
 - **`lever-tool-github -push-workflows` (opt-in).** Push tokens asked only for `contents: write`,
@@ -20,8 +22,6 @@ version bump moves the block under the new version heading.
   `/.github/` on `main`, and Actions not allowed to approve PRs. Other operations keep their permission sets, and `pr_merge`
   still cannot merge a PR that changes `.github/workflows/`. Host-only: the Jail ABI does not
   change.
-
-## [1.0.0-beta.6] - 2026-11-08
 
 ### Fixed
 
@@ -54,8 +54,10 @@ version bump moves the block under the new version heading.
 
 ### Upgrade
 
-- **Jail ABI unchanged.** No agent image rebuild. Both fixes are host-side and take effect after
-  `lever apply` or `lever up`, which restarts the broker on the new version.
+- **Jail ABI unchanged.** No agent image rebuild. Everything here is host-side and takes effect
+  after `lever apply` or `lever up`, which restarts the broker on the new version.
+  `-push-workflows` is off until you add it to the github tool's command, after reading section 9
+  of the GitHub tool guide.
 
 ## [1.0.0-beta.5] - 2026-11-07
 

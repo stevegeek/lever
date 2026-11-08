@@ -23,6 +23,18 @@ version bump moves the block under the new version heading.
   for 60 s. A broker refusal now gives the slot back. A broker that is busy with another resume,
   fails, or cannot be reached still spends it, so a failing broker is not retried more than once a
   minute. Host-only: the Jail ABI does not change.
+- **Four HTTP answers carry the right status.**
+  - A push subscription whose body could not be read (a dropped connection, a bad chunked body)
+    was answered 413 `too-large`; it is now 400 `bad-body`. Only a body over the limit gets 413.
+  - A sent push was audited, and written to `push/status.json`, as 201 whatever the push service
+    answered. Services also answer 200 or 202; the audit line now shows the service's own status.
+  - A dictation clip sent without a `Content-Length` and over the length limit was answered 400
+    `bad-audio`; it is now 413 `too-long`, as when the length is declared. The proxy's own client
+    always declares it, so the chat page saw no change.
+  - A service host answered a request body over its limit with 400; it now answers 413, as the
+    broker's gateway does. The gateway bounds bodies first, so this was not reachable through it.
+
+  Host-only: the Jail ABI does not change.
 
 ## [1.0.0-beta.7] - 2026-11-08
 

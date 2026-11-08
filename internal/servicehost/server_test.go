@@ -508,3 +508,16 @@ func TestCloseDoesNotHangOnAServerThatStoppedReading(t *testing.T) {
 		t.Fatal("Close hung on a server blocked in a write")
 	}
 }
+
+// A body over maxRequestBody is too large (413), as at the broker's gateway;
+// a malformed one stays 400.
+func TestOversizeRequestIs413(t *testing.T) {
+	r := newRig(t, 0, fakeTool(t, filepath.Join(t.TempDir(), "fake.log"), "echo"))
+	big := `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"pad":"` + strings.Repeat("a", maxRequestBody) + `"}}`
+	if resp, body := r.post("/mcp/fake", big); resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversize: %d %s, want 413", resp.StatusCode, body)
+	}
+	if resp, body := r.post("/mcp/fake", `{`); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("malformed: %d %s, want 400", resp.StatusCode, body)
+	}
+}

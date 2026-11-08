@@ -261,12 +261,12 @@ func (p *Push) notify(ctx context.Context, login, agent string) {
 		wg.Go(func() {
 			defer func() { <-sem }()
 			sctx, cancel := context.WithTimeout(ctx, webpush.SendTimeout)
-			err := p.send.Send(sctx, sub.Subscription, payload)
+			status, err := p.send.Send(sctx, sub.Subscription, payload)
 			cancel()
 			host := endpointHost(sub.Endpoint)
 			switch {
 			case err == nil:
-				p.record(login, agent, host, DecisionPushSent, http.StatusCreated, "sent")
+				p.record(login, agent, host, DecisionPushSent, status, "sent")
 			case webpush.Gone(err):
 				_, _ = p.store.Remove(login, sub.Endpoint)
 				p.kick()

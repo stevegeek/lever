@@ -133,7 +133,7 @@ func TestSendDeliversAnEncryptedSignedPush(t *testing.T) {
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	now := time.Now()
 	s := &Sender{Key: key, Subject: "mailto:op@example.com", Test: th, Client: NewClient(th), Now: func() time.Time { return now }}
-	if err := s.Send(context.Background(), sub, []byte(`{"v":1,"agent":"w1"}`)); err != nil {
+	if _, err := s.Send(context.Background(), sub, []byte(`{"v":1,"agent":"w1"}`)); err != nil {
 		t.Fatal(err)
 	}
 	req, body := r.got[0], r.bodies[0]
@@ -161,7 +161,7 @@ func TestSendStatuses(t *testing.T) {
 	} {
 		r, sub, th := newReceiver(t, status)
 		s := &Sender{Key: key, Subject: "mailto:x@y", Test: th, Client: NewClient(th)}
-		err := s.Send(context.Background(), sub, []byte(`{}`))
+		_, err := s.Send(context.Background(), sub, []byte(`{}`))
 		if (err == nil) != want.ok || Gone(err) != want.gone {
 			t.Errorf("HTTP %d: err %v, gone %v", status, err, Gone(err))
 		}
@@ -178,7 +178,7 @@ func TestSendRefusesAnEndpointOutsideTheList(t *testing.T) {
 	_, sub, _ := newReceiver(t, 201)
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	s := &Sender{Key: key, Subject: "mailto:x@y"} // no test hosts: production
-	if err := s.Send(context.Background(), sub, []byte(`{}`)); !errors.Is(err, ErrEndpoint) {
+	if _, err := s.Send(context.Background(), sub, []byte(`{}`)); !errors.Is(err, ErrEndpoint) {
 		t.Fatalf("err %v", err)
 	}
 }
@@ -189,7 +189,7 @@ func TestSendErrorNamesTheHostOnly(t *testing.T) {
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := (&Sender{Key: key, Subject: "mailto:x@y", Test: th, Client: NewClient(th)}).Send(ctx, sub, []byte(`{}`))
+	_, err := (&Sender{Key: key, Subject: "mailto:x@y", Test: th, Client: NewClient(th)}).Send(ctx, sub, []byte(`{}`))
 	if err == nil || strings.Contains(err.Error(), "SECRET-TOKEN") {
 		t.Fatalf("err %v must not carry the endpoint path", err)
 	}
@@ -214,7 +214,7 @@ func TestSendHTTPSAudience(t *testing.T) {
 	})}
 	s := &Sender{Key: key, Subject: "mailto:x@y", Client: client, Now: func() time.Time { return now }}
 	sub := Subscription{Endpoint: "https://fcm.googleapis.com/fcm/send/abc", P256DH: b64.EncodeToString(ua.PublicKey().Bytes()), Auth: b64.EncodeToString(auth)}
-	if err := s.Send(context.Background(), sub, []byte(`{}`)); err != nil {
+	if _, err := s.Send(context.Background(), sub, []byte(`{}`)); err != nil {
 		t.Fatal(err)
 	}
 	if got.URL.String() != sub.Endpoint {
@@ -279,5 +279,18 @@ func TestDialerGivesEachAddressItsOwnBudget(t *testing.T) {
 	}
 	if len(tried) != 2 {
 		t.Fatalf("tried %v", tried)
+	}
+}
+
+// Send reports the push service's own 2xx: services answer 200, 201 or 202.
+func TestSendReturnsTheServicesStatus(t *testing.T) {
+	for _, code := range []int{http.StatusOK, http.StatusCreated, http.StatusAccepted, http.StatusGone} {
+		_, sub, th := newReceiver(t, code)
+		key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		s := &Sender{Key: key, Subject: "mailto:x@y", Test: th, Client: NewClient(th)}
+		got, err := s.Send(context.Background(), sub, []byte(`{}`))
+		if got != code || (err == nil) != (code/100 == 2) {
+			t.Errorf("service answered %d: Send = %d, %v", code, got, err)
+		}
 	}
 }

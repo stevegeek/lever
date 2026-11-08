@@ -45,7 +45,7 @@ const (
 )
 
 type pushSender interface {
-	Send(ctx context.Context, sub webpush.Subscription, payload []byte) error
+	Send(ctx context.Context, sub webpush.Subscription, payload []byte) (status int, err error)
 }
 
 type PushOptions struct {
@@ -192,7 +192,12 @@ func (g *gate) servePush(w http.ResponseWriter, r *http.Request, line *AuditLine
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxSubBody+1))
-	if err != nil || len(body) > maxSubBody {
+	if err != nil {
+		// A dropped connection or a malformed chunked body, not a big one.
+		refuse(http.StatusBadRequest, "bad-body")
+		return
+	}
+	if len(body) > maxSubBody {
 		refuse(http.StatusRequestEntityTooLarge, "too-large")
 		return
 	}

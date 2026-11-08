@@ -3,6 +3,7 @@ package remoteproxy
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -18,11 +19,13 @@ type fakeSender struct {
 	mu   sync.Mutex
 	sent []string // "<endpoint> <payload>"
 	err  func(webpush.Subscription) error
+	// status is the push service's 2xx on success (0: 201).
+	status int
 	// hook, when set, runs before the send is recorded, with its context.
 	hook func(ctx context.Context)
 }
 
-func (f *fakeSender) Send(ctx context.Context, s webpush.Subscription, p []byte) error {
+func (f *fakeSender) Send(ctx context.Context, s webpush.Subscription, p []byte) (int, error) {
 	if f.hook != nil {
 		f.hook(ctx)
 	}
@@ -30,9 +33,14 @@ func (f *fakeSender) Send(ctx context.Context, s webpush.Subscription, p []byte)
 	defer f.mu.Unlock()
 	f.sent = append(f.sent, s.Endpoint+" "+string(p))
 	if f.err != nil {
-		return f.err(s)
+		if err := f.err(s); err != nil {
+			return webpush.StatusOf(err), err
+		}
 	}
-	return nil
+	if f.status != 0 {
+		return f.status, nil
+	}
+	return 201, nil
 }
 
 func (f *fakeSender) all() []string {
@@ -356,5 +364,30 @@ func TestSameOriginWrite(t *testing.T) {
 	}
 	if sameOriginWrite(httptest.NewRequest("POST", pushSubsPath, nil), "") {
 		t.Error("an unset serve host matches no origin")
+	}
+}
+
+type failingBody struct{}
+
+func (failingBody) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
+
+// A body that cannot be read (a dropped connection, a bad chunked body) is a
+// bad request, not a too-large one.
+func TestPushSubscribeReadErrorIsBadBody(t *testing.T) {
+	hub := newPageHub(t)
+	cfg, p := pushConfig(t, hub, &fakeSender{}, nil)
+	h := NewHandler(cfg)
+	req := proxyRequest("POST", pushSubsPath, failingBody{})
+	req.Header.Set("Tailscale-User-Login", chatOp)
+	for k, v := range map[string]string{"Origin": "https://" + testServeHost, "Sec-Fetch-Site": "same-origin", "Content-Type": "application/json"} {
+		req.Header.Set(k, v)
+	}
+	rw := httptest.NewRecorder()
+	h.ServeHTTP(rw, req)
+	if rw.Code != http.StatusBadRequest || !strings.Contains(rw.Body.String(), `"error":"bad-body"`) {
+		t.Fatalf("got %d %s, want 400 bad-body", rw.Code, rw.Body.String())
+	}
+	if len(p.store.Logins()) != 0 {
+		t.Fatal("a refused request stored a subscription")
 	}
 }

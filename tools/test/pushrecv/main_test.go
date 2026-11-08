@@ -33,7 +33,7 @@ func TestReceiverDecryptsAndLogs(t *testing.T) {
 	th, _ := webpush.ParseTestHosts(ln.Addr().String())
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	s := &webpush.Sender{Key: key, Subject: "mailto:x@y", Test: th, Client: webpush.NewClient(th)}
-	if err := s.Send(context.Background(), webpush.Subscription{Endpoint: sub.Endpoint, P256DH: sub.Keys.P256DH, Auth: sub.Keys.Auth}, []byte(`{"v":1,"agent":"w1"}`)); err != nil {
+	if _, err := s.Send(context.Background(), webpush.Subscription{Endpoint: sub.Endpoint, P256DH: sub.Keys.P256DH, Auth: sub.Keys.Auth}, []byte(`{"v":1,"agent":"w1"}`)); err != nil {
 		t.Fatal(err)
 	}
 	f, _ := os.Open(filepath.Join(out, "received.jsonl"))

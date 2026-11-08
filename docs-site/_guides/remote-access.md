@@ -766,7 +766,7 @@ who wrote a message. Two host records do, and no agent can write either of them:
   sender and time, and the text. Only the proxy writes it, and agents never reach the proxy.
 - **The sent ledger** (`.lever-state/sent-ledger/`, one 0600 file per recipient and kind). The
   broker records every message lever sends, before it sends it: the recipient, who it is from
-  (`manager`, `worker:<slug>`, `operator-note` or `directive-notice`), the exact text, and a fresh
+  (`manager`, `worker:<slug>`, `operator-note`, `directive-notice` or `service-host-notice`), the exact text, and a fresh
   128-bit id. It writes that id on the message's first line as `ref=<id>`, after the marker. A
   send the broker cannot record is not made.
 

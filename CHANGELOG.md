@@ -9,6 +9,19 @@ version bump moves the block under the new version heading.
 
 ### Fixed
 
+- **OrbStack refuses to reuse a machine that does not match lever's containment.** `lever up`
+  and `lever apply` reused any machine with the lever name, started it if it was stopped, and never
+  checked how it was made. A machine made by hand, or changed after creation, could see the Mac's
+  files, forward the Mac's SSH agent, or mount another tree, while the profile still claimed
+  "isolated machine: no host files + project tree mounted at /lever". Before reuse lever now reads
+  OrbStack's record of the machine (`orb info --format json`) and requires `isolated`, no SSH agent
+  forwarding, and exactly the project tree mounted at `/lever`. Once the machine runs, it also checks
+  from inside that `/Users` is absent and that every host mount is at or under `/lever`. On a
+  mismatch, or when the state cannot be read, it stops with "orbstack machine … exists with a
+  mismatched containment config (…); run 'lever down' then 'lever up' to recreate", as the Lima
+  backend does. A stopped machine whose OrbStack record mismatches is not started; one that fails
+  only the in-guest check is stopped again. A machine lever created passes unchanged.
+  Host-only: the Jail ABI does not change.
 - **`github.push` to a private repo.** The first step of a push refreshes the host's copy of the
   repo's `main` from GitHub, and that fetch went out without the token. A private repo refuses an
   anonymous fetch, so every push to one failed with "could not read Username". The fetch now

@@ -1,0 +1,30 @@
+{
+  "record": {
+    "id": "01M6X5VXEAEGEEYM43TNXG70TD",
+    "name": "lever-jail",
+    "image": {
+      "distro": "alpine",
+      "version": "3.23",
+      "arch": "arm64",
+      "variant": "default"
+    },
+    "config": {
+      "isolated": false,
+      "forward_ssh_agent": true,
+      "isolate_network": false,
+      "default_username": "user",
+      "http_port": 0,
+      "https_port": 0
+    },
+    "os_release": {
+      "name": "Alpine Linux",
+      "version_id": "3.23.8",
+      "pretty_name": "Alpine Linux v3.23"
+    },
+    "builtin": false,
+    "state": "running"
+  },
+  "disk_size": 35479552,
+  "ip4": "192.168.139.134",
+  "ip6": "fd07:b51a:cc66:0:f822:afff:fe81:e022"
+}

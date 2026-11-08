@@ -122,20 +122,37 @@ func (o *OrbStack) ResolveRunUser(ctx context.Context) error {
 }
 
 // ensureMachine: the project tree mount is set at CREATE time only; changing
-// it on an existing machine requires Teardown+EnsureUp.
+// it on an existing machine requires Teardown+EnsureUp. An existing machine
+// is reused only when it matches the containment lever creates: OrbStack's
+// record is checked before it is started, the guest's mounts once it runs.
 func (o *OrbStack) ensureMachine(ctx context.Context, projectTree string) (skip string, err error) {
 	status, found, err := o.machineStatus(ctx)
 	if err != nil {
 		return "", err
 	}
 	if found {
+		if err := o.verifyMachineConfig(ctx, projectTree); err != nil {
+			return "", err
+		}
 		if strings.EqualFold(status, "running") {
+			if err := o.verifyGuestMounts(ctx); err != nil {
+				return "", err
+			}
 			return "already running", nil
 		}
 		if _, err := o.Runner().Run(ctx, nil, "orb", "start", o.Machine()); err != nil {
 			return "", fmt.Errorf("orb start: %w", err)
 		}
-		return "", o.waitMachineReachable(ctx)
+		if err := o.waitMachineReachable(ctx); err != nil {
+			return "", err
+		}
+		if err := o.verifyGuestMounts(ctx); err != nil {
+			// Leave a refused machine as it was found: stopped. Best
+			// effort; the refusal is the error that matters.
+			_, _ = o.Runner().Run(ctx, nil, "orb", "stop", o.Machine())
+			return "", err
+		}
+		return "", nil
 	}
 	mountArg := projectTree + ":" + common.MountDest
 	if _, err := o.Runner().Run(ctx, nil, "orb", "create", "--isolated", "--mount", mountArg, distro, o.Machine()); err != nil {

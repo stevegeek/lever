@@ -80,3 +80,51 @@ func TestRealOrbStack(t *testing.T) {
 	}
 	t.Logf("rootless podman: %q", strings.TrimSpace(res.Stdout))
 }
+
+// Run with: go test -tags integration -run TestRealOrbStackVerifiesMachine ./internal/backend/orbstack/ -v
+// Creates and DELETES two throwaway machines. A machine lever made is reused
+// (running, and after a stop); one made by hand without --isolated under a
+// lever name is refused and not started.
+func TestRealOrbStackVerifiesMachine(t *testing.T) {
+	ctx := context.Background()
+	r := proc.RealRunner{}
+	tree := t.TempDir() // under /var, a symbolic link to /private/var on macOS
+
+	own := New(r, "lever-it-verify-"+os.Getenv("USER"), common.Options{})
+	t.Cleanup(func() { _ = own.Teardown(ctx) })
+	if _, err := own.ensureMachine(ctx, tree); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if skip, err := own.ensureMachine(ctx, tree); err != nil || skip != "already running" {
+		t.Fatalf("reuse running = %q, %v; want already running", skip, err)
+	}
+	if err := own.Stop(ctx); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if _, err := own.ensureMachine(ctx, tree); err != nil {
+		t.Fatalf("reuse stopped: %v", err)
+	}
+	if _, err := own.ensureMachine(ctx, t.TempDir()); err == nil || !strings.Contains(err.Error(), "mismatched containment config") {
+		t.Fatalf("another project tree must be refused; got %v", err)
+	}
+
+	foreign := New(r, "lever-it-foreign-"+os.Getenv("USER"), common.Options{})
+	t.Cleanup(func() { _ = foreign.Teardown(ctx) })
+	if _, err := r.Run(ctx, nil, "orb", "create", "alpine", foreign.Machine()); err != nil {
+		t.Fatalf("orb create (not isolated): %v", err)
+	}
+	_, err := foreign.ensureMachine(ctx, tree)
+	if err == nil || !strings.Contains(err.Error(), "not isolated") {
+		t.Fatalf("a non-isolated machine must be refused; got %v", err)
+	}
+	t.Logf("refused: %v", err)
+	if err := foreign.Stop(ctx); err != nil {
+		t.Fatalf("stop foreign: %v", err)
+	}
+	if _, err := foreign.ensureMachine(ctx, tree); err == nil {
+		t.Fatal("a stopped non-isolated machine must be refused")
+	}
+	if stopped, err := foreign.MachineStopped(ctx); err != nil || !stopped {
+		t.Fatalf("a refused stopped machine must stay stopped; stopped=%v err=%v", stopped, err)
+	}
+}

@@ -304,21 +304,29 @@ func TestForegroundFailureStopsTheLanes(t *testing.T) {
 	}
 }
 
+// The broker lane fails first, then the foreground step: both failures are
+// in the error. The foreground waits for the broker step's FAILED line, which
+// the lane prints only after it has recorded the failure. (Waiting for
+// BrokerHealthy to return was not enough: the run's stop could then land
+// before the lane recorded its failure, and the lane, seeing the stop,
+// counted its own failure as stopped.)
 func TestBothFailuresAreReported(t *testing.T) {
-	identityStarted, brokerFailed := make(chan struct{}), make(chan struct{})
+	identityStarted := make(chan struct{})
 	errBroker := errors.New("broker did not become healthy")
-	_, err := runWithProgress(t, Deps{
+	out := &syncOut{}
+	_, err := runWithProgressCtx(context.Background(), t, Deps{
 		BrokerHealthy: func(context.Context) error {
-			defer close(brokerFailed)
 			<-identityStarted
 			return errBroker
 		},
 		EnsureHubIdentity: func(context.Context) error {
 			close(identityStarted)
-			<-brokerFailed
+			if !out.waitFor("broker-up FAILED") {
+				t.Errorf("the broker step was never listed as failed:\n%s", out)
+			}
 			return errBoom
 		},
-	})
+	}, out)
 	testutil.WantErrIs(t, err, errBoom)
 	testutil.WantErrIs(t, err, errBroker)
 	if !strings.Contains(err.Error(), "step broker-up") || !strings.Contains(err.Error(), "step hub-identity") {

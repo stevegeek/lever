@@ -7,6 +7,18 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **The manager hears when a service host is back.** An agent that holds back work while a service
+  host is away (writes queued while a laptop sleeps) had no way to know when to try again. The
+  broker now checks each service host once a minute, and a failed tool call checks its host at
+  once. When a host it saw down answers again, the broker sends the manager one message, marked
+  `[lever: service host back]`, naming the host and its tools. It goes out at most once every 10
+  minutes per host, never on the first check after the broker starts, and not to a manager that is
+  not running. The manager's skill gains the `service-host-notice` kind, only on instances with a
+  service host, so other instances keep their skill unchanged. Host-only: the Jail ABI does not
+  change. (T0352)
+
 ### Changed
 
 - **Read-aloud needs sherpa-onnx 2.0 and uses Kokoro v1.0.** sherpa-onnx 2.0 dropped espeak-ng, so
@@ -28,6 +40,61 @@ version bump moves the block under the new version heading.
   sherpa-onnx reads several lexicons as one comma-separated option. The voice `af` (a blend in
   v0.19) is gone. Host-only: the Jail ABI does not change.
 
+### Fixed
+
+- **Hub lists are read past their first page.** lever looked up an access constraint by name, and
+  a project by name or slug, from the first page of the hub's list only. With more than 200
+  constraints matching the name, the exact one could be on a later page; lever then found none and
+  created a duplicate. With more than 500 visible projects, a project past the first page read as
+  "no project". Both lookups now follow the hub's page token or cursor, so a same-named project on
+  a later page also counts as ambiguous. A list that does not end within 200 pages, or repeats a
+  page, is an error rather than "none found". Host-only: the Jail ABI does not change.
+- **A refused wake no longer locks the agent's wake for a minute.** The chat page's wake button
+  allows one wake per agent a minute, and took that slot before asking the broker. When the broker
+  refused before starting anything (the agent was not asleep after all, it is revoked, or the
+  worker cap is reached), the next wake was still refused with "rate-limited" for 60 s. Such a
+  refusal now gives the slot back. The hub refusing a resume the broker did start still spends
+  it, as do a broker busy with another resume, a broker that fails, and one that cannot be reached,
+  so none of them is retried more than once a minute. Host-only: the Jail ABI does not change.
+- **Four HTTP answers carry the right status.**
+  - A push subscription whose body could not be read (a dropped connection, a bad chunked body)
+    was answered 413 `too-large`; it is now 400 `bad-body`. Only a body over the limit gets 413.
+  - A sent push was audited, and written to `push/status.json`, as 201 whatever the push service
+    answered. Services also answer 200 or 202; the audit line now shows the service's own status.
+  - A dictation clip sent without a `Content-Length` and over the length limit was answered 400
+    `bad-audio`; it is now 413 `too-long`, as when the length is declared. The proxy's own client
+    always declares it, so the chat page saw no change.
+  - A service host answered a request body over its limit with 400; it now answers 413, as the
+    broker's gateway does. The gateway bounds bodies first, so this was not reachable through it.
+
+  Host-only: the Jail ABI does not change.
+- **Agent probes name a timeout and the output cap.** When the exec into an agent container hung
+  past its deadline, or printed more than its cap, three probes reported "exit status -1" or
+  "error" instead of "timed out" or "output over its limit": the harness check, the session
+  report and the detach of stale tmux clients. They now class their failures as the hub-token
+  probe does. The detach also runs under the guest's own `timeout`, as every other exec into an
+  agent container does, so a tmux the agent made hang is cut off inside the VM too. Host-only:
+  the Jail ABI does not change. (T0478)
+- **A stop-claim refusal keeps podman's error.** When lever could not read the manager's container
+  a second time, or failed to remove it, while clearing a hub stop claim, the refusal carried
+  podman's error only as text inside its reason. The error is now the refusal's cause: it shows
+  once, sanitized, at the end, and stays available to code that checks for it. Host-only: the
+  Jail ABI does not change. (T0483)
+- **A slow conversation backup is no longer swept from under itself.** Pruning removes a backup's
+  temporary directory once it is an hour old, which is how a backup killed midway is cleaned up.
+  A backup still being written by another lever command after an hour (a very large conversation,
+  a slow disk) lost its directory the same way and failed. A backup in progress now holds a lock
+  in its directory until it is renamed into place, which the sweep checks first; a killed one has
+  released its lock and is still removed. A store on a filesystem with no file locks saves as
+  before, unlocked. Host-only: the Jail ABI does not change.
+- **A supervised tool's `backend` must be loopback.** The broker starts a tool with
+  `-backend <backend>` as its listen address, and config load only checked that it parsed as
+  `host:port`, so `backend: 0.0.0.0:3210` loaded and the tool listened on every interface. A
+  supervised tool trusts the broker's word for who calls it, so it must not be on the network.
+  Config load now refuses a supervised tool's `backend` unless its host is a literal loopback IP
+  (`127.0.0.1`, `[::1]`), as it already did for external tools. `lever apply`'s plan in the CLI
+  reference now lists its last steps, `worker-autostart`. Host-only: the Jail ABI does not change.
+
 ### Upgrade
 
 - **Read-aloud (`lever-tool-tts`):** install sherpa-onnx 2.0 or later (for example `pip install
@@ -37,6 +104,11 @@ version bump moves the block under the new version heading.
   `lever reload`. With `piper-en_GB-alba-medium`, run `lever voice fetch piper-en_GB-alba-medium`
   again for its lexicon. The old `kokoro-en-v0_19` directory in `-models` can be deleted. A config
   naming `kokoro-en-v0_19` no longer loads.
+- **Supervised tool backends.** A config whose supervised tool sets `backend` to anything but a
+  literal loopback IP (`0.0.0.0`, a LAN address, or a name such as `localhost`) no longer loads;
+  write `127.0.0.1:PORT`. Every tool lever ships, and every example, already does. A running
+  instance whose config is refused keeps running until the next `lever apply`, `lever up` or
+  broker restart, which then stops with the reason.
 
 ## [1.0.0-beta.7] - 2026-11-08
 

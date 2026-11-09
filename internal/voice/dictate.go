@@ -176,6 +176,13 @@ func (h *DictateHandler) dictate(w http.ResponseWriter, r *http.Request) {
 		answerJSON(w, http.StatusBadRequest, map[string]string{"error": WordBadAudio})
 		return
 	}
+	// Without a Content-Length (a chunked body) only the read shows the
+	// clip is over the limit: it is too long, not bad audio.
+	if int64(len(clip)) > limit {
+		drainClip(r)
+		answerJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": WordTooLong})
+		return
+	}
 	seconds, word := CheckWAV(clip, h.MaxSeconds)
 	if word != "" {
 		drainClip(r)

@@ -1,10 +1,12 @@
 package voice
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -393,5 +395,23 @@ func TestDictateAvailableSingleFlight(t *testing.T) {
 	release <- struct{}{}
 	if !<-first {
 		t.Fatal("the probing caller")
+	}
+}
+
+// A chunked clip (no Content-Length) one second over the limit is too long
+// (413), not bad audio: only the read shows its size.
+func TestDictateChunkedOverLimitIsTooLong(t *testing.T) {
+	svc := &stubSvc{}
+	svc.ready.Store(true)
+	h := &DictateHandler{Svc: svc, Queue: &Queue{}, MaxSeconds: 1}
+	req := httptest.NewRequest("POST", "/dictate", bytes.NewReader(CanonicalWAV(2*16000)))
+	req.ContentLength = -1
+	rw := httptest.NewRecorder()
+	h.ServeHTTP(rw, req)
+	if rw.Code != http.StatusRequestEntityTooLarge || !strings.Contains(rw.Body.String(), `"error":"too-long"`) {
+		t.Fatalf("got %d %s, want 413 too-long", rw.Code, rw.Body.String())
+	}
+	if svc.calls.Load() != 0 {
+		t.Fatal("an over-limit clip was transcribed")
 	}
 }

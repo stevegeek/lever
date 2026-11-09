@@ -621,3 +621,24 @@ func TestCheckContactWithoutPeekFailsClosed(t *testing.T) {
 		t.Fatalf("pushes %v, binds %d", e.fs.all(), e.binds.Load())
 	}
 }
+
+// A sent push is audited with the status the push service answered, not a
+// fixed 201.
+func TestPushSentRecordsTheServicesStatus(t *testing.T) {
+	e := newTriggerEnv(t, nil)
+	e.fs.status = http.StatusAccepted
+	e.p.store.Add(chatOp, sub("op"))
+	tg := e.target(t, chatOp, chatUID, "w1")
+	e.p.store.SetMark(chatOp, "w1", PushMark{ID: "m0", At: t0.Add(-time.Minute)})
+	e.hub.put(tg.key, agentMsg("m1", agentW1, "w1", t0))
+	e.p.check(context.Background(), chatOp, tg, e.session(chatUID, chatledger.TierOperator), false)
+	var sent []AuditLine
+	for _, l := range e.lines.all() {
+		if l.Decision == DecisionPushSent {
+			sent = append(sent, l)
+		}
+	}
+	if len(sent) != 1 || sent[0].Status != http.StatusAccepted {
+		t.Fatalf("push-sent lines %+v, want one with status 202", sent)
+	}
+}

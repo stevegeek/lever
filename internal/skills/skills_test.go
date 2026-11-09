@@ -182,7 +182,7 @@ func TestAgentMessagesOnTeachesAuthorizeThenSend(t *testing.T) {
 
 // operatorNoRecycle is the manager skill source with the recycle variant
 // picked off, the base the other block tests compare with.
-var operatorNoRecycle = pickBlocks(operatorSrc, false, recycleOn, recycleOff)
+var operatorNoRecycle = pickBlocks(pickBlocks(operatorSrc, false, recycleOn, recycleOff), false, serviceHostsOn, serviceHostsOff)
 
 // filesBlocks cuts every files block (on and off) with its markers.
 var filesBlocks = regexp.MustCompile(`(?ms)^<!-- lever:files (on|off) -->\n.*?^<!-- /lever:files (on|off) -->\n`)
@@ -237,7 +237,7 @@ func TestFilesDirectionBlocks(t *testing.T) {
 			if pair[1] == "a" {
 				return string(AgentWith("1", true, false, f))
 			}
-			return string(OperatorWith("1", true, false, f, false))
+			return string(OperatorWith("1", true, false, f, false, false))
 		}
 		want := string(renderChat(pickBlocks(pick(dirBlocks.ReplaceAllString(pair[0], ""), false), true, filesOn, filesOff), "1", true))
 		if got := render(Files{On: true}); got != want {
@@ -294,12 +294,12 @@ func TestContentHashIgnoresOnlyTheStamp(t *testing.T) {
 // the skill is byte-for-byte the baseline.
 func TestOperatorRecycleBlocks(t *testing.T) {
 	for _, chat := range []bool{false, true} {
-		if got, want := OperatorWith("9.9.9", chat, false, Files{}, false), renderChat(operatorPre, "9.9.9", chat); !bytes.Equal(got, want) {
+		if got, want := OperatorWith("9.9.9", chat, false, Files{}, false, false), renderChat(operatorPre, "9.9.9", chat); !bytes.Equal(got, want) {
 			t.Fatalf("recycle off (chat=%v) differs from the pre-change render", chat)
 		}
 	}
-	off := string(OperatorWith("1", true, true, Files{On: true}, false))
-	on := string(OperatorWith("1", true, true, Files{On: true}, true))
+	off := string(OperatorWith("1", true, true, Files{On: true}, false, false))
+	on := string(OperatorWith("1", true, true, Files{On: true}, true, false))
 	if strings.Contains(off, "agent recycle") {
 		t.Error("recycle off teaches agent recycle")
 	}
@@ -310,5 +310,22 @@ func TestOperatorRecycleBlocks(t *testing.T) {
 	}
 	if strings.Contains(on, "NOT create or purge them") || strings.Contains(on, "lever:recycle") || strings.Contains(off, "lever:recycle") {
 		t.Error("a recycle variant or marker line survived")
+	}
+}
+
+// The service-host notice kind renders only for an instance with a service
+// host; off, the skill is byte-for-byte the baseline.
+func TestOperatorServiceHostBlock(t *testing.T) {
+	for _, chat := range []bool{false, true} {
+		if got, want := OperatorWith("9.9.9", chat, false, Files{}, false, false), renderChat(operatorPre, "9.9.9", chat); !bytes.Equal(got, want) {
+			t.Fatalf("service hosts off (chat=%v) differs from the pre-change render", chat)
+		}
+	}
+	on := string(OperatorWith("1", true, false, Files{}, false, true))
+	if !strings.Contains(on, "`service-host-notice`") || strings.Contains(on, "lever:service-hosts") {
+		t.Fatalf("service hosts on: the notice kind is missing or a marker is left:\n%s", on)
+	}
+	if off := string(OperatorWith("1", true, false, Files{}, false, false)); strings.Contains(off, "service-host-notice") {
+		t.Fatal("service hosts off: the notice kind rendered")
 	}
 }

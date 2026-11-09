@@ -43,6 +43,17 @@ func (a *App) ServiceHostTools(name string) []Tool {
 	return out
 }
 
+// AnyServiceHostTool reports whether some tool runs on a service host: the
+// broker then watches the hosts and tells the manager when one is back.
+func (a *App) AnyServiceHostTool() bool {
+	for _, t := range a.Broker.Tools {
+		if t.Host != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *App) validateServiceHosts() error {
 	names, addrs := map[string]bool{}, map[string]string{}
 	for _, h := range a.Broker.ServiceHosts {

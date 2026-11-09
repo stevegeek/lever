@@ -260,10 +260,16 @@ func TestStopClaimNoContainerWaits(t *testing.T) {
 		t.Fatalf("calls %v", j.calls)
 	}
 	// Any other podman failure removes nothing and stops at once.
-	j = &fakeJanitor{stateErr: errors.New("cannot connect to podman")}
+	podmanDown := errors.New("cannot connect to podman")
+	j = &fakeJanitor{stateErr: podmanDown}
 	n = 0
-	if err := resumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, held)); !errors.Is(err, ErrStopClaimHeld) || n != 1 {
+	err := resumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, held))
+	if !errors.Is(err, ErrStopClaimHeld) || n != 1 {
 		t.Fatalf("err %v resumes %d", err, n)
+	}
+	// Both the podman error and the hub's refusal stay reachable.
+	if !errors.Is(err, podmanDown) || !errors.Is(err, held) {
+		t.Fatalf("the causes are lost: %v", err)
 	}
 	// Unwired: the manual fix, nothing else.
 	n = 0
@@ -391,5 +397,54 @@ func TestIsStopClaimHeldWithARequestID(t *testing.T) {
 	}
 	if IsStopClaimHeld(errors.New(strings.Replace(stopClaimMsg, "(status: 409)", "(status: 4090)", 1))) {
 		t.Fatal("another status is no stop claim")
+	}
+}
+
+// secondLookJanitor answers the first State with a removable container and
+// fails every later one with err: the second look before a removal.
+type secondLookJanitor struct {
+	fakeJanitor
+	looks int
+	err   error
+}
+
+func (s *secondLookJanitor) State(ctx context.Context, ref string) (jail.ContainerState, error) {
+	s.looks++
+	if s.looks > 1 {
+		return jail.ContainerState{}, s.err
+	}
+	return s.fakeJanitor.State(ctx, ref)
+}
+
+// The podman failure behind a refusal stays reachable with errors.Is, and
+// its text appears once, sanitized, as the cause.
+func TestStopClaimFailureKeepsTheCause(t *testing.T) {
+	errRemove := errors.New("cannot remove container as it is running")
+	j := &fakeJanitor{states: []jail.ContainerState{created(staleID)}, removeErr: errRemove}
+	var logs []string
+	n := 0
+	err := resumeClearingStopClaim(context.Background(), stopClaimDeps(j, &logs), "m", "/x/proj", "up", resumes(&n, errors.New(stopClaimMsg)))
+	if !errors.Is(err, ErrStopClaimHeld) || !errors.Is(err, errRemove) {
+		t.Fatalf("remove failure: err %v must wrap ErrStopClaimHeld and the podman error", err)
+	}
+	if strings.Count(err.Error(), "as it is running") != 1 {
+		t.Fatalf("the cause must appear once: %v", err)
+	}
+
+	errState := errors.New("podman: state read failed")
+	sj := &secondLookJanitor{fakeJanitor: fakeJanitor{states: []jail.ContainerState{created(staleID)}}, err: errState}
+	d := stopClaimDeps(&sj.fakeJanitor, &logs)
+	d.StaleContainer = sj
+	n = 0
+	err = resumeClearingStopClaim(context.Background(), d, "m", "/x/proj", "up", resumes(&n, errors.New(stopClaimMsg)))
+	if !errors.Is(err, ErrStopClaimHeld) || !errors.Is(err, errState) {
+		t.Fatalf("second look failure: err %v must wrap ErrStopClaimHeld and the podman error", err)
+	}
+	if sj.did("rm ") {
+		t.Fatal("removed a container whose second look failed")
+	}
+	var ee *cli.ExitError
+	if !errors.As(err, &ee) || ee.Code != cli.ExitManagerResumeFailed {
+		t.Fatalf("exit code: %v", err)
 	}
 }

@@ -454,6 +454,11 @@ type Broker struct {
 	toolSecret      string
 	timeouts        TimeoutConfig
 	serviceHosts    map[string]ServiceHostRoute
+	// hostWatch tracks which service hosts answer, for the "host is back"
+	// notice (hostwatch.go). hostProbe and hostWatchEvery are for tests.
+	hostWatch      hostWatch
+	hostProbe      func(context.Context, hostTarget) bool
+	hostWatchEvery time.Duration
 }
 
 // New builds a Broker from c.

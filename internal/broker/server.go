@@ -187,6 +187,9 @@ func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn, directiveL
 	if onLapse != nil {
 		go b.runHealer(ctx)
 	}
+	if b.hostWatchEnabled() {
+		go b.runHostWatch(ctx)
+	}
 	if b.tokenWatchEnabled() {
 		// scion's hub token refresh timer stalls while the host sleeps, and
 		// nothing else notices.

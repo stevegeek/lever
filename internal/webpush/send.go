@@ -174,21 +174,24 @@ type Sender struct {
 // Send encrypts payload for sub and posts it. The endpoint is checked again
 // here: a stored subscription is never trusted to still pass. An error
 // names the endpoint's host, never its path (the path is the capability).
-func (s *Sender) Send(ctx context.Context, sub Subscription, payload []byte) error {
+// status is the push service's answer: its 2xx on success (services answer
+// 200, 201 or 202), its other status with an *HTTPError, and 0 when no
+// answer came.
+func (s *Sender) Send(ctx context.Context, sub Subscription, payload []byte) (status int, err error) {
 	u, err := CheckEndpoint(sub.Endpoint, s.Test)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	p256dh, auth, err := sub.keys()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	body, err := Encrypt(p256dh, auth, payload)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if len(body) > MaxBody {
-		return errPayloadTooLarge
+		return 0, errPayloadTooLarge
 	}
 	aud := "https://" + u.Hostname()
 	if u.Scheme == "http" {
@@ -200,13 +203,13 @@ func (s *Sender) Send(ctx context.Context, sub Subscription, payload []byte) err
 	}
 	auth2, err := VAPIDHeader(s.Key, aud, s.Subject, now().Add(12*time.Hour))
 	if err != nil {
-		return err
+		return 0, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, SendTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("webpush: request to %s", u.Host)
+		return 0, fmt.Errorf("webpush: request to %s", u.Host)
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("Content-Encoding", "aes128gcm")
@@ -223,12 +226,12 @@ func (s *Sender) Send(ctx context.Context, sub Subscription, payload []byte) err
 		if errors.As(err, &ue) {
 			err = ue.Err
 		}
-		return fmt.Errorf("webpush: post to %s: %w", u.Host, err)
+		return 0, fmt.Errorf("webpush: post to %s: %w", u.Host, err)
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 	_ = resp.Body.Close()
 	if resp.StatusCode/100 == 2 {
-		return nil
+		return resp.StatusCode, nil
 	}
-	return &HTTPError{Status: resp.StatusCode}
+	return resp.StatusCode, &HTTPError{Status: resp.StatusCode}
 }

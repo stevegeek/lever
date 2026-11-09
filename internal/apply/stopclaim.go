@@ -85,7 +85,7 @@ func resumeClearingStopClaim(ctx context.Context, d Deps, name, project, subject
 			case errors.Is(serr, jail.ErrNoContainer):
 				cleared, lastState = true, "gone"
 			case serr != nil:
-				return stopClaimFailure(subject, ref, "lever could not read the container's state from podman ("+termsafe.Sanitize(serr.Error())+"), so it removed nothing", err)
+				return stopClaimFailure(subject, ref, "lever could not read the container's state from podman ("+termsafe.Sanitize(serr.Error())+"), so it removed nothing", err, serr)
 			case st.Removable():
 				if cerr := clearStaleContainer(ctx, d, subject, ref, st); cerr != nil {
 					return cerr
@@ -138,12 +138,12 @@ func clearStaleContainer(ctx context.Context, d Deps, subject, ref string, st ja
 		d.Log("%s: container %s was removed by someone else meanwhile", subject, ref)
 		return nil
 	case aerr != nil:
-		return stopClaimFailure(subject, ref, "lever could not read the container's state again before removing it ("+termsafe.Sanitize(aerr.Error())+"), so it removed nothing", nil)
+		return stopClaimFailure(subject, ref, "lever could not read the container's state again before removing it, so it removed nothing", aerr)
 	case again.ID != st.ID || again.Status != st.Status || !again.Removable():
 		return stopClaimFailure(subject, ref, "the container changed between lever's two looks (now "+termsafe.Sanitize(again.Status)+"), so lever removed nothing; a start may be under way", nil)
 	}
 	if rerr := ops.Remove(ctx, st.ID); rerr != nil {
-		return stopClaimFailure(subject, ref, "removing the container failed ("+termsafe.Sanitize(rerr.Error())+")", nil)
+		return stopClaimFailure(subject, ref, "removing the container failed", rerr)
 	}
 	d.Log("%s: removed manager container %s (podman state %s) so the hub can release its stop claim. The resume creates a new container, as any scion resume of a container that is not running does: its writable layer is lost, that is whatever was written outside the agent home and the mounted tree (packages installed by hand, files in /tmp). The conversation is in the agent home and is kept. Waiting for the hub to release the claim (at most about %s)",
 		subject, ref, st.Status, stopClaimWaitTotal(d.StopClaimRetry.or(defaultStopClaimRetry)).Round(time.Second))
@@ -151,15 +151,41 @@ func clearStaleContainer(ctx context.Context, d Deps, subject, ref string, st ja
 }
 
 // stopClaimFailure is the refusal when the claim is still held. cause, when
-// set, is the hub's last answer; it comes last, as in ResumeFailed.
-func stopClaimFailure(subject, ref, why string, cause error) error {
+// set, is what failed last (the hub's answer, or podman's when lever could
+// not inspect or remove the container); its text comes last, sanitized, as
+// in ResumeFailed, and it stays reachable with errors.Is and errors.As.
+// also are further causes the error unwraps to; only cause is quoted.
+func stopClaimFailure(subject, ref, why string, cause error, also ...error) error {
 	tail := ""
 	if cause != nil {
 		tail = " Cause: " + termsafe.Sanitize(scion.ErrSummary(cause))
 	}
-	return cli.WithExitCode(fmt.Errorf("%s: %w: %s. lever did NOT delete the manager: its record and its conversation are kept. "+
-		"%s.%s", subject, ErrStopClaimHeld, why, StopClaimManualFix(ref), tail),
-		cli.ExitManagerResumeFailed)
+	msg := fmt.Sprintf("%s: %s: %s. lever did NOT delete the manager: its record and its conversation are kept. "+
+		"%s.%s", subject, ErrStopClaimHeld, why, StopClaimManualFix(ref), tail)
+	return cli.WithExitCode(&stopClaimError{msg: msg, cause: cause, also: also}, cli.ExitManagerResumeFailed)
+}
+
+// stopClaimError is stopClaimFailure's error: its text is the sanitized
+// message alone, and it unwraps to ErrStopClaimHeld and the cause.
+type stopClaimError struct {
+	msg   string
+	cause error
+	also  []error
+}
+
+func (e *stopClaimError) Error() string { return e.msg }
+
+func (e *stopClaimError) Unwrap() []error {
+	out := []error{ErrStopClaimHeld}
+	if e.cause != nil {
+		out = append(out, e.cause)
+	}
+	for _, a := range e.also {
+		if a != nil {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // StopClaimManualFix is the fix by hand for a stop claim a stopped container

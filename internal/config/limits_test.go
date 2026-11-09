@@ -48,11 +48,23 @@ func TestSupervisedToolBackend(t *testing.T) {
 	tool := func(backend string) string {
 		return limitsBase + "broker:\n  llm_auth: subscription\n  tools:\n    - {name: t, command: [x], backend: \"" + backend + "\", operations: [{name: read}]}\n"
 	}
-	for _, ok := range []string{"127.0.0.1:3201", "http://127.0.0.1:3201/mcp", "https://127.0.0.1:3201"} {
+	for _, ok := range []string{"127.0.0.1:3201", "http://127.0.0.1:3201/mcp", "https://127.0.0.1:3201", "[::1]:3201", "127.0.0.2:3201"} {
 		if _, err := LoadNoHostChecks(writeConfig(t, tool(ok))); err != nil {
 			t.Fatalf("%q: %v", ok, err)
 		}
 	}
 	rejectNoHost(t, tool("ftp://127.0.0.1:3201"), "broker tool", "backend")
 	rejectNoHost(t, tool("127.0.0.1"), "broker tool", "backend")
+}
+
+// The broker starts a supervised tool listening on its backend, so a
+// backend off loopback (every interface, a LAN address, a name a resolver
+// decides) would put the tool on the network: refused.
+func TestSupervisedToolBackendMustBeLoopback(t *testing.T) {
+	tool := func(backend string) string {
+		return limitsBase + "broker:\n  llm_auth: subscription\n  tools:\n    - {name: t, command: [x], backend: \"" + backend + "\", operations: [{name: read}]}\n"
+	}
+	for _, bad := range []string{"0.0.0.0:3201", "[::]:3201", "192.168.1.5:3201", "http://10.0.0.1:3201/mcp", "localhost:3201", ":3201"} {
+		rejectNoHost(t, tool(bad), "broker tool", "loopback")
+	}
 }

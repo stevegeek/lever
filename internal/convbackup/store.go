@@ -126,6 +126,20 @@ func (s Store) Save(m Meta, write func(w io.Writer) (Stats, error)) (Meta, error
 			_ = r.RemoveAll(tmp)
 		}
 	}()
+	// The lock tells a sweep in another process that this Save is alive,
+	// however long it writes; the kernel drops it if this process dies. A
+	// store that cannot lock (a network filesystem without flock) saves
+	// unlocked, as before the lock existed: only a sweep could then race it.
+	unlock, err := hostledger.LockFile(filepath.Join(s.Dir, tmp, saveLockName))
+	if err != nil {
+		unlock = func() {}
+	}
+	locked := true
+	defer func() {
+		if locked {
+			unlock()
+		}
+	}()
 	f, err := r.OpenFile(filepath.Join(tmp, archiveName), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return Meta{}, fmt.Errorf("conversation backups: %w", err)
@@ -148,10 +162,20 @@ func (s Store) Save(m Meta, write func(w io.Writer) (Stats, error)) (Meta, error
 	if err := writeNew(r, filepath.Join(tmp, metaName), append(b, '\n')); err != nil {
 		return Meta{}, err
 	}
+	// Rename while still locked: a sweep that judged this Save stale and
+	// opens the lock before the rename finds it held, and one that opens it
+	// after finds no temporary directory. Only then is the lock file (not
+	// part of the backup) removed and the lock dropped. A stray .lock left
+	// in the backup (a crash, a failed remove) is never read.
 	if err := r.Rename(tmp, m.ID); err != nil {
 		return Meta{}, fmt.Errorf("conversation backups: %w", err)
 	}
 	ok = true
+	// Best effort: the backup is already in place, and a stray .lock is
+	// harmless.
+	_ = r.Remove(filepath.Join(m.ID, saveLockName))
+	unlock()
+	locked = false
 	// Make the rename durable: `up --fresh` deletes the guest's copy next.
 	// Best effort, as a store that cannot sync its directory still holds
 	// the backup.
@@ -315,7 +339,7 @@ func (s Store) Prune(keep int, protect ...string) ([]string, error) {
 		return nil, err
 	}
 	defer r.Close()
-	sweepTemps(r, time.Now())
+	sweepTemps(r, s.Dir, time.Now())
 	all, err := s.List()
 	if err != nil || len(all) <= keep {
 		return nil, err
@@ -333,9 +357,15 @@ func (s Store) Prune(keep int, protect ...string) ([]string, error) {
 	return removed, nil
 }
 
-// sweepTemps removes Save's temporary directories older than staleTemp. A
-// younger one may belong to a Save still running.
-func sweepTemps(r *os.Root, now time.Time) {
+// saveLockName is the lock file a running Save holds in its temporary
+// directory.
+const saveLockName = ".lock"
+
+// sweepTemps removes Save's temporary directories older than staleTemp whose
+// Save is gone. A younger one may belong to a Save still starting; an older
+// one whose lock is held belongs to a Save still writing (a very large
+// conversation, a slow disk). A Save killed midway left its lock free.
+func sweepTemps(r *os.Root, dir string, now time.Time) {
 	d, err := r.Open(".")
 	if err != nil {
 		return
@@ -349,8 +379,15 @@ func sweepTemps(r *os.Root, now time.Time) {
 		if !e.IsDir() || !strings.HasPrefix(e.Name(), ".tmp-") {
 			continue
 		}
-		if fi, err := e.Info(); err == nil && now.Sub(fi.ModTime()) > staleTemp {
-			_ = r.RemoveAll(e.Name())
+		fi, err := e.Info()
+		if err != nil || now.Sub(fi.ModTime()) <= staleTemp {
+			continue
 		}
+		unlock, err := hostledger.TryLockFile(filepath.Join(dir, e.Name(), saveLockName))
+		if err != nil {
+			continue // held by a live Save, or not ours to judge
+		}
+		_ = r.RemoveAll(e.Name())
+		unlock()
 	}
 }

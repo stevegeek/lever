@@ -165,18 +165,51 @@ func snippet(body []byte) string {
 // ProjectID resolves a project name or slug to its hub UUID. endpointHint
 // names the hub in the not-found error, the operator's only clue when the jail
 // reached the wrong hub.
+//
+// Every page is read (cursor and nextCursor; the hub's default page is 500),
+// so a project past the first page is found and a duplicate on a later page
+// still counts.
 func (c *Client) ProjectID(ctx context.Context, nameOrSlug, endpointHint string) (string, error) {
-	var body struct {
-		Projects []project `json:"projects"`
-	}
-	if err := c.get(ctx, "/api/v1/projects", &body); err != nil {
-		return "", err
-	}
 	var matched []project
-	for _, p := range body.Projects {
-		if p.Name == nameOrSlug || p.Slug == nameOrSlug {
-			matched = append(matched, p)
+	listed := 0
+	seen := map[string]bool{}
+	cursor := ""
+	for page := 0; ; page++ {
+		if page == listPageLimit {
+			return "", &APIError{Msg: fmt.Sprintf("hub %s: the project list did not end after %d pages", endpointHint, listPageLimit)}
 		}
+		path := "/api/v1/projects"
+		if cursor != "" {
+			path += "?" + url.Values{"cursor": {cursor}}.Encode()
+		}
+		var raw map[string]json.RawMessage
+		if err := c.get(ctx, path, &raw); err != nil {
+			return "", err
+		}
+		var projects []project
+		if field, ok := raw["projects"]; ok {
+			if err := json.Unmarshal(field, &projects); err != nil {
+				return "", &APIError{Msg: fmt.Sprintf("decoding project list: %v", err)}
+			}
+		}
+		listed += len(projects)
+		for _, p := range projects {
+			if p.Name == nameOrSlug || p.Slug == nameOrSlug {
+				matched = append(matched, p)
+			}
+		}
+		next, err := pageCursor(raw, "nextCursor", "project list")
+		if err != nil {
+			return "", err
+		}
+		if next == "" {
+			break
+		}
+		if seen[next] {
+			return "", &APIError{Msg: fmt.Sprintf("hub %s: the project list repeated a page cursor", endpointHint)}
+		}
+		seen[next] = true
+		cursor = next
 	}
 	// More than one match must fail, not pick the first: that could strip a
 	// shared dir from the wrong record and report success while the live
@@ -193,7 +226,7 @@ func (c *Client) ProjectID(ctx context.Context, nameOrSlug, endpointHint string)
 		return matched[0].ID, nil
 	}
 	return "", &APIError{NoProject: true, Msg: fmt.Sprintf("no project named %q at hub %s (it listed %d project(s))",
-		nameOrSlug, endpointHint, len(body.Projects))}
+		nameOrSlug, endpointHint, listed)}
 }
 
 // SharedDirs lists a project's shared directories by project UUID.

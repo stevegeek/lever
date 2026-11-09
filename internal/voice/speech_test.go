@@ -28,11 +28,14 @@ import (
 // testdata/tiny-kokoro.tar.bz2 holds them below its top directory
 // tiny-kokoro/ (with a ._model.onnx that is skipped, an empty directory
 // and a pax global header). The archive was made with Python's tarfile
-// and bz2 modules, as no bzip2 writer is in Go's library.
+// and bz2 modules, as no bzip2 writer is in Go's library. Like the real
+// Kokoro archive it still carries espeak-ng's data, which 2.x does not use.
 var testSpeechFiles = map[string]string{
 	"model.onnx":                          "onnx bytes",
 	"voices.bin":                          "voice bytes",
 	"tokens.txt":                          "a 1\nb 2\n",
+	"lexicon-us-en.txt":                   "hello h ə l ˈ O\nready ɹ ˈ ɛ d i\n",
+	"lexicon-gb-en.txt":                   "hello h ə l ˈ Q\nready ɹ ˈ ɛ d i ː\n",
 	"espeak-ng-data/phontab":              "phontab",
 	"espeak-ng-data/lang/gmw/en":          "name english",
 	"espeak-ng-data/en_dict":              "dict",
@@ -42,28 +45,54 @@ var testSpeechFiles = map[string]string{
 	"espeak-ng-data/voices/!v/Mr serious": "variant",
 }
 
+// testExtraLexicon is the tiny model's lexicon fetched on its own, in the
+// "word || phones" form of sherpa-onnx's lexicon-en-us.txt: every word the
+// tests speak, and each letter.
+var testExtraLexicon = func() string {
+	var b strings.Builder
+	b.WriteString("# Lexicon: word(s) || space-separated phones\n")
+	for _, w := range strings.Fields("hello there now argv please fail secret words float sleep one two three ready git hub zero twenty five point percent") {
+		b.WriteString(w + " || x\n")
+	}
+	for c := 'a'; c <= 'z'; c++ {
+		b.WriteString(string(c) + " || x\n")
+	}
+	b.WriteString("new york || x\n")
+	return b.String()
+}()
+
 const testSpeechArchive = "testdata/tiny-kokoro.tar.bz2"
 
-// testSpeechModel is a Kokoro model pinned to testSpeechArchive.
+// testSpeechModel is a Kokoro model pinned to testSpeechArchive, with
+// testExtraLexicon as its extra file.
 func testSpeechModel() SpeechModel {
 	b, err := os.ReadFile(testSpeechArchive)
 	if err != nil {
 		panic(err)
 	}
 	sum := sha256.Sum256(b)
+	esum := sha256.Sum256([]byte(testExtraLexicon))
+	extra := SpeechExtra{Path: "lexicon-en-us.txt", URL: "https://github.com/someone/tiny/releases/download/models/lexicon-en-us.txt",
+		Size: int64(len(testExtraLexicon)), SHA256: hex.EncodeToString(esum[:])}
 	return SpeechModel{
 		Name: "tiny-kokoro", Kind: KindKokoro,
 		ArchiveURL:  "https://github.com/someone/tiny/releases/download/models/tiny-kokoro.tar.bz2",
 		ArchiveSize: int64(len(b)), ArchiveSHA256: hex.EncodeToString(sum[:]), ArchiveRoot: "tiny-kokoro",
-		ModelFile: "model.onnx", TokensFile: "tokens.txt", VoicesFile: "voices.bin", DataDir: "espeak-ng-data",
+		ModelFile: "model.onnx", TokensFile: "tokens.txt", VoicesFile: "voices.bin",
+		Extras: []SpeechExtra{extra},
+		Lexicons: map[string][]string{
+			"en-US": {"lexicon-en-us.txt", "lexicon-us-en.txt"},
+			"en-GB": {"lexicon-en-us.txt", "lexicon-gb-en.txt"},
+		},
 		Voices:       []SpeechVoice{{"af", 0, "en-US"}, {"bf_emma", 7, "en-GB"}},
 		DefaultVoice: "bf_emma", SampleRate: 24000,
 	}
 }
 
+// testSpeechManifest is the archive's files and the extra lexicon.
 func testSpeechManifest() []SpeechFile {
 	var out []SpeechFile
-	for p, c := range testSpeechFiles {
+	for p, c := range allTestSpeechFiles() {
 		sum := sha256.Sum256([]byte(c))
 		out = append(out, SpeechFile{Path: p, Size: int64(len(c)), SHA256: hex.EncodeToString(sum[:])})
 	}
@@ -71,11 +100,24 @@ func testSpeechManifest() []SpeechFile {
 	return out
 }
 
+// archiveSpeechManifest is the archive's files alone, as unpacked.
+func archiveSpeechManifest() []SpeechFile {
+	return slices.DeleteFunc(testSpeechManifest(), func(f SpeechFile) bool { return f.Path == "lexicon-en-us.txt" })
+}
+
+func allTestSpeechFiles() map[string]string {
+	all := map[string]string{"lexicon-en-us.txt": testExtraLexicon}
+	for p, c := range testSpeechFiles {
+		all[p] = c
+	}
+	return all
+}
+
 // placeSpeech writes m's files and manifest into dir as a fetch would.
 func placeSpeech(t *testing.T, dir string, m SpeechModel) {
 	t.Helper()
 	root := SpeechDir(dir, m)
-	for p, c := range testSpeechFiles {
+	for p, c := range allTestSpeechFiles() {
 		sub, err := privateDirs(root, path.Dir(p), true)
 		if err != nil {
 			t.Fatal(err)
@@ -90,7 +132,7 @@ func placeSpeech(t *testing.T, dir string, m SpeechModel) {
 }
 
 func TestShippedSpeechModels(t *testing.T) {
-	for _, name := range []string{"kokoro-en-v0_19", "piper-en_GB-alba-medium"} {
+	for _, name := range []string{"kokoro-multi-lang-v1_0", "piper-en_GB-alba-medium"} {
 		m, ok := LookupSpeech(name)
 		if !ok {
 			t.Fatalf("%s is not in the table", name)
@@ -101,16 +143,39 @@ func TestShippedSpeechModels(t *testing.T) {
 		if !strings.HasPrefix(m.ArchiveURL, speechReleaseURL) || path.Base(m.ArchiveURL) != m.ArchiveRoot+".tar.bz2" {
 			t.Errorf("%s: archive %s, top directory %s", name, m.ArchiveURL, m.ArchiveRoot)
 		}
-	}
-	// sherpa-onnx's table for kokoro-en-v0_19: speaker id -> voice.
-	k, _ := LookupSpeech(DefaultSpeechModel)
-	for i, v := range []string{"af", "af_bella", "af_nicole", "af_sarah", "af_sky", "am_adam", "am_michael", "bf_emma", "bf_isabella", "bm_george", "bm_lewis"} {
-		if got, ok := k.Voice(v); !ok || got.SID != i {
-			t.Errorf("%s: %+v %v, want id %d", v, got, ok, i)
+		// Every voice has the separate English lexicon first.
+		for _, v := range m.Voices {
+			if lex := m.LexiconFiles(v); len(lex) == 0 || lex[0] != "lexicon-en-us.txt" {
+				t.Errorf("%s %s: lexicons %v", name, v.Name, lex)
+			}
+		}
+		if len(m.Extras) != 1 || m.Extras[0].URL != speechReleaseURL+"lexicon-en-us.txt" {
+			t.Errorf("%s: extras %+v", name, m.Extras)
 		}
 	}
-	if len(k.Voices) != 11 || k.DefaultVoice != "bf_emma" || k.SampleRate != 24000 {
+	// kokoro-multi-lang-v1_0's model.onnx speaker2id: its English voices.
+	k, _ := LookupSpeech(DefaultSpeechModel)
+	for i, v := range strings.Fields("af_alloy af_aoede af_bella af_heart af_jessica af_kore af_nicole af_nova af_river af_sarah af_sky " +
+		"am_adam am_echo am_eric am_fenrir am_liam am_michael am_onyx am_puck am_santa " +
+		"bf_alice bf_emma bf_isabella bf_lily bm_daniel bm_fable bm_george bm_lewis") {
+		got, ok := k.Voice(v)
+		lang := "en-US"
+		if v[0] == 'b' {
+			lang = "en-GB"
+		}
+		if !ok || got.SID != i || got.Lang != lang {
+			t.Errorf("%s: %+v %v, want id %d, %s", v, got, ok, i, lang)
+		}
+	}
+	if len(k.Voices) != 28 || k.DefaultVoice != "bf_emma" || k.SampleRate != 24000 {
 		t.Errorf("%+v", k)
+	}
+	gb, _ := k.Voice("bf_emma")
+	if lex := k.LexiconFiles(gb); !slices.Equal(lex, []string{"lexicon-en-us.txt", "lexicon-gb-en.txt"}) {
+		t.Errorf("bf_emma lexicons %v: the accent's own must come last", lex)
+	}
+	if !slices.Equal(k.RequiredFiles(), []string{"model.onnx", "tokens.txt", "voices.bin", "lexicon-gb-en.txt", "lexicon-us-en.txt"}) {
+		t.Errorf("required %v", k.RequiredFiles())
 	}
 }
 
@@ -132,7 +197,14 @@ func TestSpeechModelPinned(t *testing.T) {
 		"dotdot model":      func(m *SpeechModel) { m.ModelFile = "../x" },
 		"absolute tokens":   func(m *SpeechModel) { m.TokensFile = "/x" },
 		"no voices file":    func(m *SpeechModel) { m.VoicesFile = "" },
-		"no data dir":       func(m *SpeechModel) { m.DataDir = "" },
+		"no lexicon":        func(m *SpeechModel) { delete(m.Lexicons, "en-GB") },
+		"comma lexicon":     func(m *SpeechModel) { m.Lexicons = map[string][]string{"en-US": {"a,b.txt"}, "en-GB": {"a,b.txt"}} },
+		"extra unpinned":    func(m *SpeechModel) { m.Extras[0].SHA256 = Unverified },
+		"extra short sha":   func(m *SpeechModel) { m.Extras[0].SHA256 = "abc" },
+		"extra zero size":   func(m *SpeechModel) { m.Extras[0].Size = 0 },
+		"extra other host":  func(m *SpeechModel) { m.Extras[0].URL = "https://example.com/lexicon-en-us.txt" },
+		"extra dotdot":      func(m *SpeechModel) { m.Extras[0].Path = "../lexicon.txt" },
+		"extra is model":    func(m *SpeechModel) { m.Extras[0].Path = "model.onnx" },
 		"bad default":       func(m *SpeechModel) { m.DefaultVoice = "zz" },
 		"bad kind":          func(m *SpeechModel) { m.Kind = "tacotron" },
 		"bad rate":          func(m *SpeechModel) { m.SampleRate = 0 },
@@ -185,18 +257,30 @@ func TestSherpaArgs(t *testing.T) {
 	got := SherpaArgs(m, "/m", SpeechVoice{"bf_emma", 7, "en-GB"}, 1.25, 2, "/m/.speak-1/speech.wav", "Hello.")
 	want := []string{
 		"--kokoro-model=/m/tiny-kokoro/model.onnx", "--kokoro-voices=/m/tiny-kokoro/voices.bin",
-		"--kokoro-tokens=/m/tiny-kokoro/tokens.txt", "--kokoro-data-dir=/m/tiny-kokoro/espeak-ng-data",
+		"--kokoro-tokens=/m/tiny-kokoro/tokens.txt", "--kokoro-lexicon=/m/tiny-kokoro/lexicon-en-us.txt,/m/tiny-kokoro/lexicon-gb-en.txt",
 		"--kokoro-length-scale=0.800", "--num-threads=2", "--sid=7", "--output-filename=/m/.speak-1/speech.wav", "--", "Hello.",
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("%q", got)
 	}
+	// An American voice gets the American lexicon last.
+	got = SherpaArgs(m, "/m", SpeechVoice{"af", 0, "en-US"}, 1, 2, "/o.wav", "Hi.")
+	if !slices.Contains(got, "--kokoro-lexicon=/m/tiny-kokoro/lexicon-en-us.txt,/m/tiny-kokoro/lexicon-us-en.txt") {
+		t.Fatalf("%q", got)
+	}
 	m.Kind, m.ModelFile, m.VoicesFile = KindVITS, "alba.onnx", ""
+	m.Lexicons = map[string][]string{"en-GB": {"lexicon-en-us.txt"}}
 	got = SherpaArgs(m, "/m", SpeechVoice{"alba", 0, "en-GB"}, 1, 1, "/o.wav", "Hi.")
 	want = []string{"--vits-model=/m/tiny-kokoro/alba.onnx", "--vits-tokens=/m/tiny-kokoro/tokens.txt",
-		"--vits-data-dir=/m/tiny-kokoro/espeak-ng-data", "--vits-length-scale=1.000", "--num-threads=1", "--sid=0", "--output-filename=/o.wav", "--", "Hi."}
+		"--vits-lexicon=/m/tiny-kokoro/lexicon-en-us.txt", "--vits-length-scale=1.000", "--num-threads=1", "--sid=0", "--output-filename=/o.wav", "--", "Hi."}
 	if !slices.Equal(got, want) {
 		t.Fatalf("%q", got)
+	}
+	// No option sherpa-onnx 2.x ignores, nor espeak-ng's data.
+	for _, a := range SherpaArgs(testSpeechModel(), "/m", SpeechVoice{"bf_emma", 7, "en-GB"}, 1, 1, "/o.wav", "x") {
+		if strings.Contains(a, "data-dir") || strings.Contains(a, "kokoro-lang") || strings.Contains(a, "espeak") {
+			t.Fatalf("passes %q", a)
+		}
 	}
 }
 
@@ -259,7 +343,8 @@ func TestSpeechWAV(t *testing.T) {
 	}
 }
 
-// serveArchive serves the file at p, counting requests.
+// serveArchive serves the file at p, counting requests, and
+// testExtraLexicon at any path ending in .txt, uncounted.
 func serveArchive(t *testing.T, p string) (*httptest.Server, *int) {
 	t.Helper()
 	b, err := os.ReadFile(p)
@@ -269,6 +354,10 @@ func serveArchive(t *testing.T, p string) (*httptest.Server, *int) {
 	var mu sync.Mutex
 	n := new(int)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".txt") {
+			_, _ = w.Write([]byte(testExtraLexicon))
+			return
+		}
 		mu.Lock()
 		*n++
 		mu.Unlock()
@@ -282,7 +371,7 @@ func TestFetchAndVerifySpeech(t *testing.T) {
 	m := testSpeechModel()
 	srv, asked := serveArchive(t, testSpeechArchive)
 	dir := filepath.Join(t.TempDir(), "models")
-	f := Fetcher{AllowHost: loopbackOnly(srv)}
+	f := Fetcher{AllowHost: loopbackOnly(srv), ExtraURL: func(SpeechExtra) string { return srv.URL + "/lexicon-en-us.txt" }}
 	root, err := f.FetchSpeechFrom(context.Background(), m, dir, srv.URL+"/a.tar.bz2")
 	if err != nil {
 		t.Fatal(err)
@@ -338,14 +427,38 @@ func TestFetchAndVerifySpeech(t *testing.T) {
 	if _, err := f.FetchSpeechFrom(context.Background(), other, filepath.Join(t.TempDir(), "m3"), srv.URL+"/a.tar.bz2"); err == nil || !strings.Contains(err.Error(), "sha256") {
 		t.Fatalf("wrong sha256: %v", err)
 	}
+	// The extra lexicon is placed beside the archive's files, 0600, and a
+	// wrong copy of it is refused like the archive.
+	if fi, err := os.Stat(SpeechPath(dir, m, "lexicon-en-us.txt")); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("extra: %v", err)
+	}
+	bad := m
+	bad.Extras = []SpeechExtra{m.Extras[0]}
+	bad.Extras[0].SHA256 = strings.Repeat("0", 64)
+	if _, err := f.FetchSpeechFrom(context.Background(), bad, filepath.Join(t.TempDir(), "m4"), srv.URL+"/a.tar.bz2"); err == nil || !strings.Contains(err.Error(), "sha256") {
+		t.Fatalf("wrong extra: %v", err)
+	}
+	// A manifest from another pin of the extra does not verify.
+	if _, err := VerifySpeech(dir, bad); !errors.Is(err, ErrModel) || !strings.Contains(err.Error(), "lexicon-en-us.txt") {
+		t.Fatalf("other extra pin: %v", err)
+	}
 	// An unpinned model is never fetched.
 	u := m
 	u.ArchiveSHA256 = Unverified
 	if _, err := f.FetchSpeechFrom(context.Background(), u, dir, srv.URL); !errors.Is(err, ErrUnpinned) {
 		t.Fatalf("unpinned: %v", err)
 	}
+	// A failed extra download costs no archive download: the extra comes
+	// first.
+	before := *asked
+	if _, err := f.FetchSpeechFrom(context.Background(), bad, filepath.Join(t.TempDir(), "m5"), srv.URL+"/a.tar.bz2"); err == nil {
+		t.Fatal("a wrong extra was accepted")
+	}
+	if *asked != before {
+		t.Fatalf("the archive was downloaded before the extra failed (%d requests)", *asked-before)
+	}
 	// The real source is GitHub's release hosts only.
-	if _, err := (Fetcher{}).FetchSpeechFrom(context.Background(), m, filepath.Join(t.TempDir(), "m2"), srv.URL); err == nil || !strings.Contains(err.Error(), "not a GitHub release host") {
+	if _, err := (Fetcher{ExtraURL: f.ExtraURL}).FetchSpeechFrom(context.Background(), m, filepath.Join(t.TempDir(), "m2"), srv.URL); err == nil || !strings.Contains(err.Error(), "not a GitHub release host") {
 		t.Fatalf("loopback source: %v", err)
 	}
 }
@@ -407,7 +520,7 @@ func testTar(t *testing.T, entries []tarEntry) *tar.Reader {
 // goodTar is a complete tiny-kokoro archive's entries.
 func goodTar() []tarEntry {
 	var out []tarEntry
-	for _, f := range testSpeechManifest() {
+	for _, f := range archiveSpeechManifest() {
 		out = append(out, tarEntry{name: "tiny-kokoro/" + f.Path, body: testSpeechFiles[f.Path], typ: tar.TypeReg})
 	}
 	return out
@@ -427,7 +540,7 @@ func privateTemp(t *testing.T) string {
 func TestUnpackSpeechTar(t *testing.T) {
 	m := testSpeechModel()
 	files, err := unpackSpeechTar(testTar(t, append([]tarEntry{{name: "./tiny-kokoro/", typ: tar.TypeDir}, {name: "tiny-kokoro/x/.hidden/y", body: "z", typ: tar.TypeReg}}, goodTar()...)), privateTemp(t), m)
-	if err != nil || !slices.Equal(files, testSpeechManifest()) {
+	if err != nil || !slices.Equal(files, archiveSpeechManifest()) {
 		t.Fatalf("%v %+v", err, files)
 	}
 	for name, tc := range map[string]struct {
@@ -447,7 +560,7 @@ func TestUnpackSpeechTar(t *testing.T) {
 		"twice":             {extra: []tarEntry{{name: "tiny-kokoro/tokens.txt", body: "again", typ: tar.TypeReg}}, want: "exists"},
 		"file then dir":     {extra: []tarEntry{{name: "tiny-kokoro/tokens.txt/x", body: "x", typ: tar.TypeReg}}, want: "tokens.txt"},
 		"no voices":         {drop: "voices.bin", want: "no voices.bin"},
-		"no phondata":       {drop: "espeak-ng-data/phondata", want: "no espeak-ng-data/phondata"},
+		"no gb lexicon":     {drop: "lexicon-gb-en.txt", want: "no lexicon-gb-en.txt"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var es []tarEntry
@@ -476,7 +589,8 @@ func TestFetchSpeechRefusesABadArchive(t *testing.T) {
 	m.ArchiveRoot = "other"
 	srv, _ := serveArchive(t, testSpeechArchive)
 	dir := filepath.Join(t.TempDir(), "models")
-	if _, err := (Fetcher{AllowHost: loopbackOnly(srv)}).FetchSpeechFrom(context.Background(), m, dir, srv.URL); !errors.Is(err, ErrModel) || !strings.Contains(err.Error(), "not below other/") {
+	f := Fetcher{AllowHost: loopbackOnly(srv), ExtraURL: func(SpeechExtra) string { return srv.URL + "/lexicon-en-us.txt" }}
+	if _, err := f.FetchSpeechFrom(context.Background(), m, dir, srv.URL); !errors.Is(err, ErrModel) || !strings.Contains(err.Error(), "not below other/") {
 		t.Fatal(err)
 	}
 	if entries, _ := os.ReadDir(dir); len(entries) != 0 {

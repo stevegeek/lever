@@ -180,6 +180,9 @@ func runSpeechFetch(ctx context.Context, app *config.App, st state.State, name s
 		return fmt.Errorf("voice: %s; this lever release cannot download it", why)
 	}
 	fmt.Fprintf(out, "fetching %s (an archive of %d bytes) from %s\n", m.Name, m.ArchiveSize, m.ArchiveURL)
+	for _, e := range m.Extras {
+		fmt.Fprintf(out, "and %s (%d bytes) from %s\n", e.Path, e.Size, e.URL)
+	}
 	p, err := fetch(ctx, m, dir)
 	if err != nil {
 		return err

@@ -6,13 +6,17 @@
 // The text steers it: one containing FAIL exits 2 with no output, SLEEP
 // sleeps 30 s first, FLOAT writes a 32-bit float WAV, ARGV writes its
 // argument list (NUL-separated) as the samples; any other text writes 100
-// silent samples per byte, with a LIST chunk before the data.
+// silent samples per byte, with a LIST chunk before the data. As
+// sherpa-onnx 2.x it needs --kokoro-lexicon (or --vits-lexicon), every file
+// of it present; with a file named v1 beside it, it fails every run as 1.x
+// does with a 2.x model.
 package main
 
 import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -39,14 +43,33 @@ func main() {
 	}
 	text := pos[0]
 	fmt.Println("text:", text) // as the real one prints it: lever must discard this
-	model := opts["kokoro-model"]
+	// A file named v1 beside the program makes it a sherpa-onnx 1.x, which
+	// refuses a model without espeak-ng's data.
+	if exe, err := os.Executable(); err == nil {
+		if _, err := os.Stat(filepath.Join(filepath.Dir(exe), "v1")); err == nil {
+			fmt.Fprintln(os.Stderr, "Errors in config!")
+			os.Exit(1)
+		}
+	}
+	model, lexicon := opts["kokoro-model"], opts["kokoro-lexicon"]
 	rate := 24000
 	if model == "" {
-		model, rate = opts["vits-model"], 22050
+		model, lexicon, rate = opts["vits-model"], opts["vits-lexicon"], 22050
 	}
 	if _, err := os.Stat(model); err != nil {
 		fmt.Fprintln(os.Stderr, "no model:", err)
 		os.Exit(1)
+	}
+	// As 2.x: no lexicon, no words; every listed lexicon must open.
+	if lexicon == "" {
+		fmt.Fprintln(os.Stderr, "No lexicon available. Please provide --kokoro-lexicon.")
+		os.Exit(1)
+	}
+	for _, l := range strings.Split(lexicon, ",") {
+		if _, err := os.Stat(l); err != nil {
+			fmt.Fprintln(os.Stderr, "no lexicon:", err)
+			os.Exit(1)
+		}
 	}
 	out := opts["output-filename"]
 	if out == "" {

@@ -132,6 +132,7 @@ func TestTTSToolValidation(t *testing.T) {
 		"long socket":      {with("-speak-socket", "/"+strings.Repeat("s", 110)), "at most"},
 		"dictation socket": {with("-speak-socket", testSocket), "also a dictation socket"},
 		"no models":        {without("-models"), "needs -models and -server"},
+		"comma in models":  {with("-models", "/s/voice,models"), "holds a comma"},
 		"no server":        {without("-server"), "needs -models and -server"},
 		"no tree":          {without("-tree"), "-tree is required"},
 		"other tree":       {with("-tree", "/elsewhere"), "not the instance's tree"},
@@ -163,13 +164,13 @@ func TestTTSToolValidation(t *testing.T) {
 
 func TestTTSToolsAndSpeechTool(t *testing.T) {
 	a := speechApp()
-	a.Broker.Tools[1].Command = append(a.Broker.Tools[1].Command, "-voice=bm_george", "--speed", "1.2", "-model", "kokoro-en-v0_19")
+	a.Broker.Tools[1].Command = append(a.Broker.Tools[1].Command, "-voice=bm_george", "--speed", "1.2", "-model", "kokoro-multi-lang-v1_0")
 	ts := a.TTSTools()
 	if len(ts) != 1 {
 		t.Fatalf("%+v", ts)
 	}
 	w := ts[0]
-	if w.Name != "tts" || w.Tree != "/t" || w.Models != "/s/voice-models" || w.Socket != testSpeakSocket || w.Voice != "bm_george" || w.Speed != "1.2" || w.EffectiveModel() != "kokoro-en-v0_19" {
+	if w.Name != "tts" || w.Tree != "/t" || w.Models != "/s/voice-models" || w.Socket != testSpeakSocket || w.Voice != "bm_george" || w.Speed != "1.2" || w.EffectiveModel() != "kokoro-multi-lang-v1_0" {
 		t.Fatalf("%+v", w)
 	}
 	if s, ok := a.SpeechTool(); !ok || s.Name != "tts" {
@@ -183,7 +184,7 @@ func TestTTSToolsAndSpeechTool(t *testing.T) {
 	if len(voiceApp().TTSTools()) != 0 || len(speechApp().WhisperTools()) != 1 {
 		t.Fatal("the tools are mixed up")
 	}
-	if (TTSTool{}).EffectiveModel() != "kokoro-en-v0_19" {
+	if (TTSTool{}).EffectiveModel() != "kokoro-multi-lang-v1_0" {
 		t.Fatal("default model")
 	}
 }

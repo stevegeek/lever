@@ -1819,7 +1819,7 @@ to your own host, never to a cloud speech service.
 3. **Set `remote.voice.read_aloud: server`** and `speak_socket` to the tool's `-speak-socket`.
    Config load refuses a `speak_socket` that is no tts tool's `-speak-socket`, or that is the
    dictation socket.
-4. **Fetch the model:** `lever voice fetch kokoro-en-v0_19`.
+4. **Fetch the model:** `lever voice fetch kokoro-multi-lang-v1_0`.
 5. **Reload and check:** `lever reload`, then the `tts tool` and `tts model` rows of
    `lever doctor`.
 

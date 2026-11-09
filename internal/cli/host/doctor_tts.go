@@ -52,7 +52,7 @@ func checkTTSTool(ctx context.Context, app *config.App) checkResult {
 			"start the broker (lever up or lever reload); if the tool is configured, " + logHint}
 	case !h.Ready:
 		return checkResult{name, false, fmt.Sprintf("running, but not ready (its sherpa-onnx program or the model %s failed a check): %s", h.Model, lost),
-			logHint + "; fetch the model with lever voice fetch " + h.Model + " if it is missing"}
+			logHint + "; fetch the model with lever voice fetch " + h.Model + " if it is missing, or install sherpa-onnx 2.0 or later, then lever reload"}
 	}
 	detail := fmt.Sprintf("ready: model %s, voice %s of %d, at most %d characters a request; one sherpa-onnx run per request, no port, only the private socket %s",
 		h.Model, h.Voice, len(h.Voices), h.MaxChars, socket)

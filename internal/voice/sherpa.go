@@ -1,41 +1,46 @@
 package voice
 
 // The sherpa-onnx adapter: every assumption lever makes about
-// sherpa-onnx-offline-tts is in this file. Checked against sherpa-onnx's
-// source on master (2026-10: sherpa-onnx-offline-tts.cc, parse-options.cc,
-// the Kokoro and VITS model config and model files, wave-writer.cc) and its
-// Kokoro documentation, not against a built release; tools/test/fakesherpa
-// stands in for it in tests.
+// sherpa-onnx-offline-tts is in this file. Checked against sherpa-onnx 2.0.1
+// (the PyPI sherpa-onnx-bin build of 2026-11: its --help, and runs with
+// both pinned models); tools/test/fakesherpa stands in for it in tests.
+// lever needs sherpa-onnx 2.0 or later: 1.x makes phonemes with espeak-ng,
+// whose data the 2.x model packages no longer carry, and refuses the
+// arguments below ("Errors in config!"). lever-tool-tts proves the program
+// with one short run before it speaks (Speaker.Check).
 //
 //  1. One run speaks one text: the program's one positional argument, the
 //     WAV to --output-filename, exit 0 on success. It reads no stdin and
 //     loads the model files on every run.
 //  2. Options are Kaldi's --name=value. lever passes, for Kokoro,
-//     --kokoro-model, --kokoro-voices, --kokoro-tokens, --kokoro-data-dir
-//     (espeak-ng's data) and --kokoro-length-scale; for VITS (Piper)
-//     --vits-model, --vits-tokens, --vits-data-dir and --vits-length-scale;
-//     and --num-threads, --sid and --output-filename. Nothing else. The
-//     length scale is the speed (larger is slower); --speed is not passed
-//     because some releases that run Kokoro lack it. The data directory must
-//     hold phontab, phonindex, phondata and intonations. kokoro-en-v0_19 is
-//     a version 1 model: it takes no --kokoro-lexicon or --kokoro-lang (a
-//     version 2 model would require one).
-//  3. A first pass reads --config=FILE and --help from every argument
+//     --kokoro-model, --kokoro-voices, --kokoro-tokens, --kokoro-lexicon and
+//     --kokoro-length-scale; for VITS (Piper) --vits-model, --vits-tokens,
+//     --vits-lexicon and --vits-length-scale; and --num-threads, --sid and
+//     --output-filename. Nothing else. The length scale is the speed (larger
+//     is slower). --kokoro-lang and the --*-data-dir options are ignored
+//     since 2.0 and not passed.
+//  3. A lexicon option takes several files, comma-separated; where two hold
+//     the same word the later one wins. No path lever passes holds a comma
+//     (SpeechModel.Pinned, and -models is refused with one).
+//  4. A word in no lexicon is skipped, not spoken (a log line says "OOV word
+//     skipped"): numbers, most acronyms, names. lever rewrites the text so
+//     every word is in a lexicon (SpeakableText) before the engine sees it.
+//  5. A first pass reads --config=FILE and --help from every argument
 //     starting with "--" up to a lone "--", positional ones included; the
 //     second reads options up to the first non-option or a lone "--", which
 //     is dropped. lever passes the text last, after "--", so no text is ever
 //     read as an option (not even --config), and never passes a text
-//     starting with "-" (SpeechInput).
-//  4. The output is a WAV with a 44-byte header, 16-bit PCM, mono, at the
+//     starting with "-" (SpeechInput, SpeakableText).
+//  6. The output is a WAV with a 44-byte header, 16-bit PCM, mono, at the
 //     model's sample rate. lever reads only its fmt and data chunks and
 //     sends on a WAV it writes itself (SpeechWAV).
-//  5. The program prints progress, the text, its arguments and timings to
+//  7. The program prints progress, the text, its arguments and timings to
 //     stdout and stderr; lever discards both: text must never reach the
 //     tool's log.
-//  6. The text is plain text, not SSML. SpeechInput still removes control
+//  8. The text is plain text, not SSML. SpeechInput still removes control
 //     and format characters and angle brackets.
-//  7. A speaker id (--sid) out of range is not an error: the engine speaks
-//     voice 0. lever's table must carry the documented ids
+//  9. A speaker id (--sid) out of range is not an error: the engine speaks
+//     voice 0. lever's table must carry the model's own ids
 //     (speechmodels.go).
 
 import (
@@ -66,19 +71,24 @@ const (
 )
 
 // SherpaArgs is the sherpa-onnx-offline-tts argument list (assumptions 1
-// to 3): the options, "--", and the text, which must have passed
-// SpeechInput.
+// to 5): the options, "--", and the text, which must have passed
+// SpeechInput (and SpeakableText).
 func SherpaArgs(m SpeechModel, dir string, v SpeechVoice, speed float64, threads int, out, text string) []string {
 	p := func(rel string) string { return SpeechPath(dir, m, rel) }
 	scale := strconv.FormatFloat(1/speed, 'f', 3, 64)
+	lex := make([]string, 0, len(m.LexiconFiles(v)))
+	for _, l := range m.LexiconFiles(v) {
+		lex = append(lex, p(l))
+	}
+	lexicons := strings.Join(lex, ",")
 	var args []string
 	switch m.Kind {
 	case KindKokoro:
 		args = []string{"--kokoro-model=" + p(m.ModelFile), "--kokoro-voices=" + p(m.VoicesFile),
-			"--kokoro-tokens=" + p(m.TokensFile), "--kokoro-data-dir=" + p(m.DataDir), "--kokoro-length-scale=" + scale}
+			"--kokoro-tokens=" + p(m.TokensFile), "--kokoro-lexicon=" + lexicons, "--kokoro-length-scale=" + scale}
 	case KindVITS:
 		args = []string{"--vits-model=" + p(m.ModelFile), "--vits-tokens=" + p(m.TokensFile),
-			"--vits-data-dir=" + p(m.DataDir), "--vits-length-scale=" + scale}
+			"--vits-lexicon=" + lexicons, "--vits-length-scale=" + scale}
 	}
 	return append(args, "--num-threads="+strconv.Itoa(threads), "--sid="+strconv.Itoa(v.SID),
 		"--output-filename="+filepath.Clean(out), "--", text)

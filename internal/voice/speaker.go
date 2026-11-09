@@ -46,7 +46,20 @@ type Speaker struct {
 	bad     string // speechStamp of the files at their last full verify that failed
 	badErr  error
 	checked time.Time
+	// probed is the program (with its size and modification time) and
+	// files the probe ran with, probeErr its result and probedAt when;
+	// lexStamp and lex the files the lexicons were read from.
+	probed   string
+	probeErr error
+	probedAt time.Time
+	lexStamp string
+	lex      map[string]Lexicon // by voice language
 }
+
+// probeRetryAfter is how long a failed probe stands before the next check
+// runs it again (a timeout, an engine killed for memory, a program upgraded
+// in place). A passed probe stands until the program or the files change.
+var probeRetryAfter = time.Minute
 
 func (s *Speaker) logf(format string, a ...any) {
 	if s.Log != nil {
@@ -55,11 +68,128 @@ func (s *Speaker) logf(format string, a ...any) {
 }
 
 // Check runs before every run: the program must pass CheckServer and still
-// resolve to the file it resolved to the first time, and the model must
-// verify. Files are hashed only when their stamp changed; a stamp that
+// resolve to the file it resolved to the first time, the model must verify,
+// and the program must have spoken a short probe text with it (once for a
+// program and its files while it passes: a sherpa-onnx older than 2.0
+// fails here). Files are hashed only when their stamp changed; a stamp that
 // failed before fails again without a hash. It returns the program's real
-// path.
-func (s *Speaker) Check() (string, error) {
+// path. The probe takes the one engine slot, so it waits for a run in
+// progress and never loads a second engine beside it.
+func (s *Speaker) Check() (string, error) { return s.check(false, true) }
+
+// Ready is Check that does not wait: while a run holds the engine slot, a
+// probe that is due is left for later and the last probe's answer stands
+// (not ready before any).
+func (s *Speaker) Ready() bool {
+	_, err := s.check(false, false)
+	return err == nil
+}
+
+var errProbeBusy = errors.New("the speech engine is busy; its check runs after the current request")
+
+// check: haveRun says the caller holds the engine slot; wait says a due
+// probe may wait for it.
+func (s *Speaker) check(haveRun, wait bool) (string, error) {
+	real, err := s.checkFiles()
+	if err != nil {
+		return "", err
+	}
+	s.mu.Lock()
+	key := real + "\x00" + s.stamp + "\x00" + programStamp(real)
+	s.mu.Unlock()
+	if done, err := s.probeAnswer(key); done {
+		return real, err
+	}
+	if !haveRun {
+		s.once.Do(func() { s.run = make(chan struct{}, 1) })
+		if wait {
+			s.run <- struct{}{}
+		} else {
+			select {
+			case s.run <- struct{}{}:
+			default:
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				if s.probed == "" {
+					return "", errProbeBusy
+				}
+				return real, s.probeErr
+			}
+		}
+		defer func() { <-s.run }()
+		// Another caller may have probed while this one waited.
+		if done, err := s.probeAnswer(key); done {
+			return real, err
+		}
+	}
+	perr := s.probe(real) // no lock held: Ready and Health answer meanwhile
+	if perr != nil {
+		s.logf("voice: %v", perr)
+	}
+	s.mu.Lock()
+	s.probed, s.probeErr, s.probedAt = key, perr, time.Now()
+	s.mu.Unlock()
+	return real, perr
+}
+
+// probeAnswer is the standing probe result for key, if there is one.
+func (s *Speaker) probeAnswer(key string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.probed != key || s.probeErr != nil && time.Since(s.probedAt) >= probeRetryAfter {
+		return false, nil
+	}
+	return true, s.probeErr
+}
+
+// programStamp is the program file's size and modification time, so a
+// program replaced in place (an upgrade at the same path) is probed again.
+func programStamp(path string) string {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%d:%d", fi.Size(), fi.ModTime().UnixNano())
+}
+
+// spokenBound is the longest rewritten text a request may hand the engine:
+// four times its own limit.
+func spokenBound(maxChars int) int {
+	if maxChars <= 0 {
+		maxChars = DefaultSpeakMaxChars
+	}
+	return 4 * maxChars
+}
+
+// probeText is what the probe speaks.
+const probeText = "Ready."
+
+// probe speaks probeText with the default voice and checks the WAV.
+func (s *Speaker) probe(real string) error {
+	v, ok := s.Model.Voice(s.Model.DefaultVoice)
+	if !ok {
+		return fmt.Errorf("the model %s has no voice %q", s.Model.Name, s.Model.DefaultVoice)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), s.maxWait())
+	defer cancel()
+	if _, err := s.synth(ctx, real, v, probeText); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("%s did not speak a short test text with the model %s within %v; it is checked again in %v", real, s.Model.Name, s.maxWait(), probeRetryAfter)
+		}
+		return fmt.Errorf("%s could not speak a short test text with the model %s (%v). A sherpa-onnx older than 2.0, for example, cannot: lever needs sherpa-onnx 2.0 or later, which reads the model's lexicons. Install it, then lever reload", real, s.Model.Name, err)
+	}
+	return nil
+}
+
+func (s *Speaker) maxWait() time.Duration {
+	if s.MaxWait > 0 {
+		return s.MaxWait
+	}
+	return 2 * time.Minute
+}
+
+// checkFiles is Check without the probe.
+func (s *Speaker) checkFiles() (string, error) {
 	if why := s.Model.Pinned(); why != "" {
 		return "", fmt.Errorf("%w: %s", ErrUnpinned, why)
 	}
@@ -100,11 +230,6 @@ func (s *Speaker) Check() (string, error) {
 	return real, nil
 }
 
-func (s *Speaker) Ready() bool {
-	_, err := s.Check()
-	return err == nil
-}
-
 // Speak turns text into a WAV with voice ("" = the default), after
 // SpeechInput. One run at a time; a caller waits until ctx ends. The error
 // never carries the text.
@@ -127,16 +252,54 @@ func (s *Speaker) Speak(ctx context.Context, text, voice string) ([]byte, error)
 		return nil, fmt.Errorf("%w: %w", ErrSpeakNotSent, ctx.Err())
 	}
 	defer func() { <-s.run }()
-	real, err := s.Check()
+	real, err := s.check(true, true)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrSpeakNotSent, err)
 	}
-	wait := s.MaxWait
-	if wait <= 0 {
-		wait = 2 * time.Minute
+	lex, err := s.lexicon(v)
+	if err != nil {
+		return nil, fmt.Errorf("%w: reading the lexicons: %v", ErrSpeakNotSent, err)
 	}
-	ctx, cancel := context.WithTimeout(ctx, wait)
+	if in = SpeakableText(in, lex); in == "" {
+		return nil, fmt.Errorf("%w: %w: nothing to speak", ErrSpeakNotSent, ErrBadText)
+	}
+	// Spoken numbers and spelled words make the text longer (a long run of
+	// digits about tenfold). Ordinary prose stays well inside the bound, and
+	// a text past it would hold the one engine slot for minutes.
+	if n, max := len([]rune(in)), spokenBound(s.MaxChars); n > max {
+		return nil, fmt.Errorf("%w: %w: %d characters once numbers and spellings are written out, at most %d", ErrSpeakNotSent, ErrBadText, n, max)
+	}
+	ctx, cancel := context.WithTimeout(ctx, s.maxWait())
 	defer cancel()
+	return s.synth(ctx, real, v, in)
+}
+
+// lexicon is the words of v's lexicons, read once for the files that last
+// verified.
+func (s *Speaker) lexicon(v SpeechVoice) (Lexicon, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lex == nil || s.lexStamp != s.stamp {
+		s.lex, s.lexStamp = map[string]Lexicon{}, s.stamp
+	}
+	if l, ok := s.lex[v.Lang]; ok {
+		return l, nil
+	}
+	var paths []string
+	for _, p := range s.Model.LexiconFiles(v) {
+		paths = append(paths, SpeechPath(s.ModelDir, s.Model, p))
+	}
+	l, err := LoadLexicon(paths...)
+	if err != nil {
+		return nil, err
+	}
+	s.lex[v.Lang] = l
+	return l, nil
+}
+
+// synth runs the engine once on text (which passed SpeechInput) and returns
+// the checked WAV.
+func (s *Speaker) synth(ctx context.Context, real string, v SpeechVoice, in string) ([]byte, error) {
 	tmp, err := os.MkdirTemp(s.ModelDir, speakTempPrefix)
 	if err != nil {
 		return nil, fmt.Errorf("%w: a private directory for the output: %v", ErrSpeakNotSent, err)

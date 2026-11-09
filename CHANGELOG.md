@@ -7,6 +7,19 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **The github tool can read a branch: `fetch`.** A jail could push to GitHub but never read from
+  it, so when `main` moved on GitHub the agent's PRs conflicted and it could not see why or fix
+  them. The opt-in `fetch` operation (`repo`, `branch`, `bundle`) reads any branch, `main`
+  included, with a Contents: read token and writes it as a full bundle into
+  `/workspace/.lever-files/github/`, replacing a file of that name; the result names the
+  `git fetch` command that imports it. The shared mirror still receives only `main`, and fetched
+  bytes count against the caller's `-import-budget`. The GitHub tool guide now also says that
+  `pr_status` and `pr_merge` need Checks: read and Commit statuses: read on the App. Add `fetch`
+  to `-ops`, the tool's `operations` and the agent's `obtain` to offer it. Host-only: the Jail
+  ABI does not change.
+
 ## [1.0.0-beta.8] - 2026-11-09
 
 ### Added

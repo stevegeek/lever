@@ -36,15 +36,18 @@ type Pusher struct {
 	MaxBundle int64
 	LockWait  time.Duration
 	Tokens    TokenSource
-	Git       Git
-	Log       *slog.Logger
+	// Scoped mints fetch's read-only token (OpPermissions[OpFetch]).
+	Scoped ScopedTokenSource
+	Git    Git
+	Log    *slog.Logger
 	// Deadline bounds one whole call, lock wait included (0 = none). Each
 	// git call also has Git.Timeout.
 	Deadline time.Duration
 	// Limits bound what the import inflates; scanBundle must run before any
 	// git command reads the bundle.
 	Limits PackLimits
-	// ImportBudget caps the bundle bytes one caller may import per hour,
+	// ImportBudget caps the bundle bytes one caller may import (push) or
+	// receive (fetch) per hour,
 	// refused pushes included (0 = no cap).
 	ImportBudget int64
 

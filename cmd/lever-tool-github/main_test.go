@@ -140,11 +140,11 @@ func TestParseFlagsOpsDefaultIsPushOnly(t *testing.T) {
 }
 
 func TestParseFlagsOps(t *testing.T) {
-	o, err := parseFlags(append(baseFlags(t), "-ops", "release, push,pr_open,push,pr_merge,pr_status", "-merge-checks", "any"))
+	o, err := parseFlags(append(baseFlags(t), "-ops", "release, push,pr_open,push,pr_merge,fetch,pr_status", "-merge-checks", "any"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"push", "pr_open", "pr_status", "pr_merge", "release"}
+	want := []string{"push", "fetch", "pr_open", "pr_status", "pr_merge", "release"}
 	if !slices.Equal(o.ops, want) || !slices.Equal(opNames(operations(o, nil, nil)), want) {
 		t.Fatalf("ops %v", o.ops)
 	}
@@ -397,5 +397,15 @@ func TestPushWorkflowsFlag(t *testing.T) {
 	}
 	if w := startupWarnings(mustParse(t, "-push-workflows", "-ops", "issue_list")); len(w) != 0 {
 		t.Fatalf("no push offered, yet warned: %v", w)
+	}
+}
+
+// fetch mints its own read-only token: the pusher main builds must carry the
+// scoped source, or every fetch answers "not configured".
+func TestNewPusherWiresFetchsTokenSource(t *testing.T) {
+	m := &ghpush.Minter{}
+	p := newPusher(mustParse(t, "-ops", "push,fetch"), m, ghpush.Git{}, nil)
+	if p.Scoped != ghpush.ScopedTokenSource(m) || p.Tokens != ghpush.TokenSource(m) {
+		t.Fatalf("pusher token sources: %+v", p)
 	}
 }

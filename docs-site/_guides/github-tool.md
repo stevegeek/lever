@@ -19,7 +19,9 @@ start with the configured prefix (default `agent/`), and it never forces a push.
 By default the only operation is `push`, with the arguments `repo`, `branch` and `bundle`. You then
 open the PR yourself: the `push` result includes a compare URL for this.
 
-You can also offer more operations with the `-ops` flag: `pr_open`, `pr_status`, `pr_merge`
+You can also offer more operations with the `-ops` flag: `fetch`, which hands the agent a branch
+from GitHub as a bundle (see [4a. Reading a branch](#4a-reading-a-branch-fetch-opt-in)),
+`pr_open`, `pr_status`, `pr_merge`
 and `release` (see [6. PRs, merges and releases](#6-prs-merges-and-releases-opt-in)), the
 read-only `ci_runs` and `ci_log`, which let an agent see why CI failed (see
 [7. CI runs and logs](#7-ci-runs-and-logs-opt-in)), and `issue_list`, `issue_read`,
@@ -46,7 +48,10 @@ tag and trigger the release workflow on unreviewed code, and an admin bypass def
 2. Give it **Contents: read and write** and no other permission. It has no Workflows permission, so
    GitHub rejects any push that changes `.github/workflows/`. Agents cannot change CI. The opt-in
    operations need more permissions (see [section 6](#6-prs-merges-and-releases-opt-in)). Add only
-   those for the operations you offer. Never add Administration. Add Workflows only together with
+   those for the operations you offer. `pr_status` and `pr_merge` need **Checks: read** and
+   **Commit statuses: read** as well as Pull requests: without them every call to those operations
+   fails, because GitHub refuses to mint the token (HTTP 422 "permissions requested are not
+   granted"). Never add Administration. Add Workflows only together with
    `-push-workflows`, after reading [section 9](#9-workflow-pushes-opt-in).
 3. Install it on one repository only.
 4. Generate a private key. Save it as a regular file with mode `0600`, owned by the user that runs
@@ -126,7 +131,7 @@ broker:
       command: [/home/you/.local/bin/lever-tool-github,
                 # -tree, -state, -app-id, -installation-id, -app-key as above
                 -repos, owner/name,
-                -ops, "push,pr_open,pr_status,pr_merge,release,ci_runs,ci_log,issue_list,issue_read,issue_comment,issue_close",
+                -ops, "push,fetch,pr_open,pr_status,pr_merge,release,ci_runs,ci_log,issue_list,issue_read,issue_comment,issue_close",
                 -merge-methods, squash,
                 -merge-checks, "test,lint"]  # required with pr_merge: names, any or none
                 # pr_merge requires a person's approval by default
@@ -135,6 +140,7 @@ broker:
       backend: 127.0.0.1:3210
       operations:
         - {name: push, params: [repo, branch, bundle]}
+        - {name: fetch, params: [repo, branch, bundle]}
         - {name: pr_open, params: [repo, branch, title, body]}
         - {name: pr_status, params: [repo, number]}
         - {name: pr_merge, params: [repo, number, method]}
@@ -177,7 +183,7 @@ The broker adds `-backend` and `-admin` itself. Every other setting is a flag in
 | `-repos` | yes | Comma list of `owner/name` the tool may push to. |
 | `-branch-prefix` | no | Required branch prefix. Default `agent/`. |
 | `-max-bundle` | no | Bundle size cap. Default 256 MiB. |
-| `-import-budget` | no | Bundle bytes that one caller can import in one hour. Refused pushes count. The count is in memory and starts again when the tool restarts. Default 1 GiB. `0` turns the cap off. |
+| `-import-budget` | no | Bundle bytes that one caller can import (`push`) or receive (`fetch`) in one hour. Refused pushes count. The count is in memory and starts again when the tool restarts. Default 1 GiB. `0` turns the cap off. |
 | `-name` | no | Tool name. Default `github`. It must equal the `name` in the config. |
 | `-ops` | no | Comma list of the operations to offer: `push`, `pr_open`, `pr_status`, `pr_merge`, `release`, `ci_runs`, `ci_log`, `issue_list`, `issue_read`, `issue_comment`, `issue_close`. Default `push`. An operation not listed does not exist. |
 | `-merge-methods` | no | Comma list of the merge methods `pr_merge` may use: `squash`, `merge`, `rebase`. The first is the default. Default `squash`. |
@@ -211,6 +217,28 @@ and no tags.
 
 The tool never forces a push. If the agent rebases a branch that is already on GitHub, the push is
 rejected. The agent must use a new branch name.
+
+## 4a. Reading a branch: `fetch` (opt-in)
+
+Without `fetch` the jail cannot see GitHub at all: when the default branch moves (a merge commit, an
+edit on GitHub, another agent's PR), the agent's PRs conflict and it cannot see why. `fetch` reads
+one branch, `main` included (no prefix needed), and writes it as a full bundle with one ref,
+`refs/heads/<branch>`, to `/workspace/.lever-files/github/<bundle>`, replacing any file of that
+name. The token carries only Contents: read. The result holds `sha`, `bundle`, `bytes`, and the
+command that imports it:
+
+```sh
+git fetch /workspace/.lever-files/github/origin-main.bundle refs/heads/main:refs/remotes/origin/main
+git merge origin/main   # resolve conflicts, then push as usual
+```
+
+The GitHub objects go into a temporary repository that borrows the mirror's objects; the shared
+mirror still receives only `main`. A bundle over `-max-bundle` is refused, and fetched bytes count
+against the caller's `-import-budget`, as pushes do, so fetching under many names cannot fill the
+disk. The audit line is `github.fetch`.
+
+**Risk:** the agent reads everything on the branch it names, including work other people pushed.
+That is the point, but grant `fetch` only to agents that may read the whole repository.
 
 ## 5. Refusals
 

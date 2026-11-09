@@ -592,3 +592,101 @@ func TestPushPrivateRepoFreshMirror(t *testing.T) {
 		t.Fatalf("a request reached the remote without credentials: %q", r.auths)
 	}
 }
+
+func (f fixedToken) TokenFor(context.Context, string, Permissions) (string, error) {
+	return string(f), nil
+}
+
+func TestFetchMainAndBranch(t *testing.T) {
+	r, work := newTestRemote(t, repo)
+	r.private = true
+	p, tree, _ := newPusher(t, r)
+	p.Scoped = fixedToken("ghs_TESTTOKEN")
+	commitOn(t, work, "agent/other", "o.txt")
+	gitT(t, work, "push", "origin", "agent/other")
+	for _, br := range []string{"main", "agent/other"} {
+		res, err := p.Fetch(context.Background(), "manager", repo, br, "f.bundle")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.SHA != r.headSHA(t, repo, br) {
+			t.Fatalf("%s: sha %s want %s", br, res.SHA, r.headSHA(t, repo, br))
+		}
+		// The agent's side: a fresh repo imports the bundle with no prerequisites.
+		dst := t.TempDir()
+		gitT(t, dst, "init", "-q", "-b", "x")
+		gitT(t, dst, "fetch", "-q", filepath.Join(tree, BundleDir, "f.bundle"), "refs/heads/"+br+":refs/remotes/origin/"+br)
+		if got := gitT(t, dst, "rev-parse", "refs/remotes/origin/"+br); got != res.SHA {
+			t.Fatalf("%s: imported %s want %s", br, got, res.SHA)
+		}
+		if !strings.Contains(res.Usage, "refs/heads/"+br+":refs/remotes/origin/"+br) {
+			t.Fatalf("usage %q", res.Usage)
+		}
+	}
+	out := gitT(t, filepath.Join(p.State, "mirrors", repo+".git"), "for-each-ref", "--format=%(refname)")
+	if out != "refs/remotes/origin/main" {
+		t.Fatalf("mirror holds more than main: %q", out)
+	}
+}
+
+func TestFetchRefusals(t *testing.T) {
+	r, _ := newTestRemote(t, repo)
+	p, tree, _ := newPusher(t, r)
+	p.Scoped = fixedToken("ghs_TESTTOKEN")
+	for _, c := range []struct{ repo, branch, bundle string }{
+		{"x/y", "main", "a.bundle"},
+		{repo, "HEAD", "a.bundle"},
+		{repo, "a..b", "a.bundle"},
+		{repo, "-x", "a.bundle"},
+		{repo, "main", "../a.bundle"},
+		{repo, "main", "a.txt"},
+	} {
+		if _, err := p.Fetch(context.Background(), "manager", c.repo, c.branch, c.bundle); err == nil {
+			t.Fatalf("%+v: want refusal", c)
+		}
+	}
+	if _, err := p.Fetch(context.Background(), "manager", repo, "agent/missing", "a.bundle"); err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("missing branch: %v", err)
+	}
+	// A planted symlink at the bundle name is replaced, never written through.
+	target := filepath.Join(t.TempDir(), "victim")
+	os.WriteFile(target, []byte("keep"), 0o644)
+	if err := os.Symlink(target, filepath.Join(tree, BundleDir, "s.bundle")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Fetch(context.Background(), "manager", repo, "main", "s.bundle"); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(target); string(b) != "keep" {
+		t.Fatalf("wrote through the symlink")
+	}
+	if fi, err := os.Lstat(filepath.Join(tree, BundleDir, "s.bundle")); err != nil || !fi.Mode().IsRegular() {
+		t.Fatalf("bundle not a regular file: %v %v", fi, err)
+	}
+}
+
+// Fetched bundles count against the caller's hourly byte budget, like
+// pushes: an agent cannot fill the tree's disk by fetching under new names.
+func TestFetchChargesTheBudget(t *testing.T) {
+	r, _ := newTestRemote(t, repo)
+	p, _, _ := newPusher(t, r)
+	p.Scoped = fixedToken("ghs_TESTTOKEN")
+	first, err := p.Fetch(context.Background(), "manager", repo, "main", "a.bundle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.ImportBudget = first.Bytes*2 + first.Bytes/2
+	p.spent = nil
+	for _, name := range []string{"b.bundle", "c.bundle"} {
+		if _, err := p.Fetch(context.Background(), "manager", repo, "main", name); err != nil {
+			t.Fatalf("%s within the budget: %v", name, err)
+		}
+	}
+	if _, err := p.Fetch(context.Background(), "manager", repo, "main", "d.bundle"); err == nil || !strings.Contains(err.Error(), "budget") {
+		t.Fatalf("third fetch over the budget: %v", err)
+	}
+	// Another caller has its own budget.
+	if _, err := p.Fetch(context.Background(), "worker", repo, "main", "e.bundle"); err != nil {
+		t.Fatalf("another caller: %v", err)
+	}
+}

@@ -592,3 +592,163 @@ func TestPushPrivateRepoFreshMirror(t *testing.T) {
 		t.Fatalf("a request reached the remote without credentials: %q", r.auths)
 	}
 }
+
+func (f fixedToken) TokenFor(context.Context, string, Permissions) (string, error) {
+	return string(f), nil
+}
+
+func TestFetchMainAndBranch(t *testing.T) {
+	r, work := newTestRemote(t, repo)
+	r.private = true
+	p, tree, _ := newPusher(t, r)
+	p.Scoped = fixedToken("ghs_TESTTOKEN")
+	commitOn(t, work, "agent/other", "o.txt")
+	gitT(t, work, "push", "origin", "agent/other")
+	for _, br := range []string{"main", "agent/other"} {
+		res, err := p.Fetch(context.Background(), "manager", repo, br, "f.bundle")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.SHA != r.headSHA(t, repo, br) {
+			t.Fatalf("%s: sha %s want %s", br, res.SHA, r.headSHA(t, repo, br))
+		}
+		// The agent's side: a fresh repo imports the bundle with no prerequisites.
+		dst := t.TempDir()
+		gitT(t, dst, "init", "-q", "-b", "x")
+		gitT(t, dst, "fetch", "-q", filepath.Join(tree, BundleDir, "f.bundle"), "refs/heads/"+br+":refs/remotes/origin/"+br)
+		if got := gitT(t, dst, "rev-parse", "refs/remotes/origin/"+br); got != res.SHA {
+			t.Fatalf("%s: imported %s want %s", br, got, res.SHA)
+		}
+		if !strings.Contains(res.Usage, "refs/heads/"+br+":refs/remotes/origin/"+br) {
+			t.Fatalf("usage %q", res.Usage)
+		}
+	}
+	out := gitT(t, filepath.Join(p.State, "mirrors", repo+".git"), "for-each-ref", "--format=%(refname)")
+	if out != "refs/remotes/origin/main" {
+		t.Fatalf("mirror holds more than main: %q", out)
+	}
+}
+
+func TestFetchRefusals(t *testing.T) {
+	r, _ := newTestRemote(t, repo)
+	p, tree, _ := newPusher(t, r)
+	p.Scoped = fixedToken("ghs_TESTTOKEN")
+	for _, c := range []struct{ repo, branch, bundle, why string }{
+		{"x/y", "main", "a.bundle", "not one this tool"},
+		{repo, "HEAD", "a.bundle", "name a branch"},
+		{repo, "a..b", "a.bundle", "'..'"},
+		{repo, "-x", "a.bundle", "invalid path component"},
+		{repo, "main", "../a.bundle", "bundle"},
+		{repo, "main", "a.txt", "bundle"},
+	} {
+		if _, err := p.Fetch(context.Background(), "manager", c.repo, c.branch, c.bundle); err == nil || !strings.Contains(err.Error(), c.why) {
+			t.Fatalf("%+v: got %v, want a refusal naming %q", c, err, c.why)
+		}
+	}
+	if _, err := p.Fetch(context.Background(), "manager", repo, "agent/missing", "a.bundle"); err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("missing branch: %v", err)
+	}
+	// A planted symlink at the bundle name is replaced, never written through.
+	target := filepath.Join(t.TempDir(), "victim")
+	os.WriteFile(target, []byte("keep"), 0o644)
+	if err := os.Symlink(target, filepath.Join(tree, BundleDir, "s.bundle")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Fetch(context.Background(), "manager", repo, "main", "s.bundle"); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(target); string(b) != "keep" {
+		t.Fatalf("wrote through the symlink")
+	}
+	if fi, err := os.Lstat(filepath.Join(tree, BundleDir, "s.bundle")); err != nil || !fi.Mode().IsRegular() {
+		t.Fatalf("bundle not a regular file: %v %v", fi, err)
+	}
+}
+
+// Fetched bytes count against the caller's hourly budget, charged up front
+// from an estimate, so a refused fetch is not free either.
+func TestFetchChargesTheBudget(t *testing.T) {
+	r, _ := newTestRemote(t, repo)
+	p, tree, _ := newPusher(t, r)
+	p.Scoped = fixedToken("ghs_TESTTOKEN")
+	p.ImportBudget = 1
+	if _, err := p.Fetch(context.Background(), "manager", repo, "main", "a.bundle"); err == nil || !strings.Contains(err.Error(), "budget") {
+		t.Fatalf("fetch over the budget: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(tree, BundleDir, "a.bundle")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a refused fetch wrote a bundle: %v", err)
+	}
+	p.ImportBudget = 0 // off
+	if _, err := p.Fetch(context.Background(), "manager", repo, "main", "a.bundle"); err != nil {
+		t.Fatalf("no budget: %v", err)
+	}
+}
+
+// A branch over -max-bundle is refused before the bundle is built, writes
+// nothing, and is still charged.
+func TestFetchRefusesOverTheCap(t *testing.T) {
+	r, _ := newTestRemote(t, repo)
+	p, tree, _ := newPusher(t, r)
+	p.Scoped = fixedToken("ghs_TESTTOKEN")
+	p.MaxBundle = 10
+	p.ImportBudget = 15
+	if _, err := p.Fetch(context.Background(), "manager", repo, "main", "a.bundle"); err == nil || !strings.Contains(err.Error(), "over the 10 byte cap") {
+		t.Fatalf("over the cap: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(tree, BundleDir, "a.bundle")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("an over-cap fetch wrote a bundle: %v", err)
+	}
+	// 10 of the 15 bytes are spent: the next doomed try is over the budget.
+	if _, err := p.Fetch(context.Background(), "manager", repo, "main", "a.bundle"); err == nil || !strings.Contains(err.Error(), "budget") {
+		t.Fatalf("the refusal was not charged: %v", err)
+	}
+}
+
+// The bundle carries exactly the one ref.
+func TestFetchBundleHasOneRef(t *testing.T) {
+	r, _ := newTestRemote(t, repo)
+	p, tree, _ := newPusher(t, r)
+	p.Scoped = fixedToken("ghs_TESTTOKEN")
+	if _, err := p.Fetch(context.Background(), "manager", repo, "main", "a.bundle"); err != nil {
+		t.Fatal(err)
+	}
+	heads := gitT(t, t.TempDir(), "bundle", "list-heads", filepath.Join(tree, BundleDir, "a.bundle"))
+	if lines := strings.Split(strings.TrimSpace(heads), "\n"); len(lines) != 1 || !strings.HasSuffix(lines[0], " refs/heads/main") {
+		t.Fatalf("bundle heads %q", heads)
+	}
+}
+
+// A symlinked bundle directory is refused, never written through.
+func TestFetchRefusesALinkedBundleDir(t *testing.T) {
+	r, _ := newTestRemote(t, repo)
+	p, tree, _ := newPusher(t, r)
+	p.Scoped = fixedToken("ghs_TESTTOKEN")
+	elsewhere := t.TempDir()
+	dir := filepath.Join(tree, BundleDir)
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Fetch(context.Background(), "manager", repo, "main", "a.bundle"); err == nil {
+		t.Fatal("a symlinked bundle directory was written through")
+	}
+	if ents, _ := os.ReadDir(elsewhere); len(ents) != 0 {
+		t.Fatalf("wrote outside the tree: %v", ents)
+	}
+}
+
+func TestValidateFetchBranch(t *testing.T) {
+	for _, ok := range []string{"main", "agent/x", "release-1.2", "a_b/c.d"} {
+		if err := ValidateFetchBranch(ok); err != nil {
+			t.Errorf("%q refused: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "HEAD", ":x", "+x", "a*", "a^", "a~1", "a@{0}", "a b", "a\x01", "caf\u00e9",
+		"a//b", "a/", "/a", "x.lock", ".x", "a/-b", "-x", "a..b", "a.", strings.Repeat("a", 201)} {
+		if err := ValidateFetchBranch(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}

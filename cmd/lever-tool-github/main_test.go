@@ -140,11 +140,11 @@ func TestParseFlagsOpsDefaultIsPushOnly(t *testing.T) {
 }
 
 func TestParseFlagsOps(t *testing.T) {
-	o, err := parseFlags(append(baseFlags(t), "-ops", "release, push,pr_open,push,pr_merge,pr_status", "-merge-checks", "any"))
+	o, err := parseFlags(append(baseFlags(t), "-ops", "release, push,pr_open,push,pr_merge,fetch,pr_status", "-merge-checks", "any"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"push", "pr_open", "pr_status", "pr_merge", "release"}
+	want := []string{"push", "fetch", "pr_open", "pr_status", "pr_merge", "release"}
 	if !slices.Equal(o.ops, want) || !slices.Equal(opNames(operations(o, nil, nil)), want) {
 		t.Fatalf("ops %v", o.ops)
 	}
@@ -397,5 +397,45 @@ func TestPushWorkflowsFlag(t *testing.T) {
 	}
 	if w := startupWarnings(mustParse(t, "-push-workflows", "-ops", "issue_list")); len(w) != 0 {
 		t.Fatalf("no push offered, yet warned: %v", w)
+	}
+}
+
+// fetch mints its own read-only token: the pusher main builds must carry the
+// scoped source, or every fetch answers "not configured".
+func TestNewPusherWiresFetchsTokenSource(t *testing.T) {
+	m := &ghpush.Minter{}
+	p := newPusher(mustParse(t, "-ops", "push,fetch"), m, ghpush.Git{}, nil)
+	if p.Scoped != ghpush.ScopedTokenSource(m) || p.Tokens != ghpush.TokenSource(m) {
+		t.Fatalf("pusher token sources: %+v", p)
+	}
+}
+
+// fetch's backstop: an allowed repo, a branch name git accepts (no prefix
+// needed), a plain bundle name, and only for the fetch operation.
+func TestFetchBackstop(t *testing.T) {
+	o := mustParse(t, "-ops", "fetch")
+	ops := map[string]captool.Operation{}
+	for _, op := range operations(o, nil, nil) {
+		ops[op.Name] = op
+	}
+	for _, c := range []struct {
+		args map[string]string
+		ok   bool
+	}{
+		{map[string]string{"repo": "stevegeek/lever", "branch": "main", "bundle": "m.bundle"}, true},
+		{map[string]string{"repo": "stevegeek/lever", "branch": "agent/x", "bundle": "x.bundle"}, true},
+		{map[string]string{"repo": "x/y", "branch": "main", "bundle": "m.bundle"}, false},
+		{map[string]string{"repo": "stevegeek/lever", "branch": "-x", "bundle": "m.bundle"}, false},
+		{map[string]string{"repo": "stevegeek/lever", "branch": "a:b", "bundle": "m.bundle"}, false},
+		{map[string]string{"repo": "stevegeek/lever", "branch": "main", "bundle": "../m.bundle"}, false},
+		{map[string]string{"repo": "stevegeek/lever", "branch": "main", "bundle": "m.txt"}, false},
+	} {
+		if err := ops["fetch"].Backstop(captool.ValidatedContext{Operation: "fetch"}, c.args); (err == nil) != c.ok {
+			t.Errorf("%v: err %v, want ok=%v", c.args, err, c.ok)
+		}
+	}
+	ok := map[string]string{"repo": "stevegeek/lever", "branch": "main", "bundle": "m.bundle"}
+	if err := ops["fetch"].Backstop(captool.ValidatedContext{Operation: "push"}, ok); err == nil {
+		t.Error("the fetch backstop must refuse another operation")
 	}
 }

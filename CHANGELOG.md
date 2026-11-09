@@ -7,6 +7,18 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **The manager hears when a service host is back.** An agent that holds back work while a service
+  host is away (writes queued while a laptop sleeps) had no way to know when to try again. The
+  broker now checks each service host once a minute, and a failed tool call checks its host at
+  once. When a host it saw down answers again, the broker sends the manager one message, marked
+  `[lever: service host back]`, naming the host and its tools. It goes out at most once every 10
+  minutes per host, never on the first check after the broker starts, and not to a manager that is
+  not running. The manager's skill gains the `service-host-notice` kind, only on instances with a
+  service host, so other instances keep their skill unchanged. Host-only: the Jail ABI does not
+  change. (T0352)
+
 ### Changed
 
 - **Read-aloud needs sherpa-onnx 2.0 and uses Kokoro v1.0.** sherpa-onnx 2.0 dropped espeak-ng, so
@@ -27,27 +39,6 @@ version bump moves the block under the new version heading.
   tried again after a minute, and at once when the program file changes. `-models` with a comma is refused, since
   sherpa-onnx reads several lexicons as one comma-separated option. The voice `af` (a blend in
   v0.19) is gone. Host-only: the Jail ABI does not change.
-
-### Upgrade
-
-- **Read-aloud (`lever-tool-tts`):** install sherpa-onnx 2.0 or later (for example `pip install
-  sherpa-onnx-bin` in a virtual environment, or a 2.x release archive) and point `-server` at it;
-  run `lever voice fetch kokoro-multi-lang-v1_0`; set `-model kokoro-multi-lang-v1_0` (or drop
-  `-model` for the default) in the tool's command, and replace `-voice af` if you used it; then
-  `lever reload`. With `piper-en_GB-alba-medium`, run `lever voice fetch piper-en_GB-alba-medium`
-  again for its lexicon. The old `kokoro-en-v0_19` directory in `-models` can be deleted. A config
-  naming `kokoro-en-v0_19` no longer loads.
-### Added
-
-- **The manager hears when a service host is back.** An agent that holds back work while a service
-  host is away (writes queued while a laptop sleeps) had no way to know when to try again. The
-  broker now checks each service host once a minute, and a failed tool call checks its host at
-  once. When a host it saw down answers again, the broker sends the manager one message, marked
-  `[lever: service host back]`, naming the host and its tools. It goes out at most once every 10
-  minutes per host, never on the first check after the broker starts, and not to a manager that is
-  not running. The manager's skill gains the `service-host-notice` kind, only on instances with a
-  service host, so other instances keep their skill unchanged. Host-only: the Jail ABI does not
-  change. (T0352)
 
 ### Fixed
 
@@ -106,6 +97,13 @@ version bump moves the block under the new version heading.
 
 ### Upgrade
 
+- **Read-aloud (`lever-tool-tts`):** install sherpa-onnx 2.0 or later (for example `pip install
+  sherpa-onnx-bin` in a virtual environment, or a 2.x release archive) and point `-server` at it;
+  run `lever voice fetch kokoro-multi-lang-v1_0`; set `-model kokoro-multi-lang-v1_0` (or drop
+  `-model` for the default) in the tool's command, and replace `-voice af` if you used it; then
+  `lever reload`. With `piper-en_GB-alba-medium`, run `lever voice fetch piper-en_GB-alba-medium`
+  again for its lexicon. The old `kokoro-en-v0_19` directory in `-models` can be deleted. A config
+  naming `kokoro-en-v0_19` no longer loads.
 - **Supervised tool backends.** A config whose supervised tool sets `backend` to anything but a
   literal loopback IP (`0.0.0.0`, a LAN address, or a name such as `localhost`) no longer loads;
   write `127.0.0.1:PORT`. Every tool lever ships, and every example, already does. A running

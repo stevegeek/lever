@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [1.0.0-beta.9] - 2026-11-09
+
 ### Added
 
 - **The github tool can read a branch: `fetch`.** A jail could push to GitHub but never read from
@@ -20,6 +22,11 @@ version bump moves the block under the new version heading.
   `pr_status` and `pr_merge` need Checks: read and Commit statuses: read on the App. Add `fetch`
   to `-ops`, the tool's `operations` and the agent's `obtain` to offer it. Host-only: the Jail
   ABI does not change.
+### Upgrade
+
+- **Jail ABI unchanged (11).** No agent image rebuild. `fetch` is off until you add it to the
+  github tool's `-ops`, its `operations` (`{name: fetch, params: [repo, branch, bundle]}`) and the
+  agent's `obtain`.
 
 ## [1.0.0-beta.8] - 2026-11-09
 

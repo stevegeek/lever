@@ -633,16 +633,16 @@ func TestFetchRefusals(t *testing.T) {
 	r, _ := newTestRemote(t, repo)
 	p, tree, _ := newPusher(t, r)
 	p.Scoped = fixedToken("ghs_TESTTOKEN")
-	for _, c := range []struct{ repo, branch, bundle string }{
-		{"x/y", "main", "a.bundle"},
-		{repo, "HEAD", "a.bundle"},
-		{repo, "a..b", "a.bundle"},
-		{repo, "-x", "a.bundle"},
-		{repo, "main", "../a.bundle"},
-		{repo, "main", "a.txt"},
+	for _, c := range []struct{ repo, branch, bundle, why string }{
+		{"x/y", "main", "a.bundle", "not one this tool"},
+		{repo, "HEAD", "a.bundle", "name a branch"},
+		{repo, "a..b", "a.bundle", "'..'"},
+		{repo, "-x", "a.bundle", "invalid path component"},
+		{repo, "main", "../a.bundle", "bundle"},
+		{repo, "main", "a.txt", "bundle"},
 	} {
-		if _, err := p.Fetch(context.Background(), "manager", c.repo, c.branch, c.bundle); err == nil {
-			t.Fatalf("%+v: want refusal", c)
+		if _, err := p.Fetch(context.Background(), "manager", c.repo, c.branch, c.bundle); err == nil || !strings.Contains(err.Error(), c.why) {
+			t.Fatalf("%+v: got %v, want a refusal naming %q", c, err, c.why)
 		}
 	}
 	if _, err := p.Fetch(context.Background(), "manager", repo, "agent/missing", "a.bundle"); err == nil || !strings.Contains(err.Error(), "does not exist") {
@@ -665,28 +665,90 @@ func TestFetchRefusals(t *testing.T) {
 	}
 }
 
-// Fetched bundles count against the caller's hourly byte budget, like
-// pushes: an agent cannot fill the tree's disk by fetching under new names.
+// Fetched bytes count against the caller's hourly budget, charged up front
+// from an estimate, so a refused fetch is not free either.
 func TestFetchChargesTheBudget(t *testing.T) {
 	r, _ := newTestRemote(t, repo)
-	p, _, _ := newPusher(t, r)
+	p, tree, _ := newPusher(t, r)
 	p.Scoped = fixedToken("ghs_TESTTOKEN")
-	first, err := p.Fetch(context.Background(), "manager", repo, "main", "a.bundle")
-	if err != nil {
+	p.ImportBudget = 1
+	if _, err := p.Fetch(context.Background(), "manager", repo, "main", "a.bundle"); err == nil || !strings.Contains(err.Error(), "budget") {
+		t.Fatalf("fetch over the budget: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(tree, BundleDir, "a.bundle")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a refused fetch wrote a bundle: %v", err)
+	}
+	p.ImportBudget = 0 // off
+	if _, err := p.Fetch(context.Background(), "manager", repo, "main", "a.bundle"); err != nil {
+		t.Fatalf("no budget: %v", err)
+	}
+}
+
+// A branch over -max-bundle is refused before the bundle is built, writes
+// nothing, and is still charged.
+func TestFetchRefusesOverTheCap(t *testing.T) {
+	r, _ := newTestRemote(t, repo)
+	p, tree, _ := newPusher(t, r)
+	p.Scoped = fixedToken("ghs_TESTTOKEN")
+	p.MaxBundle = 10
+	p.ImportBudget = 15
+	if _, err := p.Fetch(context.Background(), "manager", repo, "main", "a.bundle"); err == nil || !strings.Contains(err.Error(), "over the 10 byte cap") {
+		t.Fatalf("over the cap: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(tree, BundleDir, "a.bundle")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("an over-cap fetch wrote a bundle: %v", err)
+	}
+	// 10 of the 15 bytes are spent: the next doomed try is over the budget.
+	if _, err := p.Fetch(context.Background(), "manager", repo, "main", "a.bundle"); err == nil || !strings.Contains(err.Error(), "budget") {
+		t.Fatalf("the refusal was not charged: %v", err)
+	}
+}
+
+// The bundle carries exactly the one ref.
+func TestFetchBundleHasOneRef(t *testing.T) {
+	r, _ := newTestRemote(t, repo)
+	p, tree, _ := newPusher(t, r)
+	p.Scoped = fixedToken("ghs_TESTTOKEN")
+	if _, err := p.Fetch(context.Background(), "manager", repo, "main", "a.bundle"); err != nil {
 		t.Fatal(err)
 	}
-	p.ImportBudget = first.Bytes*2 + first.Bytes/2
-	p.spent = nil
-	for _, name := range []string{"b.bundle", "c.bundle"} {
-		if _, err := p.Fetch(context.Background(), "manager", repo, "main", name); err != nil {
-			t.Fatalf("%s within the budget: %v", name, err)
+	heads := gitT(t, t.TempDir(), "bundle", "list-heads", filepath.Join(tree, BundleDir, "a.bundle"))
+	if lines := strings.Split(strings.TrimSpace(heads), "\n"); len(lines) != 1 || !strings.HasSuffix(lines[0], " refs/heads/main") {
+		t.Fatalf("bundle heads %q", heads)
+	}
+}
+
+// A symlinked bundle directory is refused, never written through.
+func TestFetchRefusesALinkedBundleDir(t *testing.T) {
+	r, _ := newTestRemote(t, repo)
+	p, tree, _ := newPusher(t, r)
+	p.Scoped = fixedToken("ghs_TESTTOKEN")
+	elsewhere := t.TempDir()
+	dir := filepath.Join(tree, BundleDir)
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Fetch(context.Background(), "manager", repo, "main", "a.bundle"); err == nil {
+		t.Fatal("a symlinked bundle directory was written through")
+	}
+	if ents, _ := os.ReadDir(elsewhere); len(ents) != 0 {
+		t.Fatalf("wrote outside the tree: %v", ents)
+	}
+}
+
+func TestValidateFetchBranch(t *testing.T) {
+	for _, ok := range []string{"main", "agent/x", "release-1.2", "a_b/c.d"} {
+		if err := ValidateFetchBranch(ok); err != nil {
+			t.Errorf("%q refused: %v", ok, err)
 		}
 	}
-	if _, err := p.Fetch(context.Background(), "manager", repo, "main", "d.bundle"); err == nil || !strings.Contains(err.Error(), "budget") {
-		t.Fatalf("third fetch over the budget: %v", err)
-	}
-	// Another caller has its own budget.
-	if _, err := p.Fetch(context.Background(), "worker", repo, "main", "e.bundle"); err != nil {
-		t.Fatalf("another caller: %v", err)
+	for _, bad := range []string{"", "HEAD", ":x", "+x", "a*", "a^", "a~1", "a@{0}", "a b", "a\x01", "caf\u00e9",
+		"a//b", "a/", "/a", "x.lock", ".x", "a/-b", "-x", "a..b", "a.", strings.Repeat("a", 201)} {
+		if err := ValidateFetchBranch(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
 	}
 }

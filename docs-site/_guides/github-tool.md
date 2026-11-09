@@ -183,9 +183,9 @@ The broker adds `-backend` and `-admin` itself. Every other setting is a flag in
 | `-repos` | yes | Comma list of `owner/name` the tool may push to. |
 | `-branch-prefix` | no | Required branch prefix. Default `agent/`. |
 | `-max-bundle` | no | Bundle size cap. Default 256 MiB. |
-| `-import-budget` | no | Bundle bytes that one caller can import (`push`) or receive (`fetch`) in one hour. Refused pushes count. The count is in memory and starts again when the tool restarts. Default 1 GiB. `0` turns the cap off. |
+| `-import-budget` | no | Bundle bytes that one caller can import (`push`) or receive (`fetch`) in one hour. Refused pushes and fetches count. The count is in memory and starts again when the tool restarts. Default 1 GiB. `0` turns the cap off. |
 | `-name` | no | Tool name. Default `github`. It must equal the `name` in the config. |
-| `-ops` | no | Comma list of the operations to offer: `push`, `pr_open`, `pr_status`, `pr_merge`, `release`, `ci_runs`, `ci_log`, `issue_list`, `issue_read`, `issue_comment`, `issue_close`. Default `push`. An operation not listed does not exist. |
+| `-ops` | no | Comma list of the operations to offer: `push`, `fetch`, `pr_open`, `pr_status`, `pr_merge`, `release`, `ci_runs`, `ci_log`, `issue_list`, `issue_read`, `issue_comment`, `issue_close`. Default `push`. An operation not listed does not exist. |
 | `-merge-methods` | no | Comma list of the merge methods `pr_merge` may use: `squash`, `merge`, `rebase`. The first is the default. Default `squash`. |
 | `-merge-checks` | with `pr_merge` | What `pr_merge` requires of the checks on the PR head. A comma list of check names: these checks must be present and successful, and all others green. `any`: at least one successful check, and all green. `none`: no check is needed, but any that exist must be green. No default: when `-ops` offers `pr_merge`, the tool refuses to start without it. |
 | `-merge-require-review` | no | `pr_merge` requires an approving review by a person on the PR's head SHA, and no outstanding request for changes. Default `true`. Turn it off only with `-merge-require-review=false`; the tool then logs a warning when it starts. |
@@ -228,14 +228,15 @@ name. The token carries only Contents: read. The result holds `sha`, `bundle`, `
 command that imports it:
 
 ```sh
-git fetch /workspace/.lever-files/github/origin-main.bundle refs/heads/main:refs/remotes/origin/main
+git fetch /workspace/.lever-files/github/origin-main.bundle +refs/heads/main:refs/remotes/origin/main
 git merge origin/main   # resolve conflicts, then push as usual
 ```
 
 The GitHub objects go into a temporary repository that borrows the mirror's objects; the shared
-mirror still receives only `main`. A bundle over `-max-bundle` is refused, and fetched bytes count
-against the caller's `-import-budget`, as pushes do, so fetching under many names cannot fill the
-disk. The audit line is `github.fetch`.
+mirror still receives only `main`. The branch's size is estimated before the bundle is built: one over
+`-max-bundle` is refused, so a repository whose history is bigger than `-max-bundle` cannot be
+fetched at all, `main` included. Each fetch is charged to the caller's `-import-budget`, as pushes
+are, refused ones too, which limits how fast fetching under many names can fill the disk. The audit line is `github.fetch`.
 
 **Risk:** the agent reads everything on the branch it names, including work other people pushed.
 That is the point, but grant `fetch` only to agents that may read the whole repository.

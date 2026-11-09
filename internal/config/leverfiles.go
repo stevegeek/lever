@@ -48,7 +48,7 @@ func (a *App) validateLeverFilesTools() error {
 		case isWhisperCommand(t):
 			reason = fmt.Sprintf("broker.tools[%s] (whisper) transcribes the manager's clips from %s", t.Name, voice.AgentDir)
 		case isGithubCommand(t):
-			reason = fmt.Sprintf("broker.tools[%s] (github) pushes the manager's bundles from %s/github", t.Name, chatfiles.Dir)
+			reason = fmt.Sprintf("broker.tools[%s] (github) reads and writes the manager's bundles in %s/github", t.Name, chatfiles.Dir)
 		default:
 			continue
 		}

@@ -283,7 +283,7 @@ func (p *Pusher) newWorkRepo(ctx context.Context, tmp, mirror string) (string, e
 	return dir, nil
 }
 
-var tmpPathRE = regexp.MustCompile(`<state>/tmp/push-[0-9]+`)
+var tmpPathRE = regexp.MustCompile(`<state>/tmp/(push|fetch)-[0-9]+`)
 
 // hidePaths replaces host paths in err's text with placeholders; errors.Is
 // still sees the cause.

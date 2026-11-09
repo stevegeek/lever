@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/stevegeek/lever/internal/fsutil"
@@ -101,6 +102,24 @@ func (p *Pusher) Fetch(ctx context.Context, caller, repo, branch, bundle string)
 	if err != nil {
 		return FetchResult{}, fmt.Errorf("fetched head is not a commit: %w", err)
 	}
+	// Estimate before building: the bundle packs the branch's whole history,
+	// so a branch over the cap would otherwise fill the state disk first.
+	// The estimate is charged to the caller's budget up front, refused or
+	// not, so repeating a doomed fetch is not free.
+	est, err := p.Git.Run(ctx, work, RunOpts{GitDir: work}, "rev-list", "--objects", "--disk-usage", ref)
+	if err != nil {
+		return FetchResult{}, fmt.Errorf("size of %s: %w", branch, err)
+	}
+	size, err := strconv.ParseInt(strings.TrimSpace(est), 10, 64)
+	if err != nil || size < 0 {
+		return FetchResult{}, fmt.Errorf("size of %s: unreadable estimate", branch)
+	}
+	if err := p.charge(caller, min(size, p.MaxBundle)); err != nil {
+		return FetchResult{}, err
+	}
+	if size > p.MaxBundle {
+		return FetchResult{}, fmt.Errorf("%s holds about %d bytes of history, over the %d byte cap; a repository bigger than -max-bundle cannot be fetched", branch, size, p.MaxBundle)
+	}
 	out := filepath.Join(tmp, "out.bundle")
 	if _, err := p.Git.Run(ctx, work, RunOpts{GitDir: work}, "bundle", "create", "--quiet", out, ref); err != nil {
 		return FetchResult{}, fmt.Errorf("bundle create: %w", err)
@@ -111,12 +130,6 @@ func (p *Pusher) Fetch(ctx context.Context, caller, repo, branch, bundle string)
 	}
 	if fi.Size() > p.MaxBundle {
 		return FetchResult{}, fmt.Errorf("bundle of %s is %d bytes, over the %d byte cap", branch, fi.Size(), p.MaxBundle)
-	}
-	// The same hourly byte budget as push: each fetch writes a bundle into
-	// the tree under a name the agent picks, so the budget bounds how fast
-	// fetches can fill its disk.
-	if err := p.charge(caller, fi.Size()); err != nil {
-		return FetchResult{}, err
 	}
 	data, err := os.ReadFile(out)
 	if err != nil {
@@ -130,7 +143,8 @@ func (p *Pusher) Fetch(ctx context.Context, caller, repo, branch, bundle string)
 	dst := "/workspace/" + BundleDir + "/" + bundle
 	return FetchResult{
 		Repo: repo, Branch: branch, SHA: strings.TrimSpace(sha), Bundle: dst, Bytes: fi.Size(),
-		Usage: fmt.Sprintf("git fetch %s %s:refs/remotes/origin/%s", dst, ref, branch),
+		// "+": GitHub's branch may have been rewritten since the last fetch.
+		Usage: fmt.Sprintf("git fetch %s +%s:refs/remotes/origin/%s", dst, ref, branch),
 	}, nil
 }
 

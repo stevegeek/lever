@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [1.0.0-beta.8] - 2026-11-09
+
 ### Added
 
 - **The manager hears when a service host is back.** An agent that holds back work while a service
@@ -97,6 +99,8 @@ version bump moves the block under the new version heading.
 
 ### Upgrade
 
+- **Jail ABI unchanged (11).** No agent image rebuild. Everything here is host-side and takes
+  effect after `lever apply` or `lever up`, which restarts the broker on the new version.
 - **Read-aloud (`lever-tool-tts`):** install sherpa-onnx 2.0 or later (for example `pip install
   sherpa-onnx-bin` in a virtual environment, or a 2.x release archive) and point `-server` at it;
   run `lever voice fetch kokoro-multi-lang-v1_0`; set `-model kokoro-multi-lang-v1_0` (or drop

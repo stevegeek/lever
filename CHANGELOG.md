@@ -17,13 +17,61 @@ version bump moves the block under the new version heading.
   documented as equivalent and still a restrictive managed setting), and the environment variables
   lever sets. The Claude Code binary grows from 267 MB to 342 MB (linux-x64), so the agent image
   grows by about as much.
+- **scion is pinned to `e8160a10`, its nightly-20261112 (was `65531d7f`).** The examples, the
+  release's prebuilt scion, the Makefile's `SCION_VERSION`, the Lima e2e scripts and the docs move to
+  it. These changes on the scion side reach lever:
+  - **Chat thread groups are always on.** scion graduated `hub.chat_thread_groups` (315c0798c): the
+    hub no longer registers it, refuses an override for it, and always serves
+    `/api/v1/thread-groups`, so agents can create and rename project-wide chat groups that project
+    members with read access see. lever can no longer turn this off. The remote proxy still
+    refuses those routes for every login, and doctor's *scion conduit and artifacts* row says the
+    feature is always on. lever still pins it off on an older scion that registers it.
+  - **A new agent phase, `halted`** (35189dd77): the platform ended a run that should still run (an
+    OOM kill, an eviction, a VM reboot, a container that went missing). scion wrote `error` for
+    these before. lever resumes a halted manager or worker like a stopped one. scion resumes it in
+    a **new claude session**: the hub passes `--continue` only for a suspended record, and
+    `--force` recovers only an error one. So an OOM-killed manager no longer comes back with its
+    conversation, as it did through `resume --force`; the transcript stays in the agent home
+    (`lever attach`, then `/resume`). lever and doctor say so. A contact cannot wake a halted
+    worker; the operator can, as for a stopped one.
+  - **The controller PAT asks for `project:list`** when the jail's scion knows the scope. scion now
+    puts the token ceiling on every list (de77b8ae9), and without it `scion hub projects` comes back
+    empty, so lever would register the project again. The changed scope set re-mints the token at
+    the next apply.
+  - **Renaming the dev user needs hub admin** (44ef85192): scion's `PUT /api/v1/system/identity`
+    now requires `hub.config.update`, so a jailed agent can no longer rename the controller through
+    the loopback. This closes the known issue earlier releases describe; lever keeps its repairs.
+  - Notifications gain `kind`, `resourceType`, `resourceId` and `excerpt` (text another principal
+    wrote). lever's manager now gets `excerpt` sanitized, bounded and marked `excerpt-reported:`, and
+    the others sanitized and bounded.
+
+### Security
+
+- **Five more scion experiments are pinned off:** `hub.attachment_artifacts` (copies chat attachments
+  into agent inboxes and the project scratchpad; scion turns it on by default wherever its artifact
+  service is ready, local disk included), `hub.port_view` (an agent's exposed port, WebSockets
+  included, for anyone holding the page link), `hub.conduit_deliver` (message delivery over
+  conduit), `hub.agent_plugins` (installs plugin bundles a template declares into the harness at
+  every start) and `hub.agent_delegation` (lets a user grant an agent hub calls under the user's
+  name, through the delegation socket sciontool now serves in every agent). Every apply pins them
+  off as `lever-admin`, and the hub's admin view must show each one off after the write; none has a
+  read-only route that tells, so doctor reads them from lever's record. `hub-experiments.json`
+  written by an older lever makes doctor warn until the next apply.
+- **The remote proxy refuses scion's new reach-widening routes for every login:**
+  `/api/v1/portview/`, `/api/v1/pending-secrets*` (approving one makes a value an agent chose a
+  secret of the user's, which the user's other agents then receive; reveal shows it),
+  `/api/v1/projects/{id}/visitors*` and `/api/v1/users/me/visitor-*`,
+  `/api/v1/attachment-deliveries/*`, and the runtime broker's own `/api/v1/broker/*` routes, which
+  no browser calls. A pending secret therefore stays pending: it reaches no agent.
 
 ### Upgrade
 
-- **Jail ABI 12.** The agent image changed (Claude Code 2.1.322): rebuild the agent image (`make
+- **Jail ABI 13.** The agent image changed (Claude Code 2.1.322, sciontool and, in the slim image,
+  scion from the new pin) and so did in-jail lever code: rebuild the agent image (`make
   lever-image` or `make lever-image-slim`, then any instance image built from it) and recreate the
   manager on it with `lever up --fresh --keep-conversation`. Doctor's *agent lever version* row says
-  so.
+  so. The first `lever apply` installs the new scion pin in the jail and re-mints the controller
+  PAT with `project:list`.
 
 ## [1.0.0-beta.9] - 2026-11-09
 

@@ -404,10 +404,14 @@ type ServerOpts struct {
 	// serves a non-empty value whether or not it holds anything, so a wrong
 	// path replaces working embedded assets with 404s.
 	WebAssetsDir string
-	// SessionSecret, when non-empty, is the hub's session-cookie signing key
-	// (--session-secret); without it every hub restart signs every browser
-	// out. The flag, not env, because scion's daemon persists and replays its
-	// argv on restart. Empty omits the flag.
+	// SessionSecret, when non-empty, is the hub's session-cookie signing key;
+	// without it every hub restart signs every browser out. It reaches the hub
+	// as SCION_SERVER_SESSION_SECRET, read from stdin by a shell that then
+	// execs scion, so no argv carries it, in the jail or on the host. scion's
+	// daemon does not forward --session-secret to its foreground child (it
+	// would land in the child's argv and server-args.json), so the flag never
+	// took effect; the child inherits the environment, and scion scrubs the
+	// variable once it has read it.
 	SessionSecret string
 	// Env is set on the start command only, and the daemonised hub inherits it.
 	// It pins the hub's auth configuration: scion lets SCION_SERVER_* override
@@ -418,6 +422,45 @@ type ServerOpts struct {
 	// Progress, when non-nil, gets a line while the start waits on a slow
 	// hub (see waitHubReady). Not part of the argv.
 	Progress func(format string, args ...any)
+}
+
+// sessionSecretShim reads one line from stdin into SCION_SERVER_SESSION_SECRET
+// and execs the rest of its argv. The secret is never an argument.
+const sessionSecretShim = `IFS= read -r v || exit 97
+SCION_SERVER_SESSION_SECRET=$v
+export SCION_SERVER_SESSION_SECRET
+unset v
+exec "$@"`
+
+// runServerStart runs scion with args, handing it secret as
+// SCION_SERVER_SESSION_SECRET through stdin when secret is set. The secret is
+// scrubbed from any error, so AlreadyRunning and the other matchers still see
+// scion's text.
+func (c *Client) runServerStart(ctx context.Context, extra map[string]string, secret string, args ...string) (string, error) {
+	if secret == "" {
+		return c.runSecretEnv(ctx, extra, "", args...)
+	}
+	if strings.ContainsAny(secret, "\r\n") {
+		return "", errors.New("scion server start: the session secret has a line break")
+	}
+	env := c.env()
+	for k, v := range extra {
+		if _, own := env[k]; own || k == "SCION_HUB_TOKEN" || k == "SCION_HUB_ENDPOINT" || k == "SCION_HUB_ENABLED" {
+			continue
+		}
+		env[k] = v
+	}
+	shArgs := append([]string{"-c", sessionSecretShim, "sh", c.bin}, args...)
+	res, err := c.r.RunStdin(ctx, strings.NewReader(secret+"\n"), env, "sh", shArgs...)
+	out := c.filterOutput(res.Stdout) + c.filterOutput(res.Stderr)
+	if err != nil {
+		err = runErr(args, out, err)
+		if len(secret) >= 8 {
+			err = errors.New(strings.ReplaceAll(err.Error(), secret, "***"))
+		}
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
 }
 
 // ServerStart starts the workstation daemon (Hub API + broker); it daemonises
@@ -439,10 +482,6 @@ func (c *Client) ServerStart(ctx context.Context, o ServerOpts) error {
 		args = append(args, "--web-port", strconv.Itoa(o.WebPort))
 	}
 	args = append(args, fmt.Sprintf("--dev-auth=%t", o.DevAuth))
-	// Equals form, so the argv matches scion's own daemon re-exec form.
-	if o.SessionSecret != "" {
-		args = append(args, "--session-secret="+o.SessionSecret)
-	}
 	if o.EnableWeb {
 		args = append(args, "--enable-web")
 		// Equals form, as scion's own daemon re-exec writes it.
@@ -532,9 +571,7 @@ func (c *Client) startHubOnce(ctx context.Context, o ServerOpts, args []string) 
 		}
 		return e
 	}
-	// runSecret: the argv carries the session secret, which redactArgs does
-	// not know. The scrub is textual, so AlreadyRunning still matches.
-	_, err := c.runSecretEnv(ctx, o.Env, o.SessionSecret, args...)
+	_, err := c.runServerStart(ctx, o.Env, o.SessionSecret, args...)
 	switch {
 	case err == nil, startGaveUpWaiting(err):
 	case startExited(err):

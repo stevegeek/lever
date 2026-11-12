@@ -192,18 +192,42 @@ func TestServerStartOmitsWebAssetsDirWithoutEnableWeb(t *testing.T) {
 	}
 }
 
-// The session-cookie signing key travels in the argv so scion's daemon replays
-// it on restart and sessions survive.
-func TestServerStartEmitsSessionSecret(t *testing.T) {
+// The session-cookie signing key reaches the hub as
+// SCION_SERVER_SESSION_SECRET on stdin, through a shell that execs scion: no
+// argv carries it (scion's daemon never forwarded --session-secret anyway).
+func TestServerStartPassesSessionSecretOnStdin(t *testing.T) {
 	f, c := okScion()
+	f.Script("sh -c", proc.Result{Stdout: "ok"})
 	opts := ServerOpts{WebPort: 8080, DevAuth: false, SessionSecret: "sessionsecrethex"}
 	if err := c.ServerStart(context.Background(), opts); err != nil {
 		t.Fatal(err)
 	}
-	got := strings.Join(serverStartCall(t, f).Args, " ")
-	want := "server start --web-port 8080 --dev-auth=false --session-secret=sessionsecrethex"
-	if got != want {
-		t.Errorf("args = %q, want %q", got, want)
+	i := f.CallIndex(func(cl proc.Call) bool {
+		return cl.Name == "sh" && strings.Contains(strings.Join(cl.Args, " "), "scion server start --web-port")
+	})
+	if i < 0 {
+		t.Fatalf("no wrapped server start; calls=%+v", f.Calls)
+	}
+	cl := f.Calls[i]
+	argv := strings.Join(cl.Args, " ")
+	if !strings.Contains(argv, "scion server start --web-port 8080 --dev-auth=false") || strings.Contains(argv, "session-secret") {
+		t.Errorf("argv = %q", argv)
+	}
+	for _, cl := range f.Calls {
+		if strings.Contains(strings.Join(cl.Args, " "), "sessionsecrethex") {
+			t.Fatalf("a call's argv carries the secret: %+v", cl)
+		}
+		for _, v := range cl.Env {
+			if strings.Contains(v, "sessionsecrethex") {
+				t.Fatalf("a call's env carries the secret: %+v", cl)
+			}
+		}
+	}
+	if cl.Stdin != "sessionsecrethex\n" {
+		t.Errorf("stdin = %q", cl.Stdin)
+	}
+	if !strings.Contains(sessionSecretShim, "export SCION_SERVER_SESSION_SECRET") {
+		t.Error("the shim does not export the variable")
 	}
 }
 

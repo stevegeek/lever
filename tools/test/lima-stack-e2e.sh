@@ -295,6 +295,9 @@ sys.exit(1 if missing else 0)
 PY
 check "the controller PAT was granted the baseline reads, inbox:read and project:list" python3 "$WORK/granted.py" "$rec"
 check "the hub runs in proxy auth mode" hubproxyenv
+# The session secret reaches the hub on stdin as SCION_SERVER_SESSION_SECRET;
+# without it scion logs this and every hub restart signs browsers out.
+check "the hub got lever's session secret" G sh -c '! grep -q "no session secret set" ~/.scion/server.log'
 check "the hub identity record says fresh" grep -q '"mode": *"fresh"' "$INST/.lever-state/hub-identity.json"
 PROJ=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["project_id"])' "$INST/.lever-state/hub-identity.json")
 checkx "the project lists the broker" 'hubbody "/api/v1/projects/$PROJ/providers" | grep -q brokerId'

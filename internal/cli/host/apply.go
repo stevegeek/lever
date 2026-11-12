@@ -1280,8 +1280,27 @@ func (w *applyWiring) setUserSecret(ctx context.Context, key, value string) erro
 	if !sessionRequired(err) {
 		return err
 	}
-	if rerr := w.assertHub(w.signer.Controller).SetUserSecret(ctx, key, value); rerr != nil {
-		return fmt.Errorf("setting %s as the controller (the hub refused it to the controller PAT): %w", key, rerr)
+	rec, found, lerr := w.state.LoadHubIdentity()
+	if lerr != nil || !found || rec.ControllerID == "" {
+		return fmt.Errorf("setting %s as the controller: no recorded controller to check the assertion against (%v); the hub refused it to the controller PAT: %w", key, lerr, err)
+	}
+	return setUserSecretAsController(ctx, w.assertHub(w.signer.Controller), rec.ControllerID, key, value)
+}
+
+// setUserSecretAsController writes the secret only after the controller's
+// assertion resolves to the recorded controller: the hub resolves an
+// assertion by email, and on a migrated hub another user could hold the
+// controller's address, which would then receive the credential.
+func setUserSecretAsController(ctx context.Context, hc *hubapi.Client, controllerID, key, value string) error {
+	me, err := hc.Me(ctx)
+	if err != nil {
+		return fmt.Errorf("setting %s as the controller: asserting the controller: %w", key, err)
+	}
+	if me.ID != controllerID {
+		return fmt.Errorf("setting %s as the controller: the controller's assertion resolves to hub user %s, not the controller %s; nothing was written", key, me.ID, controllerID)
+	}
+	if err := hc.SetUserSecret(ctx, key, value); err != nil {
+		return fmt.Errorf("setting %s as the controller (the hub refused it to the controller PAT): %w", key, err)
 	}
 	return nil
 }

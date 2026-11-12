@@ -367,7 +367,7 @@ write_config "$IMAGE_LINE" "    - { login: contact2@example.com, tier: contact, 
 code=$(pcode contact2@example.com "http://127.0.0.1:$RP/api/v1/auth/me")
 checkx "contact2 signs in before the removal ($code)" '[ "$code" = 200 ]'
 cat > "$WORK/loop.py" <<'PY'
-import json, os, time, urllib.request
+import json, os, time, urllib.error, urllib.request
 tok = open(os.path.expanduser("~/.scion/scion-token")).read().strip()
 ep = os.environ.get("SCION_HUB_ENDPOINT") or os.environ.get("SCION_HUB_URL")
 end = time.time() + float(os.environ.get("LOOP_SECS", "600"))
@@ -380,6 +380,8 @@ while time.time() < end:
         n += 1
         if n == 1:
             open("/tmp/loop.ok", "w").write("1")
+    except urllib.error.HTTPError as e:
+        open("/tmp/loop.status", "w").write(str(e.code))
     except Exception:
         pass
     time.sleep(0.002)
@@ -391,7 +393,7 @@ sleep 3
 # From scion e8160a10 the identity route needs hub.config.update, so the
 # agent's loop is refused; the rest of this section still proves a refused
 # loop cannot hold up the contact's removal.
-checkx "the agent's rename loop is refused by the hub" 'X exec "lever--$NAME" test ! -e /tmp/loop.ok'
+checkx "the agent's rename loop is refused by the hub (403)" 'X exec "lever--$NAME" test ! -e /tmp/loop.ok && [ "$(X exec "lever--$NAME" cat /tmp/loop.status 2>/dev/null)" = 403 ]'
 # Other recorded scopes make the mint urgent: a token only in its renew window
 # would be left for a later apply with a warning.
 python3 - "$rec" <<'PY'

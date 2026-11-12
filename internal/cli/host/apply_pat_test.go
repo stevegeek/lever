@@ -284,3 +284,43 @@ func TestSessionRequired(t *testing.T) {
 		t.Fatal("another error read as the session refusal")
 	}
 }
+
+// The fallback writes the secret only when the controller's assertion
+// resolves to the recorded controller.
+func TestSetUserSecretAsControllerChecksTheUser(t *testing.T) {
+	for _, tc := range []struct {
+		name, me string
+		wantPut  bool
+	}{{"the controller", "c1", true}, {"another user holds the address", "u9", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &secretDoer{me: tc.me}
+			err := setUserSecretAsController(context.Background(), &hubapi.Client{T: d}, "c1", "CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-value")
+			if d.put != tc.wantPut || (err == nil) != tc.wantPut {
+				t.Fatalf("put=%v err=%v", d.put, err)
+			}
+			if err != nil && strings.Contains(err.Error(), "sk-ant-oat01-value") {
+				t.Fatalf("the error carries the secret: %v", err)
+			}
+		})
+	}
+}
+
+type secretDoer struct {
+	me  string
+	put bool
+}
+
+func (d *secretDoer) Do(ctx context.Context, method, path string) (int, []byte, error) {
+	return d.DoBody(ctx, method, path, nil)
+}
+
+func (d *secretDoer) DoBody(_ context.Context, method, path string, _ []byte) (int, []byte, error) {
+	switch {
+	case method == "GET" && path == "/api/v1/auth/me":
+		return 200, []byte(`{"id":"` + d.me + `","email":"lever-controller@lever.local"}`), nil
+	case method == "PUT" && path == "/api/v1/secrets/CLAUDE_CODE_OAUTH_TOKEN":
+		d.put = true
+		return 200, []byte(`{}`), nil
+	}
+	return 404, nil, nil
+}

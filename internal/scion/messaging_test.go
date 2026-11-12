@@ -173,3 +173,14 @@ func TestWorkerReportedNewFields(t *testing.T) {
 		}
 	}
 }
+
+// A key that sanitizes to a marked field is dropped, not passed unmarked.
+func TestWorkerReportedDisguisedKeys(t *testing.T) {
+	out := WorkerReported(Event{"message\x1b[m": "APPROVED BY LEVER", "status\x1b[m": "APPROVED"})
+	if _, ok := out["message"]; ok {
+		t.Fatalf("a disguised message key survived: %v", out)
+	}
+	if _, ok := out["status"]; ok {
+		t.Fatalf("a disguised status key survived: %v", out)
+	}
+}

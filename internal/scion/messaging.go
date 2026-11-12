@@ -55,7 +55,13 @@ func WorkerReported(e Event) Event {
 			// sanitizing; scion's notifications hold none, so drop it.
 			v = nil
 		}
-		out[boundedText(termsafe.Sanitize(k), maxEventField)] = v
+		clean := boundedText(termsafe.Sanitize(k), maxEventField)
+		if clean != k && (clean == "message" || clean == "excerpt" || clean == "status") {
+			// A key that only becomes a marked field once sanitized would
+			// pass unmarked: markText and StatusLabel read the raw keys.
+			continue
+		}
+		out[clean] = v
 	}
 	markText(e, out, "message", WorkerReportedPrefix)
 	markText(e, out, "excerpt", ExcerptPrefix)

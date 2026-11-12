@@ -43,7 +43,8 @@ version bump moves the block under the new version heading.
   - **Renaming the dev user needs hub admin** (44ef85192): scion's `PUT /api/v1/system/identity`
     and `PATCH /api/v1/system/workstation-settings` now require `hub.config.update`, so a jailed
     agent can no longer rename the controller or turn on gcloud credential injection through the
-    loopback (the stack e2e proves both refused). This closes the known issue earlier releases describe; lever keeps its repairs.
+    loopback (the stack e2e proves both refused with 403). This closes the known issue earlier
+    releases describe; lever keeps its repairs.
   - Notifications gain `kind`, `resourceType`, `resourceId` and `excerpt` (text another principal
     wrote). lever's manager now gets `excerpt` sanitized, bounded and marked `excerpt-reported:`, the
     other fields and every key sanitized and bounded, and nested objects and arrays dropped.
@@ -58,7 +59,8 @@ version bump moves the block under the new version heading.
     and the API-key placeholder could not be set and `lever up` stopped at *start-manager*. When
     the hub refuses it that way, lever now sets the same user-scope secret through
     `PUT /api/v1/secrets/{key}` as the controller with a hub assertion, which the hub counts as a
-    login. An older scion takes the PAT as before.
+    login, once the assertion resolves to the recorded controller (else it writes nothing). An
+    older scion takes the PAT as before.
 
 ### Security
 
@@ -88,7 +90,7 @@ version bump moves the block under the new version heading.
 
 ### Upgrade
 
-- **Jail ABI 14.** The agent image changed (Claude Code 2.1.322, sciontool and, in the slim image,
+- **Jail ABI 15.** The agent image changed (Claude Code 2.1.322, sciontool and, in the slim image,
   scion from the new pin) and so did in-jail lever code: rebuild the agent image (`make
   lever-image` or `make lever-image-slim`, then any instance image built from it) and recreate the
   manager on it with `lever up --fresh --keep-conversation`. Doctor's *agent lever version* row says

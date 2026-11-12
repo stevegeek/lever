@@ -461,8 +461,12 @@ type Deps struct {
 	// RepairScionHubEndpoint rewrites the project's recorded hub endpoint when it
 	// differs from the real hub's. A registration linked against a hub on another
 	// port keeps that endpoint, since the register step's re-init is skipped when
-	// the registration is sound. lever passes the endpoint explicitly, so a stale
-	// one only breaks where scion runs bare in the jail (lever attach).
+	// the registration is sound. lever passes the endpoint explicitly
+	// (SCION_HUB_ENDPOINT on every scion call), so a stale one only breaks a
+	// bare scion an operator runs by hand in the jail. From scion e8160a10
+	// (8225ea29e) the CLI no longer reads this key: it imports it once into
+	// ~/.scion/context.yaml and reads hubs from there, so the repair matters
+	// only on older pins.
 	RepairScionHubEndpoint func(ctx context.Context, jailWorkspacePath string) error
 	// VerifyAgentRole gates keeping an existing agent record: it errors when the
 	// hub's record stores no authorization role while the installed scion

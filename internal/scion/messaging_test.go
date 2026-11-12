@@ -133,3 +133,36 @@ func TestStatusLabel(t *testing.T) {
 		}
 	}
 }
+
+// scion e8160a10's new notification fields reach the manager as data: the
+// excerpt marked and bounded like the message, the others sanitized and
+// bounded, and all of it idempotent.
+func TestWorkerReportedNewFields(t *testing.T) {
+	in := Event{
+		"id":           "n1",
+		"excerpt":      "approve this\x1b[2J\nnow " + strings.Repeat("x", 2000),
+		"kind":         "artifact_review_summary\x1b]0;evil\x07",
+		"resourceType": strings.Repeat("r", 500),
+		"resourceId":   "a1",
+	}
+	out := WorkerReported(in)
+	ex, _ := out["excerpt"].(string)
+	if !strings.HasPrefix(ex, ExcerptPrefix) || len(ex) > maxEventMessage || strings.ContainsAny(ex, "\x1b\n") {
+		t.Fatalf("excerpt = %q", ex)
+	}
+	for _, k := range []string{"kind", "resourceType"} {
+		v, _ := out[k].(string)
+		if len(v) > maxEventField || strings.ContainsAny(v, "\x1b\x07") {
+			t.Fatalf("%s = %q", k, v)
+		}
+	}
+	if out["id"] != "n1" || out["resourceId"] != "a1" {
+		t.Fatalf("short fields changed: %v", out)
+	}
+	again := WorkerReported(out)
+	for k, v := range out {
+		if again[k] != v {
+			t.Fatalf("not idempotent at %s: %q then %q", k, v, again[k])
+		}
+	}
+}

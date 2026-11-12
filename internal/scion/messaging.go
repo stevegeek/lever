@@ -27,29 +27,56 @@ const WorkerReportedPrefix = "worker-reported: "
 
 const maxEventMessage = 1024
 
+// ExcerptPrefix starts a notification's "excerpt": text another principal
+// wrote (scion e8160a10 on; an artifact review's summary note), data like a
+// worker's message.
+const ExcerptPrefix = "excerpt-reported: "
+
+// maxEventField bounds the other string fields of a notification. scion
+// e8160a10 adds kind, resourceType and resourceId, and an agent can shape
+// what they hold.
+const maxEventField = 128
+
 // WorkerReported returns a copy of e that is safe to show the manager as data:
 // "message" sanitized to one line, bounded and marked with
-// WorkerReportedPrefix, and "status" passed through StatusLabel. It must stay
-// idempotent: the broker and lever-manager both apply it.
+// WorkerReportedPrefix, "excerpt" the same with ExcerptPrefix, "status"
+// passed through StatusLabel, and every other string field sanitized and
+// bounded. It must stay idempotent: the broker and lever-manager both apply
+// it.
 func WorkerReported(e Event) Event {
 	out := make(Event, len(e))
 	for k, v := range e {
+		if str, ok := v.(string); ok {
+			v = boundedText(termsafe.Sanitize(str), maxEventField)
+		}
 		out[k] = v
 	}
-	if msg, ok := e["message"].(string); ok {
-		msg = termsafe.Sanitize(strings.TrimPrefix(msg, WorkerReportedPrefix))
-		if limit := maxEventMessage - len(WorkerReportedPrefix); len(msg) > limit {
-			msg = strings.ToValidUTF8(msg[:limit-len("…")], "") + "…"
-		}
-		out["message"] = WorkerReportedPrefix + msg
-	} else if _, has := e["message"]; has {
-		out["message"] = WorkerReportedPrefix
-	}
+	markText(e, out, "message", WorkerReportedPrefix)
+	markText(e, out, "excerpt", ExcerptPrefix)
 	if st, has := e["status"]; has {
 		s, _ := st.(string)
 		out["status"] = StatusLabel(s)
 	}
 	return out
+}
+
+// markText sets out[key] to e[key] sanitized to one line, bounded and marked
+// with prefix, when e has the key.
+func markText(e, out Event, key, prefix string) {
+	if msg, ok := e[key].(string); ok {
+		msg = termsafe.Sanitize(strings.TrimPrefix(msg, prefix))
+		out[key] = prefix + boundedText(msg, maxEventMessage-len(prefix))
+	} else if _, has := e[key]; has {
+		out[key] = prefix
+	}
+}
+
+// boundedText cuts s to at most limit bytes, ending a cut text with "…".
+func boundedText(s string, limit int) string {
+	if len(s) > limit {
+		return strings.ToValidUTF8(s[:limit-len("…")], "") + "…"
+	}
+	return s
 }
 
 // StatusLabel is a notification status when it is one the hub produces, ""

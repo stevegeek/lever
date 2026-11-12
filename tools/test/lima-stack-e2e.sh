@@ -176,6 +176,7 @@ running() { X ps --format '{{.Names}}' | grep -qx "lever--$NAME"; }
 # hubproxyenv: the running hub carries lever's proxy-mode env (matched in the
 # guest; nothing else of its environment leaves the jail).
 hubproxyenv() { G sh -c 'pid=$(tr -cd 0-9 < ~/.scion/server.pid); tr "\000" "\n" < /proc/$pid/environ | grep -qx SCION_SERVER_AUTH_MODE=proxy'; }
+hubregenv() { G sh -c 'pid=$(tr -cd 0-9 < ~/.scion/server.pid); tr "\000" "\n" < /proc/$pid/environ | grep -qx SCION_IMAGE_REGISTRY=lever.local'; }
 # hubbody <path>: a hub GET's body with the controller PAT (over stdin).
 hubbody() { G sh -c 'read -r t; curl -sS -m 20 -H "Authorization: Bearer $t" "http://127.0.0.1:8080$1"' _ "$1" < "$INST/.lever-state/controller.pat"; }
 mgr() { X exec "lever--$NAME" lever-manager "$@" 2>&1; }
@@ -295,6 +296,7 @@ sys.exit(1 if missing else 0)
 PY
 check "the controller PAT was granted the baseline reads, inbox:read and project:list" python3 "$WORK/granted.py" "$rec"
 check "the hub runs in proxy auth mode" hubproxyenv
+check "the hub pins the agent image registry in its env (SCION_IMAGE_REGISTRY)" hubregenv
 # The session secret reaches the hub on stdin as SCION_SERVER_SESSION_SECRET;
 # without it scion logs this and every hub restart signs browsers out.
 check "the hub got lever's session secret" G sh -c '! grep -q "no session secret set" ~/.scion/server.log'

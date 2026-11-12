@@ -2590,6 +2590,13 @@ func defaultReadCred(path string) (string, error) {
 // underscores (USERACCESSMODE, PUBLICKEYFILE); the underscored spellings are
 // silently ignored, and an ignored user-access mode admits anyone.
 // LEVER_HUB_AUTH_KEY records which key the hub read, for HubRestartReason.
+//
+// SCION_IMAGE_REGISTRY pins the agent image registry above every settings
+// value: from scion e8160a10 (4dec8b3c1) the order is node env, then the hub
+// database's active profile, then its top level, then the file. An agent can
+// write the top level through the loopback registry route, and a profile
+// value would outrank lever's reset of it; the env outranks both. The co-
+// located runtime broker inherits it. An older scion ignores it.
 func HubAuthEnv(instanceID, keyFingerprint string) map[string]string {
 	return map[string]string{
 		"SCION_SERVER_AUTH_MODE":                    "proxy",
@@ -2603,5 +2610,6 @@ func HubAuthEnv(instanceID, keyFingerprint string) map[string]string {
 		"SCION_SERVER_HUB_ADMINEMAILS":              hubauth.AdminEmail,
 		"SCION_SERVER_AUTH_DEFAULTUSERROLE":         "member",
 		"LEVER_HUB_AUTH_KEY":                        keyFingerprint,
+		"SCION_IMAGE_REGISTRY":                      ImageRegistry,
 	}
 }

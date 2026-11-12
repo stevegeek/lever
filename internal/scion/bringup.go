@@ -844,7 +844,7 @@ type RunningHub struct {
 // HubEnvPrefixes are the environment keys RunningHub reports. Only these
 // leave the jail: the daemon's environment can hold the session secret and a
 // hub token.
-var HubEnvPrefixes = []string{"SCION_SERVER_AUTH_", "SCION_SERVER_HUB_ADMINEMAILS", "LEVER_HUB_"}
+var HubEnvPrefixes = []string{"SCION_SERVER_AUTH_", "SCION_SERVER_HUB_ADMINEMAILS", "LEVER_HUB_", "SCION_IMAGE_REGISTRY"}
 
 // runningHubScript prints the server's pid, then its NUL-separated argv, a
 // separator line, then the allowed env entries. The env filter runs in the

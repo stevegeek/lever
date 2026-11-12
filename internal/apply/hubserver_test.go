@@ -49,6 +49,7 @@ func TestHubAuthEnvPinsTheProxyJWTConfiguration(t *testing.T) {
 		"SCION_SERVER_HUB_ADMINEMAILS":              hubauth.AdminEmail,
 		"SCION_SERVER_AUTH_DEFAULTUSERROLE":         "member",
 		"LEVER_HUB_AUTH_KEY":                        "sha256:fp1",
+		"SCION_IMAGE_REGISTRY":                      ImageRegistry,
 	}
 	if !maps.Equal(got, want) {
 		t.Fatalf("HubAuthEnv =\n%v\nwant\n%v", got, want)

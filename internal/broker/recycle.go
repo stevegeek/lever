@@ -33,7 +33,7 @@ const taskPreviewLen = 60
 // "running, container down", which can still come back.
 func recyclablePhase(phase string) bool {
 	switch phase {
-	case scion.PhaseSuspended, scion.PhaseStopped, scion.PhaseError:
+	case scion.PhaseSuspended, scion.PhaseStopped, scion.PhaseError, scion.PhaseHalted:
 		return true
 	}
 	return false

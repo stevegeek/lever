@@ -119,6 +119,7 @@ func TestStatusLabel(t *testing.T) {
 		"LIMITS_EXCEEDED":   "LIMITS_EXCEEDED",
 		"STALLED":           "STALLED",
 		"ERROR":             "ERROR",
+		"HALTED":            "HALTED",
 		"DELETED":           "DELETED",
 		"DELIVERY_FAILED":   "DELIVERY_FAILED",
 		"completed":         "UNRECOGNISED",

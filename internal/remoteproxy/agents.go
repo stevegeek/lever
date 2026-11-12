@@ -102,7 +102,9 @@ func agentState(rec AgentRecord, found, hubDown bool) (string, string) {
 		return "suspended", ""
 	case "stopping", "stopped":
 		return "stopped", ""
-	case "error":
+	case "error", "halted":
+		// halted: the platform ended a run that should still run (scion
+		// e8160a10 on); it read "error" before.
 		return "error", ""
 	}
 	return "unknown", ""

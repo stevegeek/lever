@@ -41,6 +41,7 @@ func TestPlanManagerKeepAndFresh(t *testing.T) {
 		"suspended":         {"resume", "delete+create"},
 		"stopped":           {"resume", "delete+create"},
 		"error":             {"resume --force", "delete+create"},
+		"halted":            {"resume", "delete+create"},
 		"created":           {"refuse", "delete+create"},
 		"provisioning":      {"refuse", "delete+create"},
 		"cloning":           {"refuse", "delete+create"},

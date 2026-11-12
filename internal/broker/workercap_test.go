@@ -43,6 +43,7 @@ func TestCountsAsRunning(t *testing.T) {
 		{"suspended", "", false},
 		{"stopped", "Exited (0) 1 minute ago", false},
 		{"error", "Exited (1) 1 minute ago", false},
+		{"halted", "", false},
 		{"", "", false},
 		{"suspended", "Up 3 hours", true}, // a live container holds a slot whatever the phase says
 	} {

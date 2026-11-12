@@ -934,7 +934,7 @@ func checkManagerLive(ctx context.Context, project, name string, list agentListe
 		}
 	}
 	if strings.EqualFold(a.ContainerStatus, "created") &&
-		(a.Phase == scionpkg.PhaseStopped || a.Phase == scionpkg.PhaseSuspended || a.Phase == scionpkg.PhaseError) {
+		(a.Phase == scionpkg.PhaseStopped || a.Phase == scionpkg.PhaseSuspended || a.Phase == scionpkg.PhaseError || a.Phase == scionpkg.PhaseHalted) {
 		return checkResult{check, false,
 			fmt.Sprintf("manager %q is not live: phase %s over a container podman lists as created (a start the VM's power-off interrupted leaves one) — the hub counts a created container as running, so a stop claim it holds on the manager is released only once that container is removed, and every resume is refused with `start_in_progress: A stop is in progress`",
 				name, scionpkg.BoundedQuote(a.Phase)),
@@ -952,6 +952,9 @@ func checkManagerLive(ctx context.Context, project, name string, list agentListe
 	fix := "run `lever up` to resume it"
 	if a.Phase == scionpkg.PhaseStopped {
 		fix = stoppedResumeFix
+	}
+	if a.Phase == scionpkg.PhaseHalted {
+		fix = haltedResumeFix
 	}
 	if a.Phase == "error" {
 		fix = "run `lever up` (an error-phase record is resumed with --force; if that fails the record and its conversation are kept, and `lever up --fresh` is the way to discard them) — its container log in the guest holds the harness's last output"
@@ -978,6 +981,11 @@ const noConversationFix = "run `lever up`: it starts the manager fresh on its ow
 
 // stoppedResumeFix: scion's hub resumes a stopped record with a fresh harness
 // session (only a suspended one gets --continue).
+// haltedResumeFix is the fix for a halted record: the platform ended the run
+// (an OOM kill, a VM reboot, a container that went missing), and scion
+// resumes it like a stopped one.
+const haltedResumeFix = "run `lever up` — the platform ended the manager's run (an OOM kill, a VM reboot or a container that went missing; scion's phase halted), and scion resumes it in a new claude session (no --continue); the old conversation stays in the agent home: `lever attach`, then `/resume`"
+
 const stoppedResumeFix = "run `lever up` — scion resumes a stopped record in a new claude session (no --continue); the old conversation stays in the agent home: `lever attach`, then `/resume`"
 
 func hubTokenFix(name, project string) string {

@@ -2157,7 +2157,7 @@ func (r *run) observeManager(ctx context.Context, jp string) (*scion.Agent, erro
 	}
 	if rec != nil && !r.fresh {
 		switch rec.Phase {
-		case scion.PhaseRunning, scion.PhaseSuspended, scion.PhaseStopped, scion.PhaseError:
+		case scion.PhaseRunning, scion.PhaseSuspended, scion.PhaseStopped, scion.PhaseError, scion.PhaseHalted:
 			if err := r.d.VerifyAgentRole(ctx, path.Base(jp), r.app.Name); err != nil {
 				return nil, fmt.Errorf("start-manager: %w", err)
 			}

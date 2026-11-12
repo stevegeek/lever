@@ -387,7 +387,7 @@ func planManager(q ManagerRequest, name string, o managerObservation) (managerPl
 				return managerPlan{recover: true}, nil
 			}
 			return managerPlan{verb: verbNone}, nil
-		case o.phase == scion.PhaseSuspended || o.phase == scion.PhaseStopped:
+		case o.phase == scion.PhaseSuspended || o.phase == scion.PhaseStopped || o.phase == scion.PhaseHalted:
 			return managerPlan{verb: verbResume}, nil
 		case o.phase == scion.PhaseError:
 			return managerPlan{verb: verbResumeForce}, nil
@@ -435,7 +435,7 @@ func planManager(q ManagerRequest, name string, o managerObservation) (managerPl
 		switch o.phase {
 		case scion.PhaseRunning:
 			return managerPlan{suspend: true, verb: verbResume}, nil
-		case scion.PhaseSuspended, scion.PhaseStopped:
+		case scion.PhaseSuspended, scion.PhaseStopped, scion.PhaseHalted:
 			return managerPlan{verb: verbResume}, nil
 		case scion.PhaseError:
 			return managerPlan{verb: verbResumeForce}, nil
@@ -700,11 +700,12 @@ func (r *run) actUp(ctx context.Context, jp string, rec *scion.Agent, p managerP
 			fmt.Sprintf("%s: --fresh — deleting manager %q (phase %s) and starting FRESH (previous session discarded)", r.subjectName(), r.app.Name, phase),
 			"--fresh delete")
 	case verbResume:
-		if rec.Phase == scion.PhaseStopped {
-			// scion's hub resumes a stopped record with a fresh harness session
-			// (it passes --continue for a suspended one only), so say so: the old
+		if rec.Phase == scion.PhaseStopped || rec.Phase == scion.PhaseHalted {
+			// scion's hub resumes a stopped or halted record with a fresh
+			// harness session (it passes --continue for a suspended one only,
+			// and --force recovers only an error record), so say so: the old
 			// conversation is still in the agent home.
-			r.d.Log("%s: manager %q is in phase stopped; scion resumes a stopped record in a new claude session (no --continue) — the old conversation stays in the agent home (`lever attach`, then `/resume`)", r.subjectName(), r.app.Name)
+			r.d.Log("%s: manager %q is in phase %s; scion resumes it in a new claude session (no --continue) — the old conversation stays in the agent home (`lever attach`, then `/resume`)", r.subjectName(), r.app.Name, rec.Phase)
 		}
 		return r.resumeOrRecover(ctx, jp, resumeVerbPlain(func() error {
 			return r.d.managerScion().Resume(ctx, r.app.Name, jp)

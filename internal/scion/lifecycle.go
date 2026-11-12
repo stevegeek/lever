@@ -344,7 +344,7 @@ const LabelUnrecognised = "unrecognised"
 func PhaseLabel(phase string) string {
 	switch phase {
 	case "", "created", "provisioning", "cloning", "starting", PhaseRunning,
-		PhaseSuspended, "stopping", PhaseStopped, PhaseError, "resumed":
+		PhaseSuspended, "stopping", PhaseStopped, PhaseError, PhaseHalted, "resumed":
 		return phase
 	}
 	return LabelUnrecognised
@@ -401,6 +401,12 @@ const (
 	PhaseSuspended = "suspended"
 	PhaseStopped   = "stopped"
 	PhaseError     = "error"
+	// PhaseHalted (scion e8160a10 on, 35189dd77): the platform ended a run
+	// that should still be running (OOM kill, eviction, a container that went
+	// missing). scion wrote "error" for these before. A plain resume restarts
+	// it, like a stopped record, in a new harness session: the hub does not
+	// pass --continue for it, and --force recovers only "error".
+	PhaseHalted = "halted"
 )
 
 // agentRoleBaseline is the role lever wants for every agent: heartbeat and

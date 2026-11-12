@@ -54,7 +54,7 @@ func countsAsRunning(phase, containerStatus string) bool {
 		return true
 	}
 	switch scion.PhaseLabel(phase) {
-	case "", scion.PhaseSuspended, scion.PhaseStopped, scion.PhaseError:
+	case "", scion.PhaseSuspended, scion.PhaseStopped, scion.PhaseError, scion.PhaseHalted:
 		return false
 	}
 	return true

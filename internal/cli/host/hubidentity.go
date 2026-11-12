@@ -350,8 +350,11 @@ func (h *hubIdentity) run(ctx context.Context) error {
 
 // ensureAdmin asserts lever-admin and checks the row the hub resolved: an
 // admin, and neither the dev user nor the controller. A rename of the dev
-// user to lever-admin's address (any loopback caller can, through scion's
-// system identity route) is repaired with the PAT (R1).
+// user to lever-admin's address is repaired with the PAT (R1). Before scion
+// e8160a10 any loopback caller could rename it through scion's system
+// identity route; from e8160a10 on (44ef85192) that route needs
+// hub.config.update, so only a hub admin can, and the PAT's repair may be
+// refused too: the apply then fails and names the repair.
 func (h *hubIdentity) ensureAdmin(ctx context.Context, mode string, rec *state.HubIdentity) (hubapi.User, error) {
 	me, err := h.admin.Me(ctx)
 	if err != nil {
@@ -609,8 +612,9 @@ var errControllerContested = errors.New("lever-controller's address does not sta
 // assertController makes an assertion as the controller resolve to the
 // controller's row, before a call that only that assertion can make (a token
 // mint or revoke, a project registration). On a migrated hub the address is
-// contested: anything that reaches the hub's identity route can rename the
-// dev user between lever's re-pin and its assertion. So the re-pin and the
+// contested: on a scion before e8160a10, anything that reaches the hub's
+// identity route can rename the dev user between lever's re-pin and its
+// assertion (from e8160a10 on, only a hub admin can). So the re-pin and the
 // assertion are retried together a few times; once the assertion resolves to
 // the dev user, scion's email cache keeps it there for a minute, which is
 // what the calls that follow rely on.

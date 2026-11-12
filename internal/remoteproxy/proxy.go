@@ -233,6 +233,15 @@ func mintsCredential(method, p string) bool {
 //     it could register a broker and receive its join token and secret; and
 //     lever-admin links a project's broker only while the hub lists exactly
 //     one, so a stray broker record blocks that link.
+//   - Routes new in scion e8160a10 that reach past the agent's own surface:
+//     port view (/portview: an agent's exposed port, WebSockets included, for
+//     anyone holding the page link), pending secrets (approving one makes a
+//     value an agent chose a secret of the user's, which the user's other
+//     agents then receive; reveal shows it), project visitors and visitor
+//     grants and DMs (federation, pinned off), attachment deliveries (token
+//     links to attachments, pinned off with hub.attachment_artifacts), and
+//     the runtime broker's own /api/v1/broker/ routes, which no browser calls
+//     (they take the broker's HMAC; refused as defense in depth).
 //
 // p is the decoded path. It is compared in lower case, and the feature
 // prefixes without a segment boundary, so no spelling the hub might route
@@ -264,6 +273,10 @@ func refusedRoute(method, p string) bool {
 	if p == callbackPath || strings.HasPrefix(p, callbackPath+"/") {
 		return true
 	}
+	if p == "/api/v1/broker" {
+		// The runtime broker's own group; /api/v1/brokers is not it.
+		return true
+	}
 	for _, base := range []string{"/api/v1/projects", "/api/v1/groves"} {
 		if p == base {
 			return method != http.MethodGet && method != http.MethodHead
@@ -279,13 +292,18 @@ func refusedRoute(method, p string) bool {
 		if sub == "clone" || strings.HasPrefix(sub, "clone/") {
 			return true
 		}
+		if strings.HasPrefix(sub, "visitor") {
+			return true
+		}
 	}
 	return false
 }
 
 const callbackPath = "/auth/callback"
 
-// refusedPrefixes are lower case, with no trailing slash on purpose.
+// refusedPrefixes are lower case, with no trailing slash on purpose, except
+// /api/v1/broker/, which must not take /api/v1/brokers with it (refusedRoute
+// refuses the bare /api/v1/broker on its own).
 var refusedPrefixes = []string{
 	"/api/v1/conduit",
 	"/api/v1/admin/conduit",
@@ -293,6 +311,11 @@ var refusedPrefixes = []string{
 	"/api/v1/thread-groups",
 	"/api/v1/test-identit", // test-identities and test-identity-delegations
 	"/auth/test-identity",
+	"/api/v1/portview",
+	"/api/v1/pending-secret",
+	"/api/v1/users/me/visitor",
+	"/api/v1/attachment-deliver",
+	"/api/v1/broker/",
 }
 
 // brokerWritePrefixes are lower case, with no trailing slash on purpose: the

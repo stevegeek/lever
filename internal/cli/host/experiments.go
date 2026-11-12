@@ -46,7 +46,8 @@ type pinnedExperiment struct {
 // its routes either way.
 //
 // Only conduit and artifacts have a probe: a read-only route the hub answers
-// 404 exactly while the experiment is off. The others are proved off by the
+// 404 exactly while the experiment is off. (federation gained GET routes in
+// e8160a10, but an older pin has none, so it stays unprobed.) The others are proved off by the
 // admin view alone (pinExperiments re-reads it after the write). scion reads
 // all of them per request from the hub database, except conduit's relay,
 // which starts only with the hub.

@@ -30,7 +30,7 @@ func seedPAT(t *testing.T, st state.State, which, token string) {
 		if err := st.SaveRemotePAT(token); err != nil {
 			t.Fatal(err)
 		}
-		if err := st.SaveRemotePATRecord(state.PATRecord{ID: "old-" + token, Requested: remotePATScopes(), MintedAt: time.Now(), ExpiresAt: far}); err != nil {
+		if err := st.SaveRemotePATRecord(state.PATRecord{ID: "old-" + token, Requested: remotePATScopes(false), MintedAt: time.Now(), ExpiresAt: far}); err != nil {
 			t.Fatal(err)
 		}
 	default:
@@ -175,9 +175,12 @@ func TestApplySignalContextCancelsOnSIGINT(t *testing.T) {
 // PAT, and it is the controller's token, so it must not attach, message or
 // change anything.
 func TestRemotePATScopesAreReadOnly(t *testing.T) {
-	got := remotePATScopes()
+	got := remotePATScopes(false)
 	if !slices.Equal(got, []string{"agent:read", "agent:list", "project:read"}) {
-		t.Fatalf("remotePATScopes() = %v", got)
+		t.Fatalf("remotePATScopes(false) = %v", got)
+	}
+	if got := remotePATScopes(true); !slices.Equal(got, []string{"agent:read", "agent:list", "project:read", projectListScope}) {
+		t.Fatalf("remotePATScopes(true) = %v", got)
 	}
 	perms := remoteRolePermissions(false)
 	for _, want := range []string{"agent.attach", "agent.message", "project.list"} {

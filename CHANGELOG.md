@@ -32,12 +32,14 @@ version bump moves the block under the new version heading.
     a **new claude session**: the hub passes `--continue` only for a suspended record, and
     `--force` recovers only an error one. So an OOM-killed manager no longer comes back with its
     conversation, as it did through `resume --force`; the transcript stays in the agent home
-    (`lever attach`, then `/resume`). lever and doctor say so. A contact cannot wake a halted
-    worker; the operator can, as for a stopped one.
-  - **The controller PAT asks for `project:list`** when the jail's scion knows the scope. scion now
+    (`lever attach`, then `/resume`). lever and doctor say so. `lever up` resumes a halted
+    manager and `lever-manager agent resume` a halted worker. The chat page shows a halted worker
+    as `error` and wakes it for no login; the broker's wake refuses a contact.
+  - **The controller PAT, and the remote proxy's read PAT, ask for `project:list`** when the
+    jail's scion knows the scope. scion now
     puts the token ceiling on every list (de77b8ae9), and without it `scion hub projects` comes back
-    empty, so lever would register the project again. The changed scope set re-mints the token at
-    the next apply.
+    empty, so lever would register the project again and the chat page could not find the project's
+    agents. The changed scope sets re-mint both tokens at the next apply.
   - **Renaming the dev user needs hub admin** (44ef85192): scion's `PUT /api/v1/system/identity`
     now requires `hub.config.update`, so a jailed agent can no longer rename the controller through
     the loopback. This closes the known issue earlier releases describe; lever keeps its repairs.
@@ -62,7 +64,7 @@ version bump moves the block under the new version heading.
   secret of the user's, which the user's other agents then receive; reveal shows it),
   `/api/v1/projects/{id}/visitors*` and `/api/v1/users/me/visitor-*`,
   `/api/v1/attachment-deliveries/*`, and the runtime broker's own `/api/v1/broker/*` routes, which
-  no browser calls. A pending secret therefore stays pending: it reaches no agent.
+  no browser calls. So no remote login can approve a pending secret.
 
 ### Upgrade
 
@@ -71,7 +73,7 @@ version bump moves the block under the new version heading.
   lever-image` or `make lever-image-slim`, then any instance image built from it) and recreate the
   manager on it with `lever up --fresh --keep-conversation`. Doctor's *agent lever version* row says
   so. The first `lever apply` installs the new scion pin in the jail and re-mints the controller
-  PAT with `project:list`.
+  and remote PATs with `project:list`.
 
 ## [1.0.0-beta.9] - 2026-11-09
 

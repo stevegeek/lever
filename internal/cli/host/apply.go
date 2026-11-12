@@ -419,8 +419,9 @@ func controllerPATScopes(lifecycle, inbox, projectList bool) []string {
 // projectListScope is the UAT scope that lists projects.
 const projectListScope = "project:list"
 
-// controllerProjectList decides whether the controller PAT carries
-// project:list, as controllerInbox does for inbox:read.
+// controllerProjectList decides whether a PAT whose record is rec carries
+// project:list, as controllerInbox does for inbox:read. The remote proxy's
+// PAT is decided the same way, from its own record.
 func controllerProjectList(ctx context.Context, known scopeKnownFunc, rec state.PATRecord) bool {
 	if known != nil {
 		if has, err := known(ctx, projectListScope); err == nil {
@@ -466,9 +467,15 @@ func controllerLifecycle(ctx context.Context, known scopeKnownFunc, rec state.PA
 // remotePATScopes is the exact scope set of the remote proxy's PAT: the proxy
 // only lists the project's agents with it (the chat page and the contact
 // fence), so it reads and nothing else. It is the controller's token, so
-// anything sent with it would wear lever's sender label.
-func remotePATScopes() []string {
-	return []string{"agent:read", "agent:list", "project:read"}
+// anything sent with it would wear lever's sender label. projectList adds
+// project:list, which the agent list needs from scion e8160a10 on: it finds
+// the project by listing projects (controllerProjectList decides it).
+func remotePATScopes(projectList bool) []string {
+	s := []string{"agent:read", "agent:list", "project:read"}
+	if projectList {
+		s = append(s, projectListScope)
+	}
+	return s
 }
 
 // patRenewWindow is how long before expiry apply re-mints.

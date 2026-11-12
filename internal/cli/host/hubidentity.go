@@ -922,7 +922,8 @@ func (h *hubIdentity) mintPATs(ctx context.Context, mode, projectID string, ctlS
 		}
 		return nil
 	}
-	return mint("lever-remote", remotePATScopes(), h.st.LoadRemotePAT, h.st.LoadRemotePATRecord,
+	rrec, _, _ := h.st.LoadRemotePATRecord()
+	return mint("lever-remote", remotePATScopes(controllerProjectList(ctx, h.scopeKnown(), rrec)), h.st.LoadRemotePAT, h.st.LoadRemotePATRecord,
 		h.st.SaveRemotePAT, h.st.SaveRemotePATRecord)
 }
 

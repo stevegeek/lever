@@ -1070,7 +1070,7 @@ func TestHubIdentityFreshBootstrap(t *testing.T) {
 	}
 	ctlTok, remTok := hiTokenNamed(h, "lever-controller", ctl.ID), hiTokenNamed(h, "lever-remote", ctl.ID)
 	if ctlTok == nil || remTok == nil || ctlTok.ProjectID != hiMarkerID ||
-		!hubapi.SamePermissions(ctlTok.Scopes, controllerPATScopes(false, false, false)) || !hubapi.SamePermissions(remTok.Scopes, remotePATScopes()) {
+		!hubapi.SamePermissions(ctlTok.Scopes, controllerPATScopes(false, false, false)) || !hubapi.SamePermissions(remTok.Scopes, remotePATScopes(false)) {
 		t.Fatalf("tokens = %+v", h.tokens)
 	}
 	if !e.diskPATIs(e.st.LoadControllerPAT, ctlTok.ID) || !e.diskPATIs(e.st.LoadRemotePAT, remTok.ID) {

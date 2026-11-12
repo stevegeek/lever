@@ -62,6 +62,19 @@ version bump moves the block under the new version heading.
     login, once the assertion resolves to the recorded controller (else it writes nothing). An
     older scion takes the PAT as before.
 
+### Fixed
+
+- **Browser sessions survive a hub restart.** lever passed the hub's session-cookie key as
+  `--session-secret`, which scion's daemon never forwards to the hub it starts (it would land in that
+  process's argv and `server-args.json`), so the hub made a new key at every start and every restart
+  signed every browser out. The key now reaches the hub as `SCION_SERVER_SESSION_SECRET`, read from
+  stdin by a shell that execs scion, and scion scrubs it once read; the stack e2e checks the hub
+  never warns that it has none. It is also off the jail's and the host's command lines.
+- **lever's edits of the jail's scion `settings.yaml` no longer race scion's.** From `e8160a10`
+  scion's writers lock `~/.scion/.settings.lock`; lever now takes the same lock and replaces the
+  file only while it still holds what lever read, so a write scion made meanwhile is never lost. A
+  changed file fails the step, naming it, and the next apply edits the new content.
+
 ### Security
 
 - **Five more scion experiments are pinned off:** `hub.attachment_artifacts` (copies chat attachments
@@ -88,9 +101,22 @@ version bump moves the block under the new version heading.
   hub-admin only, and lever's unversioned scion build never finds a release, so this is defense in
   depth.
 
+- **The agent image registry is pinned in the hub's environment.** Every hub start carries
+  `SCION_IMAGE_REGISTRY=lever.local`, which from `e8160a10` outranks every settings value: an agent
+  could write the top-level registry through the loopback route (lever resets it at every apply), and
+  a profile-level value would have outranked that reset. A running hub without it is restarted.
+- **Secrets stay off every command line.** An assertion-signed hub request now sends its body on
+  stdin after the assertion line, not in an environment variable that reached curl's argv in the jail
+  and the host's argv. The manager's credential and the API-key placeholder now go through the hub's
+  REST route as the verified controller first; the scion CLI, which takes the value only as an
+  argument, is the fallback only for a hub without that route.
+- **scion's hub self-update is off.** Every apply writes `server.maintenance.update_policy: disabled`
+  into the jail's `settings.yaml`, beside the remote proxy's refusal of maintenance writes, so a
+  version-stamped scion build could not replace lever's pin with an upstream release either.
+
 ### Upgrade
 
-- **Jail ABI 15.** The agent image changed (Claude Code 2.1.322, sciontool and, in the slim image,
+- **Jail ABI 16.** The agent image changed (Claude Code 2.1.322, sciontool and, in the slim image,
   scion from the new pin) and so did in-jail lever code: rebuild the agent image (`make
   lever-image` or `make lever-image-slim`, then any instance image built from it) and recreate the
   manager on it with `lever up --fresh --keep-conversation`. Doctor's *agent lever version* row says

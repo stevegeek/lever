@@ -2299,7 +2299,7 @@ func checkHubExperiments(ctx context.Context, st state.State, sshOn bool, known 
 	if len(on) > 0 {
 		return checkResult{name, false,
 			strings.Join(on, ", ") + " on at the hub: scion experiments not reviewed for the jail (conduit: an inbound shell and port path into agents; " +
-				"artifacts: hub-held publishing with unauthenticated share links; chat thread groups: project-wide chat groups agents can create)",
+				"artifacts: hub-held publishing with unauthenticated share links; port view: an agent's ports for anyone with the URL; the rest widen what agents or hub users can reach)",
 			"run `lever apply`: it pins it off as lever-admin and restarts the hub"}
 	}
 	if !hubHasExperiments(ctx, known, rec, found) {
@@ -2336,6 +2336,9 @@ func checkHubExperiments(ctx context.Context, st state.State, sshOn bool, known 
 	}
 	if conduitOn {
 		detail += "; " + conduitExperiment + " on for `lever ssh` (its own row)"
+	}
+	if slices.Contains(rec.Asked, threadGroupsExperiment) && !slices.Contains(rec.Off, threadGroupsExperiment) {
+		detail += "; chat thread groups are always on in this scion (graduated), and the remote proxy refuses their routes"
 	}
 	return checkResult{name, true, detail, ""}
 }

@@ -26,20 +26,44 @@ type pinnedExperiment struct {
 // scion default cannot turn one on. hub.conduit adds an inbound shell, sftp
 // and port path into every agent, reaching the jail loopback and any Unix
 // socket; hub.artifacts adds hub-held publishing with unauthenticated share
-// links beside lever's reviewed file paths. hub.chat_thread_groups lets agents
-// create and rename project-wide chat groups that project members with read
-// access see, and copies users' personal groups into the project. federation.project_visitors
+// links beside lever's reviewed file paths. federation.project_visitors
 // admits users of external issuers and mints this hub's users credentials for
-// peer hubs; its only route is POST and also needs the hub's OIDC provider,
-// which lever does not configure, so no GET tells whether it is on. scion reads
+// peer hubs. hub.attachment_artifacts copies chat attachments into agent
+// inboxes and the project scratchpad, and scion turns it on by default
+// wherever its artifact service is ready, local disk included.
+// hub.port_view serves an agent's ports, WebSockets included, to anyone with
+// the URL. hub.conduit_deliver delivers messages to agents over a conduit
+// session instead of runtime exec. hub.agent_plugins installs plugin bundles a
+// template declares into the harness (claude included) at every start.
+// hub.agent_delegation lets a user grant agents hub calls under the user's
+// name, through sciontool's delegation socket in every agent.
+//
+// hub.chat_thread_groups (project-wide chat groups that agents can create and
+// rename) is graduated from e8160a10 on: always on, never registered, and
+// scion refuses an override for it. It stays here for older pins, where the
+// admin view still registers it and lever pins it off; it has no probe,
+// because its route is served on every newer hub. The remote proxy refuses
+// its routes either way.
+//
+// Only conduit and artifacts have a probe: a read-only route the hub answers
+// 404 exactly while the experiment is off. The others are proved off by the
+// admin view alone (pinExperiments re-reads it after the write). scion reads
 // all of them per request from the hub database, except conduit's relay,
 // which starts only with the hub.
 var pinnedOffExperiments = []pinnedExperiment{
 	{name: "hub.conduit", probe: "/api/v1/conduit/grant-keys"},
 	{name: "hub.artifacts", probe: "/api/v1/artifacts?mine=1"},
-	{name: "hub.chat_thread_groups", probe: "/api/v1/thread-groups"},
+	{name: threadGroupsExperiment},
 	{name: "federation.project_visitors"},
+	{name: "hub.attachment_artifacts"},
+	{name: "hub.port_view"},
+	{name: "hub.conduit_deliver"},
+	{name: "hub.agent_plugins"},
+	{name: "hub.agent_delegation"},
 }
+
+// threadGroupsExperiment is graduated (always on) from scion e8160a10 on.
+const threadGroupsExperiment = "hub.chat_thread_groups"
 
 // experimentsScope is the UAT scope of scion's experiments admin route. The
 // jail's scion lists it exactly when it has hub-wide experiments, and answers

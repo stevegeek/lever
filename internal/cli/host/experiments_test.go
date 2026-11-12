@@ -33,8 +33,14 @@ type fakeExperimentsHub struct {
 	// probeStatus overrides the probe answer for every probe route.
 	probeStatus int
 	probeErr    error
-	calls       []string
-	puts        []map[string]*bool
+	// defaultOn are experiments on without an override, as scion's
+	// deployment default turns hub.attachment_artifacts on.
+	defaultOn map[string]bool
+	// served are routes answered 200 whatever the experiments say, as
+	// e8160a10 serves the graduated thread groups.
+	served []string
+	calls  []string
+	puts   []map[string]*bool
 }
 
 func newFakeExperimentsHub() *fakeExperimentsHub {
@@ -45,7 +51,10 @@ func (h *fakeExperimentsHub) enabled(name string) bool {
 	if h.malformed && name != "web.agent_edit" {
 		return false
 	}
-	return h.overrides[name]
+	if v, ok := h.overrides[name]; ok {
+		return v
+	}
+	return h.defaultOn[name]
 }
 
 func (h *fakeExperimentsHub) view() []byte {
@@ -68,6 +77,9 @@ func (h *fakeExperimentsHub) Do(ctx context.Context, method, path string) (int, 
 
 func (h *fakeExperimentsHub) DoBody(_ context.Context, method, path string, body []byte) (int, []byte, error) {
 	h.calls = append(h.calls, method+" "+path)
+	if method == http.MethodGet && slices.Contains(h.served, path) {
+		return 200, []byte(`{}`), nil
+	}
 	notFound := []byte(`{"error":{"code":"not_found","message":"route not found"}}`)
 	for _, e := range pinnedOffExperiments {
 		if e.probe != "" && method == http.MethodGet && path == e.probe {
@@ -173,6 +185,8 @@ func TestPinExperimentsOff(t *testing.T) {
 				"federation.project_visitors": true}
 			h.revision = 4
 		}, wantRec: state.HubExperimentsRecord{Off: []string{"hub.conduit", "hub.artifacts", "hub.chat_thread_groups", "federation.project_visitors"}, Revision: 5}, wantPuts: 1},
+		{name: "e8160a10: thread groups graduated, attachment artifacts on by default", setup: newScionExperiments,
+			wantRec: state.HubExperimentsRecord{Off: newScionPinned, Revision: 1}, wantPuts: 1},
 		{name: "malformed store", setup: func(h *fakeExperimentsHub) { h.malformed = true }, wantErr: errExperimentsMalformed},
 		{name: "one concurrent write is retried", setup: func(h *fakeExperimentsHub) { h.conflicts = 1 },
 			wantRec: state.HubExperimentsRecord{Off: []string{"hub.conduit", "hub.artifacts", "hub.chat_thread_groups", "federation.project_visitors"}, Revision: 2}, wantPuts: 2},
@@ -517,5 +531,54 @@ func TestPrePinExperiments(t *testing.T) {
 				t.Fatalf("record on = %v, want %v", rec.On, c.wantOn)
 			}
 		})
+	}
+}
+
+// newScionPinned are the pinned experiments scion e8160a10 registers:
+// hub.chat_thread_groups is graduated there.
+var newScionPinned = []string{"hub.conduit", "hub.artifacts", "federation.project_visitors", "hub.attachment_artifacts",
+	"hub.port_view", "hub.conduit_deliver", "hub.agent_plugins", "hub.agent_delegation"}
+
+// newScionExperiments makes h answer as scion e8160a10: thread groups are
+// no longer registered and their route is always served, and
+// hub.attachment_artifacts is on by the deployment default.
+func newScionExperiments(h *fakeExperimentsHub) {
+	h.registered = append(slices.Clone(newScionPinned), "web.agent_edit")
+	h.defaultOn = map[string]bool{"hub.attachment_artifacts": true}
+	h.served = []string{"/api/v1/thread-groups"}
+}
+
+func TestEnsureHubExperimentsOnGraduatedThreadGroups(t *testing.T) {
+	h := newFakeExperimentsHub()
+	newScionExperiments(h)
+	st := state.ForConfig(t.TempDir())
+	restarts := 0
+	on, err := ensureHubExperiments(context.Background(), experimentsPin{
+		admin: &hubapi.Client{T: h}, st: st, known: knowsExperiments(true),
+		now:        func() time.Time { return time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC) },
+		restartHub: func(context.Context) error { restarts++; return nil },
+		log:        func(string, ...any) {}, warn: func(f string, a ...any) { t.Errorf("warn: "+f, a...) },
+	})
+	if err != nil || on {
+		t.Fatalf("on=%v err=%v (%v)", on, err, h.calls)
+	}
+	if restarts != 0 {
+		t.Fatalf("restarts = %d: no probed experiment was on", restarts)
+	}
+	for _, n := range newScionPinned {
+		if v, ok := h.overrides[n]; !ok || v {
+			t.Fatalf("%s override = %v, %v; want pinned off", n, v, ok)
+		}
+	}
+	if _, ok := h.overrides[threadGroupsExperiment]; ok {
+		t.Fatal("lever wrote an override for the graduated thread groups")
+	}
+	rec, found, _ := st.LoadHubExperimentsRecord()
+	if !found || !slices.Equal(rec.Off, newScionPinned) || !slices.Contains(rec.Asked, threadGroupsExperiment) {
+		t.Fatalf("record = %+v (found %v)", rec, found)
+	}
+	r := checkHubExperiments(context.Background(), st, false, knowsExperiments(true), &hubapi.Client{T: h})
+	if !r.ok || r.fix != "" || !strings.Contains(r.detail, "chat thread groups are always on in this scion") {
+		t.Fatalf("doctor row = %+v", r)
 	}
 }

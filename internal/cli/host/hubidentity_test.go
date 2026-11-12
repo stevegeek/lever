@@ -2051,7 +2051,7 @@ func TestHubIdentityPinsExperimentsAndLinksTheBrokerFirst(t *testing.T) {
 		if v, ok := exp.overrides["hub.conduit"]; !ok || v {
 			t.Fatalf("overrides = %v", exp.overrides)
 		}
-		if rec, found, _ := e.st.LoadHubExperimentsRecord(); !found || !sameScopeSet(rec.Off, pinnedOffNames()) {
+		if rec, found, _ := e.st.LoadHubExperimentsRecord(); !found || !sameScopeSet(rec.Off, []string{"hub.conduit", "hub.artifacts", "hub.chat_thread_groups", "federation.project_visitors"}) {
 			t.Fatalf("pin record = %+v found=%v", rec, found)
 		}
 		hiWantOrder(t, e.hub, "broker link "+hiJailMount, "scion link "+hiJailMount)

@@ -23,7 +23,8 @@
 # archive path: reuse the archive an earlier run saved there when the key file
 # beside it matches this tree's in-jail fingerprint, pins, arch and image, else
 # build the image and save it there), LEVER (default ~/.local/bin/lever),
-# STACK_NAME (default stacke2e; must end in e2e), KEEP=1 (leave the VM for
+# STACK_NAME (default stacke2e; must end in e2e), STACK_MEMORY (the VM's memory,
+# default 6GiB), KEEP=1 (leave the VM for
 # inspection).
 set -uo pipefail
 
@@ -116,7 +117,7 @@ scion:
   version: $SCION_VERSION
 backend: lima
 cpus: 4
-memory: 6GiB
+memory: ${STACK_MEMORY:-6GiB}
 egress: open
 tree: workspace
 manager:

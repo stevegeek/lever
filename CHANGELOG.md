@@ -109,10 +109,13 @@ version bump moves the block under the new version heading.
   stdin after the assertion line, not in an environment variable that reached curl's argv in the jail
   and the host's argv. The manager's credential and the API-key placeholder now go through the hub's
   REST route as the verified controller first; the scion CLI, which takes the value only as an
-  argument, is the fallback only for a hub without that route.
-- **scion's hub self-update is off.** Every apply writes `server.maintenance.update_policy: disabled`
-  into the jail's `settings.yaml`, beside the remote proxy's refusal of maintenance writes, so a
-  version-stamped scion build could not replace lever's pin with an upstream release either.
+  argument, is the fallback only for a hub without that route or an instance with no recorded
+  controller.
+- **scion's scheduled release check and automatic update are off.** Every apply writes
+  `server.maintenance.update_policy: disabled` into the jail's `settings.yaml` (left out on an
+  instance whose server settings are still in a legacy `server.yaml`). A hub admin starting
+  `update-binary` by hand does not read that policy; the remote proxy's refusal of maintenance
+  writes is what blocks it remotely.
 
 ### Upgrade
 

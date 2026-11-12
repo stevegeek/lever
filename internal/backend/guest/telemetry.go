@@ -34,7 +34,7 @@ func (g Guest) EnsureScionTelemetry(ctx context.Context, off bool) (bool, error)
 		// absent would rewrite scion's machine configuration from nothing.
 		return false, fmt.Errorf("guest: read %s: %w", layout.SettingsRel, err)
 	}
-	existing, _, err := parseScionSettingsRead(res.Stdout)
+	existing, hasServerYAML, err := parseScionSettingsRead(res.Stdout)
 	if err != nil {
 		return false, err
 	}
@@ -46,7 +46,7 @@ func (g Guest) EnsureScionTelemetry(ctx context.Context, off bool) (bool, error)
 	if err != nil {
 		return false, err
 	}
-	updated, pinned, err := withUpdatesDisabled(updated)
+	updated, pinned, err := withUpdatesDisabled(updated, hasServerYAML)
 	if err != nil || !changed && !removed && !pinned {
 		return false, err
 	}
@@ -56,23 +56,24 @@ func (g Guest) EnsureScionTelemetry(ctx context.Context, off bool) (bool, error)
 	return changed, nil
 }
 
-// keyGcloudADC is the settings key that makes scion's broker copy the jail
-// user's gcloud application-default credentials into every agent it starts.
-// Any loopback caller, an agent included, can set it through the workstation
-// settings route, and the broker reads it at each start. lever never sets it,
-// so every apply removes it.
 // updatePolicyDisabled is scion's server.maintenance.update_policy that turns
-// the hub's release check and self-update off. From scion e8160a10 on, a hub
-// with a version stamp checks GitHub for releases (notify by default) and a
-// hub admin can start update-binary, which would replace lever's pinned scion
-// with an upstream build. The hub reads it at start.
+// off the hub's scheduled release check and its automatic update. From scion
+// e8160a10 on, a version-stamped hub checks GitHub for releases (notify by
+// default). It does not stop a hub admin starting update-binary by hand: the
+// remote proxy refuses maintenance writes for that. The hub reads it at start.
 const updatePolicyDisabled = "disabled"
 
 // withUpdatesDisabled sets server.maintenance.update_policy to disabled,
 // keeping every other key. It reports whether it changed anything. An older
-// scion ignores the key.
-func withUpdatesDisabled(existing []byte) ([]byte, bool, error) {
+// scion ignores the key. With a legacy server.yaml and no `server:` key it
+// changes nothing: scion reads server settings from settings.yaml once it
+// has that key, so adding one would silently drop server.yaml (the hub-auth
+// step refuses that case and names the fix).
+func withUpdatesDisabled(existing []byte, hasServerYAML bool) ([]byte, bool, error) {
 	if len(bytes.TrimSpace(existing)) == 0 {
+		if hasServerYAML {
+			return existing, false, nil
+		}
 		return []byte("server:\n  maintenance:\n    update_policy: " + updatePolicyDisabled + "\n"), true, nil
 	}
 	doc, err := parseJailSettings(existing)
@@ -82,6 +83,9 @@ func withUpdatesDisabled(existing []byte) ([]byte, bool, error) {
 	root := layout.DocumentRoot(doc)
 	if root == nil {
 		return nil, false, fmt.Errorf("guest: the jail's %s is not a YAML mapping", layout.SettingsRel)
+	}
+	if hasServerYAML && layout.MapGet(root, "server") == nil {
+		return existing, false, nil
 	}
 	server, err := childMapping(root, "server")
 	if err != nil {
@@ -117,6 +121,11 @@ func childMapping(m *yaml.Node, key string) (*yaml.Node, error) {
 	return n, nil
 }
 
+// keyGcloudADC is the settings key that makes scion's broker copy the jail
+// user's gcloud application-default credentials into every agent it starts.
+// Any loopback caller, an agent included, can set it through the workstation
+// settings route, and the broker reads it at each start. lever never sets it,
+// so every apply removes it.
 const keyGcloudADC = "auto_inject_gcloud_adc"
 
 func withoutGcloudADC(existing []byte) ([]byte, bool, error) {

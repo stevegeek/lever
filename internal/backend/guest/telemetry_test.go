@@ -250,7 +250,7 @@ func TestWithUpdatesDisabled(t *testing.T) {
 		{"already disabled", "server:\n  maintenance:\n    update_policy: disabled\n", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			out, changed, err := withUpdatesDisabled([]byte(tc.in))
+			out, changed, err := withUpdatesDisabled([]byte(tc.in), false)
 			if err != nil || changed != tc.changed {
 				t.Fatalf("changed=%v err=%v", changed, err)
 			}
@@ -275,7 +275,22 @@ func TestWithUpdatesDisabled(t *testing.T) {
 			}
 		})
 	}
-	if _, _, err := withUpdatesDisabled([]byte("server: 3\n")); err == nil {
+	if _, _, err := withUpdatesDisabled([]byte("server: 3\n"), false); err == nil {
 		t.Fatal("a non-mapping server key must be an error")
+	}
+}
+
+// With a legacy server.yaml and no server: key, adding one would make scion
+// stop reading server.yaml, so the pin changes nothing.
+func TestWithUpdatesDisabledLeavesLegacyServerYAML(t *testing.T) {
+	for _, in := range []string{"", "telemetry:\n  enabled: false\n"} {
+		out, changed, err := withUpdatesDisabled([]byte(in), true)
+		if err != nil || changed || string(out) != in {
+			t.Fatalf("%q: changed=%v err=%v out=%q", in, changed, err, out)
+		}
+	}
+	out, changed, err := withUpdatesDisabled([]byte("server:\n  hub:\n    port: 1\n"), true)
+	if err != nil || !changed || !strings.Contains(string(out), "update_policy: disabled") {
+		t.Fatalf("an existing server key: changed=%v err=%v out=%q", changed, err, out)
 	}
 }

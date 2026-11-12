@@ -298,7 +298,9 @@ check "the controller PAT was granted the baseline reads, inbox:read and project
 check "the hub runs in proxy auth mode" hubproxyenv
 check "the hub pins the agent image registry in its env (SCION_IMAGE_REGISTRY)" hubregenv
 # The session secret reaches the hub on stdin as SCION_SERVER_SESSION_SECRET;
-# without it scion logs this and every hub restart signs browsers out.
+# without it scion logs this and every hub restart signs browsers out. scion
+# appends to server.log across starts; the clean slate gives this run a fresh
+# VM, so every start in it must have had the secret.
 check "the hub got lever's session secret" G sh -c '! grep -q "no session secret set" ~/.scion/server.log'
 check "the hub identity record says fresh" grep -q '"mode": *"fresh"' "$INST/.lever-state/hub-identity.json"
 PROJ=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["project_id"])' "$INST/.lever-state/hub-identity.json")

@@ -37,6 +37,8 @@ type pinnedExperiment struct {
 // template declares into the harness (claude included) at every start.
 // hub.agent_delegation lets a user grant agents hub calls under the user's
 // name, through sciontool's delegation socket in every agent.
+// hub.async_agent_start is pinned for correctness, not reach
+// (asyncAgentStartExperiment).
 //
 // hub.chat_thread_groups (project-wide chat groups that agents can create and
 // rename) is graduated from e8160a10 on: always on, never registered, and
@@ -61,7 +63,15 @@ var pinnedOffExperiments = []pinnedExperiment{
 	{name: "hub.conduit_deliver"},
 	{name: "hub.agent_plugins"},
 	{name: "hub.agent_delegation"},
+	{name: asyncAgentStartExperiment},
 }
+
+// asyncAgentStartExperiment (scion e8160a10 on, default on) starts, resumes
+// and restarts existing agents asynchronously. That path does not store a
+// resume's task in the record, so after `lever conversation new` the hub
+// kept the old boot prompt, which a later resume of a stopped manager would
+// start with. Off, resumes take the synchronous path, which stores it.
+const asyncAgentStartExperiment = "hub.async_agent_start"
 
 // threadGroupsExperiment is graduated (always on) from scion e8160a10 on.
 const threadGroupsExperiment = "hub.chat_thread_groups"

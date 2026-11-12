@@ -41,8 +41,9 @@ version bump moves the block under the new version heading.
     empty, so lever would register the project again and the chat page could not find the project's
     agents. The changed scope sets re-mint both tokens at the next apply.
   - **Renaming the dev user needs hub admin** (44ef85192): scion's `PUT /api/v1/system/identity`
-    now requires `hub.config.update`, so a jailed agent can no longer rename the controller through
-    the loopback. This closes the known issue earlier releases describe; lever keeps its repairs.
+    and `PATCH /api/v1/system/workstation-settings` now require `hub.config.update`, so a jailed
+    agent can no longer rename the controller or turn on gcloud credential injection through the
+    loopback (the stack e2e proves both refused). This closes the known issue earlier releases describe; lever keeps its repairs.
   - Notifications gain `kind`, `resourceType`, `resourceId` and `excerpt` (text another principal
     wrote). lever's manager now gets `excerpt` sanitized, bounded and marked `excerpt-reported:`, the
     other fields and every key sanitized and bounded, and nested objects and arrays dropped.
@@ -67,7 +68,10 @@ version bump moves the block under the new version heading.
   included, for anyone holding the page link), `hub.conduit_deliver` (message delivery over
   conduit), `hub.agent_plugins` (installs plugin bundles a template declares into the harness at
   every start) and `hub.agent_delegation` (lets a user grant an agent hub calls under the user's
-  name, through the delegation socket sciontool now serves in every agent). Every apply pins them
+  name, through the delegation socket sciontool now serves in every agent). lever also pins
+  `hub.async_agent_start` off, for correctness: on scion's asynchronous start path a resume's task
+  is not stored in the agent record, so after `lever conversation new` the hub kept the old boot
+  prompt, which a later resume of a stopped manager would start with. Every apply pins them
   off as `lever-admin`, and the hub's admin view must show each one off after the write; none has a
   read-only route that tells, so doctor reads them from lever's record. `hub-experiments.json`
   written by an older lever makes doctor warn until the next apply.

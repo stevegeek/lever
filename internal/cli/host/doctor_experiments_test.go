@@ -25,7 +25,7 @@ func TestCheckHubExperiments(t *testing.T) {
 	}{
 		{name: "pinned and off", known: knowsExperiments(true), rec: pinned, wantOK: true, wantSub: "pinned off by lever on 2026-10-13T12:00:00Z"},
 		{name: "federation is read from the record", known: knowsExperiments(true), rec: pinned, wantOK: true,
-			wantSub: "(hub.conduit, hub.artifacts); hub.chat_thread_groups, federation.project_visitors, hub.attachment_artifacts, hub.port_view, hub.conduit_deliver, hub.agent_plugins, hub.agent_delegation pinned off on the same apply, which no route can show"},
+			wantSub: "(hub.conduit, hub.artifacts); hub.chat_thread_groups, federation.project_visitors, hub.attachment_artifacts, hub.port_view, hub.conduit_deliver, hub.agent_plugins, hub.agent_delegation, hub.async_agent_start pinned off on the same apply, which no route can show"},
 		{name: "conduit live", known: knowsExperiments(true), rec: pinned,
 			hub: func(h *fakeExperimentsHub) { h.overrides["hub.conduit"] = true }, wantSub: "hub.conduit on at the hub"},
 		{name: "artifacts live, never pinned", known: knowsExperiments(true),

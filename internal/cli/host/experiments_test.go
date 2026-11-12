@@ -537,7 +537,7 @@ func TestPrePinExperiments(t *testing.T) {
 // newScionPinned are the pinned experiments scion e8160a10 registers:
 // hub.chat_thread_groups is graduated there.
 var newScionPinned = []string{"hub.conduit", "hub.artifacts", "federation.project_visitors", "hub.attachment_artifacts",
-	"hub.port_view", "hub.conduit_deliver", "hub.agent_plugins", "hub.agent_delegation"}
+	"hub.port_view", "hub.conduit_deliver", "hub.agent_plugins", "hub.agent_delegation", "hub.async_agent_start"}
 
 // newScionExperiments makes h answer as scion e8160a10: thread groups are
 // no longer registered and their route is always served, and

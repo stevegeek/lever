@@ -299,7 +299,7 @@ check "the hub identity record says fresh" grep -q '"mode": *"fresh"' "$INST/.le
 PROJ=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["project_id"])' "$INST/.lever-state/hub-identity.json")
 checkx "the project lists the broker" 'hubbody "/api/v1/projects/$PROJ/providers" | grep -q brokerId'
 check "lever-admin pinned the experiments off" grep -q '"off": *\[' "$INST/.lever-state/hub-experiments.json"
-for x in hub.conduit hub.artifacts hub.chat_thread_groups federation.project_visitors; do
+for x in hub.conduit hub.artifacts federation.project_visitors hub.attachment_artifacts hub.port_view hub.conduit_deliver hub.agent_plugins hub.agent_delegation hub.async_agent_start; do
 	check "lever-admin pinned $x off" python3 -c 'import json,sys; sys.exit(sys.argv[2] not in json.load(open(sys.argv[1])).get("off", []))' "$INST/.lever-state/hub-experiments.json" "$x"
 done
 check "no dev token in the jail" G sh -c '! test -e ~/.scion/dev-token'
@@ -320,10 +320,13 @@ checkx "lever msg send to the manager" '(cd "$INST" && "$LEVER" msg send --to "$
 checkx "the controller PAT lists notifications (inbox:read)" '[ "$(hub GET /api/v1/notifications)" = 200 ]'
 
 say "the experiment fence on the hub"
-for p in /api/v1/conduit/grant-keys /api/v1/artifacts /api/v1/thread-groups; do
+for p in /api/v1/conduit/grant-keys /api/v1/artifacts; do
 	code=$(hub GET "$p")
 	checkx "hub answers $p with 404 (experiment off): $code" '[ "$code" = 404 ]'
 done
+# scion e8160a10 graduated thread groups: always served, never pinned; the
+# remote proxy refuses them (below).
+check "lever-admin did not pin the graduated hub.chat_thread_groups" python3 -c 'import json,sys; sys.exit(sys.argv[2] in json.load(open(sys.argv[1])).get("off", []))' "$INST/.lever-state/hub-experiments.json" hub.chat_thread_groups
 
 say "the experiment fence in the remote proxy"
 code=$(pcode "$OPERATOR" "http://127.0.0.1:$RP/api/v1/auth/me")
@@ -385,7 +388,10 @@ limactl copy "$WORK/loop.py" "$VM:/tmp/loop.py"
 X cp /tmp/loop.py "lever--$NAME:/tmp/loop.py"
 X exec -d -e LOOP_SECS=600 "lever--$NAME" python3 /tmp/loop.py
 sleep 3
-checkx "the agent's rename loop reaches the hub" 'X exec "lever--$NAME" test -e /tmp/loop.ok'
+# From scion e8160a10 the identity route needs hub.config.update, so the
+# agent's loop is refused; the rest of this section still proves a refused
+# loop cannot hold up the contact's removal.
+checkx "the agent's rename loop is refused by the hub" 'X exec "lever--$NAME" test ! -e /tmp/loop.ok'
 # Other recorded scopes make the mint urgent: a token only in its renew window
 # would be left for a later apply with a warning.
 python3 - "$rec" <<'PY'
@@ -465,8 +471,9 @@ mgr agent stop worker | tail -1 | sed 's/^/      | /'
 checkx "the worker resumes under the agent's registry" 'mgr agent resume worker | grep -qE "running|resumed"'
 checkx "the worker runs lever's image, not the agent's registry ($(cimage lever--worker))" '[ "$(cimage lever--worker)" = "$AGENT_IMAGE" ]'
 code=$(agentcall PATCH /api/v1/system/workstation-settings '{"auto_inject_gcloud_adc":true}')
-checkx "the agent's gcloud injection write reaches the hub ($code)" '[ "$code" = 200 ]'
-check "settings.yaml carries auto_inject_gcloud_adc" gcloudset
+# From scion e8160a10 workstation-settings needs hub.config.update.
+checkx "the hub refuses the agent's gcloud injection write ($code)" '[ "$code" = 403 ]'
+checkx "settings.yaml does not carry auto_inject_gcloud_adc" '! gcloudset'
 code=$(agentcall PUT /api/v1/system/runtime '{"runtime":"docker"}')
 checkx "the agent's runtime write reaches the hub ($code)" '[ "$code" = 200 ]'
 checkx "the hub's runtime is the agent's ($(hubrt))" '[ "$(hubrt)" = docker ]'

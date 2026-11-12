@@ -291,7 +291,7 @@ func (h *hubIdentity) run(ctx context.Context) error {
 		return errHubIdentity("%w", err)
 	}
 
-	if err := h.mintPATs(ctx, mode, rec.ProjectID, controllerPATScopes(lifecycle, h.controllerInbox(ctx))); err != nil {
+	if err := h.mintPATs(ctx, mode, rec.ProjectID, controllerPATScopes(lifecycle, h.controllerInbox(ctx), h.controllerProjectList(ctx))); err != nil {
 		return err
 	}
 	if !conduitOn {
@@ -819,6 +819,12 @@ func (h *hubIdentity) controllerInbox(ctx context.Context) bool {
 	return controllerInbox(ctx, h.scopeKnown(), rec)
 }
 
+// controllerProjectList is controllerProjectList on the stored record.
+func (h *hubIdentity) controllerProjectList(ctx context.Context) bool {
+	rec, _, _ := h.st.LoadControllerPATRecord()
+	return controllerProjectList(ctx, h.scopeKnown(), rec)
+}
+
 func (h *hubIdentity) scopeKnown() scopeKnownFunc {
 	if h.sc == nil {
 		return nil
@@ -942,7 +948,7 @@ func controllerActions(lifecycle bool) []string {
 func ungrantedScopes(requested, granted []string) []string {
 	var out []string
 	for _, s := range requested {
-		literal := s == inboxReadScope || strings.HasPrefix(s, "skill:") || strings.HasPrefix(s, "template:") || strings.HasPrefix(s, "harness_config:")
+		literal := s == inboxReadScope || s == projectListScope || strings.HasPrefix(s, "skill:") || strings.HasPrefix(s, "template:") || strings.HasPrefix(s, "harness_config:")
 		if literal && !slices.Contains(granted, s) {
 			out = append(out, s)
 		}

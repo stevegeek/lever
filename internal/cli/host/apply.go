@@ -396,9 +396,12 @@ func removeJailFile(ctx context.Context, jr proc.Runner, jailPath string) error 
 // stop, suspend and resume of an existing agent by a user token; a refused
 // resume answers 409 "already exists". inbox adds inbox:read, which a hub that
 // has it requires to list notifications (the broker inbox and the manager
-// watch). An older hub rejects an unknown scope, so each is added only when
-// the jail's scion knows it.
-func controllerPATScopes(lifecycle, inbox bool) []string {
+// watch). projectList adds project:list, which a hub from scion e8160a10 on
+// requires of a token to list projects (de77b8ae9 puts the token ceiling on
+// every list): without it `scion hub projects` comes back empty and lever
+// would register the project again. An older hub rejects an unknown scope, so
+// each is added only when the jail's scion knows it.
+func controllerPATScopes(lifecycle, inbox, projectList bool) []string {
 	s := []string{"agent:manage", "agent:attach", "agent:message", "project:read", "project:update",
 		"skill:read", "skill:list", "template:read", "template:list", "harness_config:read", "harness_config:list"}
 	if lifecycle {
@@ -407,7 +410,24 @@ func controllerPATScopes(lifecycle, inbox bool) []string {
 	if inbox {
 		s = append(s, inboxReadScope)
 	}
+	if projectList {
+		s = append(s, projectListScope)
+	}
 	return s
+}
+
+// projectListScope is the UAT scope that lists projects.
+const projectListScope = "project:list"
+
+// controllerProjectList decides whether the controller PAT carries
+// project:list, as controllerInbox does for inbox:read.
+func controllerProjectList(ctx context.Context, known scopeKnownFunc, rec state.PATRecord) bool {
+	if known != nil {
+		if has, err := known(ctx, projectListScope); err == nil {
+			return has
+		}
+	}
+	return slices.Contains(rec.Requested, projectListScope)
 }
 
 // inboxReadScope is the UAT scope that lists the caller's notifications.

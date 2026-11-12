@@ -287,12 +287,12 @@ checkx "the controller PAT carries inbox:read" 'python3 -c "import json,sys; sys
 cat > "$WORK/granted.py" <<'PY'
 import json, sys
 g = json.load(open(sys.argv[1])).get("granted_scopes") or []
-want = ["skill:read", "skill:list", "template:read", "template:list", "harness_config:read", "harness_config:list", "inbox:read"]
+want = ["skill:read", "skill:list", "template:read", "template:list", "harness_config:read", "harness_config:list", "inbox:read", "project:list"]
 missing = [w for w in want if w not in g]
 print("      | granted:", ",".join(g), "missing:", ",".join(missing))
 sys.exit(1 if missing else 0)
 PY
-check "the controller PAT was granted the baseline reads and inbox:read" python3 "$WORK/granted.py" "$rec"
+check "the controller PAT was granted the baseline reads, inbox:read and project:list" python3 "$WORK/granted.py" "$rec"
 check "the hub runs in proxy auth mode" hubproxyenv
 check "the hub identity record says fresh" grep -q '"mode": *"fresh"' "$INST/.lever-state/hub-identity.json"
 PROJ=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["project_id"])' "$INST/.lever-state/hub-identity.json")

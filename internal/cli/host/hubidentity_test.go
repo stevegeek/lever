@@ -966,7 +966,7 @@ func (e *hiEnv) seedMigrated(devEmail string, lifecycle bool) {
 		ScopeType: hubapi.RoleScopeProject, Permissions: controllerRolePermissions(lifecycle)})
 	h.addBinding("role-ctl-old", devUserID, hubapi.RoleScopeProject, "proj-1", devUserID)
 	h.tokens = append(h.tokens, &hiToken{ID: "tok-old", Owner: devUserID, Name: "lever-controller", ProjectID: "proj-1",
-		Secret: "scion_pat_old-0123456789abcdef", Scopes: controllerPATScopes(lifecycle, false), Expires: e.now.Add(300 * 24 * time.Hour)})
+		Secret: "scion_pat_old-0123456789abcdef", Scopes: controllerPATScopes(lifecycle, false, false), Expires: e.now.Add(300 * 24 * time.Hour)})
 	acts := controllerActions(lifecycle)
 	h.agents = []hiAgent{{Slug: "manager", Actions: acts}, {Slug: "worker", Actions: acts}}
 	e.sc.lifecycle = lifecycle
@@ -975,7 +975,7 @@ func (e *hiEnv) seedMigrated(devEmail string, lifecycle bool) {
 	if err := e.st.SaveControllerPAT("scion_pat_old-0123456789abcdef"); err != nil {
 		e.t.Fatal(err)
 	}
-	if err := e.st.SaveControllerPATRecord(state.PATRecord{ID: "tok-old", Requested: controllerPATScopes(lifecycle, false),
+	if err := e.st.SaveControllerPATRecord(state.PATRecord{ID: "tok-old", Requested: controllerPATScopes(lifecycle, false, false),
 		MintedAt: e.now.Add(-10 * 24 * time.Hour), ExpiresAt: e.now.Add(300 * 24 * time.Hour)}); err != nil {
 		e.t.Fatal(err)
 	}
@@ -1070,7 +1070,7 @@ func TestHubIdentityFreshBootstrap(t *testing.T) {
 	}
 	ctlTok, remTok := hiTokenNamed(h, "lever-controller", ctl.ID), hiTokenNamed(h, "lever-remote", ctl.ID)
 	if ctlTok == nil || remTok == nil || ctlTok.ProjectID != hiMarkerID ||
-		!hubapi.SamePermissions(ctlTok.Scopes, controllerPATScopes(false, false)) || !hubapi.SamePermissions(remTok.Scopes, remotePATScopes()) {
+		!hubapi.SamePermissions(ctlTok.Scopes, controllerPATScopes(false, false, false)) || !hubapi.SamePermissions(remTok.Scopes, remotePATScopes()) {
 		t.Fatalf("tokens = %+v", h.tokens)
 	}
 	if !e.diskPATIs(e.st.LoadControllerPAT, ctlTok.ID) || !e.diskPATIs(e.st.LoadRemotePAT, remTok.ID) {
@@ -1927,7 +1927,7 @@ func TestHubIdentityProbeChecksInboxAndGrants(t *testing.T) {
 }
 
 func TestUngrantedScopes(t *testing.T) {
-	req := controllerPATScopes(true, true)
+	req := controllerPATScopes(true, true, false)
 	if got := ungrantedScopes(req, []string{"agent:create", "agent:attach", "project:read", "skill:read", "skill:list",
 		"template:read", "template:list", "harness_config:read", "harness_config:list", inboxReadScope}); len(got) != 0 {
 		t.Fatalf("aliases or lifecycle counted as ungranted: %v", got)

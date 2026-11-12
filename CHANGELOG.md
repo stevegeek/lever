@@ -7,6 +7,24 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Changed
+
+- **The agent image bakes Claude Code 2.1.322 (was 2.1.300).** These are unchanged in 2.1.322,
+  read from the linux-x64 and linux-arm64 builds: the messages lever reads from Claude Code (a stale background
+  session, no conversation to continue), the session records under `~/.claude/sessions` (`kind`,
+  `parkedJobId`, `pidDomain`, and the pid domain built from `/etc/machine-id` and the pid
+  namespace), the agent-view switch (`CLAUDE_CODE_DISABLE_AGENT_VIEW` and `disableAgentView`, still
+  documented as equivalent and still a restrictive managed setting), and the environment variables
+  lever sets. The Claude Code binary grows from 267 MB to 342 MB (linux-x64), so the agent image
+  grows by about as much.
+
+### Upgrade
+
+- **Jail ABI 12.** The agent image changed (Claude Code 2.1.322): rebuild the agent image (`make
+  lever-image` or `make lever-image-slim`, then any instance image built from it) and recreate the
+  manager on it with `lever up --fresh --keep-conversation`. Doctor's *agent lever version* row says
+  so.
+
 ## [1.0.0-beta.9] - 2026-11-09
 
 ### Added

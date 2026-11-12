@@ -3,6 +3,8 @@ package guest
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -25,9 +27,15 @@ const (
 )
 
 // writeScionSettings writes as the RUN USER: it is that user's own config,
-// not root's.
-func (g Guest) writeScionSettings(ctx context.Context, content []byte) error {
-	if err := g.pipeInto(ctx, g.UserPrefix, bytes.NewReader(content), writeScionSettingsScript); err != nil {
+// not root's. read is what the caller read (readScionSettingsScript) and
+// edited: the write takes scion's settings lock (from scion e8160a10 its own
+// writers flock ~/.scion/.settings.lock around every read-modify-write) and
+// replaces the file only while it still holds exactly read, so a write
+// scion made in between is never lost. A changed file fails the step; the
+// next apply edits the new content.
+func (g Guest) writeScionSettings(ctx context.Context, read, content []byte) error {
+	sum := sha256.Sum256(read)
+	if err := g.pipeInto(ctx, g.UserPrefix, bytes.NewReader(content), writeScionSettingsScript(hex.EncodeToString(sum[:]))); err != nil {
 		return fmt.Errorf("guest: write %s: %w", layout.SettingsRel, err)
 	}
 	return nil
@@ -48,8 +56,20 @@ func parseScionSettingsRead(out string) (settings []byte, hasServerYAML bool, er
 	return []byte(rest), strings.TrimSpace(strings.TrimPrefix(line, "LEGACY ")) == "1", nil
 }
 
-var writeScionSettingsScript = fmt.Sprintf(`mkdir -p "$HOME/%s" && cat > "$HOME/%s.lever-tmp" && mv "$HOME/%s.lever-tmp" "$HOME/%s"`,
-	filepath.Dir(layout.SettingsRel), layout.SettingsRel, layout.SettingsRel, layout.SettingsRel)
+// writeScionSettingsScript holds scion's settings lock (fd 9, flock, waiting
+// at most 10 s) while it checks that settings.yaml still hashes to want (an
+// absent file hashes as empty, as readScionSettingsScript reads it) and
+// replaces it. want is lever's own hex digest, never input.
+func writeScionSettingsScript(want string) string {
+	dir, file := filepath.Dir(layout.SettingsRel), layout.SettingsRel
+	return fmt.Sprintf(`set -u
+mkdir -p "$HOME/%[1]s" || exit 1
+exec 9>>"$HOME/%[1]s/.settings.lock" || exit 1
+flock -w 10 9 || { echo "scion's settings lock is held by another writer" >&2; exit 75; }
+cur=$(cat "$HOME/%[2]s" 2>/dev/null | sha256sum | cut -c1-64)
+[ "$cur" = %[3]q ] || { echo "~/%[2]s changed while lever edited it; run lever apply again" >&2; exit 76; }
+cat > "$HOME/%[2]s.lever-tmp" && mv "$HOME/%[2]s.lever-tmp" "$HOME/%[2]s"`, dir, file, want)
+}
 
 // setOperatorDisplayName only ever ADDS: an existing display_name, email or
 // username is the operator's own and is left as it is. `auth` holds unrelated

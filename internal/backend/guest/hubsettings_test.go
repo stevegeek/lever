@@ -2,6 +2,12 @@ package guest
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -215,7 +221,7 @@ func TestWriteScionSettingsIsAtomicAndUserOwned(t *testing.T) {
 	f := proc.NewFakeRunner()
 	f.Script("orb -m lever-x bash -c", proc.Result{})
 	g := Guest{Host: f, UserPrefix: []string{"orb", "-m", "lever-x"}, RootPrefix: []string{"orb", "-u", "root", "-m", "lever-x"}}
-	if err := g.writeScionSettings(context.Background(), []byte("server: {}\n")); err != nil {
+	if err := g.writeScionSettings(context.Background(), []byte("old: 1\n"), []byte("server: {}\n")); err != nil {
 		t.Fatalf("writeScionSettings: %v", err)
 	}
 	if len(f.Calls) != 1 {
@@ -234,6 +240,9 @@ func TestWriteScionSettingsIsAtomicAndUserOwned(t *testing.T) {
 	for _, want := range []string{
 		".scion/settings.yaml.lever-tmp",
 		`mv "$HOME/.scion/settings.yaml.lever-tmp" "$HOME/.scion/settings.yaml"`,
+		`exec 9>>"$HOME/.scion/.settings.lock"`,
+		"flock -w 10 9",
+		fmt.Sprintf("%x", sha256.Sum256([]byte("old: 1\n"))),
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("script missing %q:\n%s", want, script)
@@ -338,7 +347,7 @@ func TestEnableMessageBroker(t *testing.T) {
 // of the write script) and how many writes were attempted.
 func writtenSettings(f *proc.FakeRunner) (written string, writes int) {
 	for _, c := range f.Calls {
-		if len(c.Args) > 0 && c.Args[len(c.Args)-1] == writeScionSettingsScript {
+		if len(c.Args) > 0 && strings.Contains(c.Args[len(c.Args)-1], ".settings.lock") {
 			writes++
 			written = c.Stdin
 		}
@@ -405,5 +414,37 @@ func TestHubAuthSettingsRefusesAMergeKeyUnderHub(t *testing.T) {
 	existing := []byte("x: &c\n  conduit:\n    internal_listen: 0.0.0.0:9810\nserver:\n  hub:\n    <<: *c\n")
 	if _, _, _, err := hubAuthSettingsConverged(existing, testHubAuth(false), false); err == nil || !strings.Contains(err.Error(), "merge key") {
 		t.Fatalf("err = %v, want a merge-key refusal", err)
+	}
+}
+
+// The write script, run by a real bash: it writes under scion's settings lock
+// only while the file still holds what lever read, and otherwise leaves it.
+func TestWriteScionSettingsScriptComparesAndSwaps(t *testing.T) {
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skip("no flock")
+	}
+	home := t.TempDir()
+	path := filepath.Join(home, ".scion", "settings.yaml")
+	run := func(read, content string) error {
+		sum := sha256.Sum256([]byte(read))
+		cmd := exec.Command("bash", "-c", writeScionSettingsScript(hex.EncodeToString(sum[:])))
+		cmd.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin"}
+		cmd.Stdin = strings.NewReader(content)
+		return cmd.Run()
+	}
+	if err := run("", "a: 1\n"); err != nil {
+		t.Fatalf("absent file: %v", err)
+	}
+	if err := run("a: 1\n", "a: 2\n"); err != nil {
+		t.Fatalf("matching file: %v", err)
+	}
+	if err := run("a: 1\n", "a: 3\n"); err == nil {
+		t.Fatal("a file changed since the read was overwritten")
+	}
+	if b, _ := os.ReadFile(path); string(b) != "a: 2\n" {
+		t.Fatalf("settings = %q, want the newer content kept", b)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".scion", ".settings.lock")); err != nil {
+		t.Fatalf("no lock file: %v", err)
 	}
 }

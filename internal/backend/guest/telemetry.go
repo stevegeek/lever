@@ -50,7 +50,7 @@ func (g Guest) EnsureScionTelemetry(ctx context.Context, off bool) (bool, error)
 	if err != nil || !changed && !removed && !pinned {
 		return false, err
 	}
-	if err := g.writeScionSettings(ctx, updated); err != nil {
+	if err := g.writeScionSettings(ctx, existing, updated); err != nil {
 		return false, err
 	}
 	return changed, nil

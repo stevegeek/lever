@@ -101,7 +101,7 @@ func (g Guest) EnsureHubAuth(ctx context.Context, spec types.HubAuth) (string, e
 		return "", err
 	}
 	if changed {
-		if err := g.writeScionSettings(ctx, updated); err != nil {
+		if err := g.writeScionSettings(ctx, existing, updated); err != nil {
 			return "", err
 		}
 	}

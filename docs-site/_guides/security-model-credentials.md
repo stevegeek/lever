@@ -217,6 +217,14 @@ controller token (`internal/broker/tokenwatch.go`, `scion.Client.ResetAuth`). `l
 `agent hub tokens` row reports an expired or overdue token. See
 [agent session heals](/operations/#agent-session-heals).
 
+**sciontool's delegation socket grants nothing under lever.** From scion `e8160a10`, sciontool
+serves `~/.scion/delegation.sock` in every agent container. It forwards a request to the hub only
+under a delegation grant, which only a signed-in user can issue, never with the agent's own token,
+and it checks the caller's uid and does not follow symlinks. Lever pins `hub.agent_delegation` off,
+so the hub issues and honours no grant, and the remote proxy refuses `/api/v1/agents/*/delegations`.
+sciontool also adopts a valid token written to `~/.scion/scion-token`; that adds no authority, since
+the only token an agent can obtain is its own.
+
 **Egress mode gives no reduction here**: `egress: closed` still ACCEPTs loopback first specifically
 so the in-machine scion hub keeps working ([§2.2](/security-model/jail/)), so this path is reachable
 identically under `open` or `closed`. The real (if narrow) bound is tenancy: this is a

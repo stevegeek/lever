@@ -10,6 +10,7 @@ import (
 	"github.com/stevegeek/lever/internal/backend/types"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion/layout"
+	"gopkg.in/yaml.v3"
 )
 
 // telemetryBlock digs out the top-level telemetry mapping, or nil.
@@ -173,8 +174,14 @@ func TestEnsureScionTelemetryWritesOnlyOnChange(t *testing.T) {
 	if changed, _, writes := run(t, written, true); changed || writes != 0 {
 		t.Fatalf("a converged file was rewritten: changed=%v writes=%d", changed, writes)
 	}
-	if changed, _, writes := run(t, "version: 1\n", false); changed || writes != 0 {
-		t.Fatalf("scion-default on a file without lever's block wrote: changed=%v writes=%d", changed, writes)
+	// scion-default leaves telemetry alone; the only write is the hub's
+	// update policy, and a file that has it is not written again.
+	changed, written, writes = run(t, "version: 1\n", false)
+	if changed || writes != 1 || strings.Contains(written, "telemetry") || !strings.Contains(written, "update_policy: disabled") {
+		t.Fatalf("scion-default on a bare file: changed=%v writes=%d\n%s", changed, writes, written)
+	}
+	if changed, _, writes := run(t, written, false); changed || writes != 0 {
+		t.Fatalf("scion-default on a converged file wrote: changed=%v writes=%d", changed, writes)
 	}
 }
 
@@ -229,5 +236,46 @@ func TestJailSettingsParseErrorIsBounded(t *testing.T) {
 	}
 	if _, err := ScionTelemetryEnabled([]byte("telemetry:\n  enabled: false\n")); err != nil {
 		t.Fatalf("normal: %v", err)
+	}
+}
+
+func TestWithUpdatesDisabled(t *testing.T) {
+	for _, tc := range []struct {
+		name, in string
+		changed  bool
+	}{
+		{"empty file", "", true},
+		{"other keys kept", "telemetry:\n  enabled: false\nserver:\n  hub:\n    port: 9810\n", true},
+		{"notify becomes disabled", "server:\n  maintenance:\n    update_policy: notify\n    github_repo: x/y\n", true},
+		{"already disabled", "server:\n  maintenance:\n    update_policy: disabled\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, changed, err := withUpdatesDisabled([]byte(tc.in))
+			if err != nil || changed != tc.changed {
+				t.Fatalf("changed=%v err=%v", changed, err)
+			}
+			var doc struct {
+				Telemetry map[string]any `yaml:"telemetry"`
+				Server    struct {
+					Hub         map[string]any    `yaml:"hub"`
+					Maintenance map[string]string `yaml:"maintenance"`
+				} `yaml:"server"`
+			}
+			if err := yaml.Unmarshal(out, &doc); err != nil {
+				t.Fatalf("%q: %v", out, err)
+			}
+			if doc.Server.Maintenance["update_policy"] != "disabled" {
+				t.Fatalf("update_policy not disabled: %q", out)
+			}
+			if strings.Contains(tc.in, "port: 9810") && doc.Server.Hub["port"] != 9810 {
+				t.Fatalf("server.hub lost: %q", out)
+			}
+			if strings.Contains(tc.in, "github_repo") && doc.Server.Maintenance["github_repo"] != "x/y" {
+				t.Fatalf("other maintenance keys lost: %q", out)
+			}
+		})
+	}
+	if _, _, err := withUpdatesDisabled([]byte("server: 3\n")); err == nil {
+		t.Fatal("a non-mapping server key must be an error")
 	}
 }

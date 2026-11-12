@@ -25,7 +25,8 @@ import (
 // up; lever does not restart the manager on its own.
 
 // EnsureScionTelemetry reports whether it changed the telemetry block. The
-// same write removes auto_inject_gcloud_adc (see withoutGcloudADC).
+// same write removes auto_inject_gcloud_adc (see withoutGcloudADC) and turns
+// the hub's self-update off (see withUpdatesDisabled).
 func (g Guest) EnsureScionTelemetry(ctx context.Context, off bool) (bool, error) {
 	res, err := g.UserRun(ctx, "/bin/bash", "-c", readScionSettingsScript)
 	if err != nil {
@@ -42,7 +43,11 @@ func (g Guest) EnsureScionTelemetry(ctx context.Context, off bool) (bool, error)
 		return false, err
 	}
 	updated, removed, err := withoutGcloudADC(updated)
-	if err != nil || !changed && !removed {
+	if err != nil {
+		return false, err
+	}
+	updated, pinned, err := withUpdatesDisabled(updated)
+	if err != nil || !changed && !removed && !pinned {
 		return false, err
 	}
 	if err := g.writeScionSettings(ctx, updated); err != nil {
@@ -56,6 +61,62 @@ func (g Guest) EnsureScionTelemetry(ctx context.Context, off bool) (bool, error)
 // Any loopback caller, an agent included, can set it through the workstation
 // settings route, and the broker reads it at each start. lever never sets it,
 // so every apply removes it.
+// updatePolicyDisabled is scion's server.maintenance.update_policy that turns
+// the hub's release check and self-update off. From scion e8160a10 on, a hub
+// with a version stamp checks GitHub for releases (notify by default) and a
+// hub admin can start update-binary, which would replace lever's pinned scion
+// with an upstream build. The hub reads it at start.
+const updatePolicyDisabled = "disabled"
+
+// withUpdatesDisabled sets server.maintenance.update_policy to disabled,
+// keeping every other key. It reports whether it changed anything. An older
+// scion ignores the key.
+func withUpdatesDisabled(existing []byte) ([]byte, bool, error) {
+	if len(bytes.TrimSpace(existing)) == 0 {
+		return []byte("server:\n  maintenance:\n    update_policy: " + updatePolicyDisabled + "\n"), true, nil
+	}
+	doc, err := parseJailSettings(existing)
+	if err != nil {
+		return nil, false, fmt.Errorf("guest: parse the jail's %s: %w", layout.SettingsRel, err)
+	}
+	root := layout.DocumentRoot(doc)
+	if root == nil {
+		return nil, false, fmt.Errorf("guest: the jail's %s is not a YAML mapping", layout.SettingsRel)
+	}
+	server, err := childMapping(root, "server")
+	if err != nil {
+		return nil, false, err
+	}
+	maint, err := childMapping(server, "maintenance")
+	if err != nil {
+		return nil, false, err
+	}
+	if cur := layout.MapGet(maint, "update_policy"); cur != nil && cur.Kind == yaml.ScalarNode && cur.Value == updatePolicyDisabled {
+		return existing, false, nil
+	}
+	layout.MapSet(maint, "update_policy", layout.StringNode(updatePolicyDisabled))
+	out, err := encodeSettings(doc)
+	if err != nil {
+		return nil, false, err
+	}
+	return out, true, nil
+}
+
+// childMapping returns m's mapping under key, adding an empty one when the
+// key is absent. A key that holds something else is an error to fix by hand.
+func childMapping(m *yaml.Node, key string) (*yaml.Node, error) {
+	n := layout.MapGet(m, key)
+	if n == nil {
+		n = layout.NewMapping()
+		layout.MapSet(m, key, n)
+		return n, nil
+	}
+	if n.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("guest: `%s:` in the jail's %s is not a mapping — fix it by hand", key, layout.SettingsRel)
+	}
+	return n, nil
+}
+
 const keyGcloudADC = "auto_inject_gcloud_adc"
 
 func withoutGcloudADC(existing []byte) ([]byte, bool, error) {

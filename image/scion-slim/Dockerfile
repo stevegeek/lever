@@ -20,8 +20,11 @@
 #  - scion: agents answer messages with `scion message`.
 #  - user scion, uid and gid 1000, home /home/scion, login shell zsh: scion's
 #    keep-id mapping and every lever probe run as that user.
-#  - git: the agent's own work in /workspace (Debian trixie's 2.47 meets the
-#    floor of the scion commit lever pins).
+#  - git: the agent's own work in /workspace. Debian trixie's 2.47 is below
+#    scion's 2.48 floor, which scion enforces only for its CLI commands that
+#    create worktrees (`git worktree add --relative-paths`); lever's agents
+#    never run those, and the runtime broker makes worktrees in the jail,
+#    whose git is newer.
 #  - tzdata, so a configured TZ takes effect (glibc silently falls back to
 #    UTC for an unknown zone), and ca-certificates.
 #  - procps: sciontool doctor and the agent use pgrep and ps.

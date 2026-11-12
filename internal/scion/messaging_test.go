@@ -144,8 +144,15 @@ func TestWorkerReportedNewFields(t *testing.T) {
 		"kind":         "artifact_review_summary\x1b]0;evil\x07",
 		"resourceType": strings.Repeat("r", 500),
 		"resourceId":   "a1",
+		"nested":       map[string]any{"text": "\x1b[2Jhidden"},
+		"list":         []any{"\x1b[2J"},
+		"count":        float64(3),
+		"read":         true,
 	}
 	out := WorkerReported(in)
+	if out["nested"] != nil || out["list"] != nil || out["count"] != float64(3) || out["read"] != true {
+		t.Fatalf("non-string fields: %v", out)
+	}
 	ex, _ := out["excerpt"].(string)
 	if !strings.HasPrefix(ex, ExcerptPrefix) || len(ex) > maxEventMessage || strings.ContainsAny(ex, "\x1b\n") {
 		t.Fatalf("excerpt = %q", ex)

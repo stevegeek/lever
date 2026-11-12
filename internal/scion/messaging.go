@@ -40,16 +40,22 @@ const maxEventField = 128
 // WorkerReported returns a copy of e that is safe to show the manager as data:
 // "message" sanitized to one line, bounded and marked with
 // WorkerReportedPrefix, "excerpt" the same with ExcerptPrefix, "status"
-// passed through StatusLabel, and every other string field sanitized and
-// bounded. It must stay idempotent: the broker and lever-manager both apply
-// it.
+// passed through StatusLabel, every other string field and every key sanitized
+// and bounded, and nested objects and arrays dropped. It must stay idempotent:
+// the broker and lever-manager both apply it.
 func WorkerReported(e Event) Event {
 	out := make(Event, len(e))
 	for k, v := range e {
-		if str, ok := v.(string); ok {
-			v = boundedText(termsafe.Sanitize(str), maxEventField)
+		switch x := v.(type) {
+		case string:
+			v = boundedText(termsafe.Sanitize(x), maxEventField)
+		case bool, float64, int, int64, nil:
+		default:
+			// A nested object or array could carry text past the
+			// sanitizing; scion's notifications hold none, so drop it.
+			v = nil
 		}
-		out[k] = v
+		out[boundedText(termsafe.Sanitize(k), maxEventField)] = v
 	}
 	markText(e, out, "message", WorkerReportedPrefix)
 	markText(e, out, "excerpt", ExcerptPrefix)

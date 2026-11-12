@@ -51,6 +51,9 @@ type hiHub struct {
 	// runtime is the active profile's container runtime, which the
 	// system/runtime route sets for any loopback caller too.
 	runtime string
+	// scratchpadDefault is the hub's project default scratchpad, nil until
+	// lever-admin writes it.
+	scratchpadDefault *bool
 
 	// cache models the hub's email-to-user cache: an email keeps resolving to
 	// a row for N more assertions.
@@ -601,6 +604,15 @@ func (h *hiHub) handle(c hiCaller, method, raw string, body []byte) (int, []byte
 		h.runtime = str("runtime")
 		h.event("runtime %s by %s", h.runtime, me.ID)
 		return hiJSON(200, map[string]any{"detected": h.runtime, "configured": h.runtime, "available": true})
+
+	case method == http.MethodPut && p == "/api/v1/admin/project-defaults":
+		if me.ID == devUserID || h.user(me.ID) == nil || h.user(me.ID).Role != "admin" {
+			return hiErr(403, "hub admin only")
+		}
+		v, _ := in["default_scratchpad"].(bool)
+		h.scratchpadDefault = &v
+		h.event("project default scratchpad %v by %s", v, me.ID)
+		return hiJSON(200, map[string]any{"default_scratchpad": v})
 
 	case method == http.MethodPut && p == "/api/v1/system/identity":
 		email := str("email")
@@ -2136,4 +2148,25 @@ func TestHubIdentityFreshRemovesAnUnreadableMarker(t *testing.T) {
 		e.jr.marker = marker
 	}
 	e.mustRun()
+}
+
+// scion e8160a10 refuses the scratchpad strip while the hub's project default
+// scratchpad is on; every apply turns it off as lever-admin, and a hub that
+// refuses the write fails the step.
+func TestHubIdentityTurnsTheDefaultScratchpadOff(t *testing.T) {
+	e := newHIEnv(t, hiRemoteApp(false))
+	e.mustRun()
+	if e.hub.scratchpadDefault == nil || *e.hub.scratchpadDefault {
+		t.Fatalf("project default scratchpad = %v after apply, want off", e.hub.scratchpadDefault)
+	}
+	admin := e.hub.byEmail(hubauth.AdminEmail)
+	if admin == nil || !slices.Contains(e.hub.events, "project default scratchpad false by "+admin.ID) {
+		t.Fatalf("default not turned off as lever-admin; events: %q", e.hub.events)
+	}
+
+	refused := newHIEnv(t, hiRemoteApp(false))
+	refused.hub.down["PUT /api/v1/admin/project-defaults"] = http.StatusForbidden
+	if err := refused.step().run(context.Background()); err == nil || !strings.Contains(err.Error(), "project default scratchpad") {
+		t.Fatalf("refused write: err = %v", err)
+	}
 }

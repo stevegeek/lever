@@ -240,6 +240,13 @@ func (h *hubIdentity) run(ctx context.Context) error {
 	if err := h.admin.SetRuntime(ctx, apply.AgentRuntime); err != nil {
 		return errHubIdentity("setting the hub's container runtime to %s as lever-admin: %w", apply.AgentRuntime, err)
 	}
+	// From scion e8160a10 on, the hub refuses to remove the scratchpad shared
+	// dir (the cross-agent mount the register step strips) while its project
+	// default scratchpad is on, and stamps one on every new project. Only a
+	// hub admin can change the default.
+	if err := h.admin.SetDefaultScratchpadOff(ctx); err != nil {
+		return errHubIdentity("turning the hub's project default scratchpad off as lever-admin: %w", err)
+	}
 
 	if _, err := h.adminHygiene(ctx, admin.ID, owe); err != nil {
 		return err

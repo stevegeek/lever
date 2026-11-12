@@ -44,8 +44,14 @@ version bump moves the block under the new version heading.
     now requires `hub.config.update`, so a jailed agent can no longer rename the controller through
     the loopback. This closes the known issue earlier releases describe; lever keeps its repairs.
   - Notifications gain `kind`, `resourceType`, `resourceId` and `excerpt` (text another principal
-    wrote). lever's manager now gets `excerpt` sanitized, bounded and marked `excerpt-reported:`, and
-    the others sanitized and bounded.
+    wrote). lever's manager now gets `excerpt` sanitized, bounded and marked `excerpt-reported:`, the
+    other fields and every key sanitized and bounded, and nested objects and arrays dropped.
+  - **The hub's project default scratchpad is turned off.** scion now refuses to remove a
+    project's `scratchpad` shared dir while its `project_defaults.default_scratchpad` is on (its
+    default), so lever's strip of that cross-agent read-write mount failed and `lever apply`
+    stopped at *register-project*. Every apply now sets the default off as `lever-admin` before
+    the strip (`PUT /api/v1/admin/project-defaults`, hub admin only, so an agent cannot turn it
+    back on); new projects then get no scratchpad either.
 
 ### Security
 
@@ -68,7 +74,7 @@ version bump moves the block under the new version heading.
 
 ### Upgrade
 
-- **Jail ABI 13.** The agent image changed (Claude Code 2.1.322, sciontool and, in the slim image,
+- **Jail ABI 14.** The agent image changed (Claude Code 2.1.322, sciontool and, in the slim image,
   scion from the new pin) and so did in-jail lever code: rebuild the agent image (`make
   lever-image` or `make lever-image-slim`, then any instance image built from it) and recreate the
   manager on it with `lever up --fresh --keep-conversation`. Doctor's *agent lever version* row says

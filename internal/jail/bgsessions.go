@@ -11,7 +11,7 @@ import (
 	"github.com/stevegeek/lever/internal/proc"
 )
 
-// AgentSessionsDir is where Claude Code (2.1.300) keeps one <pid>.json per
+// AgentSessionsDir is where Claude Code (2.1.322) keeps one <pid>.json per
 // running claude, interactive or in the background.
 const AgentSessionsDir = "/home/scion/.claude/sessions"
 

@@ -134,6 +134,11 @@ func (h *SpeakHandler) speak(w http.ResponseWriter, r *http.Request) {
 	case err != nil && r.Context().Err() != nil:
 		h.logf("voice: speech request of %d characters, voice %s: canceled after %d ms", n, voice, ms)
 		answerJSON(w, http.StatusServiceUnavailable, map[string]string{"error": WordCanceled})
+	case errors.Is(err, ErrBadText):
+		// Nothing speakable once rewritten (only a script the lexicons do
+		// not hold, emoji), or too long once numbers are written out.
+		h.logf("voice: speech request of %d characters, voice %s: refused (%v)", n, voice, err)
+		answerJSON(w, http.StatusBadRequest, map[string]string{"error": WordBadText})
 	case errors.Is(err, ErrSpeakNotSent):
 		h.logf("voice: speech request of %d characters, voice %s: did not reach the engine: %v", n, voice, err)
 		answerJSON(w, http.StatusServiceUnavailable, map[string]string{"error": WordNotReady})

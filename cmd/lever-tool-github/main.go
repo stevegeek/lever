@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"github.com/stevegeek/lever/internal/logging"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -86,6 +87,23 @@ func newMinter(o opts, key *rsa.PrivateKey) *ghpush.Minter {
 		PushPerms: pushPermissions(o)}
 }
 
+// newPusher builds push's and fetch's runner: push tokens from minter.Token,
+// fetch's read-only token from minter.TokenFor.
+func newPusher(o opts, minter *ghpush.Minter, g ghpush.Git, logger *slog.Logger) *ghpush.Pusher {
+	return &ghpush.Pusher{
+		Tree: o.tree, State: o.state, Prefix: o.prefix, BaseURL: "https://github.com",
+		Repos: o.repos, MaxBundle: o.maxBundle, ImportBudget: o.importBudget, LockWait: 30 * time.Second,
+		Deadline: 10 * time.Minute,
+		Tokens:   minter,
+		Scoped:   minter,
+		// GitHub refuses files over 100 MiB, so a bigger object can never be
+		// pushed; the caps bound what index-pack inflates and holds.
+		Limits: ghpush.PackLimits{MaxObjects: 2_000_000, MaxObjectSize: 100 << 20, MaxInflated: 4 << 30},
+		Git:    g,
+		Log:    logger,
+	}
+}
+
 // maxTextMax is GitHub's limit on a PR body.
 const maxTextMax = 65536
 
@@ -104,7 +122,7 @@ func parseFlags(args []string) (opts, error) {
 	fs.StringVar(&repos, "repos", "", "comma list of owner/name")
 	fs.StringVar(&o.prefix, "branch-prefix", "agent/", "required branch prefix")
 	fs.Int64Var(&o.maxBundle, "max-bundle", 256<<20, "bundle size cap in bytes")
-	fs.Int64Var(&o.importBudget, "import-budget", 1<<30, "bundle bytes one caller may import per hour, refusals included (0 = no cap)")
+	fs.Int64Var(&o.importBudget, "import-budget", 1<<30, "bundle bytes one caller may import (push) or receive (fetch) per hour, refusals included (0 = no cap)")
 	fs.StringVar(&ops, "ops", ghpush.OpPush, "comma list of operations to offer: "+strings.Join(ghpush.AllOps, ", "))
 	fs.StringVar(&methods, "merge-methods", "squash", "comma list of merge methods pr_merge may use (squash, merge, rebase); the first is the default")
 	fs.StringVar(&checks, "merge-checks", "", "what pr_merge requires on the head: any (at least one check, all green), none, or a comma list of check names that must succeed; required with pr_merge, no default")
@@ -222,6 +240,15 @@ func opBackstop(op string, repos map[string]bool, check func(map[string]string) 
 		}
 		return check(a)
 	}
+}
+
+func fetchBackstop(o opts) func(captool.ValidatedContext, map[string]string) error {
+	return opBackstop(ghpush.OpFetch, o.repos, func(a map[string]string) error {
+		if err := ghpush.ValidateFetchBranch(a["branch"]); err != nil {
+			return err
+		}
+		return ghpush.ValidateBundleName(a["bundle"])
+	})
 }
 
 func prOpenBackstop(o opts) func(captool.ValidatedContext, map[string]string) error {
@@ -351,6 +378,21 @@ func operations(o opts, p *ghpush.Pusher, g *ghpush.Ops) []captool.Operation {
 			Backstop:    pushBackstop(o.repos, o.prefix),
 			Handler: func(c captool.ValidatedContext, a map[string]string) (any, error) {
 				return asResult(p.Push(context.Background(), c.Caller, a["repo"], a["branch"], a["bundle"]))
+			},
+		},
+		ghpush.OpFetch: {
+			Name: ghpush.OpFetch,
+			Description: "read a branch from GitHub (any branch, main included) into a full git bundle at /workspace/.lever-files/github/<bundle>, " +
+				"replacing a file of that name; returns sha, bundle and the git fetch command that imports it as refs/remotes/origin/<branch>",
+			Params: []captool.ParamSpec{
+				repoParam,
+				{Name: "branch", Type: "string", Description: "branch to read, e.g. main"},
+				{Name: "bundle", Type: "string", Description: "bundle file name to write in /workspace/.lever-files/github/, e.g. origin-main.bundle"},
+			},
+			CaveatParam: caveat,
+			Backstop:    fetchBackstop(o),
+			Handler: func(c captool.ValidatedContext, a map[string]string) (any, error) {
+				return asResult(p.Fetch(context.Background(), c.Caller, a["repo"], a["branch"], a["bundle"]))
 			},
 		},
 		ghpush.OpPROpen: {
@@ -553,17 +595,7 @@ func main() {
 		log.Fatal(err)
 	}
 	minter := newMinter(o, key)
-	p := &ghpush.Pusher{
-		Tree: o.tree, State: o.state, Prefix: o.prefix, BaseURL: "https://github.com",
-		Repos: o.repos, MaxBundle: o.maxBundle, ImportBudget: o.importBudget, LockWait: 30 * time.Second,
-		Deadline: 10 * time.Minute,
-		Tokens:   minter,
-		// GitHub refuses files over 100 MiB, so a bigger object can never be
-		// pushed; the caps bound what index-pack inflates and holds.
-		Limits: ghpush.PackLimits{MaxObjects: 2_000_000, MaxObjectSize: 100 << 20, MaxInflated: 4 << 30},
-		Git:    g,
-		Log:    logger,
-	}
+	p := newPusher(o, minter, g, logger)
 	gh := &ghpush.Ops{
 		Repos: o.repos, Prefix: o.prefix,
 		API:    &ghpush.API{Base: "https://api.github.com", HTTP: ghpush.NewAPIClient(&http.Client{Timeout: 30 * time.Second})},

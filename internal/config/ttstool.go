@@ -146,6 +146,9 @@ func (a *App) validateTTSTools() error {
 		if t.Models == "" || t.Server == "" {
 			return fmt.Errorf("config: %s needs -models and -server (absolute host paths outside the tree)", key)
 		}
+		if strings.Contains(t.Models, ",") {
+			return fmt.Errorf("config: %s -models %q holds a comma, which sherpa-onnx would read as a list separator", key, t.Models)
+		}
 		if t.Tree == "" {
 			return fmt.Errorf("config: %s -tree is required: the instance's tree, %s", key, a.Tree)
 		}

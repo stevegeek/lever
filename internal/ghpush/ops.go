@@ -27,7 +27,7 @@ const (
 	OpRelease  = "release"
 )
 
-var AllOps = []string{OpPush, OpPROpen, OpPRStatus, OpPRMerge, OpRelease, OpCIRuns, OpCILog,
+var AllOps = []string{OpPush, OpFetch, OpPROpen, OpPRStatus, OpPRMerge, OpRelease, OpCIRuns, OpCILog,
 	OpIssueList, OpIssueRead, OpIssueComment, OpIssueClose}
 
 // OpPermissions is the App permission set each operation's token is
@@ -36,6 +36,7 @@ var AllOps = []string{OpPush, OpPROpen, OpPRStatus, OpPRMerge, OpRelease, OpCIRu
 // default set only.
 var OpPermissions = map[string]Permissions{
 	OpPush:     PushPermissions,
+	OpFetch:    {"contents": "read"},
 	OpPROpen:   {"contents": "read", "pull_requests": "write"},
 	OpPRStatus: {"pull_requests": "read", "checks": "read", "statuses": "read"},
 	OpPRMerge:  {"contents": "write", "pull_requests": "write", "checks": "read", "statuses": "read"},

@@ -18,10 +18,10 @@ import (
 )
 
 // testSpeechArchive is the voice package's tiny Kokoro archive (top
-// directory tiny-kokoro/, 10 files).
+// directory tiny-kokoro/, 12 files).
 const testSpeechArchive = "../../voice/testdata/tiny-kokoro.tar.bz2"
 
-// pinTestSpeech swaps in one speech model, kokoro-en-v0_19 pinned to
+// pinTestSpeech swaps in one speech model, the default name pinned to
 // testSpeechArchive, for the test's length.
 func pinTestSpeech(t *testing.T) voice.SpeechModel {
 	t.Helper()
@@ -33,8 +33,9 @@ func pinTestSpeech(t *testing.T) voice.SpeechModel {
 	m := voice.SpeechModel{Name: voice.DefaultSpeechModel, Kind: voice.KindKokoro,
 		ArchiveURL:  "https://github.com/someone/tiny/releases/download/models/tiny-kokoro.tar.bz2",
 		ArchiveSize: int64(len(b)), ArchiveSHA256: hex.EncodeToString(sum[:]), ArchiveRoot: "tiny-kokoro",
-		ModelFile: "model.onnx", TokensFile: "tokens.txt", VoicesFile: "voices.bin", DataDir: "espeak-ng-data",
-		Voices: []voice.SpeechVoice{{Name: "bf_emma", SID: 7, Lang: "en-GB"}}, DefaultVoice: "bf_emma", SampleRate: 24000}
+		ModelFile: "model.onnx", TokensFile: "tokens.txt", VoicesFile: "voices.bin",
+		Lexicons: map[string][]string{"en-GB": {"lexicon-gb-en.txt"}},
+		Voices:   []voice.SpeechVoice{{Name: "bf_emma", SID: 7, Lang: "en-GB"}}, DefaultVoice: "bf_emma", SampleRate: 24000}
 	old := voice.SpeechModels
 	voice.SpeechModels = []voice.SpeechModel{m}
 	t.Cleanup(func() { voice.SpeechModels = old })
@@ -106,11 +107,11 @@ func TestCheckTTSTool(t *testing.T) {
 	srv := voice.NewSpeakServer(&voice.SpeakHandler{Engine: stub, Model: m, Voice: "bf_emma", MaxChars: 600})
 	go func() { _ = srv.Serve(ln) }()
 	defer srv.Close()
-	if r := checkTTSTool(context.Background(), app); r.ok || !strings.Contains(r.detail, "not ready") || !strings.Contains(r.fix, "lever voice fetch kokoro-en-v0_19") {
+	if r := checkTTSTool(context.Background(), app); r.ok || !strings.Contains(r.detail, "not ready") || !strings.Contains(r.fix, "lever voice fetch kokoro-multi-lang-v1_0") {
 		t.Fatalf("not ready: %+v", r)
 	}
 	stub.ready = true
-	if r := checkTTSTool(context.Background(), app); !r.ok || !strings.Contains(r.detail, "ready: model kokoro-en-v0_19, voice bf_emma of 1, at most 600 characters") ||
+	if r := checkTTSTool(context.Background(), app); !r.ok || !strings.Contains(r.detail, "ready: model kokoro-multi-lang-v1_0, voice bf_emma of 1, at most 600 characters") ||
 		!strings.Contains(r.detail, "no port") {
 		t.Fatalf("ready: %+v", r)
 	}
@@ -136,7 +137,7 @@ func TestCheckTTSModel(t *testing.T) {
 	if _, err := archiveFetch(t)(context.Background(), m, tool.Models); err != nil {
 		t.Fatal(err)
 	}
-	if r := checkTTSModel(app); !r.ok || !strings.Contains(r.detail, "10 files") || !strings.Contains(r.detail, m.ArchiveSHA256[:12]) {
+	if r := checkTTSModel(app); !r.ok || !strings.Contains(r.detail, "12 files") || !strings.Contains(r.detail, m.ArchiveSHA256[:12]) {
 		t.Fatalf("good: %+v", r)
 	}
 	if err := os.WriteFile(voice.SpeechPath(tool.Models, m, "tokens.txt"), []byte("a 9\nb 2\n"), 0o600); err != nil {

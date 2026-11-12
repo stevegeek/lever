@@ -76,6 +76,10 @@ func parseFlags(args []string) (opts, error) {
 	if err := voice.CheckSocketPath(o.socket); err != nil {
 		return o, fmt.Errorf("-speak-socket: %w", err)
 	}
+	// sherpa-onnx takes several lexicons as one comma-separated option.
+	if strings.Contains(o.models, ",") {
+		return o, fmt.Errorf("-models %q holds a comma, which sherpa-onnx would read as a list separator", o.models)
+	}
 	for _, r := range []struct{ flag, v, why string }{
 		{"-models", o.models, "an agent could replace the model the engine loads"},
 		{"-server", o.server, "an agent could replace the program the host runs"},

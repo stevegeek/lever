@@ -19,7 +19,8 @@ func pinModel(t *testing.T) {
 		Name: voice.DefaultSpeechModel, Kind: voice.KindKokoro,
 		ArchiveURL:  "https://github.com/someone/kokoro/releases/download/models/kokoro.tar.bz2",
 		ArchiveSize: 1, ArchiveSHA256: strings.Repeat("c", 64), ArchiveRoot: "kokoro",
-		ModelFile: "model.onnx", TokensFile: "tokens.txt", VoicesFile: "voices.bin", DataDir: "espeak-ng-data",
+		ModelFile: "model.onnx", TokensFile: "tokens.txt", VoicesFile: "voices.bin",
+		Lexicons:     map[string][]string{"en-GB": {"lexicon-gb-en.txt"}},
 		Voices:       []voice.SpeechVoice{{Name: "bf_emma", SID: 7, Lang: "en-GB"}, {Name: "bm_george", SID: 9, Lang: "en-GB"}},
 		DefaultVoice: "bf_emma", SampleRate: 24000,
 	}}
@@ -96,6 +97,7 @@ func TestParseFlagsRefusals(t *testing.T) {
 		"no server":       {drop("-server"), "-server is required"},
 		"no socket":       {drop("-speak-socket"), "-speak-socket is required"},
 		"relative models": {set("-models", "models"), "absolute"},
+		"comma models":    {set("-models", "/srv/voice,models"), "comma"},
 		"relative server": {set("-server", "bin/tts"), "absolute"},
 		"unclean socket":  {set("-speak-socket", "/a/../b.sock"), "clean absolute"},
 		"long socket":     {set("-speak-socket", "/"+strings.Repeat("s", 120)), "at most"},

@@ -16,8 +16,8 @@ For each part of a message the page reads aloud, the remote proxy sends the text
 Unix socket (`-speak-socket`, the same path as `remote.voice.speak_socket`). The tool runs
 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)'s `sherpa-onnx-offline-tts` once, as its
 child, with a speech model from lever's pinned table, and answers the audio as WAV. The default
-model is Kokoro (`kokoro-en-v0_19`: 11 English voices, American and British, such as `bf_emma` and
-`bm_george`).
+model is Kokoro v1.0 (`kokoro-multi-lang-v1_0`: lever offers its 28 English voices, American and
+British, such as `bf_emma` and `bm_george`).
 
 The socket is not reached through the broker. It is `0600` in a private `0700` directory, so only
 processes of your user can connect. There is no long-running engine and no TCP port: nothing
@@ -37,25 +37,29 @@ nothing to speak with, and no agent can call it without an `obtain` grant.
 
 - sherpa-onnx's `sherpa-onnx-offline-tts`, which you install yourself (below). Install it outside
   the tree, owned by you or root and writable by no one else. Lever never builds or installs it.
-- Disk space for the model: about 350 MB for `kokoro-en-v0_19` and 80 MB for
-  `piper-en_GB-alba-medium`, espeak-ng's data included, and as much again while `lever voice
-  fetch` unpacks it (the archives are 320 MB and 67 MB). The engine runs on the CPU.
-- A sherpa-onnx 1.x release that runs Kokoro models (`--kokoro-model` in
-  `sherpa-onnx-offline-tts --help`), such as 1.13.8. sherpa-onnx 2.0 dropped espeak-ng: it ignores
-  `--kokoro-data-dir` and refuses to speak with `kokoro-en-v0_19` ("No lexicon available"), so it
-  does not work with lever's pinned Kokoro model.
+- Disk space for the model: about 370 MB for `kokoro-multi-lang-v1_0` and 85 MB for
+  `piper-en_GB-alba-medium`, the shared English lexicon included, and as much again while `lever
+  voice fetch` unpacks it (the archives are 350 MB and 67 MB, and the lexicon 6 MB). The engine
+  runs on the CPU.
+- sherpa-onnx 2.0 or later (2.0.1 is what lever was checked with). 2.0 dropped espeak-ng: a model
+  now reads text only through pronunciation lexicons, which lever passes. A 1.x release refuses
+  these arguments ("Errors in config!"). The tool speaks a short probe text with the program and
+  model before it serves, and reports itself not ready, with the reason in its log, if that fails.
+  An older sherpa-onnx is the usual cause.
 - Install the tool with `make install`. Releases ship it for darwin and linux.
 - [Remote access](/remote-access/) with the chat page and `remote.voice` on (read-aloud is part of
   it).
 
 ### Install sherpa-onnx
 
-Build it from source (CMake and a C++17 compiler), or unpack a prebuilt release archive for your
-platform from the project's GitHub releases. From source:
+Build it from source (CMake and a C++17 compiler), unpack a prebuilt release archive for your
+platform from the project's GitHub releases, or take the program from the `sherpa-onnx-bin`
+package on PyPI (`pip install sherpa-onnx-bin` in a virtual environment puts
+`sherpa-onnx-offline-tts` in its `bin/`). From source:
 
 ```sh
 git clone https://github.com/k2-fsa/sherpa-onnx
-cd sherpa-onnx && git checkout <a 1.x release tag, such as v1.13.8>
+cd sherpa-onnx && git checkout <a release tag, 2.0 or later, such as v2.0.1>
 mkdir build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF ..
 make -j4 sherpa-onnx-offline-tts
@@ -73,17 +77,18 @@ upgrade.
 ### A CPU-only Linux host
 
 The engine always runs on the CPU, so a headless Linux host with no GPU needs nothing more. On
-x86-64 Linux, sherpa-onnx's prebuilt `linux-x64` archive from its GitHub releases and a build from
-source as above both work; pick a 1.x release.
+x86-64 Linux, sherpa-onnx's prebuilt `linux-x64` archive from its GitHub releases, the PyPI
+`sherpa-onnx-bin` program and a build from source as above all work; pick 2.0 or later.
 
-**Expected latency.** Measured with sherpa-onnx 1.13.8 (its x86-64 Linux binary) and
-`kokoro-en-v0_19`, voice `bf_emma`, on an AMD Ryzen 9 9950X: a 41-character sentence (2.4 s of
-audio) took 1.1 s with the default 2 threads and 0.8 s with 4; a 207-character paragraph (10.7 s
-of audio) took 2.8 s with 2 threads and 2.0 s with 4. That is about a quarter of real time. An
-older 6-core Intel CPU is slower per core: expect two to three times these times, still faster
-than the audio plays and well inside the 2-minute bound of one run. On a host with cores to spare,
-raise `-threads` to 4. This was not measured on such a host, and `piper-en_GB-alba-medium` was not
-measured.
+**Expected latency.** Measured with sherpa-onnx 2.0.1 (the PyPI `sherpa-onnx-bin` x86-64 Linux
+program) on an AMD Ryzen 9 9950X, best of three runs with lever's arguments. With
+`kokoro-multi-lang-v1_0` and voice `bf_emma`, a 41-character sentence (2.3 s of audio) took 1.9 s
+with the default 2 threads and 1.8 s with 4, and a 207-character paragraph (10.9 s of audio) took
+3.7 s and 2.9 s. With `piper-en_GB-alba-medium` the same took 1.1 s and 1.6 s on 2 threads. About a
+second of each Kokoro run is loading its two lexicons, which the engine does on every run. An older
+6-core Intel CPU is slower per core: expect two to three times these times, still about as fast as
+the audio plays and well inside the 2-minute bound of one run. On a host with cores to spare,
+raise `-threads` to 4. This was not measured on such a host.
 
 ## 1. Configure the tool
 
@@ -95,7 +100,7 @@ broker:
                 -tree, /home/you/my-instance/workspace,
                 -models, /home/you/my-instance/.lever-state/voice-models,
                 -server, /usr/local/bin/sherpa-onnx-offline-tts,
-                -model, kokoro-en-v0_19,
+                -model, kokoro-multi-lang-v1_0,
                 -voice, bf_emma,
                 -speak-socket, /home/you/my-instance/.lever-state/tts/speak.sock]
       backend: 127.0.0.1:3213
@@ -116,9 +121,9 @@ command that takes `-speak-socket`, and reads these flags only in its command:
 | Flag | Required | Meaning |
 |---|---|---|
 | `-tree` | yes | Absolute path of the instance tree. Config load requires it and refuses a value that is not the instance's `tree`. |
-| `-models` | yes | Absolute path of the directory with the models. `lever voice fetch` downloads into it, each speech model in its own directory. Outside the tree. Each run's output is written to a private directory in it and removed at once. It may be the whisper tool's `-models`. |
+| `-models` | yes | Absolute path of the directory with the models. `lever voice fetch` downloads into it, each speech model in its own directory. Outside the tree, and with no comma (sherpa-onnx reads a comma in a lexicon option as a list separator). Each run's output is written to a private directory in it and removed at once. It may be the whisper tool's `-models`. |
 | `-server` | yes | Absolute path of `sherpa-onnx-offline-tts`. Outside the tree; a `manager.read_only` entry does not excuse it. Its real file must be an executable owned by you or root that no one else can write to, in a directory no one else can write to. |
-| `-model` | no | A name from lever's pinned speech table: `kokoro-en-v0_19` (default) or `piper-en_GB-alba-medium` (lighter, one voice, less natural). |
+| `-model` | no | A name from lever's pinned speech table: `kokoro-multi-lang-v1_0` (default) or `piper-en_GB-alba-medium` (lighter, one voice, less natural, American pronunciations). |
 | `-voice` | no | The default voice, one of the model's. Default: `bf_emma` for Kokoro, `alba` for the Piper model. The page's voice picker can choose another per device. |
 | `-speed` | no | Speaking rate, `0.5` to `2.0`. Default `1`, the model's own pace. |
 | `-threads` | no | CPU threads of one run, `1` to `16`. Default `2`. |
@@ -127,34 +132,44 @@ command that takes `-speak-socket`, and reads these flags only in its command:
 | `-name` | no | Tool name. Default `tts`. It must equal the `name` in the config. |
 
 Config load checks each of these (the model and voice against lever's table, the numbers against
-their ranges) and refuses the program, the models and the socket inside the tree. The Kokoro voices
-of `kokoro-en-v0_19` are `af`, `af_bella`, `af_nicole`, `af_sarah`, `af_sky`, `am_adam`,
-`am_michael` (American) and `bf_emma`, `bf_isabella`, `bm_george`, `bm_lewis` (British), speaker
-ids 0 to 10 in that order, as sherpa-onnx documents them.
+their ranges) and refuses the program, the models and the socket inside the tree. The voices lever
+offers of `kokoro-multi-lang-v1_0` are its English ones, with the speaker ids the model records:
+`af_alloy`, `af_aoede`, `af_bella`, `af_heart`, `af_jessica`, `af_kore`, `af_nicole`, `af_nova`,
+`af_river`, `af_sarah`, `af_sky`, `am_adam`, `am_echo`, `am_eric`, `am_fenrir`, `am_liam`,
+`am_michael`, `am_onyx`, `am_puck`, `am_santa` (American, ids 0 to 19) and `bf_alice`, `bf_emma`,
+`bf_isabella`, `bf_lily`, `bm_daniel`, `bm_fable`, `bm_george`, `bm_lewis` (British, ids 20 to 27).
+Its other voices (Spanish, French, Hindi, Italian, Japanese, Portuguese, Chinese) are not offered.
 
-**Why `kokoro-en-v0_19`.** It is the English-only Kokoro model: espeak-ng alone turns its text
-into phonemes, so sherpa-onnx needs only the model, its voices, its tokens and espeak-ng's data,
-and every sherpa-onnx release that runs Kokoro runs it. sherpa-onnx's newer multi-lingual Kokoro
-models (`kokoro-multi-lang-v1_0` has eight British voices to this one's four) also need a lexicon
-or language flag that depends on the voice, and carry Chinese dictionaries and rules; lever does
-not offer them yet.
+**How text is read.** sherpa-onnx 2.x turns a word into speech only through its lexicons, and skips
+a word it finds in none of them. Each voice gets sherpa-onnx's separate English lexicon
+(`lexicon-en-us.txt`, which has inflected forms and common technical words) and then its accent's
+own lexicon from the model (`lexicon-gb-en.txt` or `lexicon-us-en.txt`), which wins where both
+have a word. Before the engine sees the text, the tool rewrites what would still be skipped:
+numbers become words ("3.5%" is "three point five percent", "1st" is "first", a version's
+"1.0.2" is "one point zero point two"); a word in no lexicon is split where its case changes
+("GitHub" is "Git Hub") and any part still unknown is spelled letter by letter ("PRs" is "p r s",
+"gofmt" is "g o f m t"); and symbols other than sentence punctuation become spaces (a branch
+name's "/" and "-"). Names the lexicons lack are therefore spelled, not guessed.
 
 ## 2. Fetch the model
 
 ```sh
-lever voice fetch kokoro-en-v0_19
+lever voice fetch kokoro-multi-lang-v1_0
 lever voice fetch                  # the whisper tool's model, and the tts tool's
 ```
 
 sherpa-onnx publishes each model as one archive among the assets of its
 [`tts-models` release](https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models): the ONNX
-model, its tokens, Kokoro's voice file and espeak-ng's data. Lever pins the archive's URL, size and
-sha256 (as GitHub records them for the asset) and downloads it only from `github.com` and GitHub's
-release-asset hosts. It keeps the archive only if its size and sha256 match, and then unpacks it
-into `<models>/<model>/`: directories (`0700`) and regular files (`0600`) only, from below the
-archive's top directory. A link, a device or a path outside that directory refuses the whole
-archive, and so does one without the files sherpa-onnx needs. Lever writes a manifest there with
-the size and sha256 of every file it unpacked, and deletes the archive.
+model, its tokens, Kokoro's voice file and lexicons (the archives still carry espeak-ng's data,
+which 2.x does not use). The English lexicon both models use, `lexicon-en-us.txt`, is a separate
+asset of the same release. Lever pins the URL, size and sha256 of the archive and of that file (as
+GitHub records them for the asset) and downloads them only from `github.com` and GitHub's
+release-asset hosts. It keeps a download only if its size and sha256 match, and then unpacks the
+archive into `<models>/<model>/`: directories (`0700`) and regular files (`0600`) only, from below
+the archive's top directory, and places the lexicon beside it (`0600`). A link, a device or a path
+outside that directory refuses the whole archive, and so does one without the files sherpa-onnx
+needs. Lever writes a manifest there with the size and sha256 of every file, and deletes the
+archive.
 
 If sherpa-onnx uploads a model's archive again, its sha256 changes and `lever voice fetch` refuses
 it until a lever release pins the new one; a model already fetched keeps working.

@@ -7,6 +7,47 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Changed
+
+- **The agent image bakes Claude Code 2.1.322 (was 2.1.300).** These are unchanged in 2.1.322,
+  read from the linux-x64 and linux-arm64 builds: the messages lever reads from Claude Code (a stale background
+  session, no conversation to continue), the session records under `~/.claude/sessions` (`kind`,
+  `parkedJobId`, `pidDomain`, and the pid domain built from `/etc/machine-id` and the pid
+  namespace), the agent-view switch (`CLAUDE_CODE_DISABLE_AGENT_VIEW` and `disableAgentView`, still
+  documented as equivalent and still a restrictive managed setting), and the environment variables
+  lever sets. The Claude Code binary grows from 267 MB to 342 MB (linux-x64), so the agent image
+  grows by about as much.
+
+### Upgrade
+
+- **Jail ABI 12.** The agent image changed (Claude Code 2.1.322): rebuild the agent image (`make
+  lever-image` or `make lever-image-slim`, then any instance image built from it) and recreate the
+  manager on it with `lever up --fresh --keep-conversation`. Doctor's *agent lever version* row says
+  so.
+
+## [1.0.0-beta.9] - 2026-11-09
+
+### Added
+
+- **The github tool can read a branch: `fetch`.** A jail could push to GitHub but never read from
+  it, so when `main` moved on GitHub the agent's PRs conflicted and it could not see why or fix
+  them. The opt-in `fetch` operation (`repo`, `branch`, `bundle`) reads any branch, `main`
+  included, with a Contents: read token and writes it as a full bundle into
+  `/workspace/.lever-files/github/`, replacing a file of that name; the result names the
+  `git fetch` command that imports it. The shared mirror still receives only `main`. A branch
+  whose history is over `-max-bundle` is refused before the bundle is built, and every fetch,
+  refused ones too, counts against the caller's `-import-budget`. The GitHub tool guide now also says that
+  `pr_status` and `pr_merge` need Checks: read and Commit statuses: read on the App. Add `fetch`
+  to `-ops`, the tool's `operations` and the agent's `obtain` to offer it. Host-only: the Jail
+  ABI does not change.
+### Upgrade
+
+- **Jail ABI unchanged (11).** No agent image rebuild. `fetch` is off until you add it to the
+  github tool's `-ops`, its `operations` (`{name: fetch, params: [repo, branch, bundle]}`) and the
+  agent's `obtain`.
+
+## [1.0.0-beta.8] - 2026-11-09
+
 ### Added
 
 - **The manager hears when a service host is back.** An agent that holds back work while a service
@@ -18,6 +59,27 @@ version bump moves the block under the new version heading.
   not running. The manager's skill gains the `service-host-notice` kind, only on instances with a
   service host, so other instances keep their skill unchanged. Host-only: the Jail ABI does not
   change. (T0352)
+
+### Changed
+
+- **Read-aloud needs sherpa-onnx 2.0 and uses Kokoro v1.0.** sherpa-onnx 2.0 dropped espeak-ng, so
+  it could not speak lever's pinned `kokoro-en-v0_19` ("No lexicon available"), and lever's checks
+  did not notice: the tool looked ready and every read-aloud failed. The default speech model is
+  now `kokoro-multi-lang-v1_0` (Kokoro v1.0, with 28 English voices, `bf_emma` still the default).
+  It is given sherpa-onnx's English lexicon, `lexicon-en-us.txt`, which `lever voice fetch` now
+  downloads beside the model and pins like the archive, and then the voice's own American or
+  British lexicon. `piper-en_GB-alba-medium` gets the English lexicon too. sherpa-onnx 2.x skips any
+  word in no lexicon, so the tool now rewrites the text first: numbers become words, and a word the
+  lexicons lack is split at its case changes and spelled where still unknown ("3 PRs" is "three
+  p r s"), so nothing is silently dropped. Accented Latin letters are read plain ("café" is
+  "cafe"), and a sign or currency before a number is spoken ("-5", "$5"). A text with nothing
+  speakable left (another script, emoji) is refused as bad text, and one that numbers would grow
+  past four times the request limit is refused before the engine runs. Before it serves, the tool
+  speaks a short probe text and reports itself not ready, with the reason in its log, if the
+  program cannot speak with the model; that is what a sherpa-onnx 1.x now hits. A failed probe is
+  tried again after a minute, and at once when the program file changes. `-models` with a comma is refused, since
+  sherpa-onnx reads several lexicons as one comma-separated option. The voice `af` (a blend in
+  v0.19) is gone. Host-only: the Jail ABI does not change.
 
 ### Fixed
 
@@ -76,6 +138,15 @@ version bump moves the block under the new version heading.
 
 ### Upgrade
 
+- **Jail ABI unchanged (11).** No agent image rebuild. Everything here is host-side and takes
+  effect after `lever apply` or `lever up`, which restarts the broker on the new version.
+- **Read-aloud (`lever-tool-tts`):** install sherpa-onnx 2.0 or later (for example `pip install
+  sherpa-onnx-bin` in a virtual environment, or a 2.x release archive) and point `-server` at it;
+  run `lever voice fetch kokoro-multi-lang-v1_0`; set `-model kokoro-multi-lang-v1_0` (or drop
+  `-model` for the default) in the tool's command, and replace `-voice af` if you used it; then
+  `lever reload`. With `piper-en_GB-alba-medium`, run `lever voice fetch piper-en_GB-alba-medium`
+  again for its lexicon. The old `kokoro-en-v0_19` directory in `-models` can be deleted. A config
+  naming `kokoro-en-v0_19` no longer loads.
 - **Supervised tool backends.** A config whose supervised tool sets `backend` to anything but a
   literal loopback IP (`0.0.0.0`, a LAN address, or a name such as `localhost`) no longer loads;
   write `127.0.0.1:PORT`. Every tool lever ships, and every example, already does. A running

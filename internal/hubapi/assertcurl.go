@@ -34,24 +34,30 @@ const assertCurlScript = `IFS= read -r t || exit 1; [ -n "$t" ] || exit 1; ` +
 	`-o - -w '\n%{http_code}' -X "$1" ` +
 	`-H @- -H 'Accept: application/json' "$2"`
 
-// assertCurlBodyScript is assertCurlScript with a JSON body from the
-// environment, like curlBodyScript.
+// assertCurlBodyScript is assertCurlScript with a JSON body. stdin holds the
+// assertion line, then the body: the shell reads the line (read takes one
+// byte at a time from a pipe, so the body stays unread), keeps the rest of
+// stdin as fd 4, and runs curl with the header on fd 3 (-H @/dev/fd/3, a
+// pipe from printf) and the body on stdin (--data-binary @-). Neither is in
+// any argv or environment, in the jail or on the host, whose argv the jail
+// runner builds from the environment. A secret in the body (a user secret,
+// SetUserSecret) stays out of every process list.
 const assertCurlBodyScript = `IFS= read -r t || exit 1; [ -n "$t" ] || exit 1; ` +
-	`printf '` + AssertionHeader + `: %s\n' "$t" | ` +
+	`{ printf '` + AssertionHeader + `: %s\n' "$t" | ` +
 	`exec curl -q -g -sS --noproxy '*' --connect-timeout 5 --max-time 20 --max-filesize "$3" ` +
 	`-o - -w '\n%{http_code}' -X "$1" ` +
-	`-H @- -H 'Accept: application/json' ` +
-	`-H 'Content-Type: application/json' --data-binary "$LEVER_HUB_BODY" "$2"`
+	`-H @/dev/fd/3 -H 'Accept: application/json' ` +
+	`-H 'Content-Type: application/json' --data-binary @- "$2" 3<&0 <&4; } 4<&0`
 
 // assertCurlIfMatchScript is assertCurlBodyScript with an If-Match header
 // from the environment. run accepts only a decimal revision, so the value
-// cannot carry a header break.
+// cannot carry a header break, and it is no secret.
 const assertCurlIfMatchScript = `IFS= read -r t || exit 1; [ -n "$t" ] || exit 1; ` +
-	`printf '` + AssertionHeader + `: %s\n' "$t" | ` +
+	`{ printf '` + AssertionHeader + `: %s\n' "$t" | ` +
 	`exec curl -q -g -sS --noproxy '*' --connect-timeout 5 --max-time 20 --max-filesize "$3" ` +
 	`-o - -w '\n%{http_code}' -X "$1" ` +
-	`-H @- -H 'Accept: application/json' -H "If-Match: $LEVER_HUB_IF_MATCH" ` +
-	`-H 'Content-Type: application/json' --data-binary "$LEVER_HUB_BODY" "$2"`
+	`-H @/dev/fd/3 -H 'Accept: application/json' -H "If-Match: $LEVER_HUB_IF_MATCH" ` +
+	`-H 'Content-Type: application/json' --data-binary @- "$2" 3<&0 <&4; } 4<&0`
 
 // AssertCurl is a Doer that runs one request inside the jail with curl,
 // authenticated by a fresh lever assertion instead of the controller PAT.
@@ -249,16 +255,17 @@ func (a *AssertCurl) run(ctx context.Context, method, path string, body []byte, 
 	}
 	var env map[string]string
 	script := assertCurlScript
+	stdin := assertion + "\n"
 	if body != nil {
-		env = map[string]string{"LEVER_HUB_BODY": string(body)}
 		script = assertCurlBodyScript
+		stdin += string(body)
 	}
 	if len(ifMatch) > 0 {
 		if body == nil {
 			return 0, nil, fmt.Errorf("%s %s: If-Match needs a request body", method, path)
 		}
-		env["LEVER_HUB_IF_MATCH"] = ifMatch[0]
+		env = map[string]string{"LEVER_HUB_IF_MATCH": ifMatch[0]}
 		script = assertCurlIfMatchScript
 	}
-	return runCurlStdin(ctx, a.Runner, strings.NewReader(assertion+"\n"), env, script, method, path, strings.TrimRight(a.BaseURL, "/")+path)
+	return runCurlStdin(ctx, a.Runner, strings.NewReader(stdin), env, script, method, path, strings.TrimRight(a.BaseURL, "/")+path)
 }

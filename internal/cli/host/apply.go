@@ -1271,20 +1271,27 @@ func (w *applyWiring) hub() *hubapi.Client {
 	return &hubapi.Client{T: hubJailTransport(w.jr, w.state)}
 }
 
-// setUserSecret sets a user-scope secret of the controller with scion's CLI
-// (the controller PAT). A hub from scion e8160a10 on refuses that to an
-// access token and wants an interactive login, which a hub assertion is, so
-// the secret is then set through the hub's REST route as the controller.
+// setUserSecret sets a user-scope secret of the controller. It goes through
+// the hub's REST route as the controller (setUserSecretAsController), which
+// keeps the value off every command line: the scion CLI takes it only as an
+// argument, and from scion e8160a10 on the hub refuses it to the controller
+// PAT anyway (8ee1dbd2f wants an interactive login, which a hub assertion
+// is). Only a hub without that route (404, an older scion) or an instance
+// with no recorded controller falls back to the CLI.
 func (w *applyWiring) setUserSecret(ctx context.Context, key, value string) error {
-	err := w.sc.SecretSet(ctx, key, value)
-	if !sessionRequired(err) {
-		return err
+	rec, found, err := w.state.LoadHubIdentity()
+	if err != nil {
+		return fmt.Errorf("setting %s: reading the hub identity record: %w", key, err)
 	}
-	rec, found, lerr := w.state.LoadHubIdentity()
-	if lerr != nil || !found || rec.ControllerID == "" {
-		return fmt.Errorf("setting %s as the controller: no recorded controller to check the assertion against (%v); the hub refused it to the controller PAT: %w", key, lerr, err)
+	if !found || rec.ControllerID == "" {
+		return w.sc.SecretSet(ctx, key, value)
 	}
-	return setUserSecretAsController(ctx, w.assertHub(w.signer.Controller), rec.ControllerID, key, value)
+	err = setUserSecretAsController(ctx, w.assertHub(w.signer.Controller), rec.ControllerID, key, value)
+	var ae *hubapi.APIError
+	if errors.As(err, &ae) && ae.Status == http.StatusNotFound {
+		return w.sc.SecretSet(ctx, key, value)
+	}
+	return err
 }
 
 // setUserSecretAsController writes the secret only after the controller's
@@ -1300,15 +1307,9 @@ func setUserSecretAsController(ctx context.Context, hc *hubapi.Client, controlle
 		return fmt.Errorf("setting %s as the controller: the controller's assertion resolves to hub user %s, not the controller %s; nothing was written", key, me.ID, controllerID)
 	}
 	if err := hc.SetUserSecret(ctx, key, value); err != nil {
-		return fmt.Errorf("setting %s as the controller (the hub refused it to the controller PAT): %w", key, err)
+		return fmt.Errorf("setting %s as the controller: %w", key, err)
 	}
 	return nil
-}
-
-// sessionRequired reports the hub's refusal of a user- or hub-level secret to
-// an access token (scion 8ee1dbd2f): it wants an interactive login.
-func sessionRequired(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "require an interactive login")
 }
 
 // stripProjectSharedDirs removes scion's default cross-agent `scratchpad` mount

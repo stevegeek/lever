@@ -59,7 +59,7 @@ func TestAssertCurlSendsTheAssertionOnStdinAndNeverABearer(t *testing.T) {
 		if strings.Contains(strings.ToLower(script), "authorization") || strings.Contains(script, "SCION_HUB_TOKEN") {
 			t.Fatalf("script must never send a bearer: %q", script)
 		}
-		if !strings.Contains(script, "-H @-") || !strings.Contains(script, "printf '"+AssertionHeader+": %s\\n'") {
+		if !(strings.Contains(script, "-H @-") || strings.Contains(script, "-H @/dev/fd/3")) || !strings.Contains(script, "printf '"+AssertionHeader+": %s\\n'") {
 			t.Fatalf("script must feed the header to curl on stdin: %q", script)
 		}
 		if !strings.Contains(script, "curl -q ") || !strings.Contains(script, "--noproxy '*'") {
@@ -83,11 +83,11 @@ func TestAssertCurlThroughTheJailRunnerKeepsTheAssertionOffTheHostArgv(t *testin
 	if strings.Contains(argv, "assertion-secret") {
 		t.Fatalf("assertion on the host argv: %q", argv)
 	}
-	if call.Stdin != testAssertion+"\n" {
-		t.Fatalf("stdin = %q, want the assertion line", call.Stdin)
+	if call.Stdin != testAssertion+"\n"+`{"email":"a@b"}` {
+		t.Fatalf("stdin = %q, want the assertion line then the body", call.Stdin)
 	}
-	if !strings.Contains(argv, "LEVER_HUB_BODY={\"email\":\"a@b\"}") {
-		t.Fatalf("the body rides the env like JailCurl's: %q", argv)
+	if strings.Contains(argv, "a@b") {
+		t.Fatalf("the body is on the host argv: %q", argv)
 	}
 }
 
@@ -352,14 +352,14 @@ func TestAssertCurlSharesJailCurlErrorHandling(t *testing.T) {
 	}
 }
 
-func TestAssertCurlDoBodySendsJSONFromEnv(t *testing.T) {
+func TestAssertCurlDoBodySendsJSONOnStdin(t *testing.T) {
 	r := &scriptedRunner{res: proc.Result{Stdout: "{}\n200"}}
 	a, _ := assertCurl(r)
 	if _, _, err := a.DoBody(context.Background(), "PATCH", "/api/v1/users/u-1", []byte(`{"role":"member"}`)); err != nil {
 		t.Fatalf("DoBody: %v", err)
 	}
-	if r.call.Env["LEVER_HUB_BODY"] != `{"role":"member"}` || r.call.Args[1] != assertCurlBodyScript {
-		t.Fatalf("env=%v script=%q", r.call.Env, r.call.Args[1])
+	if len(r.call.Env) != 0 || r.call.Stdin != testAssertion+"\n"+`{"role":"member"}` || r.call.Args[1] != assertCurlBodyScript {
+		t.Fatalf("env=%v stdin=%q script=%q", r.call.Env, r.call.Stdin, r.call.Args[1])
 	}
 	if r.call.Args[3] != "PATCH" {
 		t.Fatalf("method = %q", r.call.Args[3])
@@ -374,10 +374,10 @@ func TestAssertCurlScriptKeepsTheAssertionOutOfTheEnvironment(t *testing.T) {
 	if err := os.WriteFile(dir+"/curl", []byte(fake), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, script := range []string{assertCurlScript, assertCurlBodyScript} {
+	{
 		r := proc.RealRunner{}
-		env := map[string]string{"PATH": dir + ":/usr/bin:/bin", "OUT": dir, "LEVER_HUB_BODY": "{}"}
-		res, err := r.RunStdin(context.Background(), strings.NewReader(testAssertion+"\n"), env, "sh", "-c", script, "_", "GET", "http://h/api/v1/auth/me")
+		env := map[string]string{"PATH": dir + ":/usr/bin:/bin", "OUT": dir}
+		res, err := r.RunStdin(context.Background(), strings.NewReader(testAssertion+"\n"), env, "sh", "-c", assertCurlScript, "_", "GET", "http://h/api/v1/auth/me")
 		if err != nil {
 			t.Fatalf("run: %v (%s)", err, res.Stderr)
 		}
@@ -390,7 +390,31 @@ func TestAssertCurlScriptKeepsTheAssertionOutOfTheEnvironment(t *testing.T) {
 			t.Fatalf("curl's stdin = %q", in)
 		}
 	}
-	res, err := proc.RealRunner{}.RunStdin(context.Background(), strings.NewReader(""), map[string]string{"PATH": dir + ":/usr/bin:/bin", "OUT": dir},
+	// The body script: the header on fd 3, the body on stdin, neither in
+	// curl's argv or environment.
+	bodyFake := "#!/bin/sh\nenv > \"$OUT/env\"\nprintf '%s ' \"$@\" > \"$OUT/argv\"\ncat /dev/fd/3 > \"$OUT/hdr\"\ncat > \"$OUT/stdin\"\nprintf '{}\\n200'\n"
+	if err := os.WriteFile(dir+"/curl", []byte(bodyFake), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"value":"body-secret-xyz"}`
+	res, err := proc.RealRunner{}.RunStdin(context.Background(), strings.NewReader(testAssertion+"\n"+body), map[string]string{"PATH": dir + ":/usr/bin:/bin", "OUT": dir},
+		"sh", "-c", assertCurlBodyScript, "_", "PUT", "http://h/api/v1/secrets/K", "1024")
+	if err != nil {
+		t.Fatalf("body run: %v (%s)", err, res.Stderr)
+	}
+	for _, f := range []string{"env", "argv"} {
+		dump, _ := os.ReadFile(dir + "/" + f)
+		if strings.Contains(string(dump), "assertion-secret") || strings.Contains(string(dump), "body-secret-xyz") {
+			t.Fatalf("curl's %s holds a secret:\n%s", f, dump)
+		}
+	}
+	if hdr, _ := os.ReadFile(dir + "/hdr"); string(hdr) != AssertionHeader+": "+testAssertion+"\n" {
+		t.Fatalf("curl's header fd = %q", hdr)
+	}
+	if in, _ := os.ReadFile(dir + "/stdin"); string(in) != body {
+		t.Fatalf("curl's stdin = %q, want the body", in)
+	}
+	res, err = proc.RealRunner{}.RunStdin(context.Background(), strings.NewReader(""), map[string]string{"PATH": dir + ":/usr/bin:/bin", "OUT": dir},
 		"sh", "-c", assertCurlScript, "_", "GET", "http://h/api/v1/auth/me")
 	if err == nil {
 		t.Fatalf("an empty stdin must fail before curl runs: %q", res.Stdout)
@@ -415,7 +439,7 @@ func TestAssertCurlIfMatch(t *testing.T) {
 	if _, _, err := a.DoBodyIfMatch(context.Background(), "PUT", "/api/v1/admin/access-constraints/c-1", []byte(`{}`), "12"); err != nil {
 		t.Fatal(err)
 	}
-	if r.call.Env["LEVER_HUB_IF_MATCH"] != "12" || r.call.Args[1] != assertCurlIfMatchScript || r.call.Stdin != testAssertion+"\n" {
+	if r.call.Env["LEVER_HUB_IF_MATCH"] != "12" || r.call.Args[1] != assertCurlIfMatchScript || r.call.Stdin != testAssertion+"\n{}" {
 		t.Fatalf("env=%v script=%q", r.call.Env, r.call.Args[1])
 	}
 	for _, bad := range []string{"", "1\r\nX-Evil: 1", "\"3\"", "-1", "12345678901234567890"} {
@@ -427,7 +451,7 @@ func TestAssertCurlIfMatch(t *testing.T) {
 	if _, _, err := a.DoBodyIfMatch(context.Background(), "PUT", "/api/v1/admin/roles/r-1/../../x", []byte(`{}`), "1"); !errors.Is(err, ErrAssertionPathRefused) {
 		t.Fatalf("path check skipped: %v", err)
 	}
-	if !strings.Contains(assertCurlIfMatchScript, "exec curl -q -g ") || !strings.Contains(assertCurlIfMatchScript, "-H @-") ||
+	if !strings.Contains(assertCurlIfMatchScript, "exec curl -q -g ") || !strings.Contains(assertCurlIfMatchScript, "-H @/dev/fd/3") ||
 		strings.Contains(strings.ToLower(assertCurlIfMatchScript), "authorization") {
 		t.Fatalf("script: %q", assertCurlIfMatchScript)
 	}

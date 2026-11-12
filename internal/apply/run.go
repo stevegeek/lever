@@ -447,6 +447,11 @@ type Deps struct {
 	// worse than a loud bring-up failure. The project name is the workspace
 	// basename, as ensureControllerPAT passes to hub token create.
 	StripProjectSharedDirs func(ctx context.Context, projectName string) error
+	// SetUserSecret sets a user-scope secret of the controller that scion
+	// injects into every agent (the manager's credential, the API-key
+	// placeholder). nil uses Scion.SecretSet (the controller PAT through
+	// scion's CLI).
+	SetUserSecret func(ctx context.Context, key, value string) error
 	// EnsureAgentRoleCeiling writes the project's max and default agent role so
 	// the hub refuses any create above the role lever stamps (the hub-side
 	// counterpart of --role). It runs on both register paths, and a failure is
@@ -509,6 +514,15 @@ type Deps struct {
 	// manager's container gone (confirmManagerContainerGone). Zero takes the
 	// default.
 	ContainerGoneRetry RetryBudget
+}
+
+// userSecret sets a user-scope secret through SetUserSecret, or the scion
+// CLI when that is nil.
+func (d Deps) userSecret(ctx context.Context, key, value string) error {
+	if d.SetUserSecret != nil {
+		return d.SetUserSecret(ctx, key, value)
+	}
+	return d.Scion.SecretSet(ctx, key, value)
 }
 
 func (d Deps) check() error {
@@ -1060,7 +1074,7 @@ func runCredential(ctx context.Context, s Step, d Deps) error {
 		// empty credential file too).
 		return fmt.Errorf("credential file %s is empty", s.Target)
 	}
-	return d.Scion.SecretSet(ctx, "CLAUDE_CODE_OAUTH_TOKEN", tok)
+	return d.userSecret(ctx, "CLAUDE_CODE_OAUTH_TOKEN", tok)
 }
 
 // ImageRegistry is the registry prefix scion rewrites an unqualified agent
@@ -2116,7 +2130,7 @@ func (r *run) prepareAPIKeyMode(ctx context.Context, jp string) error {
 	if err := r.d.Scion.EnvSet(ctx, jp, "LEVER_LLM_AUTH", "api-key"); err != nil {
 		return fmt.Errorf("set LEVER_LLM_AUTH for manager: %w", err)
 	}
-	if err := r.d.Scion.SecretSet(ctx, "ANTHROPIC_API_KEY", apiKeyPlaceholder); err != nil {
+	if err := r.d.userSecret(ctx, "ANTHROPIC_API_KEY", apiKeyPlaceholder); err != nil {
 		return fmt.Errorf("set placeholder ANTHROPIC_API_KEY: %w", err)
 	}
 	return nil

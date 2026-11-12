@@ -52,6 +52,12 @@ version bump moves the block under the new version heading.
     stopped at *register-project*. Every apply now sets the default off as `lever-admin` before
     the strip (`PUT /api/v1/admin/project-defaults`, hub admin only, so an agent cannot turn it
     back on); new projects then get no scratchpad either.
+  - **User-level secrets need an interactive login** (8ee1dbd2f): the hub refuses
+    `scion hub env set --secret` at user scope to the controller PAT, so the manager's credential
+    and the API-key placeholder could not be set and `lever up` stopped at *start-manager*. When
+    the hub refuses it that way, lever now sets the same user-scope secret through
+    `PUT /api/v1/secrets/{key}` as the controller with a hub assertion, which the hub counts as a
+    login. An older scion takes the PAT as before.
 
 ### Security
 
@@ -70,7 +76,11 @@ version bump moves the block under the new version heading.
   secret of the user's, which the user's other agents then receive; reveal shows it),
   `/api/v1/projects/{id}/visitors*` and `/api/v1/users/me/visitor-*`,
   `/api/v1/attachment-deliveries/*`, and the runtime broker's own `/api/v1/broker/*` routes, which
-  no browser calls. So no remote login can approve a pending secret.
+  no browser calls. So no remote login can approve a pending secret. Maintenance writes
+  (`/api/v1/admin/maintenance/*`) are refused as well: scion's new hub self-update can start
+  `update-binary` there, which would replace lever's pinned scion with an upstream release. It is
+  hub-admin only, and lever's unversioned scion build never finds a release, so this is defense in
+  depth.
 
 ### Upgrade
 

@@ -1089,6 +1089,7 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		ScionProjectRegistered: b.ScionProjectRegistered,
 
 		StripProjectSharedDirs: w.stripProjectSharedDirs,
+		SetUserSecret:          w.setUserSecret,
 		EnsureAgentRoleCeiling: w.ensureAgentRoleCeiling,
 		RepairScionHubEndpoint: w.repairScionHubEndpoint,
 		VerifyAgentRole:        w.verifyAgentRole,
@@ -1268,6 +1269,27 @@ func recordMounts(agents []hubapi.Agent, agentName string) ([]jail.Mount, error)
 // a re-mint is picked up.
 func (w *applyWiring) hub() *hubapi.Client {
 	return &hubapi.Client{T: hubJailTransport(w.jr, w.state)}
+}
+
+// setUserSecret sets a user-scope secret of the controller with scion's CLI
+// (the controller PAT). A hub from scion e8160a10 on refuses that to an
+// access token and wants an interactive login, which a hub assertion is, so
+// the secret is then set through the hub's REST route as the controller.
+func (w *applyWiring) setUserSecret(ctx context.Context, key, value string) error {
+	err := w.sc.SecretSet(ctx, key, value)
+	if !sessionRequired(err) {
+		return err
+	}
+	if rerr := w.assertHub(w.signer.Controller).SetUserSecret(ctx, key, value); rerr != nil {
+		return fmt.Errorf("setting %s as the controller (the hub refused it to the controller PAT): %w", key, rerr)
+	}
+	return nil
+}
+
+// sessionRequired reports the hub's refusal of a user- or hub-level secret to
+// an access token (scion 8ee1dbd2f): it wants an interactive login.
+func sessionRequired(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "require an interactive login")
 }
 
 // stripProjectSharedDirs removes scion's default cross-agent `scratchpad` mount

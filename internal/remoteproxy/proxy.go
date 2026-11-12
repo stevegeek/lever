@@ -223,8 +223,10 @@ func mintsCredential(method, p string) bool {
 //     (hub-held files with unauthenticated share and view links) and chat
 //     thread groups (project-wide groups agents can create and rename): lever
 //     has not reviewed them, and each reaches past the agent's own surface.
-//   - Experiment writes, which switch those features on. Reading the list
-//     changes nothing and stays admin-only at the hub.
+//   - Experiment writes, which switch those features on, and maintenance
+//     writes: from scion e8160a10 on, a hub admin can start update-binary
+//     there, which replaces lever's pinned scion with an upstream release.
+//     Reading either changes nothing and stays admin-only at the hub.
 //   - An agent's port tunnel and delegations: the tunnel is the agent side's
 //     own socket, and a delegation hands the signed-in user's authority to
 //     the agent, which lever assumes hostile.
@@ -253,7 +255,7 @@ func refusedRoute(method, p string) bool {
 			return true
 		}
 	}
-	if strings.HasPrefix(p, "/api/v1/admin/experiments") {
+	if strings.HasPrefix(p, "/api/v1/admin/experiments") || strings.HasPrefix(p, "/api/v1/admin/maintenance") {
 		return method != http.MethodGet && method != http.MethodHead
 	}
 	for _, prefix := range brokerWritePrefixes {

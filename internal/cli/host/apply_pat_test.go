@@ -272,3 +272,15 @@ func TestControllerProjectList(t *testing.T) {
 		t.Fatalf("ungrantedScopes = %v: a mint that drops project:list must be caught", got)
 	}
 }
+
+// The hub's refusal of a user-level secret to the controller PAT (scion
+// 8ee1dbd2f) is told apart from every other failure.
+func TestSessionRequired(t *testing.T) {
+	refusal := errors.New("set placeholder ANTHROPIC_API_KEY: scion hub env set ***: Error: failed to set secret: user- and hub-level environment variables and secrets require an interactive login (run 'scion hub auth login'); access tokens are not accepted (status: 403)")
+	if !sessionRequired(refusal) {
+		t.Fatal("the hub's refusal was not recognised")
+	}
+	if sessionRequired(nil) || sessionRequired(errors.New("connection refused")) {
+		t.Fatal("another error read as the session refusal")
+	}
+}

@@ -483,6 +483,9 @@ type Broker struct {
 	spawnDayMu         sync.Mutex
 	spawnDayStart      time.Time
 	spawnDayCount      int
+	// inheritedUnsettled are the records a previous broker left spawning or
+	// destroying: the only ones ReconcileAgents settles.
+	inheritedUnsettled map[string]bool
 	// hostWatch tracks which service hosts answer, for the "host is back"
 	// notice (hostwatch.go). hostProbe and hostWatchEvery are for tests.
 	hostWatch      hostWatch
@@ -520,7 +523,11 @@ func New(c Config) *Broker {
 	// A name being or already destroyed stays revoked even if the revocation
 	// file lost it: the registry is the record of every name used.
 	addRevoked := false
+	inherited := map[string]bool{}
 	for _, rec := range workers.recordList() {
+		if rec.State == AgentSpawning || rec.State == AgentDestroying {
+			inherited[rec.Name] = true
+		}
 		if (rec.State == AgentDestroyed || rec.State == AgentDestroying) && !revoked[rec.Name] {
 			revoked[rec.Name] = true
 			addRevoked = true
@@ -579,7 +586,7 @@ func New(c Config) *Broker {
 		files:       c.Files.withDefaults(), fileLedger: &fileRecord{dir: c.Files.LedgerDir},
 		filesRate:  newRateWindow(filesCallLimit),
 		archiveDir: d.ArchiveDir, backupConversation: d.BackupConversation,
-		spawnRate: newRateWindow(managerSpawnRateLimit),
+		spawnRate: newRateWindow(managerSpawnRateLimit), inheritedUnsettled: inherited,
 	}
 	if addRevoked {
 		b.mu.Lock()

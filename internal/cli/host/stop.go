@@ -112,7 +112,10 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 					}
 					// After the manager, under its own budget, so a slow worker pass cannot cost
 					// the manager its suspend.
-					reg, _ := brokerctl.LoadAgents(st)
+					reg, rerr := brokerctl.LoadAgents(st)
+					if rerr != nil {
+						cmd.PrintErrf("lever: warning: the spawned-agent registry cannot be read (%s); no spawned agent was suspended\n", termsafe.Sanitize(rerr.Error()))
+					}
 					if !suspendRunningWorkers(cmd, sc, ia.app, b.MountDest(), liveSpawned(reg)) {
 						suspended = false
 					}

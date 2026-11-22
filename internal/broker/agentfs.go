@@ -75,6 +75,11 @@ func (b *Broker) createAgentDir(rel string, files map[string][]byte) (string, er
 	}
 	for p, data := range files {
 		if err := writeNewFile(dir, p, data); err != nil {
+			// The directory is the one just made: remove it through its
+			// own handle, as destroy would.
+			if rerr := removeAgentDir(parent, dir, name); rerr != nil {
+				err = fmt.Errorf("%w (and removing it: %v)", err, rerr)
+			}
 			return "", fmt.Errorf("%s/%s: %w", rel, p, err)
 		}
 	}

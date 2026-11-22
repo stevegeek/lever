@@ -36,6 +36,10 @@ func attachTarget(app *config.App, mountDest, name string) (slug, project string
 		}
 		names = append(names, g.Name)
 	}
+	// A spawned agent: whether it exists is the hub's and the broker's to say.
+	if _, ok := app.TemplateOf(name); ok {
+		return name, mountDest, nil
+	}
 	return "", "", fmt.Errorf("attach: unknown agent %q (valid: %s)", name, strings.Join(names, ", "))
 }
 

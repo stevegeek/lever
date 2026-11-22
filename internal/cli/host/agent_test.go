@@ -129,3 +129,19 @@ func TestWorkerResumeTakesASpawnedName(t *testing.T) {
 		t.Fatal("not sent")
 	}
 }
+
+// lever msg send takes a spawned agent's name: the broker decides.
+func TestHostMsgSendTakesASpawnedName(t *testing.T) {
+	dir := directiveTestDir(t)
+	writeInstanceInto(t, dir, instanceYAML("assistant", managerYAML+scratchWorkerYAML+
+		"templates:\n  - name: session\n    prefix: s\n    dir_root: sessions\n    resources: {memory: 1GiB}\n    max_instances: 2\n    max_running: 1\n"))
+	t.Chdir(dir)
+	rec := startResumeUDS(t, dir, map[string]canned{"/operator/note": {body: `{"id":"abc"}`}})
+	out, err := clitest.Exec(t, stubRoot(&stubBackend{runner: proc.NewFakeRunner()}), "msg", "send", "--to", "s-abc234", "hi")
+	if err != nil || !strings.Contains(out, "Sent to s-abc234") || len(rec.all()) != 1 {
+		t.Fatalf("%v %q", err, out)
+	}
+	if _, err := clitest.Exec(t, stubRoot(&stubBackend{runner: proc.NewFakeRunner()}), "msg", "send", "--to", "s-abc", "hi"); err == nil {
+		t.Fatal("a name of no shape was sent")
+	}
+}

@@ -23,12 +23,13 @@ version bump moves the block under the new version heading.
     removes or keeps its workspace, and deletes its hub record. `lever agent list` lists templates
     and agents.
   - A spawned agent is driven like a worker (`lever worker resume|suspend|stop|new-session|watch`,
-    `lever msg send`), is suspended by `lever stop`, and is never purged or recycled.
+    `lever msg send`, `lever attach`), is suspended by `lever stop`, and is never purged or recycled.
   - With `spawners: [manager]` the manager spawns, drives, messages and destroys its own agents
     (`lever-manager agent spawn|destroy|spawned`, at most 4 spawns a minute and 200 a day); such a
     template may obtain only what the manager obtains and may delegate nothing. Its skill teaches
     the verbs only then.
-  - Spawned agents are not yet in the remote web UI or `lever attach`.
+  - `lever attach NAME` takes a spawned agent's name. Spawned agents are not yet in the remote web
+    UI.
   - A `delegate` may name `template:<name>`, which holds for that template's active agents.
   - Config load checks that every template's `max_running` agents fit in the VM's memory and,
     with the manager and the workers, within scion's cap of 12 running agents.

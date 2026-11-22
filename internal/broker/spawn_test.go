@@ -786,3 +786,33 @@ func TestManagerMessagesOnlyItsOwnSpawnedAgents(t *testing.T) {
 		t.Fatalf("own agent: %v (%d %s)", err, rec.Code, rec.Body)
 	}
 }
+
+// A file that cannot be written into the new workspace (a planted one)
+// refuses the spawn and leaves no workspace behind.
+func TestCreateAgentDirCleansUpAFailedWrite(t *testing.T) {
+	e := newSpawnEnv(t, AgentsState{})
+	files := map[string][]byte{"a/../../x": []byte("y")}
+	if _, err := e.b.createAgentDir("sessions/s-aaaaaa", files); err == nil {
+		t.Fatal("wrote outside the workspace")
+	}
+	if _, err := os.Stat(filepath.Join(e.tree, "sessions", "s-aaaaaa")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("workspace left: %v", err)
+	}
+}
+
+// Reconcile settles only what an earlier broker left, never a spawn this
+// broker is running.
+func TestReconcileLeavesThisBrokersSpawns(t *testing.T) {
+	e := newSpawnEnv(t, AgentsState{})
+	tmpl, _ := e.b.workers.template("session")
+	if _, err := e.b.workers.reserve(tmpl, operatorActor, "", time.Now(), func(string) bool { return false }, newInstanceID); err != nil {
+		t.Fatal(err)
+	}
+	e.rt.staticPhases = true
+	if !e.b.ReconcileAgents(context.Background()) {
+		t.Fatal("not settled")
+	}
+	if st := e.state(); st.Agents[0].State != AgentSpawning {
+		t.Fatalf("reconcile touched a live spawn: %+v", st)
+	}
+}

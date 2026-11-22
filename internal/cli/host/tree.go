@@ -73,8 +73,9 @@ func (e *treeEnv) openStore() (*treebackup.Store, error) {
 
 func (e *treeEnv) workerDirs() [][]byte {
 	var out [][]byte
-	for _, w := range e.app.Workers {
-		if rel, err := filepath.Rel(e.app.Tree, e.app.WorkerDir(w)); err == nil && filepath.IsLocal(rel) {
+	// Template dir_roots too: each holds spawned agents' workspaces.
+	for _, d := range e.app.AgentDirs() {
+		if rel, err := filepath.Rel(e.app.Tree, filepath.Join(e.app.Tree, d.Dir)); err == nil && filepath.IsLocal(rel) {
 			out = append(out, []byte(filepath.ToSlash(rel)))
 		}
 	}

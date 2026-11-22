@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -111,7 +112,8 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 					}
 					// After the manager, under its own budget, so a slow worker pass cannot cost
 					// the manager its suspend.
-					if !suspendRunningWorkers(cmd, sc, ia.app, b.MountDest()) {
+					reg, _ := brokerctl.LoadAgents(st)
+					if !suspendRunningWorkers(cmd, sc, ia.app, b.MountDest(), liveSpawned(reg)) {
 						suspended = false
 					}
 				}
@@ -255,8 +257,8 @@ type workerSuspender interface {
 // error with a never-started container, whose resume answers 409. Best-effort:
 // failures warn and the caller powers off regardless. It reports whether every
 // needed suspend took (false on a failed list).
-func suspendRunningWorkers(cmd *cobra.Command, sc workerSuspender, app *config.App, project string) bool {
-	if len(app.Workers) == 0 && len(app.Templates) == 0 {
+func suspendRunningWorkers(cmd *cobra.Command, sc workerSuspender, app *config.App, project string, spawned []string) bool {
+	if len(app.Workers) == 0 && len(spawned) == 0 {
 		return true
 	}
 	lctx, cancel := context.WithTimeout(cmd.Context(), workerListTimeout)
@@ -272,10 +274,11 @@ func suspendRunningWorkers(cmd *cobra.Command, sc workerSuspender, app *config.A
 			names = append(names, wk.Name)
 		}
 	}
-	// Spawned agents too: a hub record with a template instance's name.
-	for _, a := range agents {
-		if _, spawned := app.TemplateOf(a.Slug); spawned && suspendBeforeStop(a.Phase) {
-			names = append(names, a.Slug)
+	// Spawned agents too, by the registry (an agent whose template was
+	// removed included).
+	for _, n := range spawned {
+		if a := scion.FindAgent(agents, n); a != nil && suspendBeforeStop(a.Phase) {
+			names = append(names, n)
 		}
 	}
 	errs := suspendWorkers(cmd.Context(), sc, names, project, workerSuspendParallel, workerSuspendTimeout)
@@ -287,7 +290,7 @@ func suspendRunningWorkers(cmd *cobra.Command, sc workerSuspender, app *config.A
 			cmd.PrintErrf("lever: warning: scion suspend of worker %q failed (it may not resume cleanly on next up): %s\n", name, termsafe.Sanitize(scion.ErrSummary(errs[i])))
 			continue
 		}
-		if _, spawned := app.TemplateOf(name); spawned {
+		if slices.Contains(spawned, name) {
 			cmd.Printf("agent %q suspended — it stays suspended after `lever up`; resume it with `lever worker resume %s`.\n", name, name)
 			continue
 		}

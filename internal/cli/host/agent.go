@@ -192,13 +192,19 @@ func newAgentListCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		Short: "List the templates and the agents spawned from them",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			fail := func(err error, reason string, code int) error {
+				if asJSON {
+					printJSONLine(cmd, agentResult{Reason: reason, Error: err.Error(), Exit: code})
+				}
+				return cli.WithExitCode(fmt.Errorf("agent list: %w", err), code)
+			}
 			app, st, err := loadAppAndState(nil)
 			if err != nil {
-				return err
+				return fail(err, "", 1)
 			}
 			sock, err := operatorSocket(app, st)
 			if err != nil {
-				return cli.WithExitCode(fmt.Errorf("agent list: %w", err), exitOperatorSocketMissing)
+				return fail(err, reasonNoOperatorSocket, exitOperatorSocketMissing)
 			}
 			path := broker.PathOperatorAgentList
 			if all {
@@ -207,9 +213,9 @@ func newAgentListCmd() *cobra.Command {
 			var resp broker.AgentListResponse
 			err = operatorGet(cmd.Context(), sock, path, &resp)
 			if ref, ok := operatorFailure(err, broker.PathOperatorAgentList); ok {
-				return cli.WithExitCode(fmt.Errorf("agent list: %w", ref), agentExit(ref.Reason))
+				return fail(ref, ref.Reason, agentExit(ref.Reason))
 			} else if err != nil {
-				return err
+				return fail(err, "", 1)
 			}
 			if asJSON {
 				printJSONLine(cmd, resp)

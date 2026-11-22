@@ -51,20 +51,21 @@ func TestTemplateLoads(t *testing.T) {
 func TestTemplateRefusals(t *testing.T) {
 	lima := strings.Replace(templateBase, "backend: orbstack", "backend: lima", 1)
 	for name, tc := range map[string]struct{ body, want string }{
-		"bad name":                  {strings.Replace(sessionTmpl, "name: session", "name: Session", 1), "template name"},
-		"no dir_root":               {strings.Replace(sessionTmpl, "    dir_root: sessions\n", "", 1), "dir_root"},
-		"dir_root escapes":          {strings.Replace(sessionTmpl, "dir_root: sessions", "dir_root: ../x", 1), "dir_root"},
-		"dir_root is tree":          {strings.Replace(sessionTmpl, "dir_root: sessions", "dir_root: .", 1), "dir_root"},
-		"overlaps a worker":         {strings.Replace(sessionTmpl, "dir_root: sessions", "dir_root: workers", 1), "overlap"},
-		"no memory":                 {strings.Replace(sessionTmpl, "    resources: {memory: 2GiB}\n", "", 1), "resources.memory"},
-		"no max_running":            {strings.Replace(sessionTmpl, "    max_running: 2\n", "", 1), "max_running"},
-		"instances < running":       {strings.Replace(sessionTmpl, "max_instances: 4", "max_instances: 1", 1), "max_instances"},
-		"bad on_destroy":            {sessionTmpl + "    on_destroy: {workspace: shred}\n", "on_destroy"},
-		"bad spawner":               {sessionTmpl + "    spawners: [worker]\n", "spawners"},
-		"unknown tool":              {sessionTmpl + "    obtain: [{tool: nope, op: x}]\n", "nope"},
-		"manager wider":             {sessionTmpl + "    spawners: [manager]\n    obtain: [{tool: db, op: write}]\n", "wider than itself"},
-		"manager wider by delegate": {sessionTmpl + "    spawners: [manager]\n    delegate: [{tool: db, op: write, to: [scratch]}]\n", "wider than itself"},
-		"named like a worker":       {strings.Replace(sessionTmpl, "name: session", "name: scratch", 1), "already the name"},
+		"bad name":                   {strings.Replace(sessionTmpl, "name: session", "name: Session", 1), "template name"},
+		"no dir_root":                {strings.Replace(sessionTmpl, "    dir_root: sessions\n", "", 1), "dir_root"},
+		"dir_root escapes":           {strings.Replace(sessionTmpl, "dir_root: sessions", "dir_root: ../x", 1), "dir_root"},
+		"dir_root is tree":           {strings.Replace(sessionTmpl, "dir_root: sessions", "dir_root: .", 1), "dir_root"},
+		"overlaps a worker":          {strings.Replace(sessionTmpl, "dir_root: sessions", "dir_root: workers", 1), "overlap"},
+		"no memory":                  {strings.Replace(sessionTmpl, "    resources: {memory: 2GiB}\n", "", 1), "resources.memory"},
+		"no max_running":             {strings.Replace(sessionTmpl, "    max_running: 2\n", "", 1), "max_running"},
+		"instances < running":        {strings.Replace(sessionTmpl, "max_instances: 4", "max_instances: 1", 1), "max_instances"},
+		"bad on_destroy":             {sessionTmpl + "    on_destroy: {workspace: shred}\n", "on_destroy"},
+		"bad spawner":                {sessionTmpl + "    spawners: [worker]\n", "spawners"},
+		"unknown tool":               {sessionTmpl + "    obtain: [{tool: nope, op: x}]\n", "nope"},
+		"manager wider":              {sessionTmpl + "    spawners: [manager]\n    obtain: [{tool: db, op: write}]\n", "wider than itself"},
+		"manager wider by delegate":  {sessionTmpl + "    spawners: [manager]\n    delegate: [{tool: db, op: write, to: [scratch]}]\n", "wider than itself"},
+		"manager template delegates": {sessionTmpl + "    spawners: [manager]\n    obtain: [{tool: db, op: read}]\n    delegate: [{tool: db, op: read, to: [scratch]}]\n", "may not delegate"},
+		"named like a worker":        {strings.Replace(sessionTmpl, "name: session", "name: scratch", 1), "already the name"},
 		"prefix twice": {sessionTmpl + "  - name: other\n    prefix: s\n    dir_root: others\n    resources: {memory: 1GiB}\n    max_instances: 1\n    max_running: 1\n",
 			"both use the prefix"},
 		"past scion's cap": {strings.Replace(strings.Replace(sessionTmpl, "max_running: 2", "max_running: 11", 1), "max_instances: 4", "max_instances: 11", 1),
@@ -108,4 +109,16 @@ func TestTemplateDelegateTargets(t *testing.T) {
 func TestTemplateDirRootIsProtectedLikeAWorkerDir(t *testing.T) {
 	body := strings.Replace(templateBase, "manager:\n", "manager:\n  read_only: [sessions/docs]\n", 1)
 	rejectNoHost(t, body+sessionTmpl, "overlaps manager.read_only")
+}
+
+// Only the manager may delegate to the agents of a template it may spawn
+// from: it steers them.
+func TestDelegationToManagerTemplateIsTheManagers(t *testing.T) {
+	tmpl := sessionTmpl + "    spawners: [manager]\n"
+	mgr := strings.Replace(templateBase, "manager:\n  obtain: [{tool: db, op: read}]\n",
+		"manager:\n  obtain: [{tool: db, op: read}]\n  delegate: [{tool: db, op: read, to: [\"template:session\"]}]\n", 1)
+	loadTemplates(t, mgr+tmpl)
+	wk := strings.Replace(templateBase, "{name: scratch, dir: workers/scratch}",
+		"{name: scratch, dir: workers/scratch, obtain: [{tool: db, op: write}], delegate: [{tool: db, op: write, to: [\"template:session\"]}]}", 1)
+	rejectNoHost(t, wk+tmpl, "only the manager may delegate")
 }

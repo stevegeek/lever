@@ -140,7 +140,7 @@ type templateCapError struct {
 }
 
 func (e *templateCapError) Error() string {
-	return fmt.Sprintf("agent %s was not started: template %s allows %d running at once and %d are running or starting (%s). Suspend or destroy one first. Nothing was changed.",
+	return fmt.Sprintf("agent %s was not started: template %s allows %d running at once and %d are running or starting (%s). Suspend or destroy one first.",
 		e.agent, e.template, e.max, len(e.active), strings.Join(e.active, ", "))
 }
 

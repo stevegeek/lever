@@ -135,9 +135,6 @@ func Serve(ctx context.Context, app *config.App, st state.State, version string,
 	cfg.ToolSecret = toolSecret
 
 	b := broker.New(cfg)
-	// Spawns and destroys a restart interrupted; they hold no authority
-	// meanwhile.
-	go b.ReconcileAgents(ctx)
 
 	jailLn, adminLn, dirLn, opLn, err := bindListeners(app, st)
 	if err != nil {
@@ -160,6 +157,9 @@ func Serve(ctx context.Context, app *config.App, st state.State, version string,
 		return err
 	}
 	defer daemon.RemovePIDFile(st.PID())
+	// Spawns and destroys a restart interrupted, once this broker serves;
+	// they hold no authority meanwhile.
+	go b.RunReconcile(ctx)
 
 	// A self-rotating serving cert: a broker that outlives a one-shot cert
 	// fails every gateway handshake, including agents' /renew, and the fleet's
@@ -246,9 +246,15 @@ func decorateConfig(cfg *broker.Config, app *config.App, st state.State, be back
 	cfg.AgentMessages = AgentMessages(app, st)
 	cfg.Files = Files(app, st)
 	cfg.Dispatch.BeginSession = func(agent string) func() error { return BeginSession(app, st, version, agent) }
-	cfg.Dispatch.Templates = TemplateSpecs(app, be.MountDest(), env.JailUID, version)
+	// With the state directory inside the tree an agent could rewrite the
+	// registry (a record's template or spawner), so no agent is spawned or
+	// given a template's grants there.
 	if !StateInsideTree(app, st) {
+		cfg.Dispatch.Templates = TemplateSpecs(app, be.MountDest(), env.JailUID, version)
 		cfg.Dispatch.ArchiveDir = st.AgentArchives()
+	}
+	if err := checkRegistryNames(app, cfg.Persistence.Agents); err != nil {
+		return err
 	}
 
 	cfg.Version = version

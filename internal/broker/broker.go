@@ -480,6 +480,9 @@ type Broker struct {
 	archiveDir         string
 	backupConversation func(ctx context.Context, agent string) (string, error)
 	spawnRate          *rateWindow
+	spawnDayMu         sync.Mutex
+	spawnDayStart      time.Time
+	spawnDayCount      int
 	// hostWatch tracks which service hosts answer, for the "host is back"
 	// notice (hostwatch.go). hostProbe and hostWatchEvery are for tests.
 	hostWatch      hostWatch

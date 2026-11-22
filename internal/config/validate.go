@@ -426,9 +426,6 @@ func (a *App) Validate() error {
 			return err
 		}
 	}
-	if err := a.validateTemplates(); err != nil {
-		return err
-	}
 	if err := a.validateWorkerDirsDisjoint(); err != nil {
 		return err
 	}
@@ -445,6 +442,10 @@ func (a *App) Validate() error {
 		return err
 	}
 	if err := a.validateBroker(); err != nil {
+		return err
+	}
+	// After the broker's llm_auth checks: a mixed instance is named as such.
+	if err := a.validateTemplates(); err != nil {
 		return err
 	}
 	if err := a.validateWhisperTools(); err != nil {

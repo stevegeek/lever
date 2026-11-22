@@ -241,6 +241,9 @@ func (a *App) validateTemplates() error {
 			return fmt.Errorf("config: template name %q is already the name of an agent (or reserved); rename the template", t.Name)
 		}
 	}
+	if err := a.checkDelegationsToManagerTemplates(); err != nil {
+		return err
+	}
 	return a.validateTemplateFit()
 }
 
@@ -319,9 +322,39 @@ func (a *App) notWiderThanManager(t Template) error {
 			return fmt.Errorf("config: template %q lists manager in spawners but obtains %s.%s, which the manager does not obtain; a manager may not spawn an agent wider than itself", t.Name, g.Tool, g.Op)
 		}
 	}
-	for _, d := range t.Delegate {
-		if !mgr[Grant{Tool: d.Tool, Op: d.Op}] {
-			return fmt.Errorf("config: template %q lists manager in spawners but delegates %s.%s, which the manager does not obtain; a manager may not spawn an agent wider than itself", t.Name, d.Tool, d.Op)
+	// The manager controls what it spawns, so a delegation by one of its
+	// agents is the manager's own: it may delegate nothing.
+	if len(t.Delegate) > 0 {
+		return fmt.Errorf("config: template %q lists manager in spawners and delegates %s.%s; a template the manager may spawn from may not delegate (a manager may not spawn an agent wider than itself)", t.Name, t.Delegate[0].Tool, t.Delegate[0].Op)
+	}
+	return nil
+}
+
+// checkDelegationsToManagerTemplates: an agent the manager spawned is the
+// manager's to steer, so only the manager may delegate to one.
+func (a *App) checkDelegationsToManagerTemplates() error {
+	check := func(who string, ds []DelegateGrant) error {
+		for _, d := range ds {
+			for _, to := range d.To {
+				name, ok := templateRef(to)
+				if !ok {
+					continue
+				}
+				if t, ok := a.TemplateByName(name); ok && t.MaySpawn(SpawnerManager) {
+					return fmt.Errorf("config: %s delegates %s.%s to %q, a template the manager may spawn from; only the manager may delegate to its agents", who, d.Tool, d.Op, to)
+				}
+			}
+		}
+		return nil
+	}
+	for _, g := range a.Workers {
+		if err := check("worker "+g.Name, g.Delegate); err != nil {
+			return err
+		}
+	}
+	for _, t := range a.Templates {
+		if err := check("template "+t.Name, t.Delegate); err != nil {
+			return err
 		}
 	}
 	return nil

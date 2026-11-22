@@ -87,6 +87,24 @@ type TemplateSpec struct {
 	Skill    []byte
 }
 
+// errStateBackwards: a change would move a record back (destroying to
+// active, say).
+var errStateBackwards = errors.New("a spawned agent's state only moves forward")
+
+func stateRank(s string) int {
+	switch s {
+	case AgentSpawning:
+		return 0
+	case AgentActive:
+		return 1
+	case AgentDestroying:
+		return 2
+	case AgentDestroyed:
+		return 3
+	}
+	return -1
+}
+
 // errTemplateFull: max_instances agents of the template exist.
 var errTemplateFull = errors.New("template is at max_instances")
 
@@ -117,7 +135,7 @@ func (r *agentRegistry) load(templates []TemplateSpec, st AgentsState, tree stri
 			continue
 		}
 		if t, ok := r.templates[rec.Template]; ok && t.Worker != nil {
-			r.specs[rec.Name] = t.Worker(rec.Name)
+			r.specs[rec.Name] = spawnedSpec(t, rec.Name)
 			continue
 		}
 		r.specs[rec.Name] = bareSpec(rec, tree)
@@ -130,7 +148,13 @@ func bareSpec(rec AgentRecord, tree string) WorkerSpec {
 	if tree != "" && rec.Dir != "" {
 		ws = tree + "/" + rec.Dir
 	}
-	return WorkerSpec{Name: rec.Name, WorkspaceSubdir: rec.Dir, HostWorkspace: ws}
+	return WorkerSpec{Name: rec.Name, WorkspaceSubdir: rec.Dir, HostWorkspace: ws, spawned: true}
+}
+
+func spawnedSpec(t TemplateSpec, name string) WorkerSpec {
+	s := t.Worker(name)
+	s.spawned = true
+	return s
 }
 
 // get returns a copy of name's spec.
@@ -327,7 +351,7 @@ func (r *agentRegistry) reserve(t TemplateSpec, createdBy, label string, now tim
 		delete(r.records, name)
 		return AgentRecord{}, err
 	}
-	r.specs[name] = t.Worker(name)
+	r.specs[name] = spawnedSpec(t, name)
 	return *rec, nil
 }
 
@@ -343,6 +367,12 @@ func (r *agentRegistry) update(name string, change func(rec *AgentRecord)) (Agen
 	}
 	old := *rec
 	change(rec)
+	if stateRank(rec.State) < stateRank(old.State) {
+		// A record never goes back: a destroy that began wins over a spawn
+		// or a reconcile that read the record before it.
+		*rec = old
+		return old, fmt.Errorf("agent %q is %s; it cannot become %s again: %w", name, old.State, rec.State, errStateBackwards)
+	}
 	if err := r.saveLocked(); err != nil {
 		*rec = old
 		return old, err

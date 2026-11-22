@@ -9,13 +9,12 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
-	"path"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/stevegeek/lever/internal/fsutil"
 	"github.com/stevegeek/lever/internal/scion"
 	"github.com/stevegeek/lever/internal/wire"
 )
@@ -177,8 +176,10 @@ func firstLineOf(s string) string {
 // read of the hub leaves the phases empty.
 func (b *Broker) agentList(ctx context.Context, all bool, createdBy string) AgentListResponse {
 	phases := map[string]string{}
+	listed := false
 	if b.runtime != nil {
 		if agents, err := b.runtime.List(ctx, b.instanceProject); err == nil {
+			listed = true
 			for _, a := range agents {
 				p := scion.PhaseLabel(a.Phase)
 				if scion.RunningContainerDown(p, a.ContainerStatus) {
@@ -202,7 +203,7 @@ func (b *Broker) agentList(ctx context.Context, all bool, createdBy string) Agen
 		t := counts[rec.Template]
 		if rec.State != AgentDestroyed {
 			e.Phase = phases[rec.Name]
-			if e.Phase == "" && len(phases) > 0 {
+			if e.Phase == "" && listed {
 				e.Phase = PhaseNone
 			}
 			e.Orphaned = t == nil
@@ -251,6 +252,9 @@ func (c *captureWriter) replay(w http.ResponseWriter) {
 	for k, v := range c.header {
 		w.Header()[k] = v
 	}
+	if c.code == 0 {
+		c.code = http.StatusInternalServerError
+	}
 	w.WriteHeader(c.code)
 	_, _ = w.Write(c.body.Bytes())
 }
@@ -279,6 +283,11 @@ func (b *Broker) spawnAgent(ctx context.Context, w http.ResponseWriter, req Spaw
 		return
 	}
 	if spawner == "manager" {
+		if !b.takeDailySpawn(time.Now()) {
+			b.audit("agent", actor, "deny", verb+": daily spawn quota reached")
+			refuse(w, ReasonRateLimited, fmt.Sprintf("rate limited: the manager may spawn at most %d agents a day; ask the operator", managerSpawnDailyLimit), http.StatusTooManyRequests)
+			return
+		}
 		if ok, wait := b.spawnRate.take(actor, time.Now()); !ok {
 			b.audit("agent", actor, "deny", verb+": rate limited")
 			refuse(w, ReasonRateLimited, fmt.Sprintf("rate limited: try again in %ds", int(wait.Seconds())+1), http.StatusTooManyRequests)
@@ -291,6 +300,17 @@ func (b *Broker) spawnAgent(ctx context.Context, w http.ResponseWriter, req Spaw
 	if b.purger == nil || b.tree == "" {
 		b.audit("agent", actor, "error", verb+": no purge channel or no tree is wired")
 		refuse(w, ReasonRuntimeUnavailable, "spawn unavailable", http.StatusBadGateway)
+		return
+	}
+	// A template already at max_running refuses before a name is drawn, so
+	// a busy template burns nothing. Admission checks again at the start.
+	if busy, err := b.templateAtMaxRunning(ctx, t); err != nil {
+		b.audit("agent", actor, "error", verb+": "+err.Error())
+		refuse(w, ReasonRuntimeError, "runtime error: could not read the hub; nothing was changed", http.StatusBadGateway)
+		return
+	} else if busy != nil {
+		b.audit("agent", actor, "deny", verb+": "+busy.Error())
+		refuse(w, ReasonTemplateBusy, busy.Error(), http.StatusConflict)
 		return
 	}
 	// taken runs under the registry's lock: it must not read the registry.
@@ -320,6 +340,13 @@ func (b *Broker) spawnAgent(ctx context.Context, w http.ResponseWriter, req Spaw
 		return
 	}
 	defer unlock()
+	// Under the lock: a destroy that took the name between the reserve and
+	// the lock, or a revoke, wins.
+	if cur, ok := b.workers.record(name); !ok || cur.State != AgentSpawning || b.isRevoked(name) {
+		b.audit("agent", actor, "deny", verb+": "+name+" was destroyed or revoked before its start")
+		refuse(w, ReasonRevoked, "the new agent "+name+" was destroyed or revoked before its start", http.StatusConflict)
+		return
+	}
 	spec, _ := b.workers.get(name)
 	fail := func(status int, reason, msg, detail string) {
 		b.audit("agent", actor, "error", verb+": "+name+": "+detail)
@@ -337,7 +364,11 @@ func (b *Broker) spawnAgent(ctx context.Context, w http.ResponseWriter, req Spaw
 		refuse(w, ReasonRuntimeError, "runtime error: the hub could not be read, or already holds a record of the drawn name; the spawn was undone. Try again", http.StatusBadGateway)
 		return
 	}
-	id, err := b.createAgentDir(rec.Dir)
+	var files map[string][]byte
+	if t.SkillRel != "" {
+		files = map[string][]byte{t.SkillRel: t.Skill}
+	}
+	id, err := b.createAgentDir(rec.Dir, files)
 	if err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			fail(http.StatusConflict, ReasonWorkspaceUnsafe, "the new agent's workspace "+rec.Dir+" already exists", err.Error())
@@ -350,11 +381,18 @@ func (b *Broker) spawnAgent(ctx context.Context, w http.ResponseWriter, req Spaw
 		fail(http.StatusInternalServerError, ReasonRuntimeError, "registry error", err.Error())
 		return
 	}
-	if t.SkillRel != "" {
-		if err := b.writeAgentFile(path.Join(rec.Dir, t.SkillRel), t.Skill); err != nil {
-			fail(http.StatusInternalServerError, ReasonWorkspaceUnsafe, "the agent's lever skill could not be written", err.Error())
-			return
-		}
+	// The start re-resolves the workspace: it must still be the directory
+	// created above, not a link the manager swapped in meanwhile.
+	if parent, dir, err := b.openAgentDir(rec); err != nil {
+		fail(http.StatusForbidden, ReasonWorkspaceUnsafe, "the new agent's workspace changed before its start", err.Error())
+		return
+	} else {
+		dir.Close()
+		parent.Close()
+	}
+	if b.isRevoked(name) {
+		fail(http.StatusConflict, ReasonRevoked, "the new agent was revoked before its start", "revoked")
+		return
 	}
 	b.policyAdd(name, t)
 	cw := newCaptureWriter()
@@ -366,6 +404,13 @@ func (b *Broker) spawnAgent(ctx context.Context, w http.ResponseWriter, req Spaw
 		return
 	}
 	if _, err := b.workers.update(name, func(r *AgentRecord) { r.State = AgentActive }); err != nil {
+		if errors.Is(err, errStateBackwards) {
+			// A destroy began meanwhile: it owns the agent now.
+			b.rules.RemoveAgent(name)
+			b.audit("agent", actor, "deny", verb+": "+name+" is being destroyed")
+			refuse(w, ReasonRevoked, "the new agent "+name+" is being destroyed", http.StatusConflict)
+			return
+		}
 		// Running, but the registry still says spawning: a restart's
 		// reconcile marks it active once it sees the hub record.
 		b.audit("agent", actor, "error", verb+": "+name+": recording it active: "+err.Error())
@@ -374,19 +419,19 @@ func (b *Broker) spawnAgent(ctx context.Context, w http.ResponseWriter, req Spaw
 	writeJSON(w, SpawnResponse{Name: name, Template: t.Name, Label: req.Label, Phase: scion.PhaseRunning})
 }
 
-// writeAgentFile writes the broker's file into a new agent's workspace:
-// no link on the path, a fresh file renamed over whatever is there.
-func (b *Broker) writeAgentFile(rel string, data []byte) error {
-	return fsutil.ReplaceInTreeNoLinks(b.tree, rel, data, 0o755, 0o644)
-}
-
 // rollbackSpawn undoes a spawn that did not come up: the record becomes
 // destroyed and the name revoked, and any hub record is deleted. started
 // says the start was tried, so a record may exist. The workspace is
 // removed when no record exists (it holds only what spawn wrote), and
 // otherwise handled as the template says.
 func (b *Broker) rollbackSpawn(ctx context.Context, rec AgentRecord, actor string, started bool) {
-	res := b.teardown(ctx, rec, actor, teardownOpts{noBackup: true, rollback: !started})
+	// Not cut short by a caller that hung up: a half-undone spawn would be
+	// left destroying.
+	ctx = context.WithoutCancel(ctx)
+	if cur, ok := b.workers.record(rec.Name); ok {
+		rec = cur
+	}
+	res := b.teardown(ctx, rec, actor, teardownOpts{noBackup: true, rollback: true})
 	if len(res.Warnings) > 0 {
 		b.audit("agent", actor, "error", "rollback of "+rec.Name+": "+strings.Join(res.Warnings, "; "))
 	}
@@ -434,6 +479,9 @@ func (b *Broker) destroyAgent(ctx context.Context, w http.ResponseWriter, req De
 		refuse(w, ReasonNotSpawned, "already destroyed", http.StatusNotFound)
 		return
 	}
+	// A spawning record whose spawn is under way is locked by it; one left
+	// by a restart may be destroyed here (the spawn re-reads it under the
+	// lock and stops).
 	spec, _ := b.workers.get(rec.Name)
 	if spec.Name == "" {
 		spec = bareSpec(rec, b.tree)
@@ -470,7 +518,8 @@ func (b *Broker) destroyAgent(ctx context.Context, w http.ResponseWriter, req De
 			}
 		}
 	}
-	res := b.teardown(ctx, rec, actor, teardownOpts{noBackup: req.NoBackup, phase: phase, havePhase: true})
+	// Once begun, a destroy is not cut short by a caller that hung up.
+	res := b.teardown(context.WithoutCancel(ctx), rec, actor, teardownOpts{noBackup: req.NoBackup, phase: phase, havePhase: true})
 	if res.err != nil {
 		b.audit("agent", actor, "error", verb+": "+res.err.Error())
 		refuse(w, res.reason, res.err.Error(), res.status)
@@ -507,8 +556,9 @@ func (b *Broker) stopAndConfirm(ctx context.Context, name string) error {
 
 type teardownOpts struct {
 	noBackup bool
-	// rollback: a spawn that never started; the workspace holds only what
-	// spawn wrote, so it is removed whatever the template says.
+	// rollback: undoing a spawn. With no hub record the agent never ran, so
+	// its workspace holds only what spawn wrote and is removed whatever the
+	// template says.
 	rollback bool
 	// phase is the record's phase when havePhase (read under the lock).
 	phase     string
@@ -536,6 +586,10 @@ type teardownResult struct {
 // Every step from 3 on is idempotent.
 func (b *Broker) teardown(ctx context.Context, rec AgentRecord, actor string, o teardownOpts) teardownResult {
 	res := teardownResult{DestroyResponse: DestroyResponse{Name: rec.Name, Was: PhaseNone}}
+	if cur, ok := b.workers.record(rec.Name); !ok || cur.State == AgentDestroyed {
+		// Another destroy finished it.
+		return res
+	}
 	stop := func(status int, reason string, err error) teardownResult {
 		res.err, res.reason, res.status = err, reason, status
 		return res
@@ -589,7 +643,7 @@ func (b *Broker) teardown(ctx context.Context, rec AgentRecord, actor string, o 
 	// 4.
 	if rec.Workspace == "" {
 		action := WorkspaceActionOf(b.workers, rec)
-		if o.rollback {
+		if o.rollback && phase == "" {
 			action = "remove"
 		}
 		done, warn := b.workspaceOnDestroy(ctx, rec, action)
@@ -686,26 +740,33 @@ func (b *Broker) pruneAgentState(name string) {
 // without are rolled back; destroying agents are destroyed again. Until it
 // has run they are no workers to any route and hold no grants (New), so it
 // may run after the broker starts serving.
-func (b *Broker) ReconcileAgents(ctx context.Context) {
+func (b *Broker) ReconcileAgents(ctx context.Context) (settled bool) {
 	if b.runtime == nil {
-		return
+		return true
 	}
+	settled = true
 	for _, rec := range b.workers.recordList() {
 		if rec.State != AgentSpawning && rec.State != AgentDestroying {
 			continue
 		}
 		unlock, ok := b.tryLockWorker(rec.Name)
 		if !ok {
+			settled = false
 			continue
 		}
 		func() {
 			defer unlock()
+			cur, ok := b.workers.record(rec.Name)
+			if !ok || cur.State != rec.State {
+				return
+			}
 			phase, _, err := b.recordOf(ctx, WorkerSpec{Name: rec.Name})
 			if err != nil {
+				settled = false
 				b.audit("agent", "broker", "error", "reconcile "+rec.Name+": "+err.Error())
 				return
 			}
-			if rec.State == AgentSpawning && phase != "" {
+			if rec.State == AgentSpawning && phase != "" && !b.isRevoked(rec.Name) {
 				if _, err := b.workers.update(rec.Name, func(r *AgentRecord) { r.State = AgentActive }); err != nil {
 					b.audit("agent", "broker", "error", "reconcile "+rec.Name+": "+err.Error())
 					return
@@ -718,11 +779,28 @@ func (b *Broker) ReconcileAgents(ctx context.Context) {
 			}
 			res := b.teardown(ctx, rec, "broker", teardownOpts{noBackup: true, rollback: rec.State == AgentSpawning, phase: phase, havePhase: true})
 			if res.err != nil {
+				settled = false
 				b.audit("agent", "broker", "error", "reconcile "+rec.Name+": "+res.err.Error())
 				return
 			}
 			b.audit("agent", "broker", "allow", "reconcile "+rec.Name+": destroyed (left "+rec.State+" by a restart)")
 		}()
+	}
+	return settled
+}
+
+// reconcileRetry spaces RunReconcile's passes.
+const reconcileRetry = 30 * time.Second
+
+// RunReconcile runs ReconcileAgents until every interrupted spawn and
+// destroy is settled, or ctx ends.
+func (b *Broker) RunReconcile(ctx context.Context) {
+	for !b.ReconcileAgents(ctx) {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(reconcileRetry):
+		}
 	}
 }
 
@@ -784,4 +862,48 @@ func (b *Broker) handleAgentList(w http.ResponseWriter, r *http.Request) {
 		out.Agents = append(out.Agents, wire.SpawnedAgent{Name: a.Name, Template: a.Template, Label: a.Label, State: a.State, Phase: a.Phase})
 	}
 	writeJSON(w, out)
+}
+
+// templateAtMaxRunning reports a templateCapError when t's agents running
+// or being admitted already reach its max_running.
+func (b *Broker) templateAtMaxRunning(ctx context.Context, t TemplateSpec) (error, error) {
+	agents, err := b.runtime.List(ctx, b.instanceProject)
+	if err != nil {
+		return nil, err
+	}
+	var same []string
+	for _, a := range agents {
+		if tt, ok := b.workers.templateOfRecord(a.Slug); ok && tt.Name == t.Name && countsAsRunning(a.Phase, a.ContainerStatus) {
+			same = append(same, a.Slug)
+		}
+	}
+	b.admitMu.Lock()
+	for name := range b.admitting {
+		if tt, ok := b.workers.templateOfRecord(name); ok && tt.Name == t.Name && !slices.Contains(same, name) {
+			same = append(same, name)
+		}
+	}
+	b.admitMu.Unlock()
+	if len(same) < t.MaxRunning {
+		return nil, nil
+	}
+	slices.Sort(same)
+	return &templateCapError{agent: "from template " + t.Name, template: t.Name, max: t.MaxRunning, active: same}, nil
+}
+
+// managerSpawnDailyLimit bounds the manager's spawns in 24 hours: every
+// spawn leaves a tombstone, a revocation entry, a backup and an archive.
+const managerSpawnDailyLimit = 200
+
+func (b *Broker) takeDailySpawn(now time.Time) bool {
+	b.spawnDayMu.Lock()
+	defer b.spawnDayMu.Unlock()
+	if now.Sub(b.spawnDayStart) >= 24*time.Hour {
+		b.spawnDayStart, b.spawnDayCount = now, 0
+	}
+	if b.spawnDayCount >= managerSpawnDailyLimit {
+		return false
+	}
+	b.spawnDayCount++
+	return true
 }

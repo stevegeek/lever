@@ -88,6 +88,8 @@ type WorkerSpec struct {
 	// Resources is sent at a fresh start only; scion keeps it in the record
 	// for resumes. Zero = scion's defaults.
 	Resources scion.Resources
+	// spawned is set by the registry for an agent spawned from a template.
+	spawned bool
 }
 
 // workerSpec returns the spec of a worker that may be driven: a config
@@ -658,6 +660,10 @@ func (b *Broker) resumeExistingWorker(ctx context.Context, w http.ResponseWriter
 			fresh = "Run `lever worker recycle " + spec.Name + " --task-file F` to start it fresh with a new task (its old conversation is discarded)"
 			again = ", or start it with no --task-file to resume it."
 		}
+		if b.workers.spawned(spec.Name) {
+			fresh = "A spawned agent's task is fixed for its life: spawn a new agent for a new task, or message this one"
+			again = ", or resume it with no task."
+		}
 		refusePhase(w, ReasonTaskFixed, phase, "worker "+spec.Name+" already exists (phase "+phase+"); its task is fixed at creation. "+fresh+again, http.StatusConflict)
 		return
 	}
@@ -692,7 +698,7 @@ func (b *Broker) resumeRecordAs(ctx context.Context, w http.ResponseWriter, spec
 		// worker is about to spend. Only wait.
 		if err := b.waitWorkerLive(ctx, spec); err != nil {
 			b.audit("worker", actor, "error", "resume "+spec.Name+" (already "+phase+"): "+err.Error())
-			refuse(w, ReasonNotLive, err.Error()+". "+workerPurgeHint(spec.Name), http.StatusBadGateway)
+			refuse(w, ReasonNotLive, err.Error()+". "+b.purgeHint(spec.Name), http.StatusBadGateway)
 			return
 		}
 		b.audit("worker", actor, "allow", "resume "+spec.Name+" (already "+phase+")")
@@ -781,7 +787,7 @@ func (b *Broker) resumeRecordAs(ctx context.Context, w http.ResponseWriter, spec
 			refusePhase(w, ReasonHubRefused, phase, "the hub refused to resume worker "+spec.Name+" (phase "+phase+"); its record was kept, nothing was deleted. "+next, http.StatusConflict)
 			return
 		}
-		refusePhase(w, ReasonRuntimeError, phase, "runtime error: worker "+spec.Name+" (phase "+phase+") did not resume. "+workerPurgeHint(spec.Name), http.StatusBadGateway)
+		refusePhase(w, ReasonRuntimeError, phase, "runtime error: worker "+spec.Name+" (phase "+phase+") did not resume. "+b.purgeHint(spec.Name), http.StatusBadGateway)
 		return
 	}
 	// A failed session record only keeps contacts out.
@@ -792,7 +798,7 @@ func (b *Broker) resumeRecordAs(ctx context.Context, w http.ResponseWriter, spec
 	}
 	if err := b.waitWorkerLive(ctx, spec); err != nil {
 		b.audit("worker", actor, "error", "resume "+spec.Name+": "+err.Error())
-		refuse(w, ReasonNotLive, err.Error()+". "+workerPurgeHint(spec.Name), http.StatusBadGateway)
+		refuse(w, ReasonNotLive, err.Error()+". "+b.purgeHint(spec.Name), http.StatusBadGateway)
 		return
 	}
 	b.resetReenrolTries(spec.Name)
@@ -813,6 +819,9 @@ func rewritableImage(a *scion.Agent) bool {
 // rewritableImageHint names the operator's way out, after "run". Every caller
 // gets it: the manager and a chat login have no way out of their own.
 func rewritableImageHint(spec WorkerSpec) string {
+	if spec.spawned {
+		return "`lever agent destroy " + spec.Name + " --force` and spawn a new agent (a spawned agent's record keeps its image for life)"
+	}
 	return "`lever worker recycle " + spec.Name + "` to start it fresh on " + spec.Image +
 		" (its workspace is kept, its conversation is not), or `lever worker purge " + spec.Name + " --force` and then `lever worker start " + spec.Name + "`"
 }
@@ -880,6 +889,9 @@ func (b *Broker) resumeChecks(ctx context.Context, w http.ResponseWriter, spec W
 			if actor == operatorActor {
 				fix = "Restore the directory, or run `lever worker purge " + spec.Name + " --force` and have the manager start it again"
 			}
+			if b.workers.spawned(spec.Name) {
+				fix = "It cannot come back without its workspace: destroy it (`lever agent destroy " + spec.Name + " --force`)"
+			}
 			refuse(w, ReasonWorkspaceMissing, "worker "+spec.Name+"'s workspace directory "+spec.WorkspaceSubdir+" no longer exists on the host (the operator removed or moved it); the record was kept. "+fix, http.StatusConflict)
 			return false
 		}
@@ -908,6 +920,13 @@ func comingUp(phase string) bool {
 
 // workerPurgeHint only names the recovery: deleting a record is never
 // automatic.
+func (b *Broker) purgeHint(worker string) string {
+	if b.workers.spawned(worker) {
+		return "If it does not recover, destroy it (`lever agent destroy " + worker + " --force`) and spawn a new one."
+	}
+	return workerPurgeHint(worker)
+}
+
 func workerPurgeHint(worker string) string {
 	return "If it does not recover, the operator can run `lever worker purge " + worker + "` on the host, then start the worker fresh."
 }
@@ -917,7 +936,7 @@ func (b *Broker) startFreshWorker(ctx context.Context, w http.ResponseWriter, sp
 		// The record would have no image (rewritableImage), and no later
 		// start of it would be allowed.
 		b.audit("worker", actor, "deny", "start "+spec.Name+": no image is configured")
-		refuse(w, ReasonImageUnqualified, "worker "+spec.Name+" has no image configured (manager.image or workers[].image in lever.yaml), so it would run a default image name the hub rewrites to its image registry; nothing was changed", http.StatusConflict)
+		refuse(w, ReasonImageUnqualified, "worker "+spec.Name+" has no image configured (manager.image, workers[].image or templates[].image in lever.yaml), so it would run a default image name the hub rewrites to its image registry; nothing was changed", http.StatusConflict)
 		return
 	}
 	// Before any side effect.
@@ -1151,6 +1170,9 @@ func (b *Broker) resumeWorker(ctx context.Context, w http.ResponseWriter, spec W
 		hint := "start it instead: `lever-manager agent start " + spec.Name + " --task \"…\"`"
 		if actor == operatorActor {
 			hint = "start it instead: `lever worker start " + spec.Name + "`"
+		}
+		if b.workers.spawned(spec.Name) {
+			hint = "a spawned agent is never started fresh: destroy it and spawn a new one"
 		}
 		refuse(w, ReasonNoRecord, "worker "+spec.Name+" has no record on the hub (never started, purged, or a new jail); "+hint, http.StatusNotFound)
 		return

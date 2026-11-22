@@ -117,3 +117,19 @@ func agentConversationBackup(app *config.App, st state.State, jr proc.Runner, ja
 		return m.ID, nil
 	}
 }
+
+// checkRegistryNames refuses a config that gives a fixed agent the name of a
+// spawned agent in the registry: that agent's certificates would
+// authenticate as it. A template's prefix that changed can do it.
+func checkRegistryNames(app *config.App, st broker.AgentsState) error {
+	fixed := map[string]bool{app.Name: true, app.ManagerCN(): true}
+	for _, w := range app.Workers {
+		fixed[w.Name] = true
+	}
+	for _, r := range st.Agents {
+		if fixed[r.Name] {
+			return fmt.Errorf("brokerctl: %q is both a configured agent and a spawned agent in %s (state %s); rename the configured one: a spawned agent's name is never reused", r.Name, "agents.json", r.State)
+		}
+	}
+	return nil
+}

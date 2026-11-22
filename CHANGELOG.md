@@ -14,7 +14,7 @@ version bump moves the block under the new version heading.
   fixed worker slots: image, model, instructions, grants, resources, a `dir_root` for their
   workspaces, `max_instances`, `max_running`, what destroy does with a workspace (`on_destroy`:
   `archive`, the default, `remove` or `keep`) and who may spawn (`spawners`).
-  - `lever agent spawn TEMPLATE --task-file F [--label L]` spawns one: the broker picks a name that
+  - `lever agent spawn TEMPLATE [--task-file F] [--label L]` spawns one: the broker picks a name that
     was never used (`<prefix>-<6 characters>`), records it in `.lever-state/agents.json`, creates its
     workspace with its `lever-agent` skill, grants it exactly the template's capabilities and starts
     it. A spawn whose start fails is undone.
@@ -24,9 +24,11 @@ version bump moves the block under the new version heading.
     and agents.
   - A spawned agent is driven like a worker (`lever worker resume|suspend|stop|new-session|watch`,
     `lever msg send`), is suspended by `lever stop`, and is never purged or recycled.
-  - With `spawners: [manager]` the manager spawns, drives and destroys its own agents
-    (`lever-manager agent spawn|destroy|spawned`, at most 4 spawns a minute); such a template may
-    obtain only what the manager obtains. Its skill teaches the verbs only then.
+  - With `spawners: [manager]` the manager spawns, drives, messages and destroys its own agents
+    (`lever-manager agent spawn|destroy|spawned`, at most 4 spawns a minute and 200 a day); such a
+    template may obtain only what the manager obtains and may delegate nothing. Its skill teaches
+    the verbs only then.
+  - Spawned agents are not yet in the remote web UI or `lever attach`.
   - A `delegate` may name `template:<name>`, which holds for that template's active agents.
   - Config load checks that every template's `max_running` agents fit in the VM's memory and,
     with the manager and the workers, within scion's cap of 12 running agents.

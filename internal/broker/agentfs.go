@@ -41,9 +41,11 @@ func splitAgentDir(rel string) (root, name string) {
 }
 
 // createAgentDir creates the new agent's workspace, exclusively: the name is
-// fresh, so an entry already there was planted and refuses the spawn. It
-// returns the directory's identity.
-func (b *Broker) createAgentDir(rel string) (string, error) {
+// fresh, so an entry already there was planted and refuses the spawn. The
+// files are written through a handle on the directory just made, each
+// created exclusively, so nothing outside it is reached whatever is
+// swapped meanwhile. It returns the directory's identity.
+func (b *Broker) createAgentDir(rel string, files map[string][]byte) (string, error) {
 	if b.tree == "" {
 		return "", errors.New("no instance tree is wired")
 	}
@@ -60,10 +62,42 @@ func (b *Broker) createAgentDir(rel string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !fi.IsDir() {
+	if fi.Mode()&fs.ModeSymlink != 0 || !fi.IsDir() {
 		return "", fmt.Errorf("%s: %w", rel, errDirSwapped)
 	}
+	dir, err := parent.OpenRoot(name)
+	if err != nil {
+		return "", err
+	}
+	defer dir.Close()
+	if st, err := dir.Stat("."); err != nil || !os.SameFile(st, fi) {
+		return "", fmt.Errorf("%s: %w", rel, errDirSwapped)
+	}
+	for p, data := range files {
+		if err := writeNewFile(dir, p, data); err != nil {
+			return "", fmt.Errorf("%s/%s: %w", rel, p, err)
+		}
+	}
 	return dirIdentity(fi)
+}
+
+// writeNewFile creates p (and its parents) inside dir, exclusively and
+// with no link at its leaf.
+func writeNewFile(dir *os.Root, p string, data []byte) error {
+	if d := path.Dir(p); d != "." {
+		if err := dir.MkdirAll(d, 0o755); err != nil {
+			return err
+		}
+	}
+	f, err := dir.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // openAgentDir opens the workspace of rec as an os.Root, refusing anything

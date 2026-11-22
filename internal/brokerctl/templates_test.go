@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/config"
 )
 
@@ -27,5 +28,18 @@ func TestTemplateSpecs(t *testing.T) {
 	if w.Name != "s-abc234" || w.WorkspaceSubdir != "sessions/s-abc234" || w.HostWorkspace != "/tree/sessions/s-abc234" ||
 		!strings.HasSuffix(w.TicketDir, "/s-abc234") || !strings.Contains(w.Image, "s:1") || w.Resources.Memory == "" || w.Shared != nil || w.Recyclable {
 		t.Fatalf("%+v", w)
+	}
+}
+
+// A configured name that a spawned agent in the registry used refuses the
+// broker's start.
+func TestCheckRegistryNames(t *testing.T) {
+	app := &config.App{Name: "app", Workers: []config.Worker{{Name: "s-abc234"}}}
+	st := broker.AgentsState{Agents: []broker.AgentRecord{{Name: "s-abc234", State: broker.AgentDestroyed}}}
+	if err := checkRegistryNames(app, st); err == nil {
+		t.Fatal("collision allowed")
+	}
+	if err := checkRegistryNames(&config.App{Name: "app"}, st); err != nil {
+		t.Fatal(err)
 	}
 }

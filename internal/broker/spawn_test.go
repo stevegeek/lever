@@ -185,13 +185,12 @@ func TestSpawnTemplateCaps(t *testing.T) {
 	if rec.Code != http.StatusConflict || rec.Header().Get(ReasonHeader) != ReasonTemplateBusy {
 		t.Fatalf("over max_running: %d %q %s", rec.Code, rec.Header().Get(ReasonHeader), rec.Body)
 	}
-	// The refused spawn was undone: destroyed, revoked, its workspace gone.
-	st := e.state()
-	if len(st.Agents) != 2 || st.Agents[1].State != AgentDestroyed || !e.b.isRevoked(st.Agents[1].Name) {
+	// A busy template refuses before a name is drawn: nothing is burnt.
+	if st := e.state(); len(st.Agents) != 1 {
 		t.Fatalf("registry %+v", st)
 	}
-	if _, err := os.Stat(filepath.Join(e.tree, st.Agents[1].Dir)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("the undone spawn's workspace: %v", err)
+	if entries, _ := os.ReadDir(e.archives); len(entries) != 0 {
+		t.Fatalf("archived %v", entries)
 	}
 }
 
@@ -200,6 +199,7 @@ func TestSpawnTemplateCaps(t *testing.T) {
 func TestSpawnFailedStartIsUndone(t *testing.T) {
 	e := newSpawnEnv(t, AgentsState{})
 	e.rt.startErr = errors.New("boom")
+	e.rt.staticPhases = true // the failed start left no record
 	rec := callOperator(t, e.b, http.MethodPost, PathOperatorAgentSpawn, `{"template":"session"}`)
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
@@ -217,6 +217,13 @@ func TestSpawnFailedStartIsUndone(t *testing.T) {
 	}
 	if _, ok := e.b.workerSpec(name); ok {
 		t.Fatal("still a worker")
+	}
+	// It never ran: its workspace is removed, not archived.
+	if _, err := os.Stat(filepath.Join(e.tree, st.Agents[0].Dir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("workspace: %v", err)
+	}
+	if entries, _ := os.ReadDir(e.archives); len(entries) != 0 {
+		t.Fatalf("archived %v", entries)
 	}
 }
 
@@ -601,13 +608,13 @@ func TestSpawnRefusesAPlantedWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.b.createAgentDir(rec.Dir); err == nil {
+	if _, err := e.b.createAgentDir(rec.Dir, nil); err == nil {
 		t.Fatal("created over a planted directory")
 	}
 	if err := os.Symlink(t.TempDir(), filepath.Join(e.tree, "elsewhere")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.b.createAgentDir("elsewhere/s-zzzzzz"); err == nil {
+	if _, err := e.b.createAgentDir("elsewhere/s-zzzzzz", nil); err == nil {
 		t.Fatal("created through a link")
 	}
 }
@@ -661,5 +668,121 @@ func TestArchiveDirStoresLinksAndSkipsSpecials(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "root:") {
 		t.Fatal("followed the link")
+	}
+}
+
+// A record's state never goes back, so a spawn or reconcile that read it
+// before a destroy began cannot make it active again.
+func TestRecordStateOnlyMovesForward(t *testing.T) {
+	e := newSpawnEnv(t, AgentsState{Agents: []AgentRecord{{Name: "s-aaaaaa", Template: "session", State: AgentDestroying, Dir: "sessions/s-aaaaaa"}}})
+	if _, err := e.b.workers.update("s-aaaaaa", func(r *AgentRecord) { r.State = AgentActive }); !errors.Is(err, errStateBackwards) {
+		t.Fatalf("%v", err)
+	}
+	if r, _ := e.b.workers.record("s-aaaaaa"); r.State != AgentDestroying {
+		t.Fatalf("%+v", r)
+	}
+}
+
+// Reconcile keeps a spawn that has a hub record, with its grants.
+func TestReconcileKeepsASpawnWithARecord(t *testing.T) {
+	e := newSpawnEnv(t, AgentsState{Agents: []AgentRecord{{Name: "s-aaaaaa", Template: "session", State: AgentSpawning, Dir: "sessions/s-aaaaaa"}}})
+	e.rt.staticPhases = true
+	e.rt.agents[testInstanceProject] = []scion.Agent{{Slug: "s-aaaaaa", Phase: "running", ContainerStatus: "Up 1 minute"}}
+	if !e.b.ReconcileAgents(context.Background()) {
+		t.Fatal("not settled")
+	}
+	if r, _ := e.b.workers.record("s-aaaaaa"); r.State != AgentActive {
+		t.Fatalf("%+v", r)
+	}
+	if _, ok := e.b.rules.MayObtainRule("s-aaaaaa", "s-aaaaaa", "db", "read"); !ok {
+		t.Fatal("no grants")
+	}
+	// A hub that cannot be read leaves it unsettled, to be tried again.
+	e = newSpawnEnv(t, AgentsState{Agents: []AgentRecord{{Name: "s-bbbbbb", Template: "session", State: AgentSpawning, Dir: "sessions/s-bbbbbb"}}})
+	e.rt.listErr = errors.New("hub down")
+	if e.b.ReconcileAgents(context.Background()) {
+		t.Fatal("settled with no hub")
+	}
+}
+
+// An agent whose template is gone, or whose hub record is gone, can still
+// be destroyed: its workspace is kept (no template says otherwise), and a
+// missing record is neither backed up nor purged.
+func TestDestroyWithoutTemplateOrRecord(t *testing.T) {
+	e := newSpawnEnv(t, AgentsState{Agents: []AgentRecord{{Name: "x-aaaaaa", Template: "gone", State: AgentActive, Dir: "old/x-aaaaaa"}}})
+	e.rt.staticPhases = true
+	e.rt.agents[testInstanceProject] = []scion.Agent{{Slug: "x-aaaaaa", Phase: "stopped"}}
+	rec := callOperator(t, e.b, http.MethodPost, PathOperatorAgentDestroy, `{"name":"x-aaaaaa"}`)
+	var got DestroyResponse
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &got) != nil || !strings.HasPrefix(got.Workspace, "kept") || len(e.rt.purged) != 1 {
+		t.Fatalf("%d %s purged %v", rec.Code, rec.Body, e.rt.purged)
+	}
+	e = newSpawnEnv(t, AgentsState{})
+	name := e.spawn(t, `{"template":"session"}`).Name
+	e.rt.staticPhases = true
+	e.rt.agents[testInstanceProject] = nil
+	rec = callOperator(t, e.b, http.MethodPost, PathOperatorAgentDestroy, `{"name":"`+name+`"}`)
+	if rec.Code != http.StatusOK || len(e.rt.purged) != 0 || len(e.backups) != 0 || !e.b.isRevoked(name) {
+		t.Fatalf("%d %s purged %v backups %v", rec.Code, rec.Body, e.rt.purged, e.backups)
+	}
+}
+
+// A resume refuses a spawned agent's workspace swapped for a link, even
+// with no manager.read_only.
+func TestResumeRefusesASwappedSpawnedWorkspace(t *testing.T) {
+	e := newSpawnEnv(t, AgentsState{})
+	name := e.spawn(t, `{"template":"session"}`).Name
+	e.rt.staticPhases = true
+	e.rt.agents[testInstanceProject] = []scion.Agent{{Slug: name, Phase: "suspended"}}
+	ws := filepath.Join(e.tree, "sessions", name)
+	other := filepath.Join(e.tree, "workers", "scratch")
+	if err := os.MkdirAll(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(ws); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(other, ws); err != nil {
+		t.Fatal(err)
+	}
+	rec := callOperator(t, e.b, http.MethodPost, PathOperatorWorkerResume, `{"worker":"`+name+`"}`)
+	if rec.Code != http.StatusForbidden || rec.Header().Get(ReasonHeader) != ReasonWorkspaceUnsafe || len(e.rt.resumed) != 0 {
+		t.Fatalf("%d %q resumed %v", rec.Code, rec.Header().Get(ReasonHeader), e.rt.resumed)
+	}
+}
+
+// A destroy whose caller hangs up still finishes.
+func TestDestroyOutlivesItsCaller(t *testing.T) {
+	e := newSpawnEnv(t, AgentsState{})
+	name := e.spawn(t, `{"template":"session"}`).Name
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	w := httptest.NewRecorder()
+	e.b.destroyAgent(ctx, w, DestroyRequest{Name: name, Stop: true}, operatorActor)
+	if r, _ := e.b.workers.record(name); w.Code != http.StatusOK || r.State != AgentDestroyed {
+		t.Fatalf("%d %s %+v", w.Code, w.Body, r)
+	}
+}
+
+// The manager messages and reads only the spawned agents it spawned.
+func TestManagerMessagesOnlyItsOwnSpawnedAgents(t *testing.T) {
+	e := newSpawnEnv(t, AgentsState{}, func(t *TemplateSpec) { t.ManagerMay = true })
+	theirs := e.spawn(t, `{"template":"session"}`).Name
+	if _, err := e.b.resolveMsgTarget("test-manager", theirs); err == nil {
+		t.Fatal("the manager may message the operator's agent")
+	}
+	if _, err := e.b.resolveListSubject("test-manager", theirs); err == nil {
+		t.Fatal("the manager may read the operator's agent's inbox")
+	}
+	for _, r := range e.b.msgRecipients("test-manager") {
+		if strings.Contains(r, theirs) {
+			t.Fatalf("recipients name %s", theirs)
+		}
+	}
+	rec := callWorker(t, e.b, "/agent/spawn", `{"template":"session"}`, "test-manager")
+	var mine SpawnResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &mine)
+	if _, err := e.b.resolveMsgTarget("test-manager", mine.Name); err != nil {
+		t.Fatalf("own agent: %v (%d %s)", err, rec.Code, rec.Body)
 	}
 }

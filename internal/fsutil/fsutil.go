@@ -274,6 +274,16 @@ func rootNoLinks(tree, dir string, mkdir bool, perm os.FileMode) (*os.Root, erro
 	return cur, nil
 }
 
+// MkdirInTreeNoLinks is OpenDirInTreeNoLinks that first creates each missing
+// component with perm (Mkdir never follows a link). The caller closes it.
+func MkdirInTreeNoLinks(tree, rel string, perm os.FileMode) (*os.Root, error) {
+	rel = filepath.ToSlash(rel)
+	if rel == "" || path.Clean(rel) != rel || !filepath.IsLocal(filepath.FromSlash(rel)) {
+		return nil, fmt.Errorf("%q: %w", rel, ErrEscapesTree)
+	}
+	return rootNoLinks(tree, rel, true, perm)
+}
+
 // OpenDirInTreeNoLinks opens the directory rel below tree as an os.Root
 // with no symbolic link on any component. The caller closes it.
 func OpenDirInTreeNoLinks(tree, rel string) (*os.Root, error) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -111,7 +112,11 @@ func newStopCmd(factory BackendFactory) *cobra.Command {
 					}
 					// After the manager, under its own budget, so a slow worker pass cannot cost
 					// the manager its suspend.
-					if !suspendRunningWorkers(cmd, sc, ia.app, b.MountDest()) {
+					reg, rerr := brokerctl.LoadAgents(st)
+					if rerr != nil {
+						cmd.PrintErrf("lever: warning: the spawned-agent registry cannot be read (%s); no spawned agent was suspended\n", termsafe.Sanitize(rerr.Error()))
+					}
+					if !suspendRunningWorkers(cmd, sc, ia.app, b.MountDest(), liveSpawned(reg)) {
 						suspended = false
 					}
 				}
@@ -250,13 +255,13 @@ type workerSuspender interface {
 	Suspend(ctx context.Context, worker, project string) error
 }
 
-// suspendRunningWorkers suspends every configured worker the hub shows running
+// suspendRunningWorkers suspends every configured worker and spawned agent the hub shows running
 // or coming up. A worker left running across the power-off comes back in phase
 // error with a never-started container, whose resume answers 409. Best-effort:
 // failures warn and the caller powers off regardless. It reports whether every
 // needed suspend took (false on a failed list).
-func suspendRunningWorkers(cmd *cobra.Command, sc workerSuspender, app *config.App, project string) bool {
-	if len(app.Workers) == 0 {
+func suspendRunningWorkers(cmd *cobra.Command, sc workerSuspender, app *config.App, project string, spawned []string) bool {
+	if len(app.Workers) == 0 && len(spawned) == 0 {
 		return true
 	}
 	lctx, cancel := context.WithTimeout(cmd.Context(), workerListTimeout)
@@ -272,6 +277,13 @@ func suspendRunningWorkers(cmd *cobra.Command, sc workerSuspender, app *config.A
 			names = append(names, wk.Name)
 		}
 	}
+	// Spawned agents too, by the registry (an agent whose template was
+	// removed included).
+	for _, n := range spawned {
+		if a := scion.FindAgent(agents, n); a != nil && suspendBeforeStop(a.Phase) {
+			names = append(names, n)
+		}
+	}
 	errs := suspendWorkers(cmd.Context(), sc, names, project, workerSuspendParallel, workerSuspendTimeout)
 	// Reported in config order, whatever order the suspends finished in.
 	ok := true
@@ -279,6 +291,10 @@ func suspendRunningWorkers(cmd *cobra.Command, sc workerSuspender, app *config.A
 		if errs[i] != nil {
 			ok = false
 			cmd.PrintErrf("lever: warning: scion suspend of worker %q failed (it may not resume cleanly on next up): %s\n", name, termsafe.Sanitize(scion.ErrSummary(errs[i])))
+			continue
+		}
+		if slices.Contains(spawned, name) {
+			cmd.Printf("agent %q suspended — it stays suspended after `lever up`; resume it with `lever worker resume %s`.\n", name, name)
 			continue
 		}
 		cmd.Printf("worker %q suspended — it stays suspended after `lever up`; resume it from the manager (`lever-manager agent resume %s`).\n", name, name)

@@ -168,6 +168,7 @@ For subscription mode instead: drop `egress`, set `broker.llm_auth: subscription
 | `scion` | object | no | - | Where the Scion engine comes from (see below). |
 | `manager` | object | **yes** | - | The manager agent (see below). |
 | `workers` | list | no | `[]` | Project agents the manager orchestrates (see below). |
+| `templates` | list | no | `[]` | Shapes of agents spawned at runtime and destroyed when done (`lever agent spawn`; see below). |
 | `shared_folders` | list | no | `[]` | Opt-in tree folders that named agents mount at `/shared/<name>`, read-write for writers and read-only for readers (see below). Unset: a worker mounts only its own `dir`. |
 | `egress` | enum | no | `open` | Jail outbound network posture (`open` \| `closed`), applied jail-wide and **independent of `llm_auth`**. `open`: LAN and non-allowlisted host ports dropped, public internet reachable. `closed`: catch-all DROP so the jail reaches **only** the broker port; requires a uniformly `api-key` instance. See [security-model §2.2](/security-model/jail/). |
 | `broker` | object | no | - | The host-side capability broker: LLM-auth mode, API-key file, registered tools (see below). |
@@ -322,6 +323,37 @@ failure modes are in the [remote access guide](/remote-access/#2-make-sure-the-h
 | `recyclable` | bool | no | `false` | Lets the manager discard this worker's record and start it fresh with a new task (`lever-manager agent recycle NAME --task "…"`), for a worker slot reused for new work that needs a fresh context. The recycle deletes what `lever worker purge` deletes: the scion record (so the worker's **conversation is lost**) and the staged ticket, never the worker's `dir`. The broker allows it only for a worker that is suspended, stopped or in phase `error` and whose container is not running (read from the hub record and from podman in the jail), never the manager, and at most once a minute per worker. Off, only the operator discards a record (`lever worker purge`, or `lever worker recycle`, which does not need this setting: it is the manager's authority only). The broker reads it at start: `lever reload` after a change. While at least one worker sets it, the manager's `lever-operator` skill carries the recycle directions (`lever init` renders them); with none, the skill is unchanged. **On an instance with contact logins, setting it (and `lever init`) changes the manager's skill, so contacts cannot post to the manager until it starts fresh**, which needs a new conversation (`lever up --fresh` backs the old one up; `--keep-conversation` would keep the old skill too): plan the change with the manager's next fresh start (`lever up --fresh`), which it also needs to get a manager image whose `lever-manager` has the `recycle` verb. See [worker slots the manager recycles](/operations/#worker-slots-the-manager-recycles). `lever doctor`'s *worker recycle* row lists the recyclable workers. |
 | `task_file` | path | no | - | A file holding the task this worker starts on when the **operator** starts it fresh with no task of its own: `lever worker start NAME` or `lever worker recycle NAME` without `--task-file`, and `autostart`. The manager's `agent start` never reads it (the manager names its own task). Same resolution and confinement as `prompt_file`: instance root, host-only, and **outside** the mounted `tree` (enforced at load), so an agent can't choose a worker's task through it. It must be a regular file, is trimmed, and is held to the same 15 KiB task budget; the broker reads it at each fresh start, so an edit needs no restart, and a file that is missing, not a regular file or over the budget refuses the start with reason `config-file`. Omit it to start with no task. A resume never uses it: scion fixes a worker's task when it creates the record. |
 | `autostart` | bool | no | `false` | Have `lever up` and `lever apply` bring this worker up once the manager is up: one `worker-autostart NAME` step per such worker, at the end of the plan (after `start-manager` and the remote proxy), one at a time. The step asks the running broker, over its operator socket, for what `lever worker start NAME` does with no `--task-file`: a running worker is left alone, an existing record (suspended, stopped, completed, error) is resumed, and a worker with no record is started with its `task_file`. A failure (the running-worker cap, a refused resume, a worker that does not come live within 3 minutes) is a warning that names the worker and `lever worker start NAME` to retry; the bring-up still succeeds. It resumes a worker you stopped with `lever worker stop` as well: unset it to keep such a worker down. |
+
+### `templates[]`
+
+A template is the shape of agents that are spawned while the instance runs and destroyed when
+their work is done, instead of a fixed worker slot. The operator spawns one with `lever agent spawn
+TEMPLATE --task-file F`; the manager can too when `spawners` lists it. Every field of a spawned agent
+comes from its template as configured when the broker started; the spawner picks only the task and a
+label. The broker names each agent `<prefix>-<id>`, where `<id>` is 6 random characters (`a-z`,
+`2-7`), and **never uses a name twice**: a destroyed agent's name stays revoked, so no certificate or
+token it held ever names another agent. Its workspace is `<dir_root>/<name>`. A spawned agent is
+driven like a worker (`lever worker resume|suspend|stop NAME`, `lever msg send --to NAME`), but is
+never purged or recycled: `lever agent destroy` ends it. See [spawned agents](/operations/#spawned-agents).
+
+| Key | Type | Required | Default | Meaning |
+|---|---|---|---|---|
+| `name` | string | **yes** | - | Template name, as `spawn` names it. Same shape as a worker name; must not be the name of the app, the manager or a worker. |
+| `prefix` | string | no | `name` | Start of every agent name. At most 56 characters. Two templates may not share one, and no worker, the app or the manager may have a name shaped like `<prefix>-<6 characters>`. |
+| `dir_root` | path | **yes** | - | Directory, **relative to `tree`**, that holds the agents' workspaces. Not the tree itself. Disjoint from every worker `dir`, every other template's `dir_root`, `manager.read_only`, every shared folder and `.lever-files`, as a worker `dir` is: it counts as one in every overlap check and pin. |
+| `image`, `image_tar`, `model`, `instructions_file`, `claude_settings`, `after_compact_note`, `llm_auth`, `obtain`, `delegate` | | no | as for `workers[]` | Same meaning as on a worker, for every agent of the template. A template's agents mount no shared folder. |
+| `resources` | map | **yes** (`memory`) | - | Container limits, as for a worker. `memory` is required: config load checks that the manager, the workers and `max_running` of each template fit in the VM's `memory` with 1GiB for the guest. |
+| `max_instances` | int | **yes** | - | How many of its agents may exist at once (any phase but destroyed), 1-100 and at least `max_running`: it bounds disk and hub records. A spawn past it is refused (`template-full`). |
+| `max_running` | int | **yes** | - | How many of its agents may run at once. Every start and resume of one is admitted against it, as against `broker.max_running_workers` (`template-busy`). The manager, the workers and every template's `max_running` (or `broker.max_running_workers` when lower) must stay within scion's cap of 12 running agents. |
+| `on_destroy.workspace` | enum | no | `archive` | What destroy does with the workspace: `archive` packs it into `.lever-state/agent-archives/<name>.tar.gz` (0600) and removes it from the tree; `remove` deletes it; `keep` leaves it. An archive that fails (past 8 GiB, 200,000 entries or 15 minutes) keeps the workspace. |
+| `spawners` | list | no | `[operator]` | Who may spawn from it: `operator` (always) and `manager`. A template that lists `manager` may obtain only capabilities the manager obtains itself and may delegate nothing, and only the manager may delegate to its agents (`template:<name>`): a manager never spawns an agent wider than itself. The manager drives, messages and destroys only the agents it spawned, and spawns at most 4 a minute and 200 a day. |
+
+A delegate's `to` may name `template:<name>`: the grant then holds for every **active** agent of
+that template, and for none that is being spawned or destroyed.
+
+While the state directory is inside the tree, the broker wires no template: an agent could rewrite
+the registry there. A configured worker, the app or the manager may not take a name a spawned agent
+used (the broker refuses to start).
 
 ### `shared_folders[]`
 
@@ -632,7 +664,7 @@ conduit off and warns, and `lever ssh` refuses.
 ## Conventions & derived values
 
 - **Machine name:** `lever-<name>`. `up`/`apply`/`stop`/`destroy`/`doctor` all agree on this, derived
-  from the config (override on `stop`/`destroy`/`doctor`/`worker purge` with `--machine`). `lever down` is a
+  from the config (override on `stop`/`destroy`/`doctor` with `--machine`). `lever down` is a
   deprecated alias of `destroy`.
 - **Worker model inheritance:** a worker with no `model:` runs on `manager.model`; with neither
   set, lever passes no `--model` and the pinned scion resolves the model. The model is fixed when

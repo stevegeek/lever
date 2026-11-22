@@ -131,3 +131,68 @@ func TestMayObtainRuleFailsClosed(t *testing.T) {
 		t.Fatalf("unknown agent: rule=%q ok=%v, want empty+false", rule, ok)
 	}
 }
+
+// AddAgent replaces an agent's grants whole; RemoveAgent drops them.
+func TestAddAndRemoveAgent(t *testing.T) {
+	p := NewPolicy()
+	p.AddAgent("s-aaaaaa", []Grant{{"db", "read"}}, []Delegation{{Tool: "db", Op: "read", To: []string{"worker"}}})
+	if _, ok := p.MayObtainRule("s-aaaaaa", "s-aaaaaa", "db", "read"); !ok {
+		t.Fatal("obtain")
+	}
+	if _, ok := p.MayObtainRule("s-aaaaaa", "worker", "db", "read"); !ok {
+		t.Fatal("delegate")
+	}
+	p.AddAgent("s-aaaaaa", []Grant{{"db", "write"}}, nil)
+	if _, ok := p.MayObtainRule("s-aaaaaa", "s-aaaaaa", "db", "read"); ok {
+		t.Fatal("AddAgent kept an old grant")
+	}
+	p.RemoveAgent("s-aaaaaa")
+	if _, ok := p.MayObtainRule("s-aaaaaa", "s-aaaaaa", "db", "write"); ok {
+		t.Fatal("RemoveAgent kept a grant")
+	}
+}
+
+// A "template:" recipient matches only what the resolver calls an active
+// instance of that template, and never as a literal name.
+func TestTemplateRecipient(t *testing.T) {
+	p := NewPolicy()
+	p.AllowDelegate("manager", "db", "read", TemplateRefPrefix+"session")
+	if _, ok := p.MayObtainRule("manager", "s-aaaaaa", "db", "read"); ok {
+		t.Fatal("matched with no resolver")
+	}
+	p.SetTemplateResolver(func(n string) (string, bool) {
+		switch n {
+		case "s-aaaaaa":
+			return "session", true
+		case "o-aaaaaa":
+			return "other", true
+		}
+		return "", false
+	})
+	if rule, ok := p.MayObtainRule("manager", "s-aaaaaa", "db", "read"); !ok || rule == "" {
+		t.Fatal("active instance refused")
+	}
+	for _, bound := range []string{"o-aaaaaa", "s-bbbbbb", TemplateRefPrefix + "session"} {
+		if _, ok := p.MayObtainRule("manager", bound, "db", "read"); ok {
+			t.Fatalf("%q matched", bound)
+		}
+	}
+}
+
+// Reads and writes may run at once (go test -race).
+func TestPolicyConcurrent(t *testing.T) {
+	p := NewPolicy()
+	p.SetTemplateResolver(func(string) (string, bool) { return "", false })
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 1000 {
+			p.AddAgent("x", []Grant{{"db", "read"}}, nil)
+			p.RemoveAgent("x")
+		}
+	}()
+	for range 1000 {
+		p.MayObtainRule("x", "x", "db", "read")
+	}
+	<-done
+}

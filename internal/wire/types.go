@@ -71,6 +71,62 @@ type WorkerStartRequest struct {
 	Task   string `json:"task"`
 }
 
+// AgentSpawnRequest is the body of POST /agent/spawn. The broker picks the
+// agent's name; any other field is refused.
+type AgentSpawnRequest struct {
+	Template string `json:"template"`
+	Task     string `json:"task,omitempty"`
+	Label    string `json:"label,omitempty"`
+}
+
+// AgentSpawnResponse answers /agent/spawn.
+type AgentSpawnResponse struct {
+	Name     string `json:"name"`
+	Template string `json:"template"`
+	Label    string `json:"label,omitempty"`
+	Phase    string `json:"phase"`
+}
+
+// AgentDestroyRequest is the body of POST /agent/destroy.
+type AgentDestroyRequest struct {
+	Name string `json:"name"`
+	Stop bool   `json:"stop,omitempty"`
+}
+
+// AgentDestroyResponse answers /agent/destroy.
+type AgentDestroyResponse struct {
+	Name       string   `json:"name"`
+	Was        string   `json:"was"`
+	Transcript string   `json:"transcript,omitempty"`
+	Workspace  string   `json:"workspace"`
+	Warnings   []string `json:"warnings,omitempty"`
+}
+
+// AgentListResponse answers /agent/list: the templates the manager may
+// spawn from, and the agents it spawned that are not destroyed.
+type AgentListResponse struct {
+	Templates []AgentTemplate `json:"templates"`
+	Agents    []SpawnedAgent  `json:"agents"`
+}
+
+// AgentTemplate is one template the manager may spawn from.
+type AgentTemplate struct {
+	Name         string `json:"name"`
+	MaxInstances int    `json:"max_instances"`
+	MaxRunning   int    `json:"max_running"`
+	Instances    int    `json:"instances"`
+	Running      int    `json:"running"`
+}
+
+// SpawnedAgent is one agent the manager spawned. Phase is a known label.
+type SpawnedAgent struct {
+	Name     string `json:"name"`
+	Template string `json:"template"`
+	Label    string `json:"label,omitempty"`
+	State    string `json:"state"`
+	Phase    string `json:"phase,omitempty"`
+}
+
 // WorkerRequest is the body of the single-worker verbs
 // (/worker/stop|suspend|resume). /worker/list ignores its body.
 type WorkerRequest struct {

@@ -7,6 +7,36 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **Agents spawned from templates.** A new `templates:` list in `lever.yaml` declares the shape of
+  agents that are spawned while the instance runs and destroyed when their work is done, instead of
+  fixed worker slots: image, model, instructions, grants, resources, a `dir_root` for their
+  workspaces, `max_instances`, `max_running`, what destroy does with a workspace (`on_destroy`:
+  `archive`, the default, `remove` or `keep`) and who may spawn (`spawners`).
+  - `lever agent spawn TEMPLATE [--task-file F] [--label L]` spawns one: the broker picks a name that
+    was never used (`<prefix>-<6 characters>`), records it in `.lever-state/agents.json`, creates its
+    workspace with its `lever-agent` skill, grants it exactly the template's capabilities and starts
+    it. A spawn whose start fails is undone.
+  - `lever agent destroy NAME --force [--stop] [--no-backup]` backs up its conversation to
+    `.lever-state/agent-conversations/`, drops its grants and revokes its name for good, archives,
+    removes or keeps its workspace, and deletes its hub record. `lever agent list` lists templates
+    and agents.
+  - A spawned agent is driven like a worker (`lever worker resume|suspend|stop|new-session|watch`,
+    `lever msg send`, `lever attach`), is suspended by `lever stop`, and is never purged or recycled.
+  - With `spawners: [manager]` the manager spawns, drives, messages and destroys its own agents
+    (`lever-manager agent spawn|destroy|spawned`, at most 4 spawns a minute and 200 a day); such a
+    template may obtain only what the manager obtains and may delegate nothing. Its skill teaches
+    the verbs only then.
+  - `lever attach NAME` takes a spawned agent's name. Spawned agents are not yet in the remote web
+    UI.
+  - A `delegate` may name `template:<name>`, which holds for that template's active agents.
+  - Config load checks that every template's `max_running` agents fit in the VM's memory and,
+    with the manager and the workers, within scion's cap of 12 running agents.
+  - `lever doctor` has a *spawned agents* row, and the *orphan agent records* row no longer counts
+    spawned agents.
+  The operations guide has a *Spawned agents* section.
+
 ### Changed
 
 - **The agent image bakes Claude Code 2.1.322 (was 2.1.300).** These are unchanged in 2.1.322,
@@ -17,13 +47,40 @@ version bump moves the block under the new version heading.
   documented as equivalent and still a restrictive managed setting), and the environment variables
   lever sets. The Claude Code binary grows from 267 MB to 342 MB (linux-x64), so the agent image
   grows by about as much.
+- **`lever worker purge` runs in the broker, under the worker's lock, and cuts off the purged
+  agent's certificates.** The command used to delete the scion record itself, so it could race a
+  start, resume or heal of the same worker. It now asks the broker on the operator socket, which
+  takes the worker's lock (a purge never waits: 503 `busy` while another action holds it) and
+  then deletes the record and the staged ticket as before, never the workspace. Once the delete is
+  confirmed, the broker refuses every client certificate of that name issued before the purge, on
+  every jail route, and its unspent enrolment tickets are dropped: a copy of the deleted agent's
+  key, certificate or staged ticket is worth nothing, while the name enrols afresh at its next
+  start. A recycle does the same. The cutoff is kept in
+  `.lever-state/revocation.json` (`superseded`). A delete that fails or is not confirmed leaves
+  the certificates alone, since the record may still be resumed. A declared worker with no record
+  is only cut off. Which names are workers is the running broker's call: after removing a worker
+  from `lever.yaml`, `lever reload` before purging it as an orphan. `--json` prints one object
+  (worker, ok, was, reason, error, exit), and the exit codes are those of the other worker verbs.
+- **Orphan records are reported and can be purged.** A hub record of the instance that is neither
+  the manager nor a declared worker (a worker removed from the config leaves one) was invisible:
+  no verb could reach it, `lever stop` left it running, and a running one still counted against
+  `broker.max_running_workers`. `lever worker list` now names them, `lever doctor` has an *orphan
+  agent records* warning row, and `lever worker purge NAME --orphan --force` deletes one through the
+  broker. A name that is not an agent name is only counted.
 
 ### Upgrade
 
-- **Jail ABI 12.** The agent image changed (Claude Code 2.1.322): rebuild the agent image (`make
-  lever-image` or `make lever-image-slim`, then any instance image built from it) and recreate the
-  manager on it with `lever up --fresh --keep-conversation`. Doctor's *agent lever version* row says
-  so.
+- **`lever worker purge` needs the broker running** (`lever up`), like the other worker verbs, and
+  no longer takes `--machine` or `--backend`. Run `lever apply` (or `lever reload`) so the running
+  broker has the purge route: an older broker answers that it has none. Going back to an older
+  lever drops the saved certificate cutoffs at its next revocation save.
+- **Jail ABI 13.** The agent image changed (Claude Code 2.1.322, and `lever-manager agent
+  spawn|destroy|spawned`): rebuild the agent image (`make lever-image` or `make lever-image-slim`,
+  then any instance image built from it) and recreate the manager on it with
+  `lever up --fresh --keep-conversation`. Doctor's *agent lever version* row says so.
+- **Templates need a broker restart.** Run `lever reload` after adding or changing `templates:`;
+  `lever init` renders the manager's spawn directions when a template lists `manager` in
+  `spawners`, which changes its skill (contacts cannot post to it until it starts fresh).
 
 ## [1.0.0-beta.9] - 2026-11-09
 

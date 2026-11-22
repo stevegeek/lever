@@ -16,9 +16,12 @@ import (
 type workerListResult struct {
 	OK      bool                     `json:"ok"`
 	Workers []broker.WorkerListEntry `json:"workers,omitempty"`
-	Reason  string                   `json:"reason,omitempty"`
-	Error   string                   `json:"error,omitempty"`
-	Exit    int                      `json:"exit"`
+	// Orphans: see broker.WorkerListResponse.
+	Orphans        []broker.OrphanEntry `json:"orphans,omitempty"`
+	UnnamedOrphans int                  `json:"unnamed_orphans,omitempty"`
+	Reason         string               `json:"reason,omitempty"`
+	Error          string               `json:"error,omitempty"`
+	Exit           int                  `json:"exit"`
 }
 
 // maxListLabel bounds each string of a list entry. The broker sends known
@@ -89,11 +92,16 @@ func newWorkerListCmd() *cobra.Command {
 			for _, e := range resp.Workers {
 				workers = append(workers, sanitizeListEntry(e))
 			}
+			var orphans []broker.OrphanEntry
+			for _, o := range resp.Orphans {
+				orphans = append(orphans, broker.OrphanEntry{Name: boundedLabel(o.Name), Phase: boundedLabel(o.Phase)})
+			}
 			if asJSON {
-				printJSONLine(cmd, workerListResult{OK: true, Workers: workers})
+				printJSONLine(cmd, workerListResult{OK: true, Workers: workers, Orphans: orphans, UnnamedOrphans: resp.UnnamedOrphans})
 				return nil
 			}
 			printWorkerTable(cmd, workers, time.Now())
+			printOrphans(cmd, orphans, resp.UnnamedOrphans)
 			return nil
 		},
 	}
@@ -124,6 +132,22 @@ func printWorkerTable(cmd *cobra.Command, workers []broker.WorkerListEntry, now 
 	}
 	_ = tw.Flush()
 	fmt.Fprintln(out, "* hub record fields the worker can write itself: the worker's word, not lever's.")
+}
+
+// printOrphans names the hub records that are neither the manager nor a
+// declared worker, and how to remove them.
+func printOrphans(cmd *cobra.Command, orphans []broker.OrphanEntry, unnamed int) {
+	if len(orphans) == 0 && unnamed == 0 {
+		return
+	}
+	out := cmd.OutOrStdout()
+	fmt.Fprintln(out, "\norphan records (neither the manager nor a declared worker; a running one counts against broker.max_running_workers):")
+	for _, o := range orphans {
+		fmt.Fprintf(out, "  %s (%s): `lever worker purge %s --orphan --force` deletes it\n", o.Name, o.Phase, o.Name)
+	}
+	if unnamed > 0 {
+		fmt.Fprintf(out, "  and %d whose name is not an agent name: remove them with scion in the jail\n", unnamed)
+	}
 }
 
 func dash(s string) string {

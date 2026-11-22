@@ -1,0 +1,384 @@
+package broker
+
+import (
+	"crypto/rand"
+	"encoding/base32"
+	"errors"
+	"fmt"
+	"slices"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/stevegeek/lever/internal/broker/rules"
+)
+
+// agentRegistry holds the workers the broker may drive, each with the spec
+// it was built from: the config's workers, and the agents spawned from a
+// template. Every read goes through it, under its lock.
+//
+// A spawned agent also has a record, kept in the registry file
+// (PersistenceConfig.Agents) whatever its state, so a destroyed name is
+// never drawn again. Its spec exists while it is spawning, active or being
+// destroyed and its template is configured.
+type agentRegistry struct {
+	mu    sync.RWMutex
+	specs map[string]WorkerSpec
+	// records are the spawned agents, destroyed ones included.
+	records   map[string]*AgentRecord
+	templates map[string]TemplateSpec
+	// persist saves the records, under mu; nil: not saved (tests).
+	persist func(AgentsState) error
+}
+
+// Agent record states.
+const (
+	AgentSpawning   = "spawning"
+	AgentActive     = "active"
+	AgentDestroying = "destroying"
+	AgentDestroyed  = "destroyed"
+)
+
+// AgentRecord is one spawned agent. Only the broker writes it: the spawner
+// supplies the template, the task and the label, never the rest.
+type AgentRecord struct {
+	Name      string    `json:"name"`
+	Template  string    `json:"template"`
+	Label     string    `json:"label,omitempty"`
+	CreatedBy string    `json:"created_by"`
+	CreatedAt time.Time `json:"created_at"`
+	State     string    `json:"state"`
+	// Dir is the tree-relative workspace, kept so the agent can be
+	// destroyed after its template is removed from the config.
+	Dir string `json:"dir"`
+	// DirID is the workspace's "dev:ino" when spawn created it: destroy
+	// acts only on that directory.
+	DirID       string    `json:"dir_id,omitempty"`
+	DestroyedAt time.Time `json:"destroyed_at,omitzero"`
+	// Transcript is the id of the conversation backup destroy took.
+	Transcript string `json:"transcript,omitempty"`
+	// Workspace is what destroy did with the workspace.
+	Workspace string `json:"workspace,omitempty"`
+}
+
+// AgentsState is the registry file.
+type AgentsState struct {
+	Agents []AgentRecord `json:"agents"`
+}
+
+// TemplateSpec is one template, from config only.
+type TemplateSpec struct {
+	Name         string
+	Prefix       string
+	DirRoot      string // tree-relative
+	MaxInstances int
+	MaxRunning   int
+	// OnDestroy is "archive", "remove" or "keep".
+	OnDestroy string
+	// ManagerMay lets the manager spawn from it (spawners: [manager]).
+	ManagerMay bool
+	Obtain     []rules.Grant
+	Delegate   []rules.Delegation
+	// Worker builds instance name's spec; the name is the only input.
+	Worker func(name string) WorkerSpec
+	// SkillRel (workspace-relative) and Skill are the agent's lever skill,
+	// written into a new workspace before its start.
+	SkillRel string
+	Skill    []byte
+}
+
+// errStateBackwards: a change would move a record back (destroying to
+// active, say).
+var errStateBackwards = errors.New("a spawned agent's state only moves forward")
+
+func stateRank(s string) int {
+	switch s {
+	case AgentSpawning:
+		return 0
+	case AgentActive:
+		return 1
+	case AgentDestroying:
+		return 2
+	case AgentDestroyed:
+		return 3
+	}
+	return -1
+}
+
+// errTemplateFull: max_instances agents of the template exist.
+var errTemplateFull = errors.New("template is at max_instances")
+
+func newAgentRegistry(specs []WorkerSpec) *agentRegistry {
+	r := &agentRegistry{specs: make(map[string]WorkerSpec, len(specs)), records: map[string]*AgentRecord{}, templates: map[string]TemplateSpec{}}
+	for _, s := range specs {
+		r.specs[s.Name] = s
+	}
+	return r
+}
+
+// load adds the templates and the saved records. An agent that is not
+// destroyed gets its spec from its template as configured now; one whose
+// template is gone gets a bare spec that only destroy uses.
+func (r *agentRegistry) load(templates []TemplateSpec, st AgentsState, tree string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, t := range templates {
+		r.templates[t.Name] = t
+	}
+	for _, rec := range st.Agents {
+		rec := rec
+		if _, static := r.specs[rec.Name]; static || rec.Name == "" {
+			continue
+		}
+		r.records[rec.Name] = &rec
+		if rec.State == AgentDestroyed {
+			continue
+		}
+		if t, ok := r.templates[rec.Template]; ok && t.Worker != nil {
+			r.specs[rec.Name] = spawnedSpec(t, rec.Name)
+			continue
+		}
+		r.specs[rec.Name] = bareSpec(rec, tree)
+	}
+}
+
+// bareSpec is enough of a spec to destroy an agent whose template is gone.
+func bareSpec(rec AgentRecord, tree string) WorkerSpec {
+	ws := ""
+	if tree != "" && rec.Dir != "" {
+		ws = tree + "/" + rec.Dir
+	}
+	return WorkerSpec{Name: rec.Name, WorkspaceSubdir: rec.Dir, HostWorkspace: ws, spawned: true}
+}
+
+func spawnedSpec(t TemplateSpec, name string) WorkerSpec {
+	s := t.Worker(name)
+	s.spawned = true
+	return s
+}
+
+// get returns a copy of name's spec.
+func (r *agentRegistry) get(name string) (WorkerSpec, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	s, ok := r.specs[name]
+	return s, ok
+}
+
+func (r *agentRegistry) has(name string) bool {
+	_, ok := r.get(name)
+	return ok
+}
+
+// names returns the registered names, sorted: a snapshot, so a caller that
+// ranges over it holds no lock.
+func (r *agentRegistry) names() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]string, 0, len(r.specs))
+	for name := range r.specs {
+		out = append(out, name)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// put adds or replaces spec.
+func (r *agentRegistry) put(spec WorkerSpec) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.specs[spec.Name] = spec
+}
+
+// record returns a copy of name's record, or false for a config worker or
+// an unknown name.
+func (r *agentRegistry) record(name string) (AgentRecord, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	rec, ok := r.records[name]
+	if !ok {
+		return AgentRecord{}, false
+	}
+	return *rec, true
+}
+
+// spawned reports whether name is a spawned agent (any state).
+func (r *agentRegistry) spawned(name string) bool {
+	_, ok := r.record(name)
+	return ok
+}
+
+// usable reports whether name's spec may be started or resumed: a config
+// worker, or a spawned agent that is active with its template configured.
+func (r *agentRegistry) usable(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	rec, ok := r.records[name]
+	if !ok {
+		_, ok := r.specs[name]
+		return ok
+	}
+	_, tmpl := r.templates[rec.Template]
+	return rec.State == AgentActive && tmpl
+}
+
+// activeTemplateOf is the policy's template resolver: only an active agent
+// of a configured template matches a "template:" recipient.
+func (r *agentRegistry) activeTemplateOf(name string) (string, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	rec, ok := r.records[name]
+	if !ok || rec.State != AgentActive {
+		return "", false
+	}
+	if _, ok := r.templates[rec.Template]; !ok {
+		return "", false
+	}
+	return rec.Template, true
+}
+
+// templateOfRecord returns the configured template of spawned agent name,
+// in any state but destroyed.
+func (r *agentRegistry) templateOfRecord(name string) (TemplateSpec, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	rec, ok := r.records[name]
+	if !ok || rec.State == AgentDestroyed {
+		return TemplateSpec{}, false
+	}
+	t, ok := r.templates[rec.Template]
+	return t, ok
+}
+
+func (r *agentRegistry) template(name string) (TemplateSpec, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	t, ok := r.templates[name]
+	return t, ok
+}
+
+func (r *agentRegistry) templateList() []TemplateSpec {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]TemplateSpec, 0, len(r.templates))
+	for _, t := range r.templates {
+		out = append(out, t)
+	}
+	slices.SortFunc(out, func(a, b TemplateSpec) int { return strings.Compare(a.Name, b.Name) })
+	return out
+}
+
+// recordList returns the records, sorted by creation then name.
+func (r *agentRegistry) recordList() []AgentRecord {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.recordListLocked()
+}
+
+func (r *agentRegistry) recordListLocked() []AgentRecord {
+	out := make([]AgentRecord, 0, len(r.records))
+	for _, rec := range r.records {
+		out = append(out, *rec)
+	}
+	slices.SortFunc(out, func(a, b AgentRecord) int {
+		if c := a.CreatedAt.Compare(b.CreatedAt); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
+	return out
+}
+
+// saveLocked requires mu held.
+func (r *agentRegistry) saveLocked() error {
+	if r.persist == nil {
+		return nil
+	}
+	return r.persist(AgentsState{Agents: r.recordListLocked()})
+}
+
+// instanceIDEncoding is lowercase base32 without padding.
+var instanceIDEncoding = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
+
+// newInstanceID draws InstanceIDLen characters from crypto/rand.
+func newInstanceID() (string, error) {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return instanceIDEncoding.EncodeToString(b[:])[:6], nil
+}
+
+// reserve draws a fresh name for template t and records it as spawning,
+// saved before it returns. taken reports a name used by anything outside
+// the registry (the manager, a revoked or superseded name). A save that
+// fails leaves nothing behind.
+func (r *agentRegistry) reserve(t TemplateSpec, createdBy, label string, now time.Time, taken func(string) bool, draw func() (string, error)) (AgentRecord, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, rec := range r.records {
+		if rec.Template == t.Name && rec.State != AgentDestroyed {
+			n++
+		}
+	}
+	if n >= t.MaxInstances {
+		return AgentRecord{}, fmt.Errorf("%w (%d)", errTemplateFull, t.MaxInstances)
+	}
+	var name string
+	for range 32 {
+		id, err := draw()
+		if err != nil {
+			return AgentRecord{}, err
+		}
+		cand := t.Prefix + "-" + id
+		if _, ok := r.records[cand]; ok {
+			continue
+		}
+		if _, ok := r.specs[cand]; ok || taken(cand) {
+			continue
+		}
+		name = cand
+		break
+	}
+	if name == "" {
+		return AgentRecord{}, errors.New("could not draw an unused agent name")
+	}
+	rec := &AgentRecord{Name: name, Template: t.Name, Label: label, CreatedBy: createdBy, CreatedAt: now.UTC(),
+		State: AgentSpawning, Dir: strings.TrimSuffix(t.DirRoot, "/") + "/" + name}
+	r.records[name] = rec
+	if err := r.saveLocked(); err != nil {
+		delete(r.records, name)
+		return AgentRecord{}, err
+	}
+	r.specs[name] = spawnedSpec(t, name)
+	return *rec, nil
+}
+
+// update applies change to name's record and saves it. On a failed save the
+// record is put back as it was. A record that becomes destroyed loses its
+// spec.
+func (r *agentRegistry) update(name string, change func(rec *AgentRecord)) (AgentRecord, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rec, ok := r.records[name]
+	if !ok {
+		return AgentRecord{}, fmt.Errorf("agent %q has no record", name)
+	}
+	old := *rec
+	change(rec)
+	if stateRank(rec.State) < stateRank(old.State) {
+		// A record never goes back: a destroy that began wins over a spawn
+		// or a reconcile that read the record before it.
+		*rec = old
+		return old, fmt.Errorf("agent %q is %s; it cannot become %s again: %w", name, old.State, rec.State, errStateBackwards)
+	}
+	if err := r.saveLocked(); err != nil {
+		*rec = old
+		return old, err
+	}
+	if rec.State == AgentDestroyed {
+		delete(r.specs, name)
+	}
+	return *rec, nil
+}

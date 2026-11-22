@@ -36,6 +36,7 @@ func ConfigHash(app *config.App) string {
 	return state.HashJSON(struct {
 		Broker          config.Broker
 		Workers         []config.Worker
+		Templates       []config.Template `json:",omitempty"`
 		Scion           config.ScionConfig
 		VerifiedChat    bool
 		WebSenders      []string              `json:",omitempty"`
@@ -45,7 +46,7 @@ func ConfigHash(app *config.App) string {
 		SharedFolders   []config.SharedFolder `json:",omitempty"`
 		ManagerReadOnly []string              `json:",omitempty"`
 		DailyReset      string                `json:",omitempty"`
-	}{app.Broker, app.Workers, app.Scion, ChatConfigured(app), WebSenders(app), agentMessagesStampOf(app), filesStampOf(app), app.ManagerClaude(),
+	}{app.Broker, app.Workers, app.Templates, app.Scion, ChatConfigured(app), WebSenders(app), agentMessagesStampOf(app), filesStampOf(app), app.ManagerClaude(),
 		app.SharedFolders, app.Manager.ReadOnly, app.Manager.DailyReset})
 }
 

@@ -18,6 +18,9 @@ func (b *Broker) handleWorkerTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	spec, ok := b.workerSpec(req.Worker)
+	if ok && b.isRevoked(spec.Name) {
+		ok = false
+	}
 	if !ok {
 		b.audit("worker-ticket", "", "deny", "unknown worker: "+req.Worker)
 		http.Error(w, "unknown worker", http.StatusNotFound)

@@ -24,3 +24,14 @@ func LoadDirectives(st state.State) (broker.DirectiveState, error) {
 func SaveDirectives(st state.State, ds broker.DirectiveState) error {
 	return state.SaveJSON(st.Directives(), "directives", ds)
 }
+
+// LoadAgents reads the spawned-agent registry; an absent file is empty. A
+// file that does not parse is an error: the broker must not start without
+// the record of the names it has used.
+func LoadAgents(st state.State) (broker.AgentsState, error) {
+	return state.LoadJSON[broker.AgentsState](st.Agents(), "agents")
+}
+
+func SaveAgents(st state.State, as broker.AgentsState) error {
+	return state.SaveJSON(st.Agents(), "agents", as)
+}

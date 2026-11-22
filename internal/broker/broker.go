@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/url"
 	"sync"
@@ -45,6 +46,10 @@ const (
 type RevocationState struct {
 	MinEpoch int      `json:"min_epoch"`
 	Revoked  []string `json:"revoked"`
+	// Superseded maps an agent name to the time its record was purged: a
+	// client certificate of that name issued before it is refused (see
+	// Supersede). Unlike Revoked, the name itself stays usable.
+	Superseded map[string]time.Time `json:"superseded,omitempty"`
 }
 
 // Config assembles a Broker.
@@ -128,6 +133,11 @@ type PersistenceConfig struct {
 	// PersistDirectives is called on every directive store mutation.
 	Directives        DirectiveState
 	PersistDirectives func(DirectiveState) error
+	// Agents is the spawned-agent registry as saved; PersistAgents saves it
+	// on every change, and a failed save refuses the change. nil ⇒ not
+	// saved.
+	Agents        AgentsState
+	PersistAgents func(AgentsState) error
 }
 
 // LLMConfig configures the /llm proxy.
@@ -291,6 +301,14 @@ type DispatchConfig struct {
 	// HubTokens heals an agent whose scion hub token expired, governed by
 	// AutoReenrol. nil ⇒ no watch.
 	HubTokens HubTokenHealer
+	// Templates are the shapes of spawned agents (config templates:).
+	Templates []TemplateSpec
+	// ArchiveDir is the host directory (0700, outside the tree) where
+	// destroy archives a workspace. Empty ⇒ archive fails and keeps it.
+	ArchiveDir string
+	// BackupConversation saves agent's conversation on the host before a
+	// destroy and returns the backup's id. nil ⇒ none is taken.
+	BackupConversation func(ctx context.Context, agent string) (string, error)
 }
 
 // TimeoutConfig bounds request handling on the jail listener per route class.
@@ -362,7 +380,7 @@ type Broker struct {
 	// afterWorkspaceMkdir is a test seam between a strict workspace mkdir
 	// and the walk that follows it.
 	afterWorkspaceMkdir func()
-	workers             map[string]WorkerSpec
+	workers             *agentRegistry
 	brokerCAPEM         string
 	brokerURL           string
 	// liveAttempts/liveInterval bound waitWorkerLive's poll (test seams).
@@ -387,10 +405,13 @@ type Broker struct {
 	admitMu           sync.Mutex
 	admitting         map[string]int
 
-	mu           sync.Mutex
-	minEpoch     int
-	revoked      map[string]bool
-	persist      func(RevocationState) error
+	mu         sync.Mutex
+	minEpoch   int
+	revoked    map[string]bool
+	superseded map[string]time.Time
+	persist    func(RevocationState) error
+	// clock is Supersede's test seam (nil: time.Now).
+	clock        func() time.Time
 	bootstrapped bool // /bootstrap latch (one manager ticket per process)
 
 	directives *DirectiveStore
@@ -454,6 +475,17 @@ type Broker struct {
 	toolSecret      string
 	timeouts        TimeoutConfig
 	serviceHosts    map[string]ServiceHostRoute
+	// archiveDir, backupConversation and spawnRate serve spawn and
+	// destroy (spawn.go).
+	archiveDir         string
+	backupConversation func(ctx context.Context, agent string) (string, error)
+	spawnRate          *rateWindow
+	spawnDayMu         sync.Mutex
+	spawnDayStart      time.Time
+	spawnDayCount      int
+	// inheritedUnsettled are the records a previous broker left spawning or
+	// destroying: the only ones ReconcileAgents settles.
+	inheritedUnsettled map[string]bool
 	// hostWatch tracks which service hosts answer, for the "host is back"
 	// notice (hostwatch.go). hostProbe and hostWatchEvery are for tests.
 	hostWatch      hostWatch
@@ -480,19 +512,43 @@ func New(c Config) *Broker {
 	for _, a := range pe.Revocation.Revoked {
 		revoked[a] = true
 	}
-	up, _ := url.Parse(cmp.Or(llm.Upstream, "https://api.anthropic.com")) // operator/test-controlled, validated at serve time
-	workers := make(map[string]WorkerSpec, len(d.Workers))
-	for _, g := range d.Workers {
-		workers[g.Name] = g
+	superseded := make(map[string]time.Time, len(pe.Revocation.Superseded))
+	for a, at := range pe.Revocation.Superseded {
+		superseded[a] = at
 	}
-	return &Broker{
+	up, _ := url.Parse(cmp.Or(llm.Upstream, "https://api.anthropic.com")) // operator/test-controlled, validated at serve time
+	workers := newAgentRegistry(d.Workers)
+	workers.load(d.Templates, pe.Agents, d.Tree)
+	workers.persist = pe.PersistAgents
+	// A name being or already destroyed stays revoked even if the revocation
+	// file lost it: the registry is the record of every name used.
+	addRevoked := false
+	inherited := map[string]bool{}
+	for _, rec := range workers.recordList() {
+		if rec.State == AgentSpawning || rec.State == AgentDestroying {
+			inherited[rec.Name] = true
+		}
+		if (rec.State == AgentDestroyed || rec.State == AgentDestroying) && !revoked[rec.Name] {
+			revoked[rec.Name] = true
+			addRevoked = true
+		}
+	}
+	if id.Rules != nil {
+		id.Rules.SetTemplateResolver(workers.activeTemplateOf)
+		for _, rec := range workers.recordList() {
+			if t, ok := workers.template(rec.Template); ok && rec.State == AgentActive {
+				id.Rules.AddAgent(rec.Name, t.Obtain, t.Delegate)
+			}
+		}
+	}
+	b := &Broker{
 		keys: id.Keys, ca: id.CA, tickets: id.Tickets, rules: id.Rules, reg: id.Registry,
 		manager: id.ManagerIdentity, managerSlug: id.ManagerSlug, managerClaude: id.ManagerClaude,
 		grantTTL: id.GrantTTL, ticketTTL: id.TicketTTL,
 		log: c.Log, version: c.Version, configHash: c.ConfigHash, epochInstanceID: c.InstanceID, toolSecret: c.ToolSecret,
 		serviceHosts: c.ServiceHosts,
 		timeouts:     c.Timeouts.withDefaults(),
-		minEpoch:     pe.Revocation.MinEpoch, revoked: revoked, persist: pe.PersistRevocation,
+		minEpoch:     pe.Revocation.MinEpoch, revoked: revoked, superseded: superseded, persist: pe.PersistRevocation,
 		directives: newDirectiveStore(pe.Directives, pe.PersistDirectives, c.Log),
 		apiKey:     llm.APIKey, llmUpstream: up,
 		runtime: d.Runtime, workers: workers, brokerCAPEM: d.BrokerCAPEM, brokerURL: d.BrokerURL,
@@ -528,9 +584,20 @@ func New(c Config) *Broker {
 		agentMsgs:  c.AgentMessages.withDefaults(), agentLedger: &agentRecord{dir: c.AgentMessages.LedgerDir},
 		contactRate: newRateWindow(contactCallLimit),
 		files:       c.Files.withDefaults(), fileLedger: &fileRecord{dir: c.Files.LedgerDir},
-		filesRate: newRateWindow(filesCallLimit),
+		filesRate:  newRateWindow(filesCallLimit),
+		archiveDir: d.ArchiveDir, backupConversation: d.BackupConversation,
+		spawnRate: newRateWindow(managerSpawnRateLimit), inheritedUnsettled: inherited,
 	}
+	if addRevoked {
+		b.mu.Lock()
+		b.persistLocked()
+		b.mu.Unlock()
+	}
+	return b
 }
+
+// managerSpawnRateLimit is the manager's spawns per minute.
+const managerSpawnRateLimit = 4
 
 // MinEpoch returns the current minimum acceptable token epoch.
 func (b *Broker) MinEpoch() int {
@@ -555,18 +622,34 @@ func (b *Broker) Revoke(agent string) {
 	b.persistLocked()
 }
 
+func (b *Broker) now() time.Time {
+	if b.clock != nil {
+		return b.clock()
+	}
+	return time.Now()
+}
+
 // persistLocked requires b.mu held.
 func (b *Broker) persistLocked() {
+	if err := b.saveRevocationLocked(); err != nil {
+		b.log.Error("broker.persist_revocation", "err", err.Error())
+	}
+}
+
+// saveRevocationLocked requires b.mu held.
+func (b *Broker) saveRevocationLocked() error {
 	if b.persist == nil {
-		return
+		return nil
 	}
 	revoked := make([]string, 0, len(b.revoked))
 	for a := range b.revoked {
 		revoked = append(revoked, a)
 	}
-	if err := b.persist(RevocationState{MinEpoch: b.minEpoch, Revoked: revoked}); err != nil {
-		b.log.Error("broker.persist_revocation", "err", err.Error())
+	var superseded map[string]time.Time
+	if len(b.superseded) > 0 {
+		superseded = maps.Clone(b.superseded)
 	}
+	return b.persist(RevocationState{MinEpoch: b.minEpoch, Revoked: revoked, Superseded: superseded})
 }
 
 func (b *Broker) isRevoked(agent string) bool {

@@ -115,6 +115,63 @@ discard a record (`lever worker purge NAME --force`, or `lever worker recycle NA
 need `recyclable`). `lever doctor`'s *worker recycle* row lists
 the recyclable workers.
 
+## Spawned agents
+
+A worker is a fixed slot: its name, directory and task are set when you declare it. For work that
+comes and goes (a session per ticket, a reviewer per pull request), declare a **template** instead
+and spawn agents from it as needed:
+
+```yaml
+templates:
+  - name: session
+    prefix: s                 # agents are named s-<6 characters>
+    dir_root: sessions        # each gets <tree>/sessions/<name>
+    resources: {memory: 4GiB, cpu: "2"}
+    max_instances: 8          # at most 8 exist at once
+    max_running: 2            # at most 2 run at once
+    obtain: [{tool: github, op: "*"}]
+    on_destroy: {workspace: archive}
+    spawners: [operator, manager]   # optional: let the manager spawn too
+```
+
+After `lever reload` (the broker reads templates at start):
+
+```console
+$ lever agent spawn session --task-file brief.md --label "PR 412"
+agent s-k3f7qa spawned from template session; it is running.
+$ lever msg send "also check the tests" --to s-k3f7qa
+$ lever worker suspend s-k3f7qa        # and resume, stop, new-session, watch
+$ lever agent list
+$ lever agent destroy s-k3f7qa --stop --force
+```
+
+What a spawn does: the broker draws a name that was never used, records the agent in
+`.lever-state/agents.json` (0600), creates its workspace with its `lever-agent` skill, grants it
+exactly the template's capabilities and starts it fresh with your task. What a destroy does: it
+backs up the agent's conversation to `.lever-state/agent-conversations/<name>/`, drops its grants
+and revokes its name for good, archives (or removes, or keeps) its workspace, and deletes its hub
+record. The record stays as a tombstone, so the name is never drawn again: the agent's certificates
+and tokens can never name another agent.
+
+- **Restarts.** Spawned agents survive `lever reload`, `lever stop` (which suspends running ones)
+  and `lever up` (which leaves them suspended: resume the ones you need). A broker that stopped in
+  the middle of a spawn or a destroy settles it when it starts again: a spawn whose agent has a hub
+  record is kept, one without is undone, and a destroy is finished. Until then the agent holds no
+  grants and no verb drives it.
+- **Changing a template.** The broker builds every agent's spec from its template as configured
+  when it starts, so a change reaches running agents at the next `lever reload` for grants, and at
+  their next fresh start for image, model and resources (scion keeps those in the record). An agent
+  whose template you removed can only be destroyed; `lever doctor`'s *spawned agents* row names it.
+- **From the manager.** With `manager` in `spawners`, the manager spawns with
+  `lever-manager agent spawn`, and drives and destroys only the agents it spawned. Such a template
+  may obtain only capabilities the manager obtains itself, and may delegate nothing. The manager
+  messages and reads the inbox of only its own spawned agents.
+- **Delegating to spawned agents.** A `delegate` grant's `to` may name `template:<name>`: it holds
+  for each active agent of that template.
+- **Not yet.** Spawned agents do not appear in the remote web UI's agent list or chat, and doctor's
+  per-agent network row skips them. Reach them with `lever attach NAME`, `lever msg send`,
+  `lever worker watch` and `lever agent list`.
+
 ## Driving workers from a host program
 
 A program on the host (a job runner, a cron script) can drive long-lived workers without the
@@ -468,10 +525,10 @@ Doctor's `manager agent` row reports this state.
 
 **Lima: the run user's uid.** The jail's rootless podman finds the agent containers only under
 the run user's `XDG_RUNTIME_DIR`, which comes from that user's uid (1000 in a Lima guest).
-`lever doctor` and `lever worker purge` read the jail run user's uid before they use the jail, as
-`lever apply` and the broker do. Before 0.32.0 they used the default uid (501), so on Lima the
-`agent hub tokens` row read "not checked (token unreadable): … (no container)" for every agent,
-and `worker purge` looked for the worker ticket in the wrong runtime directory.
+`lever doctor` reads the jail run user's uid before it uses the jail, as `lever apply` and the
+broker do (`lever worker purge` runs in the broker). Before 0.32.0 doctor used the default uid
+(501), so on Lima the `agent hub tokens` row read "not checked (token unreadable): … (no
+container)" for every agent.
 
 ## Create-time manager settings
 
@@ -620,7 +677,9 @@ detaches other terminals and stages the attach token. While one of them runs, an
 names the command that holds the lock (with its pid and start time), and changes nothing: an
 interactive command does not wait silently, since a new conversation can take minutes.
 The worker commands (`lever worker resume`, `lever worker purge`) and `lever msg send` take no
-lifecycle lock: the broker serializes what they do to one worker with that worker's own lock.
+lifecycle lock: the broker serializes what they do to one worker with that worker's own lock. A
+purge never waits for that lock: while another action of the worker holds it, it exits `75`
+(`busy`) and deletes nothing.
 
 `--wait <duration>` (for example `--wait 5m`) makes a command wait up to that long for the holder
 to finish instead, saying once what it waits for; when the time runs out it exits `6` as before.

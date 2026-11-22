@@ -5,85 +5,111 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/broker"
-	"github.com/stevegeek/lever/internal/brokerctl"
-	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/cli"
 )
 
-// newWorkerCmd is the host-side worker admin command; unlike the in-container
-// `agent` command it reaches the scion runtime directly.
-func newWorkerCmd(factory BackendFactory) *cobra.Command {
+// newWorkerCmd is the host-side worker admin command. Every verb goes
+// through the broker's operator socket.
+func newWorkerCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "worker", Short: "Manage worker agents host-side"}
-	cmd.AddCommand(newWorkerPurgeCmd(factory), newWorkerListCmd(), newWorkerStartCmd(), newWorkerResumeCmd(),
+	cmd.AddCommand(newWorkerPurgeCmd(), newWorkerListCmd(), newWorkerStartCmd(), newWorkerResumeCmd(),
 		newWorkerRecycleCmd(), newWorkerNewSessionCmd(), newWorkerSuspendCmd(), newWorkerStopCmd(), newWorkerWatchCmd())
 	return cmd
 }
 
+// workerPurgeResult is `lever worker purge --json`'s one line on stdout.
+type workerPurgeResult struct {
+	workerVerbResult
+	Was           string `json:"was,omitempty"`
+	TicketLeft    bool   `json:"ticket_left,omitempty"`
+	CutoffUnsaved bool   `json:"cutoff_unsaved,omitempty"`
+}
+
 // newWorkerPurgeCmd deletes a worker's scion record and staged ticket so it
 // can be dispatched fresh with a new task (scion pins the task at creation).
-// It never deletes the worker's HostWorkspace, its work product. Destructive,
-// so it requires --force; only configured worker names are accepted.
-func newWorkerPurgeCmd(factory BackendFactory) *cobra.Command {
-	var force bool
-	var machine, backendFlag *string
+// The broker does it under the worker's lock and supersedes the certificates
+// issued to the worker. It never deletes the worker's workspace, its work
+// product. Destructive, so it requires --force. --orphan purges a hub record
+// that is neither the manager nor a declared worker.
+func newWorkerPurgeCmd() *cobra.Command {
+	var force, orphan, asJSON bool
 	c := &cobra.Command{
 		Use:   "purge NAME",
 		Args:  cobra.ExactArgs(1),
 		Short: "Delete a worker's scion record + staged ticket (keeps its work product)",
+		Long: "Delete a declared worker's scion record and staged ticket through the broker, under the worker's lock,\n" +
+			"so it can run a new task; certificates issued to it before the purge are refused from then on. Its work\n" +
+			"product in the workspace is kept. --orphan deletes a hub record of this instance that is neither the\n" +
+			"manager nor a declared worker (`lever worker list` and `lever doctor` name them).\n" +
+			"Exit codes and --json reasons: see the CLI reference.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
+			res := workerPurgeResult{workerVerbResult: workerVerbResult{Worker: name}}
+			fail := func(err error, reason string, code int) error {
+				if asJSON {
+					res.Reason, res.Error, res.Exit = reason, err.Error(), code
+					printJSONLine(cmd, res)
+				}
+				return cli.WithExitCode(fmt.Errorf("worker purge %s: %w", name, err), code)
+			}
+			what := "the worker's scion record and staged ticket so it can run a new task (its work product in the workspace is KEPT)"
+			if orphan {
+				what = "the orphan hub record " + name
+			}
 			if !force {
-				return fmt.Errorf("`lever worker purge %s` deletes the worker's scion record and staged ticket so it can run a new task (its work product in the workspace is KEPT); re-run with --force to proceed", name)
+				return fail(fmt.Errorf("this deletes %s; re-run with --force to proceed", what), reasonNoForce, exitWorkerRefused)
 			}
-
-			// Config comes from the CWD; the positional is the worker name.
-			app, state, err := loadAppAndState(nil)
+			app, st, err := loadAppAndState(nil)
 			if err != nil {
-				return err
+				return fail(err, "", 1)
 			}
-
-			_, b, err := resolveJailBackend(factory, *machine, *backendFlag)
+			// Which names are workers is the running broker's call, not this
+			// lever.yaml's: the two differ until `lever reload`.
+			sock, err := operatorSocket(app, st)
 			if err != nil {
-				return err
+				return fail(err, reasonNoOperatorSocket, exitOperatorSocketMissing)
 			}
-			// The ticket dir and the jail runner's XDG_RUNTIME_DIR come from the run
-			// user's uid; the default (501) is wrong on Lima (1000).
-			if err := b.ResolveRunUser(cmd.Context()); err != nil {
-				return fmt.Errorf("reading the jail run user: %w", err)
+			var resp broker.WorkerPurgeResponse
+			err = operatorPost(cmd.Context(), sock, broker.PathOperatorWorkerPurge, broker.WorkerPurgeRequest{Worker: name, Orphan: orphan}, &resp)
+			if ref, ok := operatorFailure(err, broker.PathOperatorWorkerPurge); ok {
+				return fail(ref, ref.Reason, workerVerbExit(ref.Reason))
+			} else if err != nil {
+				return fail(err, "", 1)
 			}
-
-			// The spec comes from config by the broker's own derivation
-			// (brokerctl.WorkerSpecs), never a manager-supplied path.
-			spec, ok := findWorkerSpec(brokerctl.WorkerSpecs(app, b.MountDest(), b.RunUID()), name)
-			if !ok {
-				return fmt.Errorf("unknown worker %q — declare it under `workers:` in %s", name, config.CanonicalName)
+			res.OK, res.Was, res.TicketLeft, res.CutoffUnsaved = true, safeToken(resp.Was), resp.TicketLeft, resp.CutoffUnsaved
+			if asJSON {
+				printJSONLine(cmd, res)
+				return nil
 			}
-
-			// brokerctl.PurgeWorker (shared with the broker's recycle route) deletes the
-			// record through a host-side scion client with the controller PAT, then the
-			// ticket in the guest runtime dir. HostWorkspace is never touched.
-			sc := brokerctl.HostScionClient(b.JailRunner(), state, app.Scion.AgentRole)
-			ticketErr, err := brokerctl.PurgeWorker(cmd.Context(), sc, b.JailRunner(), spec.Name, b.MountDest())
-			if err != nil {
-				return err
+			if resp.TicketLeft {
+				cmd.PrintErrf("lever: warning: the staged ticket of %q was not removed (see the broker log); its next start stages a fresh one\n", name)
 			}
-			if ticketErr != nil {
-				cmd.PrintErrf("lever: warning: removing staged ticket for %q: %v\n", spec.Name, ticketErr)
+			if resp.CutoffUnsaved {
+				cmd.PrintErrf("lever: warning: the certificate cutoff for %q was not saved (see the broker log): it holds until the broker restarts\n", name)
 			}
-
-			cmd.Printf("worker %q purged — scion record deleted; work product in %s kept.\n", spec.Name, spec.HostWorkspace)
+			deleted := "scion record deleted (it was " + res.Was + ")"
+			if res.Was == broker.PhaseNone {
+				deleted = "no scion record to delete"
+			}
+			if orphan {
+				cmd.Printf("orphan %q purged: %s.\n", name, deleted)
+				return nil
+			}
+			dir := name
+			for _, w := range app.Workers {
+				if w.Name == name {
+					dir = app.WorkerDir(w)
+				}
+			}
+			cmd.Printf("worker %q purged: %s; certificates issued to it before now are refused; work product in %s kept.\n", name, deleted, dir)
 			return nil
 		},
 	}
 	c.Flags().BoolVar(&force, "force", false, "confirm the destructive purge (required)")
-	machine, backendFlag = addJailTargetFlags(c)
+	c.Flags().BoolVar(&orphan, "orphan", false, "purge a hub record that is neither the manager nor a declared worker")
+	c.Flags().BoolVar(&asJSON, "json", false, "print one JSON object on stdout: worker, ok, was, reason, error, exit")
 	return c
 }
 
-func findWorkerSpec(specs []broker.WorkerSpec, name string) (broker.WorkerSpec, bool) {
-	for _, s := range specs {
-		if s.Name == name {
-			return s, true
-		}
-	}
-	return broker.WorkerSpec{}, false
-}
+// reasonNoForce is purge's own refusal without --force.
+const reasonNoForce = "no-force"

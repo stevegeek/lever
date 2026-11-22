@@ -2,12 +2,10 @@ package brokerctl
 
 import (
 	"fmt"
-	"path/filepath"
 
 	"github.com/stevegeek/lever/internal/apply"
 	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/config"
-	"github.com/stevegeek/lever/internal/jail"
 )
 
 // WorkerSpecs derives the config-authoritative worker descriptions the broker
@@ -17,27 +15,7 @@ import (
 func WorkerSpecs(app *config.App, jailMount, jailUID string) []broker.WorkerSpec {
 	specs := make([]broker.WorkerSpec, 0, len(app.Workers))
 	for _, g := range app.Workers {
-		ticketDir := ""
-		if jailUID != "" {
-			ticketDir = jail.WorkerTicketDir(jailUID, g.Name)
-		}
-		specs = append(specs, broker.WorkerSpec{
-			Name:            g.Name,
-			WorkspaceSubdir: g.Dir,                          // e.g. "workers/scratch" — relative to the project root (/lever); scion mounts this subtree at /workspace
-			HostWorkspace:   filepath.Join(app.Tree, g.Dir), // <tree>/<dir> — MkdirAll'd before start (scion's guard requires it to exist)
-			TicketDir:       ticketDir,
-			Image:           app.WorkerAgentImage(g),
-			Model:           app.WorkerModel(g), // own model:, else the manager's; empty ⇒ scion decides
-			// Own instructions_file only, never the manager's. Read at dispatch.
-			InstructionsPath: app.WorkerInstructionsPath(g),
-			TaskPath:         app.WorkerTaskPath(g),
-			APIKey:           app.EffectiveWorkerLLMAuth(g) == config.LLMAuthAPIKey,
-			Recyclable:       g.Recyclable,
-			Claude:           g.Claude(),
-			Shared:           sharedMounts(app, jailMount, g.Name),
-			// Own resources only — never the manager's.
-			Resources: apply.ScionResources(g.Resources),
-		})
+		specs = append(specs, workerSpecOf(app, jailMount, jailUID, g, true))
 	}
 	return specs
 }

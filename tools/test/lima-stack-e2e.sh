@@ -3,7 +3,8 @@
 # with the agent image (lever-admin links the runtime broker and pins the
 # experiments off), a manager and a worker, messages both ways, remote access
 # for an operator and a contact, the experiment and broker fence, a contact
-# removed while an agent loops the controller rename, an agent's image
+# removed while an agent loops the controller rename, agents spawned from a
+# template and destroyed (operator and manager), an agent's image
 # registry, runtime and gcloud settings writes (a worker still starts on lever's
 # image, and the next apply undoes them), `lever stop` and a resume, `lever
 # up` applying a config change, a warm `lever up`, `lever up --wait` under a
@@ -128,6 +129,14 @@ workers:
   - name: worker
     dir: workers/worker
     obtain: []
+templates:
+  - name: session
+    prefix: s
+    dir_root: sessions
+    resources: {memory: 1GiB}
+    max_instances: 3
+    max_running: 1
+    spawners: [operator, manager]
 broker:
   jail_port: $JP
   admin_port: $AP
@@ -317,6 +326,50 @@ checkx "the manager messages the worker" 'X exec "lever--$NAME" lever-manager ms
 checkx "the manager reads its inbox through the broker (notifications)" 'X exec "lever--$NAME" lever-manager msg list >/dev/null 2>&1'
 checkx "lever msg send to the manager" '(cd "$INST" && "$LEVER" msg send --to "$NAME" "stack e2e host note" 2>&1) | grep -q Sent'
 checkx "the controller PAT lists notifications (inbox:read)" '[ "$(hub GET /api/v1/notifications)" = 200 ]'
+
+say "agents spawned from a template"
+# lever agent spawn and destroy (operator), lever-manager agent spawn and
+# destroy (manager), max_running, the registry across a broker restart, and
+# what destroy leaves: a conversation backup, an archive, a revoked name.
+LA() { (cd "$INST" && "$LEVER" agent "$@" 2>&1); }
+echo "Say hello, then wait." > "$WORK/brief.md"
+spawn_json=$(LA spawn session --task-file "$WORK/brief.md" --label e2e-op --json)
+S1=$(printf '%s' "$spawn_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("name",""))' 2>/dev/null)
+echo "      | $spawn_json" | cut -c1-300
+checkx "the operator spawns an agent with a fresh name ($S1)" '[[ "$S1" =~ ^s-[a-z2-7]{6}$ ]]'
+checkx "its container runs" 'X ps --format "{{.Names}}" | grep -q -- "$S1"'
+checkx "its workspace holds its lever skill" '[ -f "$INST/workspace/sessions/$S1/.claude/skills/lever-agent/SKILL.md" ]'
+checkx "lever agent list shows it active" 'LA list | grep -E "^$S1 .*active" >/dev/null'
+checkx "lever msg send reaches it" '(cd "$INST" && "$LEVER" msg send --to "$S1" "stack e2e hello" 2>&1) | grep -q Sent'
+out=$(mgr agent spawn session --task probe)
+echo "      | $out" | tail -1 | cut -c1-300
+checkx "max_running refuses a second running agent of the template" '[[ "$out" == *"allows 1 running"* ]]'
+checkx "the manager may not destroy the operator's agent" '[[ "$(mgr agent destroy "$S1" --stop)" == *"not spawned by the manager"* ]]'
+(cd "$INST" && "$LEVER" worker suspend "$S1" 2>&1) | tail -1 | sed 's/^/      | /'
+out=$(mgr agent spawn session --task probe --label e2e-mgr)
+S2=$(printf '%s' "$out" | grep -oE 's-[a-z2-7]{6}' | head -1)
+echo "      | $out" | tail -1 | cut -c1-300
+checkx "the manager spawns its own agent ($S2)" '[ -n "$S2" ] && [ "$S2" != "$S1" ]'
+checkx "the manager lists only its own agent" 'o=$(mgr agent spawned); [[ "$o" == *"$S2"* && "$o" != *"$S1"* ]]'
+(cd "$INST" && timeout 900 "$LEVER" reload 2>&1) | tail -2 | sed 's/^/      | /'
+checkx "both agents survive a broker restart" 'o=$(LA list); [[ "$o" == *"$S1"* && "$o" == *"$S2"* ]]'
+dj=$(LA destroy "$S1" --force --json)
+echo "      | $dj" | cut -c1-300
+checkx "the operator destroys its agent" 'printf "%s" "$dj" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if d[\"ok\"] and d[\"workspace\"].startswith(\"archived\") else 1)"'
+TR=$(printf '%s' "$dj" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("transcript",""))' 2>/dev/null)
+if [ -n "$TR" ]; then
+	checkx "its conversation was backed up ($TR)" '[ -f "$INST/.lever-state/agent-conversations/$S1/$TR/projects.tar.gz" ]'
+else
+	echo "      | (no transcript in its home yet: nothing to back up)"
+fi
+checkx "its workspace was archived and removed" '[ -f "$INST/.lever-state/agent-archives/$S1.tar.gz" ] && [ ! -e "$INST/workspace/sessions/$S1" ]'
+checkx "its name is revoked for good" 'grep -q "\"$S1\"" "$INST/.lever-state/revocation.json"'
+checkx "its hub record is gone" '! mgr agent list | grep -q -- "$S1"'
+checkx "a destroyed agent cannot be resumed" '! (cd "$INST" && "$LEVER" worker resume "$S1" >/dev/null 2>&1)'
+out=$(mgr agent destroy "$S2" --stop)
+echo "      | $out" | head -1 | cut -c1-300
+checkx "the manager destroys its own agent" '[[ "$out" == *"destroyed"* ]]'
+checkx "lever agent list --all keeps both as destroyed" '[ "$(LA list --all | grep -cE "^s-[a-z2-7]{6} .*destroyed")" = 2 ]'
 
 say "the experiment fence on the hub"
 for p in /api/v1/conduit/grant-keys /api/v1/artifacts /api/v1/thread-groups; do

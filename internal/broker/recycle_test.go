@@ -309,7 +309,7 @@ func TestWorkerRecycle_badTaskOrInstructionsDeleteNothing(t *testing.T) {
 
 	b2, rt2, _, spec := recycleBroker(t, scion.PhaseSuspended, true)
 	spec.InstructionsPath = filepath.Join(t.TempDir(), "missing.md")
-	b2.workers["worker"] = spec
+	b2.workers.put(spec)
 	if rec := callWorker(t, b2, "/worker/recycle", recycleBody, "test-manager"); rec.Code != http.StatusInternalServerError {
 		t.Fatalf("missing instructions: status = %d, want 500", rec.Code)
 	}

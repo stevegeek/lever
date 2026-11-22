@@ -154,9 +154,9 @@ func TestFreshStartRefusesNoImage(t *testing.T) {
 	} {
 		rt := &fakeRuntime{agents: map[string][]scion.Agent{}}
 		b := newTestBroker(t, rt, imageSpec)
-		s := b.workers["worker"]
+		s := workerSpecOf(b, "worker")
 		s.Image = ""
-		b.workers["worker"] = s
+		b.workers.put(s)
 		rec := call(t, b)
 		if rec.Code != http.StatusConflict || rec.Header().Get(ReasonHeader) != ReasonImageUnqualified || len(rt.started)+len(rt.staged) != 0 {
 			t.Errorf("%s: %d %q started=%d staged=%d: %s", name, rec.Code, rec.Header().Get(ReasonHeader), len(rt.started), len(rt.staged), rec.Body)

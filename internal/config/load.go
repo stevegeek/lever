@@ -184,6 +184,12 @@ func LoadNoHostChecks(path string) (*App, error) {
 			struct{ key, path string }{fmt.Sprintf("workers[%s].task_file", g.Name), app.WorkerTaskPath(g)},
 			struct{ key, path string }{fmt.Sprintf("workers[%s].image_tar", g.Name), app.WorkerImageTarPath(g)})
 	}
+	for _, t := range app.Templates {
+		g := t.prototype()
+		bootFiles = append(bootFiles,
+			struct{ key, path string }{fmt.Sprintf("templates[%s].instructions_file", t.Name), app.WorkerInstructionsPath(g)},
+			struct{ key, path string }{fmt.Sprintf("templates[%s].image_tar", t.Name), app.WorkerImageTarPath(g)})
+	}
 	for _, m := range bootFiles {
 		if m.path == "" {
 			continue
@@ -249,6 +255,11 @@ func (a *App) injectLLMGrants() {
 	for i := range a.Workers {
 		if a.EffectiveWorkerLLMAuth(a.Workers[i]) == LLMAuthAPIKey {
 			add(&a.Workers[i].Obtain)
+		}
+	}
+	for i := range a.Templates {
+		if a.EffectiveWorkerLLMAuth(a.Templates[i].prototype()) == LLMAuthAPIKey {
+			add(&a.Templates[i].Obtain)
 		}
 	}
 }

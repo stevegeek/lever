@@ -39,7 +39,7 @@ func (a *App) llmAuthModes() (anyAPIKey, anySubscription bool) {
 		}
 	}
 	mark(a.EffectiveManagerLLMAuth())
-	for _, g := range a.Workers {
+	for _, g := range a.workerShapes() {
 		mark(a.EffectiveWorkerLLMAuth(g))
 	}
 	return

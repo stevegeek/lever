@@ -84,8 +84,8 @@ func (a *App) treeMountPlan(dirs, pinned []string) []TreeMount {
 	for _, p := range pinned {
 		pinWithAncestors(cleanRel(p), true, false)
 	}
-	for _, g := range a.Workers {
-		pinWithAncestors(cleanRel(g.Dir), true, true)
+	for _, d := range a.AgentDirs() {
+		pinWithAncestors(cleanRel(d.Dir), true, true)
 	}
 	slices.SortFunc(out, func(x, y TreeMount) int {
 		return cmp.Or(cmp.Compare(strings.Count(x.Rel, "/"), strings.Count(y.Rel, "/")), cmp.Compare(x.Rel, y.Rel))
@@ -145,19 +145,19 @@ func (a *App) validateManagerReadOnly() error {
 				return fmt.Errorf("config: manager.read_only entries %q and %q are nested — one contains the other, which would make a read-only directory the other's read-write pin; list only the outer one", prev, e)
 			}
 		}
-		for _, g := range a.Workers {
-			if fsutil.RelOverlapFold(g.Dir, e) {
-				return fmt.Errorf("config: worker %q (dir %q) overlaps manager.read_only entry %q — the worker mounts its dir read-write and never sees the manager's read-only mounts, so it (or the manager, by dispatching it) could write the protected path; move the worker or the read_only entry", g.Name, g.Dir, e)
+		for _, d := range a.AgentDirs() {
+			if fsutil.RelOverlapFold(d.Dir, e) {
+				return fmt.Errorf("config: %s overlaps manager.read_only entry %q — the agent mounts its dir read-write and never sees the manager's read-only mounts, so it (or the manager, by dispatching it) could write the protected path; move the agent's dir or the read_only entry", d, e)
 			}
 		}
 	}
 	// Every worker dir becomes a pin, so the same character rules apply.
-	for _, g := range a.Workers {
-		if strings.ContainsAny(g.Dir, readOnlyForbiddenChars) {
-			return fmt.Errorf("config: worker %q dir %q must not contain any of %q while manager.read_only or shared_folders is set (the manager pins each worker dir with a mount, and scion expands $VAR and ~ in a mount path)", g.Name, g.Dir, readOnlyForbiddenChars)
+	for _, d := range a.AgentDirs() {
+		if strings.ContainsAny(d.Dir, readOnlyForbiddenChars) {
+			return fmt.Errorf("config: %s must not contain any of %q while manager.read_only or shared_folders is set (the manager pins each worker dir with a mount, and scion expands $VAR and ~ in a mount path)", d, readOnlyForbiddenChars)
 		}
-		if !isASCII(g.Dir) {
-			return fmt.Errorf("config: worker %q dir %q must be ASCII while manager.read_only or shared_folders is set — APFS treats the composed and decomposed spellings of an accented name as one directory, so the overlap check with the read_only entries could miss an alias", g.Name, g.Dir)
+		if !isASCII(d.Dir) {
+			return fmt.Errorf("config: %s must be ASCII while manager.read_only or shared_folders is set — APFS treats the composed and decomposed spellings of an accented name as one directory, so the overlap check with the read_only entries could miss an alias", d)
 		}
 	}
 	return nil
@@ -196,7 +196,7 @@ func (a *App) PrepareManagerReadOnlyHost() error {
 			return fmt.Errorf("config: manager.read_only entry %q: %w", e, err)
 		}
 	}
-	if len(a.Workers) == 0 {
+	if len(a.AgentDirs()) == 0 {
 		return nil
 	}
 	root, err := os.OpenRoot(a.Tree)
@@ -204,19 +204,19 @@ func (a *App) PrepareManagerReadOnlyHost() error {
 		return fmt.Errorf("config: manager.read_only: opening the tree: %w", err)
 	}
 	defer root.Close()
-	for _, g := range a.Workers {
-		rel := filepath.Clean(g.Dir)
+	for _, d := range a.AgentDirs() {
+		rel := filepath.Clean(d.Dir)
 		if err := walkNoSymlink(a.Tree, rel, true); err != nil {
-			return fmt.Errorf("config: worker %q dir %q (pinned while manager.read_only or shared_folders is set): %w", g.Name, g.Dir, err)
+			return fmt.Errorf("config: %s (pinned while manager.read_only or shared_folders is set): %w", d, err)
 		}
 		if err := root.MkdirAll(rel, 0o755); err != nil {
-			return fmt.Errorf("config: worker %q dir %q: creating it: %w", g.Name, g.Dir, err)
+			return fmt.Errorf("config: %s: creating it: %w", d, err)
 		}
 		if afterWorkerDirMkdir != nil {
 			afterWorkerDirMkdir(rel)
 		}
 		if err := walkNoSymlink(a.Tree, rel, false); err != nil {
-			return fmt.Errorf("config: worker %q dir %q (pinned while manager.read_only or shared_folders is set): %w", g.Name, g.Dir, err)
+			return fmt.Errorf("config: %s (pinned while manager.read_only or shared_folders is set): %w", d, err)
 		}
 	}
 	return nil

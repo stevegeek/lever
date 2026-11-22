@@ -19,10 +19,25 @@ import (
 // via the lever-renew sidecar hitting /renew.
 const certTTL = 24 * time.Hour
 
+// LeafBackdate is how far a leaf's NotBefore is set before its issue, for
+// clock skew. LeafIssuedAt undoes it.
+const LeafBackdate = time.Minute
+
+// LeafIssuedAt is when leaf was issued, to the second: x509 keeps NotBefore
+// in whole seconds, so it is at most a second early.
+func LeafIssuedAt(leaf *x509.Certificate) time.Time {
+	return leaf.NotBefore.Add(LeafBackdate)
+}
+
 // leafTemplate is the single place the leaf-cert security policy lives:
 // random 128-bit serial, 1-minute clock-skew backdate, certTTL lifetime,
 // digital-signature key usage, exactly one EKU.
 func leafTemplate(cn string, eku x509.ExtKeyUsage, dnsNames []string, ipAddrs []net.IP) (*x509.Certificate, error) {
+	return leafTemplateAt(cn, eku, dnsNames, ipAddrs, time.Now())
+}
+
+// leafTemplateAt is leafTemplate for a leaf stamped as issued at issued.
+func leafTemplateAt(cn string, eku x509.ExtKeyUsage, dnsNames []string, ipAddrs []net.IP, issued time.Time) (*x509.Certificate, error) {
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
 		return nil, fmt.Errorf("ca: serial: %w", err)
@@ -30,8 +45,8 @@ func leafTemplate(cn string, eku x509.ExtKeyUsage, dnsNames []string, ipAddrs []
 	return &x509.Certificate{
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: cn},
-		NotBefore:    time.Now().Add(-time.Minute),
-		NotAfter:     time.Now().Add(certTTL),
+		NotBefore:    issued.Add(-LeafBackdate),
+		NotAfter:     issued.Add(certTTL),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{eku},
 		DNSNames:     dnsNames,
@@ -63,10 +78,21 @@ func (c *CA) SignCSR(csrPEM []byte) ([]byte, error) {
 // CommonName. /renew uses it to stamp the authenticated identity, never a
 // CSR-supplied CN.
 func (c *CA) SignPublicKey(pub crypto.PublicKey, cn string) ([]byte, error) {
+	return c.SignPublicKeyFrom(pub, cn, time.Time{})
+}
+
+// SignPublicKeyFrom is SignPublicKey for a leaf whose issue time (see
+// LeafIssuedAt) is no earlier than earliest, which may be up to a few seconds
+// ahead: the leaf is valid at once, since NotBefore is backdated.
+func (c *CA) SignPublicKeyFrom(pub crypto.PublicKey, cn string, earliest time.Time) ([]byte, error) {
 	if cn == "" {
 		return nil, fmt.Errorf("ca: empty common name")
 	}
-	tmpl, err := leafTemplate(cn, x509.ExtKeyUsageClientAuth, nil, nil)
+	issued := time.Now()
+	if earliest.After(issued) {
+		issued = earliest
+	}
+	tmpl, err := leafTemplateAt(cn, x509.ExtKeyUsageClientAuth, nil, nil, issued)
 	if err != nil {
 		return nil, err
 	}

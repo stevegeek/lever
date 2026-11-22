@@ -460,3 +460,33 @@ complete only after the purge (or, for the manager, `lever up --fresh`), and the
 resume is not refused, only reported by doctor. The checks before a mount and the mount itself are
 not atomic; the pins are what close that window, which is why workers wait for them. Writers'
 mounts are checked by configuration only, since a writer is meant to write.
+
+### 4.6 Spawned agents
+
+An agent spawned from a template is a worker in every check above: it mounts only its own
+`<dir_root>/<name>`, holds only its template's grants, and is started and resumed through the same
+broker checks. What spawning adds, and how it is held:
+
+- **The spawner chooses only the task and a label.** The broker refuses a spawn body with any other
+  field, picks the name itself and builds the spec from the template alone. A template the manager
+  may spawn from may obtain and delegate only what the manager obtains (config load enforces it),
+  so the manager cannot mint an agent wider than itself.
+- **Names are never reused.** Authority is checked by certificate CN, and certificates and tokens
+  live up to 24 hours. A destroyed agent's name is revoked for good and kept as a tombstone in
+  `.lever-state/agents.json`; a revocation that is not saved stops the destroy, and the broker
+  re-asserts the revocation of every destroyed name at start.
+- **The workspace is only the directory spawn made.** The tree is manager-writable, so spawn
+  creates the workspace exclusively with no link on its path and records its device and inode.
+  Every resume refuses a workspace that is no longer that directory, whatever `manager.read_only`
+  says, so a manager that swaps it for a link to another agent's directory gains nothing. Destroy
+  archives and removes only through a handle on that directory: links inside are archived as
+  links, never followed, and special files are skipped.
+- **Destroy cuts authority before it deletes.** Grants are dropped and the name revoked before the
+  workspace and the hub record are touched; a spawn or destroy that a restart interrupted holds no
+  grants and is no worker until the broker settles it.
+
+**Residual risks.** The manager mounts the whole tree, so it can write a spawned agent's workspace
+(its `.claude` settings included) as it can a worker's. An operator-only template with grants wider
+than the manager's is therefore reachable by a compromised manager the same way a wider worker is:
+keep such templates' grants as narrow as their work allows. Conversation backups hold whatever the
+agent saw; they stay in the host-only state directory and are never removed by lever.

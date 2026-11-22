@@ -69,7 +69,7 @@ func (a *App) WorkerAgentImage(g Worker) string {
 func (a *App) CheckTarTag(stepRef, tag string) error {
 	own := imageref.Normalize(imageref.Agent(stepRef))
 	refs := []string{a.ManagerImage()}
-	for _, g := range a.Workers {
+	for _, g := range a.workerShapes() {
 		refs = append(refs, a.WorkerImage(g))
 	}
 	tagNames := imageref.Names(tag)

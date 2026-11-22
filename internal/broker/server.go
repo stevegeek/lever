@@ -36,7 +36,9 @@ const jailHandshakeTimeout = 10 * time.Second
 // handshake (which proves its key) and is reported and refused there.
 func (b *Broker) jailServer(tlsCfg *tls.Config, onLapse ca.LapseFunc) *http.Server {
 	return &http.Server{
-		Handler: ca.LapseGate(b.JailHandler(), onLapse, b.log), TLSConfig: tlsCfg,
+		// The cutoff gate also runs first, so a superseded leaf that has
+		// expired too never asks the healer to bounce the name's new agent.
+		Handler: b.supersededGate(ca.LapseGate(b.JailHandler(), onLapse, b.log)), TLSConfig: tlsCfg,
 		ConnContext:       ca.ConnContext,
 		ReadHeaderTimeout: jailHandshakeTimeout, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 16,
 	}
@@ -53,6 +55,9 @@ func (b *Broker) JailHandler() http.Handler {
 	mux.Handle("POST "+wire.PathWorkerResume, worker(b.handleWorkerResume))
 	mux.Handle("POST "+wire.PathWorkerRecycle, worker(b.handleWorkerRecycle))
 	mux.Handle("POST "+wire.PathWorkerList, control(b.handleWorkerList))
+	mux.Handle("POST "+wire.PathAgentSpawn, worker(b.handleAgentSpawn))
+	mux.Handle("POST "+wire.PathAgentDestroy, worker(b.handleAgentDestroy))
+	mux.Handle("POST "+wire.PathAgentList, control(b.handleAgentList))
 	mux.Handle("POST "+wire.PathMsgSend, control(b.handleMsgSend))
 	mux.Handle("POST "+wire.PathMsgList, control(b.handleMsgList))
 	mux.Handle("POST "+wire.PathMsgRecipients, control(b.handleMsgRecipients))
@@ -84,7 +89,7 @@ func (b *Broker) JailHandler() http.Handler {
 	if b.apiKey != nil {
 		mux.Handle("/llm/", http.StripPrefix("/llm", withBodyDeadline(b.timeouts.Body, b.llmProxyHandler())))
 	}
-	return mux
+	return b.supersededGate(mux)
 }
 
 // bounded is for control routes only, never a streaming one (JailHandler).
@@ -146,6 +151,10 @@ func (b *Broker) OperatorHandler() http.Handler {
 	mux.HandleFunc("POST "+PathOperatorWorkerSuspend, b.handleOperatorWorkerSuspend)
 	mux.HandleFunc("POST "+PathOperatorWorkerStop, b.handleOperatorWorkerStop)
 	mux.HandleFunc("POST "+PathOperatorWorkerNewSession, b.handleOperatorWorkerNewSession)
+	mux.HandleFunc("POST "+PathOperatorWorkerPurge, b.handleOperatorWorkerPurge)
+	mux.HandleFunc("POST "+PathOperatorAgentSpawn, b.handleOperatorAgentSpawn)
+	mux.HandleFunc("POST "+PathOperatorAgentDestroy, b.handleOperatorAgentDestroy)
+	mux.HandleFunc("GET "+PathOperatorAgentList, b.handleOperatorAgentList)
 	mux.HandleFunc("POST "+PathOperatorWorkerEvents, b.handleOperatorWorkerEvents)
 	mux.HandleFunc("POST "+wire.PathOperatorAgentMessagesMatch, b.handleAgentMessagesMatch)
 	return mux

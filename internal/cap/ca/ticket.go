@@ -56,6 +56,17 @@ func (s *TicketStore) issue(worker string, ttl time.Duration, sole bool) (string
 	return tk, nil
 }
 
+// DropFor drops every unspent ticket for worker.
+func (s *TicketStore) DropFor(worker string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, t := range s.tickets {
+		if t.worker == worker {
+			delete(s.tickets, k)
+		}
+	}
+}
+
 // Redeem consumes a ticket: it must exist, be unexpired, and match worker.
 // Only a successful match burns it, so a mismatched attempt cannot burn a
 // legitimate holder's ticket.

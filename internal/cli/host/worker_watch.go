@@ -101,7 +101,9 @@ func runWorkerWatch(cmd *cobra.Command, name string, asJSON bool, idle time.Dura
 	if err != nil {
 		return end(err, "", 1)
 	}
-	if !declaredWorker(app.Workers, name) {
+	// A spawned agent is the broker's to know: its name only has a
+	// template's shape here.
+	if _, spawned := app.TemplateOf(name); !spawned && !declaredWorker(app.Workers, name) {
 		return end(fmt.Errorf("unknown worker %q (declared: %s)", name, strings.Join(workerNamesOf(app), ", ")),
 			broker.ReasonNotAWorker, exitWorkerRefused)
 	}

@@ -49,7 +49,8 @@ const rotateCap = 1 << 20
 var ErrUnsafe = hostledger.ErrUnsafe
 
 // SkillRel is the tree-relative path of agent's lever skill: lever-operator
-// for the manager (the app name), lever-agent in a declared worker's dir.
+// for the manager (the app name), lever-agent in a declared worker's dir or
+// a spawned agent's.
 func SkillRel(app *config.App, agent string) (string, bool) {
 	if agent == app.Name {
 		return ".claude/skills/lever-operator/SKILL.md", true
@@ -58,6 +59,10 @@ func SkillRel(app *config.App, agent string) (string, bool) {
 		if g.Name == agent {
 			return filepath.ToSlash(filepath.Join(g.Dir, ".claude", "skills", "lever-agent", "SKILL.md")), true
 		}
+	}
+	// A spawned agent's workspace is its template's dir_root/<name>.
+	if t, ok := app.TemplateOf(agent); ok {
+		return filepath.ToSlash(filepath.Join(t.InstanceDir(agent), ".claude", "skills", "lever-agent", "SKILL.md")), true
 	}
 	return "", false
 }

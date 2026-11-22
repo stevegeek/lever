@@ -57,7 +57,7 @@ func workerVerbExit(reason string) int {
 		return exitOperatorSocketMissing
 	case broker.ReasonNotStopped:
 		return exitWorkerNotStopped
-	case broker.ReasonNotAWorker, broker.ReasonRevoked, broker.ReasonRoleMismatch,
+	case broker.ReasonNotAWorker, broker.ReasonNotOrphan, reasonNoForce, broker.ReasonRevoked, broker.ReasonRoleMismatch,
 		broker.ReasonWorkspaceUnsafe, broker.ReasonWorkspaceMissing, broker.ReasonSharedAccess,
 		broker.ReasonBadTask, broker.ReasonTaskTooLong, broker.ReasonTaskFixed,
 		broker.ReasonConfigFile, broker.ReasonImageUnqualified, reasonTaskFile:
@@ -99,7 +99,9 @@ func runWorkerVerb(cmd *cobra.Command, v workerVerb, name string, asJSON bool) e
 	if err != nil {
 		return fail(err, "", 1)
 	}
-	if !declaredWorker(app.Workers, name) {
+	// A spawned agent is the broker's to know: its name only has a
+	// template's shape here.
+	if _, spawned := app.TemplateOf(name); !spawned && !declaredWorker(app.Workers, name) {
 		return fail(fmt.Errorf("unknown worker %q (declared: %s); the manager is run with `lever up`", name, strings.Join(workerNamesOf(app), ", ")),
 			broker.ReasonNotAWorker, exitWorkerRefused)
 	}

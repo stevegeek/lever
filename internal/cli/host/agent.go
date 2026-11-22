@@ -1,0 +1,263 @@
+package host
+
+import (
+	"cmp"
+	"fmt"
+	"strings"
+	"text/tabwriter"
+
+	"github.com/spf13/cobra"
+	"github.com/stevegeek/lever/internal/broker"
+	"github.com/stevegeek/lever/internal/cli"
+	"github.com/stevegeek/lever/internal/config"
+	"github.com/stevegeek/lever/internal/convbackup"
+	"github.com/stevegeek/lever/internal/termsafe"
+)
+
+// newAgentCmd is `lever agent`: agents spawned from the templates in
+// lever.yaml. Every verb goes through the broker's operator socket.
+func newAgentCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "agent", Short: "Spawn and destroy agents from templates"}
+	cmd.AddCommand(newAgentSpawnCmd(), newAgentDestroyCmd(), newAgentListCmd())
+	return cmd
+}
+
+// agentResult is the --json line of spawn and destroy.
+type agentResult struct {
+	Name       string   `json:"name,omitempty"`
+	Template   string   `json:"template,omitempty"`
+	Label      string   `json:"label,omitempty"`
+	OK         bool     `json:"ok"`
+	Phase      string   `json:"phase,omitempty"`
+	Was        string   `json:"was,omitempty"`
+	Transcript string   `json:"transcript,omitempty"`
+	Workspace  string   `json:"workspace,omitempty"`
+	Warnings   []string `json:"warnings,omitempty"`
+	Reason     string   `json:"reason,omitempty"`
+	Error      string   `json:"error,omitempty"`
+	Exit       int      `json:"exit"`
+}
+
+// agentExit maps a broker refusal to an exit code: the worker verbs' codes,
+// plus spawn's and destroy's own refusals.
+func agentExit(reason string) int {
+	switch reason {
+	case broker.ReasonTemplateFull, broker.ReasonTemplateBusy:
+		return exitWorkerBusy
+	case broker.ReasonRunning:
+		return exitWorkerNotStopped
+	case broker.ReasonNoTemplate, broker.ReasonBadLabel, broker.ReasonNotSpawned, broker.ReasonNotYours, broker.ReasonBadRequest:
+		return exitWorkerRefused
+	case broker.ReasonBackupFailed:
+		return exitWorkerResumeFailed
+	}
+	return workerVerbExit(reason)
+}
+
+// agentRun posts one agent verb and fills res; it prints res as JSON on
+// failure when asJSON.
+func agentRun(cmd *cobra.Command, verb, path string, body, out any, res *agentResult, asJSON bool) (*config.App, error) {
+	fail := func(err error, reason string, code int) error {
+		if asJSON {
+			res.Reason, res.Error, res.Exit = reason, err.Error(), code
+			printJSONLine(cmd, res)
+		}
+		return cli.WithExitCode(fmt.Errorf("agent %s: %w", verb, err), code)
+	}
+	app, st, err := loadAppAndState(nil)
+	if err != nil {
+		return nil, fail(err, "", 1)
+	}
+	sock, err := operatorSocket(app, st)
+	if err != nil {
+		return nil, fail(err, reasonNoOperatorSocket, exitOperatorSocketMissing)
+	}
+	err = operatorPost(cmd.Context(), sock, path, body, out)
+	if ref, ok := operatorFailure(err, path); ok {
+		res.Phase = ref.Phase
+		return nil, fail(ref, ref.Reason, agentExit(ref.Reason))
+	} else if err != nil {
+		return nil, fail(err, "", 1)
+	}
+	return app, nil
+}
+
+func newAgentSpawnCmd() *cobra.Command {
+	var taskFile, label string
+	var asJSON bool
+	c := &cobra.Command{
+		Use:   "spawn TEMPLATE",
+		Args:  cobra.ExactArgs(1),
+		Short: "Spawn a new agent from a template and start it",
+		Long: "Spawn a new agent from TEMPLATE (under `templates:` in lever.yaml) and start it fresh with the task\n" +
+			"in --task-file. The broker picks its name (<prefix>-<6 characters>, never used before), creates its\n" +
+			"workspace under the template's dir_root and grants it the template's capabilities. The label is shown\n" +
+			"in lists only.\nExit codes and --json reasons: see the CLI reference.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			res := agentResult{Template: args[0], Label: label}
+			req := broker.SpawnRequest{Template: args[0], Label: label}
+			if taskFile != "" {
+				app, _, err := loadAppAndState(nil)
+				if err != nil {
+					return cli.WithExitCode(fmt.Errorf("agent spawn: %w", err), 1)
+				}
+				task, err := readTaskFile(app, taskFile)
+				if err != nil {
+					if asJSON {
+						res.Reason, res.Error, res.Exit = reasonOf(err), err.Error(), exitWorkerRefused
+						printJSONLine(cmd, res)
+					}
+					return cli.WithExitCode(fmt.Errorf("agent spawn: %w", err), exitWorkerRefused)
+				}
+				req.Task = task
+			}
+			var resp broker.SpawnResponse
+			if _, err := agentRun(cmd, "spawn", broker.PathOperatorAgentSpawn, req, &resp, &res, asJSON); err != nil {
+				return err
+			}
+			res.OK, res.Name, res.Phase = true, safeToken(resp.Name), safeToken(resp.Phase)
+			if asJSON {
+				printJSONLine(cmd, res)
+				return nil
+			}
+			cmd.Printf("agent %s spawned from template %s; it is %s.\n", res.Name, args[0], cmp.Or(res.Phase, "in an unknown phase"))
+			return nil
+		},
+	}
+	c.Flags().StringVar(&taskFile, "task-file", "", "a file holding the new agent's task")
+	c.Flags().StringVar(&label, "label", "", fmt.Sprintf("a title shown in lists (at most %d characters)", broker.MaxAgentLabel))
+	c.Flags().BoolVar(&asJSON, "json", false, "print one JSON object on stdout: name, template, ok, phase, reason, error, exit")
+	return c
+}
+
+func newAgentDestroyCmd() *cobra.Command {
+	var stop, noBackup, force, asJSON bool
+	c := &cobra.Command{
+		Use:   "destroy NAME",
+		Args:  cobra.ExactArgs(1),
+		Short: "Destroy a spawned agent: back up its conversation, revoke it, handle its workspace, delete it",
+		Long: "Destroy the spawned agent NAME. Its conversation is backed up to the state directory first (a failed\n" +
+			"backup stops the destroy unless --no-backup). Then its name is revoked for good, its workspace is\n" +
+			"archived, removed or kept as its template's on_destroy says, and its hub record is deleted. A running\n" +
+			"agent is refused unless --stop. Destructive, so it requires --force.\n" +
+			"Exit codes and --json reasons: see the CLI reference.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			res := agentResult{Name: args[0]}
+			if !force {
+				err := fmt.Errorf("this destroys agent %s for good; re-run with --force to proceed", args[0])
+				if asJSON {
+					res.Reason, res.Error, res.Exit = reasonNoForce, err.Error(), exitWorkerRefused
+					printJSONLine(cmd, res)
+				}
+				return cli.WithExitCode(fmt.Errorf("agent destroy: %w", err), exitWorkerRefused)
+			}
+			var resp broker.DestroyResponse
+			if _, err := agentRun(cmd, "destroy", broker.PathOperatorAgentDestroy, broker.DestroyRequest{Name: args[0], Stop: stop, NoBackup: noBackup}, &resp, &res, asJSON); err != nil {
+				return err
+			}
+			res.OK, res.Was = true, cmp.Or(safeToken(resp.Was), "in an unknown phase")
+			if convbackup.ValidID(resp.Transcript) {
+				res.Transcript = resp.Transcript
+			}
+			res.Workspace = termsafe.Sanitize(resp.Workspace)
+			for _, w := range resp.Warnings {
+				res.Warnings = append(res.Warnings, termsafe.Sanitize(w))
+			}
+			if asJSON {
+				printJSONLine(cmd, res)
+				return nil
+			}
+			for _, w := range res.Warnings {
+				cmd.PrintErrf("lever: warning: %s\n", w)
+			}
+			backup := "no conversation backup"
+			if res.Transcript != "" {
+				backup = "conversation backed up as " + res.Transcript
+			}
+			cmd.Printf("agent %s destroyed (it was %s): %s; workspace %s; its name is revoked for good.\n", res.Name, res.Was, backup, res.Workspace)
+			return nil
+		},
+	}
+	c.Flags().BoolVar(&force, "force", false, "confirm the destroy (required)")
+	c.Flags().BoolVar(&stop, "stop", false, "stop the agent first if it is running")
+	c.Flags().BoolVar(&noBackup, "no-backup", false, "destroy without backing up its conversation")
+	c.Flags().BoolVar(&asJSON, "json", false, "print one JSON object on stdout: name, ok, was, transcript, workspace, warnings, reason, error, exit")
+	return c
+}
+
+func newAgentListCmd() *cobra.Command {
+	var all, asJSON bool
+	c := &cobra.Command{
+		Use:   "list",
+		Args:  cobra.NoArgs,
+		Short: "List the templates and the agents spawned from them",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			fail := func(err error, reason string, code int) error {
+				if asJSON {
+					printJSONLine(cmd, agentResult{Reason: reason, Error: err.Error(), Exit: code})
+				}
+				return cli.WithExitCode(fmt.Errorf("agent list: %w", err), code)
+			}
+			app, st, err := loadAppAndState(nil)
+			if err != nil {
+				return fail(err, "", 1)
+			}
+			sock, err := operatorSocket(app, st)
+			if err != nil {
+				return fail(err, reasonNoOperatorSocket, exitOperatorSocketMissing)
+			}
+			path := broker.PathOperatorAgentList
+			if all {
+				path += "?all=1"
+			}
+			var resp broker.AgentListResponse
+			err = operatorGet(cmd.Context(), sock, path, &resp)
+			if ref, ok := operatorFailure(err, broker.PathOperatorAgentList); ok {
+				return fail(ref, ref.Reason, agentExit(ref.Reason))
+			} else if err != nil {
+				return fail(err, "", 1)
+			}
+			if asJSON {
+				printJSONLine(cmd, resp)
+				return nil
+			}
+			printAgentList(cmd, resp)
+			return nil
+		},
+	}
+	c.Flags().BoolVar(&all, "all", false, "include destroyed agents")
+	c.Flags().BoolVar(&asJSON, "json", false, "print the list as one JSON object")
+	return c
+}
+
+func printAgentList(cmd *cobra.Command, resp broker.AgentListResponse) {
+	if len(resp.Templates) == 0 && len(resp.Agents) == 0 {
+		cmd.Println("no templates and no spawned agents.")
+		return
+	}
+	tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "TEMPLATE\tPREFIX\tAGENTS\tRUNNING\tSPAWNERS")
+	for _, t := range resp.Templates {
+		spawners := "operator"
+		if t.ManagerMay {
+			spawners += ", manager"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%d/%d\t%d/%d\t%s\n", safeToken(t.Name), safeToken(t.Prefix), t.Instances, t.MaxInstances, t.Running, t.MaxRunning, spawners)
+	}
+	tw.Flush()
+	if len(resp.Agents) == 0 {
+		return
+	}
+	cmd.Println()
+	tw = tabwriter.NewWriter(cmd.OutOrStdout(), 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "AGENT\tTEMPLATE\tSTATE\tPHASE\tBY\tCREATED\tLABEL")
+	for _, a := range resp.Agents {
+		state := safeToken(a.State)
+		if a.Orphaned {
+			state += " (template gone)"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", safeToken(a.Name), safeToken(a.Template), state, cmp.Or(safeToken(a.Phase), "-"),
+			safeToken(a.CreatedBy), a.CreatedAt.Format("2006-01-02 15:04"), strings.ReplaceAll(termsafe.Sanitize(a.Label), "\t", " "))
+	}
+	tw.Flush()
+}

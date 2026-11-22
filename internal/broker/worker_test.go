@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,6 +26,8 @@ import (
 
 // fakeRuntime records calls and returns scripted results; satisfies WorkerRuntime.
 type fakeRuntime struct {
+	// mu makes the fake safe for concurrent calls (parallel spawns).
+	mu             sync.Mutex
 	agents         map[string][]scion.Agent // project -> agents (for List)
 	started        []scion.StartOpts
 	resumed        []string
@@ -86,6 +89,8 @@ type fakeRuntime struct {
 // PurgeWorker satisfies WorkerPurger: it drops the worker's record from
 // every project and its staged tickets, as the real purge does.
 func (f *fakeRuntime) PurgeWorker(_ context.Context, worker string) (error, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.purged = append(f.purged, worker)
 	if f.purgeErr != nil {
 		return nil, f.purgeErr
@@ -106,6 +111,8 @@ func (f *fakeRuntime) PurgeWorker(_ context.Context, worker string) (error, erro
 // StageWorkerTicket satisfies TicketStager: the fake is also the guest
 // channel, so a test reads what a dispatch staged without touching disk.
 func (f *fakeRuntime) StageWorkerTicket(_ context.Context, worker string, payload []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.stageErr != nil {
 		return f.stageErr
 	}
@@ -134,6 +141,8 @@ func (f *fakeRuntime) lastStaged(t *testing.T, worker string) wire.Bootstrap {
 const fakeRecordImage = "lever.local/img:1"
 
 func (f *fakeRuntime) List(ctx context.Context, project string) ([]scion.Agent, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	agents, err := f.list(ctx, project)
 	if f.keepEmptyImage || len(agents) == 0 {
 		return agents, err
@@ -193,36 +202,50 @@ func (f *fakeRuntime) lastActed() (string, bool) {
 	return "", false
 }
 func (f *fakeRuntime) Start(_ context.Context, o scion.StartOpts) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.started = append(f.started, o)
 	return f.startErr
 }
 func (f *fakeRuntime) Resume(_ context.Context, worker, project string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.resumed = append(f.resumed, worker)
 	f.resumeProj = append(f.resumeProj, project)
 	return f.resumeErr
 }
 func (f *fakeRuntime) ResumeTask(_ context.Context, worker, project, task string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.resumeTasks = append(f.resumeTasks, task)
 	f.resumed = append(f.resumed, worker)
 	f.resumeProj = append(f.resumeProj, project)
 	return f.resumeErr
 }
 func (f *fakeRuntime) ResumeForce(_ context.Context, worker, project string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.resumeForced = append(f.resumeForced, worker)
 	return f.resumeForceErr
 }
 
 func (f *fakeRuntime) Stop(_ context.Context, worker, project string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.stopped = append(f.stopped, worker)
 	f.stopProj = append(f.stopProj, project)
 	return f.stopErr
 }
 func (f *fakeRuntime) Suspend(_ context.Context, worker, project string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.suspend = append(f.suspend, worker)
 	f.suspendProj = append(f.suspendProj, project)
 	return nil
 }
 func (f *fakeRuntime) EnvSet(_ context.Context, project, _, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.envSets = append(f.envSets, "set")
 	f.envSetProj = append(f.envSetProj, project)
 	return nil

@@ -72,7 +72,7 @@ func (b *Broker) handleOperatorWorkerNewSession(w http.ResponseWriter, r *http.R
 		// scion's resume of a missing record would create the agent from the
 		// project template, not the worker's config.
 		b.audit("worker", operatorActor, "deny", verb+": no record")
-		refuse(w, ReasonNoRecord, "worker "+spec.Name+" has no record on the hub (never started, purged, or a new jail); start it instead: `lever worker start "+spec.Name+"`", http.StatusNotFound)
+		refuse(w, ReasonNoRecord, "worker "+spec.Name+" has no record on the hub (never started, purged, or a new jail); start it instead: `lever worker start "+spec.Name+"` (a spawned agent: destroy it and spawn a new one)", http.StatusNotFound)
 		return
 	}
 	task := req.Task

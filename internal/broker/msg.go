@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
-	"slices"
 	"strings"
 	"time"
 
@@ -103,7 +102,7 @@ func (b *Broker) resolveMsgTarget(caller, to string) (msgTarget, error) {
 		// Before the unknown check, with one text for both, so a worker cannot
 		// probe for the names of peers it may not message.
 		return msgTarget{}, fmt.Errorf("recipient %q is not the manager or this worker (worker→worker messaging is disabled)", to)
-	case !known:
+	case !known, isManager && !b.managerMayReach(cn):
 		return msgTarget{}, fmt.Errorf("%w %q", errUnknownRecipient, to)
 	}
 	return msgTarget{scionTo: "agent:" + slug, project: b.instanceProject, relayFrom: relayFrom, recipientCN: cn}, nil
@@ -125,10 +124,14 @@ func (b *Broker) msgRecipients(caller string) []string {
 	var workers []string
 	switch {
 	case isManager || b.workerToWorker:
-		for name := range b.workers {
+		for _, name := range b.workers.names() {
+			// Only agents that may be driven, and for the manager only the
+			// spawned agents it spawned.
+			if _, ok := b.workerSpec(name); !ok || (isManager && !b.managerMayReach(name)) {
+				continue
+			}
 			workers = append(workers, "agent:"+name)
 		}
-		slices.Sort(workers)
 	default:
 		workers = []string{"agent:" + caller}
 	}
@@ -159,7 +162,7 @@ func (b *Broker) resolveListSubject(caller, worker string) (string, error) {
 		if worker == "" {
 			return b.managerSlug, nil
 		}
-		if _, ok := b.workerSpec(worker); !ok {
+		if _, ok := b.workerSpec(worker); !ok || !b.managerMayReach(worker) {
 			return "", fmt.Errorf("unknown worker %q", worker)
 		}
 		return worker, nil
@@ -366,4 +369,11 @@ func (b *Broker) handleMsgList(w http.ResponseWriter, r *http.Request) {
 		kept[i] = scion.WorkerReported(e)
 	}
 	writeJSON(w, wire.MsgListResponse[scion.Event]{Events: kept})
+}
+
+// managerMayReach reports whether the manager may message or read the inbox
+// of name: a config worker, or a spawned agent the manager spawned.
+func (b *Broker) managerMayReach(name string) bool {
+	rec, spawned := b.workers.record(name)
+	return !spawned || rec.CreatedBy == b.manager
 }

@@ -40,12 +40,14 @@ func (b *Broker) handleEnrol(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cn := csr.Subject.CommonName
+	// Read before the redeem (see Supersede).
+	from := b.leafFrom(cn)
 	if err := b.tickets.Redeem(req.Ticket, cn, time.Now()); err != nil {
 		b.audit("enrol", cn, "deny", err.Error())
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	certPEM, err := b.ca.SignPublicKey(csr.PublicKey, cn)
+	certPEM, err := b.ca.SignPublicKeyFrom(csr.PublicKey, cn, from)
 	if err != nil {
 		b.audit("enrol", cn, "error", err.Error())
 		http.Error(w, "internal error", http.StatusInternalServerError)

@@ -66,6 +66,12 @@ func (b *Broker) recycleWorker(ctx context.Context, w http.ResponseWriter, spec 
 		refuse(w, ReasonNotAWorker, "forbidden", http.StatusForbidden)
 		return
 	}
+	// A spawned agent's name is never reused: spawn a new one instead.
+	if b.workers.spawned(spec.Name) {
+		b.audit("worker", actor, "deny", verb+": a spawned agent")
+		refuse(w, ReasonSpawned, "agent "+spec.Name+" was spawned from a template and is never recycled: destroy it and spawn a new one", http.StatusForbidden)
+		return
+	}
 	// recyclable is the manager's authority to discard a record. The
 	// operator owns the instance and may discard any worker's record anyway
 	// (`lever worker purge`), so the operator's recycle does not need it.
@@ -193,7 +199,11 @@ func (b *Broker) recycleWorker(ctx context.Context, w http.ResponseWriter, spec 
 			// The start stages a fresh ticket over what is left.
 			b.audit("worker", actor, "error", verb+": removing the staged ticket: "+ticketErr.Error())
 		}
-		b.audit("worker", actor, "allow", verb+": record deleted (phase "+phase+"), workspace kept; "+preview)
+		// Before the fresh start enrols: its leaf is issued after the cutoff.
+		if err := b.Supersede(spec.Name); err != nil {
+			b.audit("worker", actor, "error", verb+": saving the certificate cutoff: "+err.Error())
+		}
+		b.audit("worker", actor, "allow", verb+": record deleted (phase "+phase+"), workspace kept, certificates superseded; "+preview)
 	}
 	b.startFreshWorker(ctx, w, spec, task, false, actor)
 }

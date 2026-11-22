@@ -38,7 +38,16 @@ func (b *Broker) handleRenew(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	certPEM, err := b.ca.SignPublicKey(pub, caller)
+	// The gate checked the caller's leaf before a purge that may have come
+	// since: read the cutoff, then check again, so a renew in flight across
+	// a purge never signs a leaf stamped at its cutoff.
+	from := b.leafFrom(caller)
+	if b.leafSuperseded(r.TLS.PeerCertificates[0]) {
+		b.audit("renew", caller, "deny", "client certificate issued before its agent's record was purged")
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	certPEM, err := b.ca.SignPublicKeyFrom(pub, caller, from)
 	if err != nil {
 		b.audit("renew", caller, "error", err.Error())
 		http.Error(w, "internal error", http.StatusInternalServerError)

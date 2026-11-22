@@ -387,7 +387,7 @@ func TestSuspendRunningWorkersReportsInConfigOrder(t *testing.T) {
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
-	suspendRunningWorkers(cmd, f, app, "/lever")
+	suspendRunningWorkers(cmd, f, app, "/lever", nil)
 	got := out.String()
 	i1, i2, i3 := strings.Index(got, `"first"`), strings.Index(got, `"second"`), strings.Index(got, `"third"`)
 	if i1 < 0 || i2 < 0 || i3 < 0 || i1 > i2 || i2 > i3 {

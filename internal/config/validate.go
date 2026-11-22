@@ -444,6 +444,10 @@ func (a *App) Validate() error {
 	if err := a.validateBroker(); err != nil {
 		return err
 	}
+	// After the broker's llm_auth checks: a mixed instance is named as such.
+	if err := a.validateTemplates(); err != nil {
+		return err
+	}
 	if err := a.validateWhisperTools(); err != nil {
 		return err
 	}
@@ -503,17 +507,18 @@ const operatorName = "operator"
 // mounting only its own subtree, so an overlap would let the outer worker
 // read and write the inner one's whole workspace.
 func (a *App) validateWorkerDirsDisjoint() error {
-	for i, outer := range a.Workers {
-		for j, inner := range a.Workers {
+	dirs := a.AgentDirs()
+	for i, outer := range dirs {
+		for j, inner := range dirs {
 			if i >= j {
 				continue
 			}
 			// Case-folded, as every other overlap check: APFS ignores case,
 			// so work/Proj and work/proj/sub are one tree on macOS.
 			if fsutil.RelOverlapFold(outer.Dir, inner.Dir) {
-				return fmt.Errorf("config: workers %q (dir %q) and %q (dir %q) overlap — one is the other, or contains it; "+
+				return fmt.Errorf("config: %s and %s overlap — one is the other, or contains it; "+
 					"each worker must mount a subtree no other worker can reach, or it can read and write its sibling's workspace",
-					outer.Name, outer.Dir, inner.Name, inner.Dir)
+					outer, inner)
 			}
 		}
 	}
@@ -1201,6 +1206,9 @@ func (a *App) validateBrokerGrants() error {
 	for _, g := range a.Workers {
 		agents[g.Name] = true
 	}
+	for _, t := range a.Templates {
+		agents[TemplateRefPrefix+t.Name] = true
+	}
 	checkCap := func(who, tool, op string) error {
 		ops, ok := toolOps[tool]
 		if !ok {
@@ -1226,7 +1234,10 @@ func (a *App) validateBrokerGrants() error {
 			}
 			for _, to := range d.To {
 				if !agents[to] {
-					return fmt.Errorf("config: %s delegates to %q which is not a declared agent", who, to)
+					if _, ok := templateRef(to); ok {
+						return fmt.Errorf("config: %s delegates to %q, which names no declared template", who, to)
+					}
+					return fmt.Errorf("config: %s delegates to %q which is not a declared agent (name a template's instances as template:<name>)", who, to)
 				}
 			}
 		}
@@ -1237,6 +1248,11 @@ func (a *App) validateBrokerGrants() error {
 	}
 	for _, g := range a.Workers {
 		if err := checkAgentGrants("worker "+g.Name, g.Obtain, g.Delegate); err != nil {
+			return err
+		}
+	}
+	for _, t := range a.Templates {
+		if err := checkAgentGrants("template "+t.Name, t.Obtain, t.Delegate); err != nil {
 			return err
 		}
 	}
@@ -1282,7 +1298,7 @@ func (a *App) validateAgentImagesDistinct() error {
 	if err := check(a.ManagerImage()); err != nil {
 		return err
 	}
-	for _, g := range a.Workers {
+	for _, g := range a.workerShapes() {
 		if err := check(a.WorkerImage(g)); err != nil {
 			return err
 		}
@@ -1307,7 +1323,7 @@ func (a *App) validateImageTarsDistinct() error {
 	if err := check(a.ManagerImage(), a.Manager.ImageTar); err != nil {
 		return err
 	}
-	for _, g := range a.Workers {
+	for _, g := range a.workerShapes() {
 		if g.Image == "" {
 			continue
 		}

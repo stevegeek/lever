@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"slices"
 	"sync"
 	"time"
 
@@ -172,6 +173,8 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		workerClaude[w.Name] = w.Claude()
 	}
 
+	spawnedState, spawnedErr := brokerctl.LoadAgents(state)
+
 	checks := []func() checkResult{
 		func() checkResult { return checkBrokerAlive(state, app.EffectiveJailPort(), probes) },
 		func() checkResult {
@@ -298,6 +301,10 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		},
 		func() checkResult { return checkWorkerTreeBootstraps(app.Tree, workerDirs) },
 		func() checkResult { return checkRecyclableWorkers(app.Workers) },
+		func() checkResult {
+			return checkOrphanRecords(ctx, b.MountDest(), app.Name, append(slices.Clone(workerNames), liveSpawned(spawnedState)...), listAgents)
+		},
+		func() checkResult { return checkSpawnedAgents(app, spawnedState, spawnedErr) },
 		func() checkResult {
 			return checkAgentNetwork(ctx, b.MountDest(), networkCheckedAgents(app.Name, workerNames), jail.ForceHostNetworkFromEnv(), listAgents, inspectNetMode)
 		},

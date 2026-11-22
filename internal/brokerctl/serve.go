@@ -157,6 +157,9 @@ func Serve(ctx context.Context, app *config.App, st state.State, version string,
 		return err
 	}
 	defer daemon.RemovePIDFile(st.PID())
+	// Spawns and destroys a restart interrupted, once this broker serves;
+	// they hold no authority meanwhile.
+	go b.RunReconcile(ctx)
 
 	// A self-rotating serving cert: a broker that outlives a one-shot cert
 	// fails every gateway handshake, including agents' /renew, and the fleet's
@@ -215,7 +218,7 @@ func decorateConfig(cfg *broker.Config, app *config.App, st state.State, be back
 	if err != nil {
 		return err
 	}
-	d, err := dispatchConfig(app, st, be, env)
+	d, err := dispatchConfig(app, st, be, env, version)
 	if err != nil {
 		return err
 	}
@@ -243,6 +246,20 @@ func decorateConfig(cfg *broker.Config, app *config.App, st state.State, be back
 	cfg.AgentMessages = AgentMessages(app, st)
 	cfg.Files = Files(app, st)
 	cfg.Dispatch.BeginSession = func(agent string) func() error { return BeginSession(app, st, version, agent) }
+	// With the state directory inside the tree an agent could rewrite the
+	// registry (a record's template or spawner), so no agent is spawned or
+	// given a template's grants there.
+	if !StateInsideTree(app, st) {
+		cfg.Dispatch.Templates = TemplateSpecs(app, be.MountDest(), env.JailUID, version)
+		cfg.Dispatch.ArchiveDir = st.AgentArchives()
+	} else {
+		// Nor is its registry read: an agent could have written it.
+		cfg.Persistence.Agents, cfg.Persistence.PersistAgents = broker.AgentsState{}, nil
+	}
+	if err := checkRegistryNames(app, cfg.Persistence.Agents); err != nil {
+		return err
+	}
+
 	cfg.Version = version
 	cfg.ConfigHash = ConfigHash(app)
 	// Made here when apply did not make it first (a manual `lever broker
@@ -265,15 +282,21 @@ func persistenceConfig(st state.State) (broker.PersistenceConfig, error) {
 	if err != nil {
 		return broker.PersistenceConfig{}, err
 	}
+	agents, err := LoadAgents(st)
+	if err != nil {
+		return broker.PersistenceConfig{}, err
+	}
 	return broker.PersistenceConfig{
 		Revocation:        rev,
 		PersistRevocation: func(rs broker.RevocationState) error { return SaveRevocation(st, rs) },
 		Directives:        dirs,
 		PersistDirectives: func(ds broker.DirectiveState) error { return SaveDirectives(st, ds) },
+		Agents:            agents,
+		PersistAgents:     func(as broker.AgentsState) error { return SaveAgents(st, as) },
 	}, nil
 }
 
-func dispatchConfig(app *config.App, st state.State, be backend.Backend, env ServeEnv) (broker.DispatchConfig, error) {
+func dispatchConfig(app *config.App, st state.State, be backend.Backend, env ServeEnv, version string) (broker.DispatchConfig, error) {
 	jailMount := be.MountDest()
 	d := broker.DispatchConfig{
 		Workers:         WorkerSpecs(app, jailMount, env.JailUID),
@@ -321,6 +344,8 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 	// Worker tickets go to the guest runtime dir over the jail runner, never
 	// into the tree the manager mounts.
 	d.Tickets = jailTicketStager{jr}
+	// A destroy backs up the agent's conversation first.
+	d.BackupConversation = agentConversationBackup(app, st, jr, jailMount, version)
 	// A recycle deletes the record and ticket like `lever worker purge`.
 	d.Purge = jailWorkerPurger{sc: sc, r: jr, project: jailMount}
 	d.ContainerRunning = func(ctx context.Context, worker string) (bool, error) {

@@ -103,6 +103,10 @@ func Plan(a *config.App, opts PlanOpts) []Step {
 	for _, g := range a.Workers {
 		addLoad(a.WorkerImage(g), a.WorkerImageTarPath(g))
 	}
+	for _, t := range a.Templates {
+		g := t.Worker(t.Name)
+		addLoad(a.WorkerImage(g), a.WorkerImageTarPath(g))
+	}
 	steps = append(steps,
 		Step{Kind: KindInitMachine},
 		Step{Kind: KindConfigRegistry},

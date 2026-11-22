@@ -2,6 +2,7 @@ package remoteproxy
 
 import (
 	"context"
+	"fmt"
 	"html"
 	"net/http"
 	"regexp"
@@ -97,18 +98,7 @@ func (g *gate) spawned(ctx context.Context) []SpawnedAgent {
 	c.inflight = ch
 	c.mu.Unlock()
 
-	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), spawnedReadTimeout)
-	list, err := g.cfg.Spawned(rctx)
-	cancel()
-	out := make([]SpawnedAgent, 0, len(list))
-	for _, a := range list {
-		// A spawned agent never shadows a config agent, and only names the
-		// page can carry pass.
-		if !spawnedName.MatchString(a.Name) || a.Name == g.cfg.ChatAgent || slices.Contains(g.cfg.Workers, a.Name) {
-			continue
-		}
-		out = append(out, a)
-	}
+	out, err := g.readSpawned(ctx)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -123,6 +113,32 @@ func (g *gate) spawned(ctx context.Context) []SpawnedAgent {
 	c.inflight = nil
 	close(ch)
 	return c.list
+}
+
+// readSpawned is one read of the registry, filtered. A panic in the source
+// is an error, so the read under way always ends (spawned).
+func (g *gate) readSpawned(ctx context.Context) (out []SpawnedAgent, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			out, err = nil, fmt.Errorf("registry read panicked: %v", p)
+		}
+	}()
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), spawnedReadTimeout)
+	defer cancel()
+	list, err := g.cfg.Spawned(rctx)
+	if err != nil {
+		return nil, err
+	}
+	out = make([]SpawnedAgent, 0, len(list))
+	for _, a := range list {
+		// A spawned agent never shadows a config agent, and only names the
+		// page can carry pass.
+		if !spawnedName.MatchString(a.Name) || a.Name == g.cfg.ChatAgent || slices.Contains(g.cfg.Workers, a.Name) {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out, nil
 }
 
 // liveSpawned is the spawned agents the operator may drive, in registry
@@ -264,12 +280,12 @@ func (g *gate) goPage(w http.ResponseWriter, r *http.Request, line *AuditLine, s
 	// chat page's own.
 	b.WriteString(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">`)
 	b.WriteString(`<link rel="stylesheet" href="/lever/chat.css">`)
-	b.WriteString(`<title>` + html.EscapeString(title) + `</title></head><body>`)
+	b.WriteString(`<title>` + html.EscapeString(title) + `</title></head><body><main class="go">`)
 	b.WriteString(`<h1>` + html.EscapeString(title) + `</h1><p>` + html.EscapeString(msg) + `</p>`)
 	if len(link) == 1 {
 		b.WriteString(`<p><a href="` + html.EscapeString(link[0]) + `">Open it</a></p>`)
 	}
-	b.WriteString(`<p><a href="` + chatPagePath + `">Chat</a></p></body></html>`)
+	b.WriteString(`<p><a href="` + chatPagePath + `">Chat</a></p></main></body></html>`)
 	g.answerChat(w, line, DecisionAllow, status, func() {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	}, []byte(b.String()), r)

@@ -1063,10 +1063,11 @@ operator socket, at most every 3 seconds. Adding the first template restarts the
   site lands on them, like `/`: they are entry pages, change nothing, and cannot be framed. The
   terminal is a live session, so a terminal link followed from another site shows a page with an
   **Open it** link, which you click yourself; from lever's own pages it opens directly. They work
-  for configured agents too, when the name is lower-case letters, digits and hyphens. Spawned names are never reused, so a link stored elsewhere (a ticket,
-  a tracker) means the same agent for its whole life. Once the agent is destroyed, the link answers
-  410 with when it was destroyed and the id of its conversation backup. A name the login may not
-  reach and a name that does not exist get the same 404.
+  for configured agents too, when the name is lower-case letters, digits and hyphens. Spawned
+  names are never reused, so a link stored elsewhere (a ticket, a tracker) means the same agent for
+  its whole life. Once the agent is destroyed, the link answers 410 with when it was destroyed and
+  the id of its conversation backup. A name the login may not reach and a name that does not exist
+  get the same 404.
 
 ### What it is, and is not
 

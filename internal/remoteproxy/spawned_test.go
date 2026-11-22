@@ -335,3 +335,53 @@ func TestGoLinksAreEntryPages(t *testing.T) {
 		t.Errorf("framed: %d", rw.Code)
 	}
 }
+
+// Concurrent callers share one read; a waiter whose request ends first
+// returns; a panicking source still ends the read under way.
+func TestSpawnedReadIsSharedAndAlwaysEnds(t *testing.T) {
+	hub := newPageHub(t)
+	cfg := spawnedConfig(t, hub, nil)
+	good := cfg.Spawned
+	release := make(chan struct{})
+	var calls atomic.Int32
+	cfg.Spawned = func(ctx context.Context) ([]SpawnedAgent, error) {
+		calls.Add(1)
+		<-release
+		return good(ctx)
+	}
+	g := NewHandler(cfg).(*gate)
+	done := make(chan []SpawnedAgent, 8)
+	for range 8 {
+		go func() { done <- g.spawned(context.Background()) }()
+	}
+	// A waiter whose request is already gone returns at once.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for calls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	if got := g.spawned(ctx); got != nil {
+		t.Fatalf("a cancelled waiter got %v before any list", got)
+	}
+	close(release)
+	for range 8 {
+		if got := <-done; len(got) == 0 {
+			t.Fatal("a caller got no list")
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("%d reads, want 1", calls.Load())
+	}
+
+	cfg.Spawned = func(context.Context) ([]SpawnedAgent, error) { panic("boom") }
+	g = NewHandler(cfg).(*gate)
+	if got := g.spawned(context.Background()); got != nil {
+		t.Fatalf("%v", got)
+	}
+	g.spawnedList.mu.Lock()
+	inflight := g.spawnedList.inflight
+	g.spawnedList.mu.Unlock()
+	if inflight != nil {
+		t.Fatal("a panicking read left the read under way")
+	}
+}

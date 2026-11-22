@@ -1613,7 +1613,7 @@ function sendFile(name, file, progress) {
 async function upload(file) {
   const c = chat;
   const cfg = roster && roster.files;
-  if (!file || !c || !cfg || uploading || sending) return;
+  if (!file || !c || c.noFiles || !cfg || uploading || sending) return;
   const why = fileCheck(file, cfg);
   if (why) {
     showError(why);

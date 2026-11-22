@@ -120,7 +120,7 @@ func TestJailHandlerIsGated(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, rt := range []struct{ method, path string }{
-		{http.MethodGet, "/tools"}, {http.MethodGet, "/version"}, {http.MethodPost, "/request"}, {http.MethodPost, "/renew"}, {http.MethodPost, "/msg/list"},
+		{http.MethodGet, "/tools"}, {http.MethodGet, "/version"}, {http.MethodPost, "/request"}, {http.MethodPost, "/renew"}, {http.MethodPost, "/msg/list"}, {http.MethodPost, "/mcp/db/"},
 	} {
 		const gateLine = "issued before its agent's record was purged"
 		code := func(leaf *x509.Certificate) (int, bool) {
@@ -261,5 +261,23 @@ func TestSupersededExpiredLeafIsNotReportedAsALapse(t *testing.T) {
 	srv.Handler.ServeHTTP(rec, r)
 	if rec.Code != http.StatusForbidden || len(lapsed) != 0 {
 		t.Fatalf("%d, lapses reported %v", rec.Code, lapsed)
+	}
+}
+
+// The renew handler checks the cutoff itself, after the gate: a renew that
+// passed the gate before a purge never signs a leaf stamped at its cutoff.
+func TestRenewRechecksTheCutoff(t *testing.T) {
+	b := New(testConfig(t))
+	old := issueLeaf(t, b, "worker")
+	if err := b.Supersede("worker"); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(wire.RenewRequest{CSR: string(makeCSRForCN(t, "worker"))})
+	r := httptest.NewRequest(http.MethodPost, "/renew", bytes.NewReader(body))
+	r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{old}}
+	rec := httptest.NewRecorder()
+	b.handleRenew(rec, r) // past the gate, as a request in flight across the purge
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("renew of a superseded leaf: %d", rec.Code)
 	}
 }

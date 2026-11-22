@@ -27,6 +27,12 @@ import (
 // the cutoff holds in this process either way, and is lost at a restart if
 // unsaved.
 func (b *Broker) Supersede(name string) error {
+	// Tickets go before the cutoff exists: handleEnrol reads the cutoff
+	// before it redeems, so a ticket that still redeems was read with no
+	// cutoff and signs a leaf the gate refuses.
+	if b.tickets != nil {
+		b.tickets.DropFor(name)
+	}
 	cutoff := b.now().Truncate(time.Second).Add(time.Second)
 	b.mu.Lock()
 	if b.superseded == nil {
@@ -35,9 +41,6 @@ func (b *Broker) Supersede(name string) error {
 	b.superseded[name] = cutoff
 	err := b.saveRevocationLocked()
 	b.mu.Unlock()
-	if b.tickets != nil {
-		b.tickets.DropFor(name)
-	}
 	return err
 }
 

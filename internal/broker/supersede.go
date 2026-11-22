@@ -12,8 +12,14 @@ import (
 // certificate of that name issued before this call is refused on every jail
 // route (supersededGate), so a copy of the deleted agent's key and leaf
 // carries no authority, while the name enrols afresh. Revoke, by contrast,
-// ends the name for good. Call it only once the record is confirmed gone: a
-// record resumed later would boot with a leaf the broker now refuses.
+// ends the name for good. Every unspent enrolment ticket of the name is
+// dropped too: one staged for the old record could otherwise enrol after
+// the cutoff. Call it only once the record is confirmed gone: a record
+// resumed later would boot with a leaf the broker now refuses.
+//
+// A host clock stepped back past a saved cutoff leaves the name unable to
+// enrol until the clock passes it again: new leaves are stamped at the
+// cutoff, which is then in the future.
 //
 // The cutoff is the next whole second, since a leaf's issue time is known
 // only to the second: older leaves of the name fall before it, and leafFrom
@@ -29,6 +35,9 @@ func (b *Broker) Supersede(name string) error {
 	b.superseded[name] = cutoff
 	err := b.saveRevocationLocked()
 	b.mu.Unlock()
+	if b.tickets != nil {
+		b.tickets.DropFor(name)
+	}
 	return err
 }
 
@@ -54,7 +63,8 @@ func (b *Broker) leafSuperseded(leaf *x509.Certificate) bool {
 func (b *Broker) supersededGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 && b.leafSuperseded(r.TLS.PeerCertificates[0]) {
-			b.audit("auth", r.TLS.PeerCertificates[0].Subject.CommonName, "deny", "client certificate issued before its agent's record was purged")
+			cn := r.TLS.PeerCertificates[0].Subject.CommonName
+			b.audit("auth", cn, "deny", "client certificate issued before its agent's record was purged; if the record still exists, purge or recycle "+cn)
 			w.Header().Set("Connection", "close")
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return

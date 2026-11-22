@@ -1,20 +1,24 @@
 package broker
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stevegeek/lever/internal/cap/ca"
+	"github.com/stevegeek/lever/internal/wire"
 )
 
 // issueLeaf signs a fresh client leaf for cn as enrol does.
@@ -103,22 +107,114 @@ func TestSupersedeIsPersisted(t *testing.T) {
 	}
 }
 
-// The jail handler carries the gate on every route.
+// The jail handler carries the gate on every route; a leaf of a name that
+// was not purged gets past it on the same routes (the control). Some routes
+// refuse the control for their own reasons, so the gate's audit line, not
+// the status, tells who refused.
 func TestJailHandlerIsGated(t *testing.T) {
+	var audit bytes.Buffer
+	b := New(testConfig(t, withAudit(&audit)))
+	old := issueLeaf(t, b, "worker")
+	control := issueLeaf(t, b, "scratch")
+	if err := b.Supersede("worker"); err != nil {
+		t.Fatal(err)
+	}
+	for _, rt := range []struct{ method, path string }{
+		{http.MethodGet, "/tools"}, {http.MethodGet, "/version"}, {http.MethodPost, "/request"}, {http.MethodPost, "/renew"}, {http.MethodPost, "/msg/list"},
+	} {
+		const gateLine = "issued before its agent's record was purged"
+		code := func(leaf *x509.Certificate) (int, bool) {
+			audit.Reset()
+			r := httptest.NewRequest(rt.method, rt.path, strings.NewReader("{}"))
+			r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}}
+			rec := httptest.NewRecorder()
+			b.JailHandler().ServeHTTP(rec, r)
+			return rec.Code, strings.Contains(audit.String(), gateLine)
+		}
+		if got, byGate := code(old); got != http.StatusForbidden || !byGate {
+			t.Errorf("%s %s, superseded: %d (by the gate: %v), want 403 by the gate", rt.method, rt.path, got, byGate)
+		}
+		got, byGate := code(control)
+		if byGate || got == http.StatusNotFound || got == http.StatusMethodNotAllowed {
+			t.Errorf("%s %s, control: %d (by the gate: %v)", rt.method, rt.path, got, byGate)
+		}
+		if (rt.path == "/tools" || rt.path == "/version") && got != http.StatusOK {
+			t.Errorf("%s %s, control: %d, want 200", rt.method, rt.path, got)
+		}
+	}
+}
+
+// After a purge, a ticket staged before it no longer enrols; one minted
+// after it does, and the leaf /enrol signs passes the gate.
+func TestEnrolAfterSupersede(t *testing.T) {
+	b := New(testConfig(t))
+	stale, err := b.tickets.Issue("worker", b.ticketTTL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Supersede("worker"); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	b.handleEnrol(w, enrolReq(stale, makeCSRForCN(t, "worker")))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("a ticket from before the purge: %d, want 403", w.Code)
+	}
+	fresh, err := b.tickets.Issue("worker", b.ticketTTL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w = httptest.NewRecorder()
+	b.handleEnrol(w, enrolReq(fresh, makeCSRForCN(t, "worker")))
+	var resp wire.EnrolResponse
+	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &resp) != nil {
+		t.Fatalf("enrol: %d %s", w.Code, w.Body)
+	}
+	if got := gated(b, parseLeaf(t, resp.Cert)); got != http.StatusOK {
+		t.Fatalf("enrolled leaf at the gate: %d", got)
+	}
+}
+
+// An old leaf cannot renew itself past the cutoff; a new one renews into a
+// leaf the gate accepts.
+func TestRenewAfterSupersede(t *testing.T) {
 	b := New(testConfig(t))
 	old := issueLeaf(t, b, "worker")
 	if err := b.Supersede("worker"); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{"/tools", "/request", "/renew", "/mcp/db/"} {
-		r := httptest.NewRequest(http.MethodPost, path, nil)
-		r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{old}}
+	renew := func(leaf *x509.Certificate) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(wire.RenewRequest{CSR: string(makeCSRForCN(t, "worker"))})
+		r := httptest.NewRequest(http.MethodPost, "/renew", bytes.NewReader(body))
+		r.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}}
 		rec := httptest.NewRecorder()
 		b.JailHandler().ServeHTTP(rec, r)
-		if rec.Code != http.StatusForbidden {
-			t.Errorf("%s: %d, want 403", path, rec.Code)
-		}
+		return rec
 	}
+	if rec := renew(old); rec.Code != http.StatusForbidden {
+		t.Fatalf("old leaf renewed: %d", rec.Code)
+	}
+	rec := renew(issueLeaf(t, b, "worker"))
+	var resp wire.RenewResponse
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &resp) != nil {
+		t.Fatalf("renew: %d %s", rec.Code, rec.Body)
+	}
+	if got := gated(b, parseLeaf(t, resp.Cert)); got != http.StatusOK {
+		t.Fatalf("renewed leaf at the gate: %d", got)
+	}
+}
+
+func parseLeaf(t *testing.T, certPEM string) *x509.Certificate {
+	t.Helper()
+	blk, _ := pem.Decode([]byte(certPEM))
+	if blk == nil {
+		t.Fatal("no PEM")
+	}
+	leaf, err := x509.ParseCertificate(blk.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return leaf
 }
 
 // A cutoff in the past leaves issuing alone.

@@ -57,3 +57,19 @@ func poolOf(c *CA) *x509.CertPool {
 	p.AddCert(c.Cert)
 	return p
 }
+
+// DropFor drops only the named worker's unspent tickets.
+func TestTicketStoreDropFor(t *testing.T) {
+	s := NewTicketStore()
+	a1, _ := s.Issue("a", time.Minute)
+	a2, _ := s.Issue("a", time.Minute)
+	b1, _ := s.Issue("b", time.Minute)
+	s.DropFor("a")
+	now := time.Now()
+	if s.Redeem(a1, "a", now) == nil || s.Redeem(a2, "a", now) == nil {
+		t.Fatal("a ticket of a survived DropFor")
+	}
+	if err := s.Redeem(b1, "b", now); err != nil {
+		t.Fatalf("b's ticket: %v", err)
+	}
+}

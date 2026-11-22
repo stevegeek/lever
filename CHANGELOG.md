@@ -23,12 +23,14 @@ version bump moves the block under the new version heading.
   takes the worker's lock (a purge never waits: 503 `busy` while another action holds it) and
   then deletes the record and the staged ticket as before, never the workspace. Once the delete is
   confirmed, the broker refuses every client certificate of that name issued before the purge, on
-  every jail route: a copy of the deleted agent's key and certificate is worth nothing, while the
-  name enrols afresh at its next start. A recycle does the same. The cutoff is kept in
+  every jail route, and its unspent enrolment tickets are dropped: a copy of the deleted agent's
+  key, certificate or staged ticket is worth nothing, while the name enrols afresh at its next
+  start. A recycle does the same. The cutoff is kept in
   `.lever-state/revocation.json` (`superseded`). A delete that fails or is not confirmed leaves
   the certificates alone, since the record may still be resumed. A declared worker with no record
-  is only cut off. `--json` prints one object (worker, ok, was, reason, error, exit), and the exit
-  codes are those of the other worker verbs.
+  is only cut off. Which names are workers is the running broker's call: after removing a worker
+  from `lever.yaml`, `lever reload` before purging it as an orphan. `--json` prints one object
+  (worker, ok, was, reason, error, exit), and the exit codes are those of the other worker verbs.
 - **Orphan records are reported and can be purged.** A hub record of the instance that is neither
   the manager nor a declared worker (a worker removed from the config leaves one) was invisible:
   no verb could reach it, `lever stop` left it running, and a running one still counted against
@@ -42,7 +44,8 @@ version bump moves the block under the new version heading.
 
 - **`lever worker purge` needs the broker running** (`lever up`), like the other worker verbs, and
   no longer takes `--machine` or `--backend`. Run `lever apply` (or `lever reload`) so the running
-  broker has the purge route: an older broker answers that it has none.
+  broker has the purge route: an older broker answers that it has none. Going back to an older
+  lever drops the saved certificate cutoffs at its next revocation save.
 - **Jail ABI 12.** The agent image changed (Claude Code 2.1.322): rebuild the agent image (`make
   lever-image` or `make lever-image-slim`, then any instance image built from it) and recreate the
   manager on it with `lever up --fresh --keep-conversation`. Doctor's *agent lever version* row says

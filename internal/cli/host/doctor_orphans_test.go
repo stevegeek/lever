@@ -24,7 +24,8 @@ func TestCheckOrphanRecords(t *testing.T) {
 		{"list fails", func(context.Context, string) ([]scionpkg.Agent, error) { return nil, errors.New("hub down\nmore") }, false, []string{"not checked", "hub down"}},
 		{"orphans", list(scionpkg.Agent{Slug: "assistant"}, scionpkg.Agent{Slug: "zed", Phase: "stopped"}, scionpkg.Agent{Slug: "old", Phase: "running"}), true,
 			[]string{"old (running), zed (stopped)", "max_running_workers"}},
-		{"an unnamed one", list(scionpkg.Agent{Slug: "Bad\x1b[2J"}), true, []string{"and 1 whose name is not an agent name"}},
+		{"an unnamed one", list(scionpkg.Agent{Slug: "Bad\x1b[2J"}), true, []string{"1 hub record(s)", "whose name is not an agent name"}},
+		{"named and unnamed", list(scionpkg.Agent{Slug: "old"}, scionpkg.Agent{Slug: "Bad"}), true, []string{"old (", "and 1 whose name is not an agent name"}},
 	} {
 		r := checkOrphanRecords(context.Background(), "/lever", "assistant", []string{"scratch"}, tc.list)
 		if !r.ok || (r.fix != "") != tc.warn {

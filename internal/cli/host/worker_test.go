@@ -57,16 +57,15 @@ func TestWorkerPurgePostsToTheOperatorSocket(t *testing.T) {
 	}
 }
 
-// Without --force, for an undeclared name without --orphan, and for a
-// declared one with it, purge sends nothing.
+// Without --force, purge sends nothing. Whether a name is a worker is the
+// broker's call (TestWorkerPurgeBrokerRefusals).
 func TestWorkerPurgeRefusesBeforeTheBroker(t *testing.T) {
 	for _, tc := range []struct {
 		args   []string
 		reason string
 	}{
 		{[]string{"worker", "purge", "scratch"}, reasonNoForce},
-		{[]string{"worker", "purge", "ghost", "--force"}, broker.ReasonNotAWorker},
-		{[]string{"worker", "purge", "scratch", "--orphan", "--force"}, broker.ReasonNotOrphan},
+		{[]string{"worker", "purge", "ghost", "--orphan"}, reasonNoForce},
 	} {
 		dir := msgDir(t)
 		t.Chdir(dir)
@@ -114,6 +113,7 @@ func TestWorkerPurgeBrokerRefusals(t *testing.T) {
 		{http.StatusNotFound, broker.ReasonNoRecord, exitWorkerNoRecord},
 		{http.StatusBadGateway, broker.ReasonRuntimeError, exitWorkerResumeFailed},
 		{http.StatusForbidden, broker.ReasonNotOrphan, exitWorkerRefused},
+		{http.StatusForbidden, broker.ReasonNotAWorker, exitWorkerRefused},
 	} {
 		dir := msgDir(t)
 		t.Chdir(dir)

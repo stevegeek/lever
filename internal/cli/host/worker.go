@@ -2,7 +2,6 @@ package host
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/broker"
@@ -64,13 +63,8 @@ func newWorkerPurgeCmd() *cobra.Command {
 			if err != nil {
 				return fail(err, "", 1)
 			}
-			switch declared := declaredWorker(app.Workers, name); {
-			case orphan && declared:
-				return fail(fmt.Errorf("%s is a declared worker, not an orphan: purge it without --orphan", name), broker.ReasonNotOrphan, exitWorkerRefused)
-			case !orphan && !declared:
-				return fail(fmt.Errorf("unknown worker %q (declared: %s); a hub record that is no declared worker is purged with --orphan",
-					name, strings.Join(workerNamesOf(app), ", ")), broker.ReasonNotAWorker, exitWorkerRefused)
-			}
+			// Which names are workers is the running broker's call, not this
+			// lever.yaml's: the two differ until `lever reload`.
 			sock, err := operatorSocket(app, st)
 			if err != nil {
 				return fail(err, reasonNoOperatorSocket, exitOperatorSocketMissing)

@@ -73,11 +73,11 @@ func (b *Broker) handleOperatorWorkerPurge(w http.ResponseWriter, r *http.Reques
 	switch {
 	case req.Orphan && declared:
 		b.audit("worker", operatorActor, "deny", verb+": a declared worker")
-		refuse(w, ReasonNotOrphan, name+" is a declared worker, not an orphan: purge it without --orphan", http.StatusForbidden)
+		refuse(w, ReasonNotOrphan, name+" is a worker of the running broker, not an orphan: purge it without --orphan (or, if you removed it from lever.yaml, run `lever reload` first)", http.StatusForbidden)
 		return
 	case !req.Orphan && !declared:
 		b.audit("worker", operatorActor, "deny", verb+": not a declared worker")
-		refuse(w, ReasonNotAWorker, "not a declared worker (a hub record that is neither the manager nor a declared worker is purged with --orphan)", http.StatusForbidden)
+		refuse(w, ReasonNotAWorker, "not a worker of the running broker (a hub record that is neither the manager nor a declared worker is purged with --orphan; a worker added to lever.yaml needs `lever reload` first)", http.StatusForbidden)
 		return
 	}
 	if !b.runtimeReady(w) {

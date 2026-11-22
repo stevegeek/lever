@@ -147,8 +147,8 @@ Three independent handles, all host-side:
 - **`lever broker bump-epoch`** — raise the epoch floor and every outstanding token dies at once.
 - **Purge** — `lever worker purge` (and a recycle) cuts off the certificates of the record it
   deleted: from then on every client certificate of that name issued before the purge is refused on
-  every jail route, so a copy of the old agent's key and certificate carries nothing, while the name
-  enrols afresh at its next start. Unlike `lever revoke`, the name stays usable. The cutoff is kept
+  every jail route and its unspent enrolment tickets are dropped, so a copy of the old agent's key,
+  certificate or staged ticket carries nothing, while the name enrols afresh at its next start. Unlike `lever revoke`, the name stays usable. The cutoff is kept
   in `.lever-state/revocation.json`. A delete that fails or is not confirmed leaves the certificates
   alone, since the record may still be resumed.
 

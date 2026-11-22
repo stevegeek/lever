@@ -40,13 +40,13 @@ func checkOrphanRecords(ctx context.Context, project, manager string, workers []
 	}
 	slices.Sort(named)
 	detail := "hub record(s) that are neither the manager nor a declared worker: " + strings.Join(named, ", ")
-	if unnamed > 0 {
-		if len(named) == 0 {
-			detail = "hub record(s) that are neither the manager nor a declared worker:"
-		}
+	switch {
+	case unnamed > 0 && len(named) == 0:
+		detail = fmt.Sprintf("%d hub record(s) that are neither the manager nor a declared worker, whose name is not an agent name", unnamed)
+	case unnamed > 0:
 		detail += fmt.Sprintf(" (and %d whose name is not an agent name)", unnamed)
 	}
 	detail += "; lever does not drive them, and a running one counts against broker.max_running_workers"
 	return checkResult{check, true, detail,
-		"delete each with `lever worker purge NAME --orphan --force` (the broker must be running), or declare it again under `workers:` and run `lever reload`"}
+		"delete each with `lever worker purge NAME --orphan --force` (the broker must be running; for a worker you just removed from lever.yaml, `lever reload` first), or declare it again under `workers:` and run `lever reload`"}
 }

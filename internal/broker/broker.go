@@ -133,6 +133,11 @@ type PersistenceConfig struct {
 	// PersistDirectives is called on every directive store mutation.
 	Directives        DirectiveState
 	PersistDirectives func(DirectiveState) error
+	// Agents is the spawned-agent registry as saved; PersistAgents saves it
+	// on every change, and a failed save refuses the change. nil ⇒ not
+	// saved.
+	Agents        AgentsState
+	PersistAgents func(AgentsState) error
 }
 
 // LLMConfig configures the /llm proxy.
@@ -296,6 +301,14 @@ type DispatchConfig struct {
 	// HubTokens heals an agent whose scion hub token expired, governed by
 	// AutoReenrol. nil ⇒ no watch.
 	HubTokens HubTokenHealer
+	// Templates are the shapes of spawned agents (config templates:).
+	Templates []TemplateSpec
+	// ArchiveDir is the host directory (0700, outside the tree) where
+	// destroy archives a workspace. Empty ⇒ archive fails and keeps it.
+	ArchiveDir string
+	// BackupConversation saves agent's conversation on the host before a
+	// destroy and returns the backup's id. nil ⇒ none is taken.
+	BackupConversation func(ctx context.Context, agent string) (string, error)
 }
 
 // TimeoutConfig bounds request handling on the jail listener per route class.
@@ -462,6 +475,11 @@ type Broker struct {
 	toolSecret      string
 	timeouts        TimeoutConfig
 	serviceHosts    map[string]ServiceHostRoute
+	// archiveDir, backupConversation and spawnRate serve spawn and
+	// destroy (spawn.go).
+	archiveDir         string
+	backupConversation func(ctx context.Context, agent string) (string, error)
+	spawnRate          *rateWindow
 	// hostWatch tracks which service hosts answer, for the "host is back"
 	// notice (hostwatch.go). hostProbe and hostWatchEvery are for tests.
 	hostWatch      hostWatch
@@ -493,7 +511,27 @@ func New(c Config) *Broker {
 		superseded[a] = at
 	}
 	up, _ := url.Parse(cmp.Or(llm.Upstream, "https://api.anthropic.com")) // operator/test-controlled, validated at serve time
-	return &Broker{
+	workers := newAgentRegistry(d.Workers)
+	workers.load(d.Templates, pe.Agents, d.Tree)
+	workers.persist = pe.PersistAgents
+	// A name being or already destroyed stays revoked even if the revocation
+	// file lost it: the registry is the record of every name used.
+	addRevoked := false
+	for _, rec := range workers.recordList() {
+		if (rec.State == AgentDestroyed || rec.State == AgentDestroying) && !revoked[rec.Name] {
+			revoked[rec.Name] = true
+			addRevoked = true
+		}
+	}
+	if id.Rules != nil {
+		id.Rules.SetTemplateResolver(workers.activeTemplateOf)
+		for _, rec := range workers.recordList() {
+			if t, ok := workers.template(rec.Template); ok && rec.State == AgentActive {
+				id.Rules.AddAgent(rec.Name, t.Obtain, t.Delegate)
+			}
+		}
+	}
+	b := &Broker{
 		keys: id.Keys, ca: id.CA, tickets: id.Tickets, rules: id.Rules, reg: id.Registry,
 		manager: id.ManagerIdentity, managerSlug: id.ManagerSlug, managerClaude: id.ManagerClaude,
 		grantTTL: id.GrantTTL, ticketTTL: id.TicketTTL,
@@ -503,7 +541,7 @@ func New(c Config) *Broker {
 		minEpoch:     pe.Revocation.MinEpoch, revoked: revoked, superseded: superseded, persist: pe.PersistRevocation,
 		directives: newDirectiveStore(pe.Directives, pe.PersistDirectives, c.Log),
 		apiKey:     llm.APIKey, llmUpstream: up,
-		runtime: d.Runtime, workers: newAgentRegistry(d.Workers), brokerCAPEM: d.BrokerCAPEM, brokerURL: d.BrokerURL,
+		runtime: d.Runtime, workers: workers, brokerCAPEM: d.BrokerCAPEM, brokerURL: d.BrokerURL,
 		instanceProject: d.InstanceProject, workerToWorker: d.WorkerToWorker,
 		verifyRole: d.VerifyAgentRole, resolveAgentID: d.ResolveAgentID, beginSession: d.BeginSession, tree: d.Tree, readOnlyDirs: d.ReadOnlyDirs,
 		recordVolumes: d.RecordVolumes, leftoverShareVolumes: d.LeftoverShareVolumes, sharedGuard: d.SharedGuard,
@@ -536,9 +574,20 @@ func New(c Config) *Broker {
 		agentMsgs:  c.AgentMessages.withDefaults(), agentLedger: &agentRecord{dir: c.AgentMessages.LedgerDir},
 		contactRate: newRateWindow(contactCallLimit),
 		files:       c.Files.withDefaults(), fileLedger: &fileRecord{dir: c.Files.LedgerDir},
-		filesRate: newRateWindow(filesCallLimit),
+		filesRate:  newRateWindow(filesCallLimit),
+		archiveDir: d.ArchiveDir, backupConversation: d.BackupConversation,
+		spawnRate: newRateWindow(managerSpawnRateLimit),
 	}
+	if addRevoked {
+		b.mu.Lock()
+		b.persistLocked()
+		b.mu.Unlock()
+	}
+	return b
 }
+
+// managerSpawnRateLimit is the manager's spawns per minute.
+const managerSpawnRateLimit = 4
 
 // MinEpoch returns the current minimum acceptable token epoch.
 func (b *Broker) MinEpoch() int {

@@ -88,6 +88,23 @@ commands that write the store (`snapshot`, `gc`, `delete`, `verify --fix`, `lock
 | `lever acceptance [config]` | Bring up a real jail and drive the six live capability/egress acceptance checks — delegated-read, three scope-envelope denials (a disallowed table, a dropped narrowing filter, a worker self-minting an un-granted cap), egress-refused (allowlisted broker port reachable, admin port blocked, the metadata address `169.254.169.254` rejected and a neighbouring link-local address dropped), and revocation (a token stops working after `bump-epoch`) — the merge gate for capability-layer changes. Before the checks it waits up to 30 s for each supervised tool to listen (not one held back by `manager.read_only`), and fails naming a tool that never does, with its log. It takes the lifecycle lock (exit `6`, or `--wait <duration>`). |
 | `lever version` / `lever --version` | Print the version: the release (`X.Y.Z`), plus the build's provenance in parentheses when there is one: the commit (first 12 hex digits, `-dirty` for an uncommitted tree) for a local build, the module version for a `go install …@vX` build. `make install` and the release build stamp the commit themselves, so a build in a git worktree reports its own commit too. A build with no commit (a plain `go build` in a git worktree, where Go records none) and a dirty build add `bin <hash>`, the first 12 hex digits of the binary's SHA-256, e.g. `X.Y.Z (bin 3f2a91c04e7b)`. `apply` restarts the broker and the remote proxy when this string changes. |
 
+### Spawned agents
+
+Agents spawned from the `templates:` in lever.yaml (see [templates](/reference/config/#templates)).
+Each verb asks the running broker over its operator socket. Once spawned, an agent is driven with
+the `lever worker` verbs (`resume`, `suspend`, `stop`, `new-session`, `watch`) and messaged with
+`lever msg send`; `purge` and `recycle` refuse it (`spawned`).
+
+| Command | What it does |
+|---|---|
+| `lever agent spawn TEMPLATE [--task-file F] [--label L] [--json]` | Spawn a new agent from `TEMPLATE` and start it fresh with the task in `F` (read as for `lever worker start --task-file`). The broker picks its name, `<prefix>-<6 characters>`, never used before, and prints it; creates its workspace `<dir_root>/<name>` (refusing anything already there or any link on the path) with its `lever-agent` skill; grants it the template's capabilities; and starts it. A start that fails is undone: the name is destroyed and revoked. The label (at most 60 printable characters) is shown in lists only. |
+| `lever agent destroy NAME --force [--stop] [--no-backup] [--json]` | Destroy a spawned agent. A running one is refused (`running`, exit `12`) unless `--stop`. In order: its conversation is backed up to `.lever-state/agent-conversations/NAME/` (a failed backup stops here with nothing changed, `backup-failed`, exit `3`, unless `--no-backup`); its grants are dropped and its name revoked for good; its workspace is archived, removed or kept as the template's `on_destroy` says (only the directory spawn created: one swapped for a link or another directory is kept, with a warning); its hub record and staged ticket are deleted; it stays in the registry as destroyed. A delete that fails leaves it `destroying` with its authority cut: run destroy again. |
+| `lever agent list [--all] [--json]` | The templates with their agent counts and caps, and the spawned agents with their state (`spawning`, `active`, `destroying`; `--all` adds `destroyed`), phase, spawner, creation time and label. An agent whose template is no longer configured is marked `template gone`: it can only be destroyed. |
+
+`lever agent spawn` and `destroy` exit with the `lever worker` codes below; their own reasons are
+`template-full` and `template-busy` (`75`), `no-template`, `bad-label`, `not-spawned` and
+`not-yours` (`10`), `running` (`12`) and `backup-failed` (`3`).
+
 ### Exit codes
 
 `lever` exits `0` on success and `1` on an error, with these exceptions from `lever up`,
@@ -183,13 +200,16 @@ while the state directory is inside the tree.
 
 Run by the manager agent inside its container (baked into the agent image, on `PATH`). Every call
 is authenticated by the broker over mTLS and validated against the instance config — the manager
-can only reach workers the operator declared.
+can only reach workers the operator declared and the agents it spawned itself.
 
 | Command | What it does |
 |---|---|
 | `lever-manager agent start NAME --task "…"` | Dispatch a declared worker that has **no** existing record. The broker resolves the worker's image and workspace from the config host-side; `--task` is the only routine flag and fixes the worker's task at creation; it defaults to `"Read your context, then begin."`, so `agent start` never sends an empty task. Against an **existing** worker `agent start` returns HTTP 409 (its task can't be changed in place) — use `agent resume` to re-run its original task, `msg send` to give a running worker new work, or, to start it fresh with a new task, `agent recycle` it (a `recyclable` worker) or ask the operator to `lever worker purge` it. Confirms the worker is live before reporting success. |
 | `lever-manager agent recycle NAME --task "…"` | Discard a worker's record and start it fresh with a new task, in one call: the same teardown as `lever worker purge` (the scion record and the staged ticket; **never the workspace**), then the same start as `agent start`. The worker's old conversation is lost. Only for a worker with `recyclable: true` in the config (403 otherwise), and only for one that is suspended, stopped or in phase `error` (409 otherwise, nothing deleted: `agent stop` it first); a worker with no record is simply started. Refused with 503 while another start, resume, stop, wake or heal of the worker is under way, and with 429 (and `Retry-After`) within a minute of the worker's last recycle. Every recycle is in the broker audit log (`op=worker`, `recycle NAME`, the task's size and its first 60 bytes only). `--task` defaults as for `agent start`. |
 | `lever-manager agent list` | List worker agents and their phases. |
+| `lever-manager agent spawn TEMPLATE --task "…" [--label L]` | Spawn a new agent from a template whose `spawners` lists `manager` (404 `no-template` otherwise), as `lever agent spawn` does; at most 4 a minute (429). The manager then drives it with the `agent` verbs and `msg send`. |
+| `lever-manager agent destroy NAME [--stop]` | Destroy an agent the manager spawned (403 `not-yours` for any other), as `lever agent destroy` does. The conversation is always backed up. |
+| `lever-manager agent spawned` | The templates the manager may spawn from, with their counts and caps, and the agents it spawned. |
 | `lever-manager agent stop NAME` / `suspend NAME` / `resume NAME` | Worker lifecycle, broker-routed. Suspend keeps the container (cheap resume); stop removes it but keeps the record. Resume answers when the worker is live (it recovers an `error`-phase record, and is a no-op for a running one); a worker must be running before `msg send` reaches it (409 otherwise). |
 | `lever-manager msg send "…" --to NAME` | Message a running agent. `NAME` is `<name>` or `agent:<name>` for a worker, or `user:manager` to reach the manager (the form taught to workers). `--interrupt` injects the message ahead of the recipient's next turn. Routing is identity-derived and default-deny; a refused send names the addresses the caller may use. |
 | `lever-manager msg recipients` | List the addresses the calling agent may pass to `msg send --to`, one per line, as the broker's policy has them: the manager sees itself and every declared worker; a worker sees `user:manager`, itself, and the other workers only when `messaging.worker_to_worker` allows them. Read-only. |

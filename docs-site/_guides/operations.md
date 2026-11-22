@@ -115,6 +115,59 @@ discard a record (`lever worker purge NAME --force`, or `lever worker recycle NA
 need `recyclable`). `lever doctor`'s *worker recycle* row lists
 the recyclable workers.
 
+## Spawned agents
+
+A worker is a fixed slot: its name, directory and task are set when you declare it. For work that
+comes and goes (a session per ticket, a reviewer per pull request), declare a **template** instead
+and spawn agents from it as needed:
+
+```yaml
+templates:
+  - name: session
+    prefix: s                 # agents are named s-<6 characters>
+    dir_root: sessions        # each gets <tree>/sessions/<name>
+    resources: {memory: 4GiB, cpu: "2"}
+    max_instances: 8          # at most 8 exist at once
+    max_running: 2            # at most 2 run at once
+    obtain: [{tool: github, op: "*"}]
+    on_destroy: {workspace: archive}
+    spawners: [operator, manager]   # optional: let the manager spawn too
+```
+
+After `lever reload` (the broker reads templates at start):
+
+```console
+$ lever agent spawn session --task-file brief.md --label "PR 412"
+agent s-k3f7qa spawned from template session; it is running.
+$ lever msg send "also check the tests" --to s-k3f7qa
+$ lever worker suspend s-k3f7qa        # and resume, stop, new-session, watch
+$ lever agent list
+$ lever agent destroy s-k3f7qa --stop --force
+```
+
+What a spawn does: the broker draws a name that was never used, records the agent in
+`.lever-state/agents.json` (0600), creates its workspace with its `lever-agent` skill, grants it
+exactly the template's capabilities and starts it fresh with your task. What a destroy does: it
+backs up the agent's conversation to `.lever-state/agent-conversations/<name>/`, drops its grants
+and revokes its name for good, archives (or removes, or keeps) its workspace, and deletes its hub
+record. The record stays as a tombstone, so the name is never drawn again: the agent's certificates
+and tokens can never name another agent.
+
+- **Restarts.** Spawned agents survive `lever reload`, `lever stop` (which suspends running ones)
+  and `lever up` (which leaves them suspended: resume the ones you need). A broker that stopped in
+  the middle of a spawn or a destroy settles it when it starts again: a spawn whose agent has a hub
+  record is kept, one without is undone, and a destroy is finished. Until then the agent holds no
+  grants and no verb drives it.
+- **Changing a template.** The broker builds every agent's spec from its template as configured
+  when it starts, so a change reaches running agents at the next `lever reload` for grants, and at
+  their next fresh start for image, model and resources (scion keeps those in the record). An agent
+  whose template you removed can only be destroyed; `lever doctor`'s *spawned agents* row names it.
+- **From the manager.** With `manager` in `spawners`, the manager spawns with
+  `lever-manager agent spawn`, and drives and destroys only the agents it spawned. Such a template
+  may obtain only capabilities the manager obtains itself.
+- **Delegating to spawned agents.** A `delegate` grant's `to` may name `template:<name>`: it holds
+  for each active agent of that template.
+
 ## Driving workers from a host program
 
 A program on the host (a job runner, a cron script) can drive long-lived workers without the

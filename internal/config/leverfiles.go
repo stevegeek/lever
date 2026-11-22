@@ -57,9 +57,9 @@ func (a *App) validateLeverFilesTools() error {
 	if reason == "" {
 		return nil
 	}
-	for _, w := range a.Workers {
-		if fsutil.RelOverlapFold(w.Dir, chatfiles.Dir) {
-			return fmt.Errorf("config: worker %q dir %q overlaps %s, and %s: the worker could plant files there; move the worker", w.Name, w.Dir, chatfiles.Dir, reason)
+	for _, d := range a.AgentDirs() {
+		if fsutil.RelOverlapFold(d.Dir, chatfiles.Dir) {
+			return fmt.Errorf("config: %s overlaps %s, and %s: the agent could plant files there; move it", d, chatfiles.Dir, reason)
 		}
 	}
 	return nil

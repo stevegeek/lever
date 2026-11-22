@@ -2,16 +2,21 @@ package wire
 
 // Jail (mTLS) listener routes.
 const (
-	PathEnrol            = "/enrol"
-	PathRenew            = "/renew"
-	PathRequest          = "/request"
-	PathTools            = "/tools"
-	PathWorkerStart      = "/worker/start"
-	PathWorkerStop       = "/worker/stop"
-	PathWorkerSuspend    = "/worker/suspend"
-	PathWorkerResume     = "/worker/resume"
-	PathWorkerRecycle    = "/worker/recycle"
-	PathWorkerList       = "/worker/list"
+	PathEnrol         = "/enrol"
+	PathRenew         = "/renew"
+	PathRequest       = "/request"
+	PathTools         = "/tools"
+	PathWorkerStart   = "/worker/start"
+	PathWorkerStop    = "/worker/stop"
+	PathWorkerSuspend = "/worker/suspend"
+	PathWorkerResume  = "/worker/resume"
+	PathWorkerRecycle = "/worker/recycle"
+	PathWorkerList    = "/worker/list"
+	// The manager's spawn, destroy and list of agents from the templates
+	// that name it in spawners.
+	PathAgentSpawn       = "/agent/spawn"
+	PathAgentDestroy     = "/agent/destroy"
+	PathAgentList        = "/agent/list"
 	PathMsgSend          = "/msg/send"
 	PathMsgList          = "/msg/list"
 	PathMsgRecipients    = "/msg/recipients"

@@ -182,7 +182,7 @@ func TestAgentMessagesOnTeachesAuthorizeThenSend(t *testing.T) {
 
 // operatorNoRecycle is the manager skill source with the recycle variant
 // picked off, the base the other block tests compare with.
-var operatorNoRecycle = pickBlocks(pickBlocks(operatorSrc, false, recycleOn, recycleOff), false, serviceHostsOn, serviceHostsOff)
+var operatorNoRecycle = pickBlocks(pickBlocks(pickBlocks(operatorSrc, false, recycleOn, recycleOff), false, serviceHostsOn, serviceHostsOff), false, spawnOn, spawnOff)
 
 // filesBlocks cuts every files block (on and off) with its markers.
 var filesBlocks = regexp.MustCompile(`(?ms)^<!-- lever:files (on|off) -->\n.*?^<!-- /lever:files (on|off) -->\n`)

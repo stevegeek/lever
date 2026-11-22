@@ -21,10 +21,19 @@ func TestHostRootHasProvisioningOnly(t *testing.T) {
 			t.Errorf("host root missing %q", want)
 		}
 	}
-	for _, unwanted := range []string{"agent", "watch"} {
+	for _, unwanted := range []string{"watch"} {
 		if n[unwanted] {
 			t.Errorf("host root should not have %q", unwanted)
 		}
+	}
+	// The host's agent command is spawn and destroy from templates, never
+	// the manager's `agent` verbs (those are `lever worker` on the host).
+	agent, _, err := NewRoot().Find([]string{"agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verbs := clitest.Names(agent); len(verbs) != 3 || !verbs["spawn"] || !verbs["destroy"] || !verbs["list"] {
+		t.Errorf("host agent verbs: %v", verbs)
 	}
 	// "down" is a deprecated alias of "destroy", not its own top-level Name().
 	if n["down"] {

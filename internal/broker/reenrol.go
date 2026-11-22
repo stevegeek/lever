@@ -84,8 +84,14 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 		b.audit("reenrol", cn, "deny", "revoked identity presented an expired leaf — not healing")
 		return
 	}
-	if _, isWorker := b.workerSpec(cn); !isWorker {
+	if cn == b.manager {
 		b.healLapsedManager(ctx, cn, slug, stage)
+		return
+	}
+	// A spawned agent stops being a worker when its destroy begins, before
+	// its name is revoked: it is never healed, and never read as the manager.
+	if _, isWorker := b.workerSpec(cn); !isWorker {
+		b.audit("reenrol", cn, "deny", "natural lapse: no longer a worker — not healing")
 		return
 	}
 	// Before a ticket is staged: a refused heal must not leave a fresh
@@ -280,7 +286,12 @@ func (b *Broker) bounceForReenrol(ctx context.Context, cn, slug string) (verb st
 		phase = scion.PhaseLabel(rec.Phase)
 	}
 	// A resume re-resolves the workspace bind source (as in resumeRecord).
-	if spec, isWorker := b.workers.get(slug); isWorker {
+	spec, isWorker := b.workerSpec(slug)
+	if !isWorker && cn != b.manager {
+		b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+slug+": no longer a worker")
+		return "", false
+	}
+	if isWorker {
 		if rewritableImage(rec) {
 			b.audit("reenrol", cn, "deny", rewritableImageRefusal(spec, rec))
 			return "", false
@@ -297,7 +308,7 @@ func (b *Broker) bounceForReenrol(ctx context.Context, cn, slug string) (verb st
 	// Resuming a non-running worker takes a slot; a running one holds its
 	// own.
 	resumes := phase == scion.PhaseSuspended || phase == scion.PhaseStopped || phase == scion.PhaseError
-	if b.workers.has(slug) && resumes {
+	if _, isWorker := b.workerSpec(slug); isWorker && resumes {
 		release, err := b.admitWorker(ctx, slug)
 		if err != nil {
 			outcome := "error"

@@ -290,7 +290,7 @@ func (a *App) checkHostPathsOutsideTree() error {
 				"a link in the tree, and the host runs what it points at — move it outside the tree, or name its real path "+
 				"under a manager.read_only entry", p.key, p.path, a.Tree)
 		case w.worker != "":
-			return fmt.Errorf("config: %s %q is inside worker %q's dir, which the worker mounts read-write, and the host runs it — "+
+			return fmt.Errorf("config: %s %q is inside the dir of %s, which it mounts read-write, and the host runs it — "+
 				"move it outside the tree, or cover it with manager.read_only outside every worker dir", p.key, p.path, w.worker)
 		case w.entry == "":
 			return fmt.Errorf("config: %s %q is inside the mounted tree (%s): an agent can replace it there, and the host runs it — "+
@@ -368,9 +368,9 @@ func (a *App) walkTree(realTree, p string) (treeWalk, error) {
 			entries = append(entries, mark{e, fi})
 		}
 	}
-	for _, g := range a.Workers {
-		if fi, err := os.Stat(filepath.Join(realTree, g.Dir)); err == nil {
-			workers = append(workers, mark{g.Name, fi})
+	for _, d := range a.AgentDirs() {
+		if fi, err := os.Stat(filepath.Join(realTree, d.Dir)); err == nil {
+			workers = append(workers, mark{d.Who, fi})
 		}
 	}
 	var walk func(p string, depth int) error

@@ -35,7 +35,14 @@ func (b *Broker) tokenWatchAgents() []string {
 		return []string{b.managerSlug}
 	}
 	out := []string{b.managerSlug}
-	return append(out, b.workers.names()...)
+	for _, name := range b.workers.names() {
+		// Only agents that may be driven: not a spawned agent being
+		// spawned or destroyed.
+		if _, ok := b.workerSpec(name); ok {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 func (b *Broker) tokenWatchEnabled() bool {
@@ -119,17 +126,18 @@ func (b *Broker) healOneHubToken(ctx context.Context, cn, slug string) {
 		b.resetManagerToken(ctx, cn)
 		return
 	}
-	if _, isWorker := b.workerSpec(slug); isWorker {
-		lctx, cancel := context.WithTimeout(ctx, cmp.Or(b.reenrolLockWait, reenrolLockWaitDefault))
-		unlock, err := b.lockWorker(lctx, slug)
-		cancel()
-		if err != nil {
-			// Not an attempt: the next tick may try again.
-			b.forgetTokenHeal(slug)
-			return
-		}
-		defer unlock()
+	if _, isWorker := b.workerSpec(slug); !isWorker {
+		return
 	}
+	lctx, cancel := context.WithTimeout(ctx, cmp.Or(b.reenrolLockWait, reenrolLockWaitDefault))
+	unlock, err := b.lockWorker(lctx, slug)
+	cancel()
+	if err != nil {
+		// Not an attempt: the next tick may try again.
+		b.forgetTokenHeal(slug)
+		return
+	}
+	defer unlock()
 	if b.isRevoked(cn) {
 		return
 	}

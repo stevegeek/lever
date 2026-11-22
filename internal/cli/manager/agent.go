@@ -16,7 +16,8 @@ func newAgentCmd(c brokerCaller) *cobra.Command {
 		Long: "Drive worker agents via the broker (manager only).\n\n" +
 			"NAME is a worker's bare name as the instance config declares it: no agent: or user: prefix\n" +
 			"(those are `msg send --to` address forms; see `lever-manager msg send --help`)."}
-	cmd.AddCommand(agentList(c), agentStart(c), agentStop(c), agentSuspend(c), agentResume(c), agentRecycle(c))
+	cmd.AddCommand(agentList(c), agentStart(c), agentStop(c), agentSuspend(c), agentResume(c), agentRecycle(c),
+		agentSpawn(c), agentDestroy(c), agentSpawned(c))
 	return cmd
 }
 

@@ -48,8 +48,15 @@ type Files struct {
 // (some tool runs on a service host) the "service-hosts on" blocks; off
 // renders no trace of them.
 func OperatorWith(version string, verifiedChat, agentMessages bool, f Files, recycle, serviceHosts bool) []byte {
+	return OperatorFor(version, verifiedChat, agentMessages, f, recycle, serviceHosts, false)
+}
+
+// OperatorFor is OperatorWith that also keeps the "spawn on" block when
+// spawn (some template lists the manager in spawners).
+func OperatorFor(version string, verifiedChat, agentMessages bool, f Files, recycle, serviceHosts, spawn bool) []byte {
 	src := pickBlocks(pickFiles(pick(operatorSrc, agentMessages), f), recycle, recycleOn, recycleOff)
 	src = pickBlocks(src, serviceHosts, serviceHostsOn, serviceHostsOff)
+	src = pickBlocks(src, spawn, spawnOn, spawnOff)
 	return renderChat(src, version, verifiedChat)
 }
 
@@ -82,6 +89,9 @@ var (
 	// One variant: the "off" blocks do not exist.
 	serviceHostsOn  = block("service-hosts", "on")
 	serviceHostsOff = block("service-hosts", "off")
+	// One variant: the "off" blocks do not exist.
+	spawnOn  = block("spawn", "on")
+	spawnOff = block("spawn", "off")
 )
 
 // block matches one marked block of a skill, markers included.

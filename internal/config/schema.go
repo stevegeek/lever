@@ -470,17 +470,19 @@ const (
 )
 
 type App struct {
-	Name     string      `yaml:"name"`
-	Backend  string      `yaml:"backend"`
-	Egress   EgressMode  `yaml:"egress"`
-	Tree     string      `yaml:"tree"`
-	Manager  Manager     `yaml:"manager"`
-	Scion    ScionConfig `yaml:"scion"`
-	Workers  []Worker    `yaml:"workers"`
-	Security Security    `yaml:"security"`
-	Broker   Broker      `yaml:"broker"`
-	Operator Operator    `yaml:"operator"`
-	Remote   Remote      `yaml:"remote"`
+	Name    string      `yaml:"name"`
+	Backend string      `yaml:"backend"`
+	Egress  EgressMode  `yaml:"egress"`
+	Tree    string      `yaml:"tree"`
+	Manager Manager     `yaml:"manager"`
+	Scion   ScionConfig `yaml:"scion"`
+	Workers []Worker    `yaml:"workers"`
+	// Templates are the shapes of agents spawned at runtime.
+	Templates []Template `yaml:"templates"`
+	Security  Security   `yaml:"security"`
+	Broker    Broker     `yaml:"broker"`
+	Operator  Operator   `yaml:"operator"`
+	Remote    Remote     `yaml:"remote"`
 	// SharedFolders are tree directories some agents mount at /shared/<name>.
 	SharedFolders []SharedFolder `yaml:"shared_folders"`
 	Disk          string         `yaml:"disk"`        // Lima guest disk size (e.g. "24GiB"); empty = backend default. Lima-only.

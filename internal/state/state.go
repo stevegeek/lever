@@ -60,6 +60,17 @@ func (s State) FilesLedger() string { return filepath.Join(s.Dir, "files-ledger"
 // before each whisper-server start. Never audio or a transcript.
 func (s State) VoiceModels() string { return filepath.Join(s.Dir, "voice-models") }
 
+// Agents is the broker's registry of spawned agents, destroyed ones
+// included, so no name is ever drawn twice.
+func (s State) Agents() string { return filepath.Join(s.Dir, "agents.json") }
+
+// AgentArchives holds the workspaces destroy archived (0700).
+func (s State) AgentArchives() string { return filepath.Join(s.Dir, "agent-archives") }
+
+// AgentConversations holds a directory of conversation backups per spawned
+// agent, taken when it is destroyed.
+func (s State) AgentConversations() string { return filepath.Join(s.Dir, "agent-conversations") }
+
 // Sessions records each agent's last fresh session start and the skill text
 // then (sessionrec): written by apply (manager) and the broker (workers),
 // read by the remote proxy before it lets a contact post to an agent.

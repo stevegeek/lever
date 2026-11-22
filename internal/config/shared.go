@@ -160,9 +160,9 @@ func (a *App) validateSharedFolders() error {
 				return fmt.Errorf("config: shared_folders %q overlaps manager.read_only %q; list the directory in one of them only", p, e)
 			}
 		}
-		for _, g := range a.Workers {
-			if fsutil.RelOverlapFold(g.Dir, p) {
-				return fmt.Errorf("config: shared folder %q overlaps worker %q (dir %q) — the worker mounts its dir read-write, so it would write the folder whatever writers says; name it in writers instead and move the folder out of its dir", p, g.Name, g.Dir)
+		for _, d := range a.AgentDirs() {
+			if fsutil.RelOverlapFold(d.Dir, p) {
+				return fmt.Errorf("config: shared folder %q overlaps %s — the agent mounts its dir read-write, so it would write the folder whatever writers says; name it in writers instead and move the folder out of its dir", p, d)
 			}
 		}
 		for _, part := range strings.Split(filepath.ToSlash(p), "/") {

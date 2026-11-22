@@ -64,7 +64,10 @@ func countsAsRunning(phase, containerStatus string) bool {
 // lifecycle lock and calls release once its start or resume has returned,
 // whatever the outcome. A failed read of the records refuses (fail closed).
 func (b *Broker) admitWorker(ctx context.Context, name string) (release func(), err error) {
-	if b.maxRunningWorkers <= 0 {
+	// A spawned agent also counts against its template's max_running,
+	// whatever the global cap.
+	tmpl, perTemplate := b.workers.templateOfRecord(name)
+	if b.maxRunningWorkers <= 0 && !perTemplate {
 		return func() {}, nil
 	}
 	// Records are read under the lock, or a read taken before another
@@ -90,7 +93,19 @@ func (b *Broker) admitWorker(ctx context.Context, name string) (release func(), 
 			counted[other] = true
 		}
 	}
-	if len(counted) >= b.maxRunningWorkers {
+	if perTemplate {
+		var same []string
+		for slug := range counted {
+			if t, ok := b.workers.templateOfRecord(slug); ok && t.Name == tmpl.Name {
+				same = append(same, slug)
+			}
+		}
+		if len(same) >= tmpl.MaxRunning {
+			slices.Sort(same)
+			return nil, &templateCapError{agent: name, template: tmpl.Name, max: tmpl.MaxRunning, active: same}
+		}
+	}
+	if b.maxRunningWorkers > 0 && len(counted) >= b.maxRunningWorkers {
 		e := &workerCapError{worker: name, max: b.maxRunningWorkers}
 		for slug := range counted {
 			if b.workers.has(slug) {
@@ -115,12 +130,33 @@ func (b *Broker) admitWorker(ctx context.Context, name string) (release func(), 
 	}, nil
 }
 
+// ErrTemplateCap is the refusal when a template's max_running is reached.
+var ErrTemplateCap = errors.New("template max_running reached")
+
+type templateCapError struct {
+	agent, template string
+	max             int
+	active          []string
+}
+
+func (e *templateCapError) Error() string {
+	return fmt.Sprintf("agent %s was not started: template %s allows %d running at once and %d are running or starting (%s). Suspend or destroy one first. Nothing was changed.",
+		e.agent, e.template, e.max, len(e.active), strings.Join(e.active, ", "))
+}
+
+func (e *templateCapError) Unwrap() error { return ErrTemplateCap }
+
 // admitOrRefuse names the running workers to the manager only; any other
 // actor gets a short body.
 func (b *Broker) admitOrRefuse(ctx context.Context, w http.ResponseWriter, actor, verb, name string) (func(), bool) {
 	release, err := b.admitWorker(ctx, name)
 	if err == nil {
 		return release, true
+	}
+	if errors.Is(err, ErrTemplateCap) {
+		b.audit("worker", actor, "deny", verb+" "+name+": "+err.Error())
+		refuse(w, ReasonTemplateBusy, err.Error(), http.StatusConflict)
+		return nil, false
 	}
 	if errors.Is(err, ErrWorkerCap) {
 		b.audit("worker", actor, "deny", verb+" "+name+": "+err.Error())

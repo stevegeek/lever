@@ -56,6 +56,15 @@ const (
 	ReasonNotStopped         = "not-stopped"         // 409 (recycle): the record is not suspended, stopped or error, or its container is live
 	ReasonRateLimited        = "rate-limited"        // 429 (recycle): the worker was recycled less than a minute ago
 	ReasonImageUnqualified   = "image-unqualified"   // 409: the worker's record runs an image name the hub rewrites to its image registry (unqualified, or none)
+	ReasonNotYours           = "not-yours"           // 403: the manager did not spawn this agent
+	ReasonNoTemplate         = "no-template"         // 404 (spawn): no such template, or the caller may not spawn from it
+	ReasonTemplateFull       = "template-full"       // 409 (spawn): the template is at max_instances
+	ReasonTemplateBusy       = "template-busy"       // 409 (spawn, start, resume): the template is at max_running
+	ReasonBadLabel           = "bad-label"           // 400 (spawn): the label is too long or has control or formatting characters
+	ReasonNotSpawned         = "not-spawned"         // 403/404 (destroy): the name is no spawned agent, or one already destroyed
+	ReasonRunning            = "running"             // 409 (destroy): the agent is running and stop was not asked
+	ReasonBackupFailed       = "backup-failed"       // 502 (destroy): the conversation backup failed; nothing was destroyed
+	ReasonSpawned            = "spawned"             // 403 (purge, recycle): a spawned agent is destroyed, never purged or recycled
 )
 
 // refuse writes an error answer with its machine-readable reason. The text is

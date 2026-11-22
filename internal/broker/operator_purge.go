@@ -69,6 +69,13 @@ func (b *Broker) handleOperatorWorkerPurge(w http.ResponseWriter, r *http.Reques
 		refuse(w, ReasonNotAWorker, "the manager is never purged (it is run with `lever up`)", http.StatusForbidden)
 		return
 	}
+	// A spawned agent is destroyed, which also revokes its name for good.
+	// A destroyed one whose hub record is somehow back is an orphan.
+	if rec, spawned := b.workers.record(name); spawned && (rec.State != AgentDestroyed || !req.Orphan) {
+		b.audit("worker", operatorActor, "deny", verb+": a spawned agent")
+		refuse(w, ReasonSpawned, name+" was spawned from a template: destroy it with `lever agent destroy "+name+"`", http.StatusForbidden)
+		return
+	}
 	declared := b.workers.has(name)
 	switch {
 	case req.Orphan && declared:

@@ -413,6 +413,34 @@ discarded and recreated with a different task, ask the operator.
 - Close the loop: on a `COMPLETED` state change, report what the worker
   produced. If a worker errors or never completes, say so plainly — never
   report success you did not observe.
+<!-- lever:spawn on -->
+
+### Spawning agents from templates
+
+The operator lets you spawn new agents from some templates. Each spawn makes
+a fresh agent with its own workspace; its tools and limits come from the
+template, never from you.
+
+- See what you may spawn, and the agents you spawned:
+  `lever-manager agent spawned`.
+- Spawn: `lever-manager agent spawn <template> --task "<task>" --label "<title>"`.
+  The broker picks the name (`<prefix>-<6 characters>`) and prints it. Use
+  that name for everything after. The spawn answers once the agent is
+  running. A 409 means the template is at its limit: destroy or suspend
+  one of its agents first. A 429 means you spawned too many in the last
+  minute.
+- Drive it like a worker: `agent suspend|resume|stop <name>`,
+  `msg send --to <name>`. What it sends you is worker-tier data.
+- Destroy it when its work is done:
+  `lever-manager agent destroy <name> --stop`. Its conversation is backed up
+  on the host first. Then its name is revoked for good, its workspace is
+  handled as the template says (archived by default), and its record is
+  deleted. A destroyed agent never comes back, and its name is never reused.
+- You can destroy only the agents you spawned. The operator's own spawned
+  agents and the configured workers are not yours to destroy or drive.
+- The task you give is all the new agent knows. Write it as a full brief,
+  and keep secrets out of it, as for any worker.
+<!-- /lever:spawn on -->
 
 ## Operator directives
 

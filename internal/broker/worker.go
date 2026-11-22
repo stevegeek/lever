@@ -90,7 +90,15 @@ type WorkerSpec struct {
 	Resources scion.Resources
 }
 
+// workerSpec returns the spec of a worker that may be driven: a config
+// worker, or a spawned agent that is active with its template configured.
+// A spawned agent that is spawning, being destroyed, destroyed or whose
+// template is gone is no worker to any route but spawn and destroy, which
+// read the registry themselves.
 func (b *Broker) workerSpec(name string) (WorkerSpec, bool) {
+	if !b.workers.usable(name) {
+		return WorkerSpec{}, false
+	}
 	return b.workers.get(name)
 }
 
@@ -137,6 +145,12 @@ func (b *Broker) requireManagerWorker(w http.ResponseWriter, r *http.Request, re
 	if !ok {
 		b.audit("worker", caller, "deny", "unknown worker: "+worker())
 		http.Error(w, "forbidden", http.StatusForbidden)
+		return WorkerSpec{}, false
+	}
+	// The manager drives only the spawned agents it spawned itself.
+	if rec, spawned := b.workers.record(spec.Name); spawned && rec.CreatedBy != caller {
+		b.audit("worker", caller, "deny", spec.Name+": a spawned agent the manager did not spawn")
+		refuse(w, ReasonNotYours, "forbidden: "+spec.Name+" was not spawned by the manager", http.StatusForbidden)
 		return WorkerSpec{}, false
 	}
 	if !b.runtimeReady(w) {
@@ -429,6 +443,20 @@ func (b *Broker) ensureWorkspaceDir(spec WorkerSpec) error {
 // container start, so this must run on every resume too. No-op when
 // read_only is unset or no tree is wired.
 func (b *Broker) verifyStrictWorkspace(spec WorkerSpec) error {
+	// A spawned agent's workspace must be the directory spawn created,
+	// whatever manager.read_only says: the manager can swap it for a link
+	// to another agent's dir, which the resume would mount.
+	if rec, spawned := b.workers.record(spec.Name); spawned && rec.DirID != "" {
+		parent, dir, err := b.openAgentDir(rec)
+		if errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		if err != nil {
+			return fmt.Errorf("%s: %w: %w", spec.HostWorkspace, fsutil.ErrEscapesTree, err)
+		}
+		dir.Close()
+		parent.Close()
+	}
 	if len(b.readOnlyDirs) == 0 || b.tree == "" {
 		return nil
 	}
@@ -589,6 +617,11 @@ func (b *Broker) startWorker(ctx context.Context, w http.ResponseWriter, spec Wo
 		writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 	case phase != "":
 		b.resumeExistingWorker(ctx, w, spec, phase, task, actor)
+	case b.workers.spawned(spec.Name):
+		// Only spawn creates a spawned agent's record: a fresh start would
+		// skip its workspace and skill checks.
+		b.audit("worker", actor, "deny", "start "+spec.Name+": a spawned agent with no record")
+		refuse(w, ReasonNoRecord, "agent "+spec.Name+" was spawned from a template and has no record on the hub; it cannot be started fresh. Destroy it (`lever agent destroy "+spec.Name+"`) and spawn a new one", http.StatusConflict)
 	default:
 		b.startFreshWorker(ctx, w, spec, task, configTask, actor)
 	}

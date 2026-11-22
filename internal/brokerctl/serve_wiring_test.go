@@ -351,7 +351,7 @@ func TestDispatchConfigWiresTheRecordReaderByFolders(t *testing.T) {
 	env := ServeEnv{JailUser: "jail", JailUID: "501"}
 
 	app := wiringApp(t.TempDir(), "")
-	d, err := dispatchConfig(app, st, be, env)
+	d, err := dispatchConfig(app, st, be, env, "test")
 	if err != nil {
 		t.Fatalf("dispatchConfig: %v", err)
 	}
@@ -380,7 +380,7 @@ func TestDispatchConfigWiresTheRecordReaderByFolders(t *testing.T) {
 	}
 
 	app.SharedFolders = []config.SharedFolder{{Path: "shared/x", Readers: []string{"a"}}}
-	d, err = dispatchConfig(app, st, be, env)
+	d, err = dispatchConfig(app, st, be, env, "test")
 	if err != nil {
 		t.Fatalf("dispatchConfig: %v", err)
 	}

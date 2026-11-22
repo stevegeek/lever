@@ -250,13 +250,13 @@ type workerSuspender interface {
 	Suspend(ctx context.Context, worker, project string) error
 }
 
-// suspendRunningWorkers suspends every configured worker the hub shows running
+// suspendRunningWorkers suspends every configured worker and spawned agent the hub shows running
 // or coming up. A worker left running across the power-off comes back in phase
 // error with a never-started container, whose resume answers 409. Best-effort:
 // failures warn and the caller powers off regardless. It reports whether every
 // needed suspend took (false on a failed list).
 func suspendRunningWorkers(cmd *cobra.Command, sc workerSuspender, app *config.App, project string) bool {
-	if len(app.Workers) == 0 {
+	if len(app.Workers) == 0 && len(app.Templates) == 0 {
 		return true
 	}
 	lctx, cancel := context.WithTimeout(cmd.Context(), workerListTimeout)
@@ -272,6 +272,12 @@ func suspendRunningWorkers(cmd *cobra.Command, sc workerSuspender, app *config.A
 			names = append(names, wk.Name)
 		}
 	}
+	// Spawned agents too: a hub record with a template instance's name.
+	for _, a := range agents {
+		if _, spawned := app.TemplateOf(a.Slug); spawned && suspendBeforeStop(a.Phase) {
+			names = append(names, a.Slug)
+		}
+	}
 	errs := suspendWorkers(cmd.Context(), sc, names, project, workerSuspendParallel, workerSuspendTimeout)
 	// Reported in config order, whatever order the suspends finished in.
 	ok := true
@@ -279,6 +285,10 @@ func suspendRunningWorkers(cmd *cobra.Command, sc workerSuspender, app *config.A
 		if errs[i] != nil {
 			ok = false
 			cmd.PrintErrf("lever: warning: scion suspend of worker %q failed (it may not resume cleanly on next up): %s\n", name, termsafe.Sanitize(scion.ErrSummary(errs[i])))
+			continue
+		}
+		if _, spawned := app.TemplateOf(name); spawned {
+			cmd.Printf("agent %q suspended — it stays suspended after `lever up`; resume it with `lever worker resume %s`.\n", name, name)
 			continue
 		}
 		cmd.Printf("worker %q suspended — it stays suspended after `lever up`; resume it from the manager (`lever-manager agent resume %s`).\n", name, name)

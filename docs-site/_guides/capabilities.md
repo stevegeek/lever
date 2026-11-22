@@ -151,6 +151,13 @@ Three independent handles, all host-side:
   certificate or staged ticket carries nothing, while the name enrols afresh at its next start. Unlike `lever revoke`, the name stays usable. The cutoff is kept
   in `.lever-state/revocation.json`. A delete that fails or is not confirmed leaves the certificates
   alone, since the record may still be resumed.
+- **Destroy** — `lever agent destroy` (and `lever-manager agent destroy`) ends a
+  [spawned agent](/operations/#spawned-agents): it drops the agent's grants from the policy, then
+  revokes its name as `lever revoke` does, before it touches the workspace or the hub record. A
+  revocation that is not saved stops the destroy. The name is never drawn again, so nothing the
+  agent held ever names another agent. A spawned agent's grants are its template's, added to the
+  policy when it is spawned and dropped when it is destroyed; a `delegate` to `template:<name>`
+  holds only for that template's active agents.
 
 ## Teaching agents the flow
 

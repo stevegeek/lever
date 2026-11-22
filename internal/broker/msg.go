@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
-	"slices"
 	"strings"
 	"time"
 
@@ -125,10 +124,9 @@ func (b *Broker) msgRecipients(caller string) []string {
 	var workers []string
 	switch {
 	case isManager || b.workerToWorker:
-		for name := range b.workers {
+		for _, name := range b.workers.names() {
 			workers = append(workers, "agent:"+name)
 		}
-		slices.Sort(workers)
 	default:
 		workers = []string{"agent:" + caller}
 	}

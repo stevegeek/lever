@@ -57,7 +57,7 @@ func workerVerbExit(reason string) int {
 		return exitOperatorSocketMissing
 	case broker.ReasonNotStopped:
 		return exitWorkerNotStopped
-	case broker.ReasonNotAWorker, broker.ReasonRevoked, broker.ReasonRoleMismatch,
+	case broker.ReasonNotAWorker, broker.ReasonNotOrphan, reasonNoForce, broker.ReasonRevoked, broker.ReasonRoleMismatch,
 		broker.ReasonWorkspaceUnsafe, broker.ReasonWorkspaceMissing, broker.ReasonSharedAccess,
 		broker.ReasonBadTask, broker.ReasonTaskTooLong, broker.ReasonTaskFixed,
 		broker.ReasonConfigFile, broker.ReasonImageUnqualified, reasonTaskFile:

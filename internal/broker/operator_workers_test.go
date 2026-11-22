@@ -196,7 +196,7 @@ func operatorStartBroker(t *testing.T, phase string, recyclable bool, task strin
 			t.Fatal(err)
 		}
 		spec.TaskPath = p
-		b.workers[spec.Name] = spec
+		b.workers.put(spec)
 	}
 	return b, rt, buf
 }
@@ -293,9 +293,9 @@ func TestOperatorWorkerStartRefusals(t *testing.T) {
 }
 
 func setTaskPath(b *Broker, p string) {
-	s := b.workers["worker"]
+	s := workerSpecOf(b, "worker")
 	s.TaskPath = p
-	b.workers["worker"] = s
+	b.workers.put(s)
 }
 
 func writeTemp(t *testing.T, content string) string {

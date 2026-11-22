@@ -102,14 +102,14 @@ func TestOperatorWorkerNewSessionRefusesBeforeTheStop(t *testing.T) {
 			b.verifyRole = func(context.Context, string) error { return errors.New("stored role is not baseline") }
 		}, http.StatusConflict, ReasonRoleMismatch},
 		"workspace gone": {`{"worker":"worker"}`, func(b *Broker, _ *fakeRuntime) {
-			b.readOnlyDirs, b.tree = []string{"protected"}, b.workers["worker"].HostWorkspace+"/../.."
-			if err := os.RemoveAll(b.workers["worker"].HostWorkspace); err != nil {
+			b.readOnlyDirs, b.tree = []string{"protected"}, workerSpecOf(b, "worker").HostWorkspace+"/../.."
+			if err := os.RemoveAll(workerSpecOf(b, "worker").HostWorkspace); err != nil {
 				panic(err)
 			}
 		}, http.StatusConflict, ReasonWorkspaceMissing},
 		"worker cap": {`{"worker":"worker"}`, func(b *Broker, rt *fakeRuntime) {
 			b.maxRunningWorkers = 1
-			b.workers["other"] = WorkerSpec{Name: "other"}
+			b.workers.put(WorkerSpec{Name: "other"})
 			rt.listFirst = [][]scion.Agent{
 				{{Slug: "worker", Phase: "running", ContainerStatus: "Up 1 minute"}},
 				{{Slug: "worker", Phase: "running", ContainerStatus: "Up 1 minute"}},

@@ -43,7 +43,7 @@ func (e *workerCapError) Error() string {
 		who += fmt.Sprintf("%d other agent(s)", e.others)
 	}
 	return fmt.Sprintf("worker %s was not started: broker.max_running_workers is %d and %d worker(s) are running or starting (%s). "+
-		"Suspend or stop one first (`lever-manager agent suspend NAME`); for a record that never came up or an agent that is not a declared worker, ask the operator to purge it (`lever worker purge NAME`) or to raise broker.max_running_workers. Nothing was changed.",
+		"Suspend or stop one first (`lever-manager agent suspend NAME`); for a record that never came up or an agent that is not a declared worker, ask the operator to purge it (`lever worker purge NAME --force`, with `--orphan` for an agent that is not a declared worker) or to raise broker.max_running_workers. Nothing was changed.",
 		e.worker, e.max, len(e.active)+e.others, who)
 }
 
@@ -93,7 +93,7 @@ func (b *Broker) admitWorker(ctx context.Context, name string) (release func(), 
 	if len(counted) >= b.maxRunningWorkers {
 		e := &workerCapError{worker: name, max: b.maxRunningWorkers}
 		for slug := range counted {
-			if _, declared := b.workers[slug]; declared {
+			if b.workers.has(slug) {
 				e.active = append(e.active, slug)
 			} else {
 				e.others++

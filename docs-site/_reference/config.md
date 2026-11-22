@@ -632,7 +632,7 @@ conduit off and warns, and `lever ssh` refuses.
 ## Conventions & derived values
 
 - **Machine name:** `lever-<name>`. `up`/`apply`/`stop`/`destroy`/`doctor` all agree on this, derived
-  from the config (override on `stop`/`destroy`/`doctor`/`worker purge` with `--machine`). `lever down` is a
+  from the config (override on `stop`/`destroy`/`doctor` with `--machine`). `lever down` is a
   deprecated alias of `destroy`.
 - **Worker model inheritance:** a worker with no `model:` runs on `manager.model`; with neither
   set, lever passes no `--model` and the pinned scion resolves the model. The model is fixed when

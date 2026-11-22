@@ -91,8 +91,7 @@ type WorkerSpec struct {
 }
 
 func (b *Broker) workerSpec(name string) (WorkerSpec, bool) {
-	s, ok := b.workers[name]
-	return s, ok
+	return b.workers.get(name)
 }
 
 // identity resolves an agent name to its (cert CN, scion slug) pair. The

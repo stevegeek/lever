@@ -38,7 +38,7 @@ func (b *Broker) handleRenew(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	certPEM, err := b.ca.SignPublicKey(pub, caller)
+	certPEM, err := b.ca.SignPublicKeyFrom(pub, caller, b.leafFrom(caller))
 	if err != nil {
 		b.audit("renew", caller, "error", err.Error())
 		http.Error(w, "internal error", http.StatusInternalServerError)

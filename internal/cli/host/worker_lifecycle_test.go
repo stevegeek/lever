@@ -324,3 +324,35 @@ func TestAutostartWorkerRewritableImage(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+
+// The orphans the broker names are listed, bounded, with the purge that
+// deletes each; none listed adds nothing.
+func TestWorkerListOrphans(t *testing.T) {
+	dir := msgDir(t)
+	t.Chdir(dir)
+	body := strings.TrimSuffix(listBody, "}") + `,"orphans":[{"name":"ghost\u001b[2J","phase":"running"}],"unnamed_orphans":2}`
+	startResumeUDS(t, dir, map[string]canned{broker.PathOperatorWorkerList: {body: body}})
+	out, err := clitest.Exec(t, stubRoot(&stubBackend{runner: proc.NewFakeRunner()}), "worker", "list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"orphan records", "--orphan --force", "and 2 whose name is not an agent name"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("table lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "\x1b") {
+		t.Fatalf("escape in the table: %q", out)
+	}
+	out, err = clitest.Exec(t, stubRoot(&stubBackend{runner: proc.NewFakeRunner()}), "worker", "list", "--json")
+	var res workerListResult
+	if err != nil || json.Unmarshal([]byte(lastJSONLine(out)), &res) != nil || len(res.Orphans) != 1 || res.UnnamedOrphans != 2 || strings.Contains(res.Orphans[0].Name, "\x1b") {
+		t.Fatalf("json %q: %+v %v", out, res, err)
+	}
+	dir = msgDir(t)
+	t.Chdir(dir)
+	startResumeUDS(t, dir, map[string]canned{broker.PathOperatorWorkerList: {body: listBody}})
+	if out, _ := clitest.Exec(t, stubRoot(&stubBackend{runner: proc.NewFakeRunner()}), "worker", "list"); strings.Contains(out, "orphan") {
+		t.Fatalf("orphan section with none:\n%s", out)
+	}
+}

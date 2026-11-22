@@ -280,7 +280,7 @@ func (b *Broker) bounceForReenrol(ctx context.Context, cn, slug string) (verb st
 		phase = scion.PhaseLabel(rec.Phase)
 	}
 	// A resume re-resolves the workspace bind source (as in resumeRecord).
-	if spec, isWorker := b.workers[slug]; isWorker {
+	if spec, isWorker := b.workers.get(slug); isWorker {
 		if rewritableImage(rec) {
 			b.audit("reenrol", cn, "deny", rewritableImageRefusal(spec, rec))
 			return "", false
@@ -297,7 +297,7 @@ func (b *Broker) bounceForReenrol(ctx context.Context, cn, slug string) (verb st
 	// Resuming a non-running worker takes a slot; a running one holds its
 	// own.
 	resumes := phase == scion.PhaseSuspended || phase == scion.PhaseStopped || phase == scion.PhaseError
-	if _, isWorker := b.workers[slug]; isWorker && resumes {
+	if b.workers.has(slug) && resumes {
 		release, err := b.admitWorker(ctx, slug)
 		if err != nil {
 			outcome := "error"

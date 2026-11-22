@@ -468,10 +468,10 @@ Doctor's `manager agent` row reports this state.
 
 **Lima: the run user's uid.** The jail's rootless podman finds the agent containers only under
 the run user's `XDG_RUNTIME_DIR`, which comes from that user's uid (1000 in a Lima guest).
-`lever doctor` and `lever worker purge` read the jail run user's uid before they use the jail, as
-`lever apply` and the broker do. Before 0.32.0 they used the default uid (501), so on Lima the
-`agent hub tokens` row read "not checked (token unreadable): … (no container)" for every agent,
-and `worker purge` looked for the worker ticket in the wrong runtime directory.
+`lever doctor` reads the jail run user's uid before it uses the jail, as `lever apply` and the
+broker do (`lever worker purge` runs in the broker). Before 0.32.0 doctor used the default uid
+(501), so on Lima the `agent hub tokens` row read "not checked (token unreadable): … (no
+container)" for every agent.
 
 ## Create-time manager settings
 
@@ -620,7 +620,9 @@ detaches other terminals and stages the attach token. While one of them runs, an
 names the command that holds the lock (with its pid and start time), and changes nothing: an
 interactive command does not wait silently, since a new conversation can take minutes.
 The worker commands (`lever worker resume`, `lever worker purge`) and `lever msg send` take no
-lifecycle lock: the broker serializes what they do to one worker with that worker's own lock.
+lifecycle lock: the broker serializes what they do to one worker with that worker's own lock. A
+purge never waits for that lock: while another action of the worker holds it, it exits `75`
+(`busy`) and deletes nothing.
 
 `--wait <duration>` (for example `--wait 5m`) makes a command wait up to that long for the holder
 to finish instead, saying once what it waits for; when the time runs out it exits `6` as before.

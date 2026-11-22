@@ -1,136 +1,138 @@
 package host
 
 import (
-	"bytes"
+	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/stevegeek/lever/internal/broker"
+	"github.com/stevegeek/lever/internal/cli/clitest"
 	"github.com/stevegeek/lever/internal/proc"
-	"github.com/stevegeek/lever/internal/state"
 )
 
-func workerInstanceDir(t *testing.T) string {
+// purgeRequestOf decodes the one request a purge sent.
+func purgeRequestOf(t *testing.T, rec *reqRecorder) broker.WorkerPurgeRequest {
 	t.Helper()
-	dir := writeInstance(t, managerYAML+scratchWorkerYAML)
-	if err := os.MkdirAll(filepath.Join(dir, "workspace", "workers", "scratch"), 0o755); err != nil {
-		t.Fatal(err)
+	reqs := rec.all()
+	var got broker.WorkerPurgeRequest
+	if len(reqs) != 1 || reqs[0].method != http.MethodPost || reqs[0].path != broker.PathOperatorWorkerPurge || json.Unmarshal([]byte(reqs[0].body), &got) != nil {
+		t.Fatalf("requests %+v", reqs)
 	}
-	return dir
+	return got
 }
 
-// TestWorkerPurgeDeletesRecordNotWorkspace: purge deletes the scion record and
-// the staged ticket, never the HostWorkspace (the work product), and writes
-// nothing under it.
-func TestWorkerPurgeDeletesRecordNotWorkspace(t *testing.T) {
-	dir := workerInstanceDir(t)
+// Purge asks the broker's operator socket, never scion: the broker deletes
+// the record under the worker's lock. The workspace is not touched.
+func TestWorkerPurgePostsToTheOperatorSocket(t *testing.T) {
+	dir := msgDir(t)
 	t.Chdir(dir)
-
-	hostWorkspace := filepath.Join(dir, "workspace", "workers", "scratch")
-	product := filepath.Join(hostWorkspace, "result.txt")
+	ws := filepath.Join(dir, "workspace", "workers", "scratch")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	product := filepath.Join(ws, "result.txt")
 	if err := os.WriteFile(product, []byte("keep me"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	// purge's scion client must keep its HubTokenSource, or it deletes
-	// anonymously, and the hub refuses it.
-	if err := state.ForConfig(dir).SaveControllerPAT("pat-worker-purge"); err != nil {
-		t.Fatal(err)
+	rec := startResumeUDS(t, dir, map[string]canned{broker.PathOperatorWorkerPurge: {body: `{"worker":"scratch","was":"suspended"}`}})
+	fr := proc.NewFakeRunner() // no scripts: any jail call fails the test below
+	out, err := clitest.Exec(t, stubRoot(&stubBackend{runner: fr}), "worker", "purge", "scratch", "--force")
+	if err != nil {
+		t.Fatalf("purge: %v (%s)", err, out)
 	}
-
-	f := scionOKRunner()
-	f.Script("sh", proc.Result{})
-	sb := &stubBackend{runner: f}
-	root := stubRoot(sb)
-	var out bytes.Buffer
-	root.SetOut(&out)
-	root.SetErr(&out)
-	root.SetArgs([]string{"worker", "purge", "scratch", "--force"})
-
-	if err := root.Execute(); err != nil {
-		t.Fatalf("purge: %v (%s)", err, out.String())
+	if got := purgeRequestOf(t, rec); got.Worker != "scratch" || got.Orphan {
+		t.Fatalf("request %+v", got)
 	}
-	// The ticket dir and XDG_RUNTIME_DIR come from the run user's uid, so purge
-	// reads it before building the jail runner.
-	if !sb.resolvedRunUser || sb.runnerBeforeUser {
-		t.Fatalf("purge: resolved=%v, runner before the user=%v", sb.resolvedRunUser, sb.runnerBeforeUser)
+	if len(fr.Calls) != 0 {
+		t.Fatalf("purge called the jail itself: %+v", fr.Calls)
 	}
-
-	// scion delete, then the guest ticket directory, and nothing else.
-	if len(f.Calls) != 2 {
-		t.Fatalf("expected two jail calls (delete, ticket removal), got %+v", f.Calls)
-	}
-	call := f.Calls[0]
-	if call.Name != "scion" || len(call.Args) < 2 || call.Args[0] != "delete" || call.Args[1] != "scratch" {
-		t.Fatalf("expected `scion delete scratch ...`, got %+v", call)
-	}
-	if got := call.Env["SCION_HUB_TOKEN"]; got != "pat-worker-purge" {
-		t.Fatalf("delete env SCION_HUB_TOKEN = %q, want %q (HubTokenSource dropped)", got, "pat-worker-purge")
-	}
-	if !containsArg(call.Args, "/lever") {
-		t.Fatalf("delete must target the instance project /lever, got args %v", call.Args)
-	}
-	if rm := f.Calls[1]; rm.Name != "sh" || !strings.Contains(rm.Argv(), "lever/tickets/$1") || rm.Args[len(rm.Args)-1] != "scratch" {
-		t.Fatalf("expected the guest ticket removal for scratch, got %+v", rm)
-	}
-
-	if _, err := os.Stat(hostWorkspace); err != nil {
-		t.Fatalf("HostWorkspace must survive purge, stat err = %v", err)
+	if !strings.Contains(out, `worker "scratch" purged: scion record deleted (it was suspended)`) || !strings.Contains(out, ws) {
+		t.Fatalf("output %q", out)
 	}
 	if b, err := os.ReadFile(product); err != nil || string(b) != "keep me" {
-		t.Fatalf("work product must survive purge: err=%v content=%q", err, string(b))
-	}
-	if entries, _ := os.ReadDir(hostWorkspace); len(entries) != 1 {
-		t.Fatalf("purge must write nothing under the workspace, got %v", entries)
+		t.Fatalf("work product: %q, %v", b, err)
 	}
 }
 
-// TestWorkerPurgeRequiresForce: without --force purge calls nothing and
-// removes nothing.
-func TestWorkerPurgeRequiresForce(t *testing.T) {
-	dir := workerInstanceDir(t)
-	t.Chdir(dir)
-
-	f := proc.NewFakeRunner() // no scripts: any jail call errors loudly
-	root := stubRoot(&stubBackend{runner: f})
-	var out bytes.Buffer
-	root.SetOut(&out)
-	root.SetErr(&out)
-	root.SetArgs([]string{"worker", "purge", "scratch"})
-
-	if err := root.Execute(); err == nil {
-		t.Fatal("purge without --force must error")
-	}
-	if len(f.Calls) != 0 {
-		t.Fatalf("purge without --force must not touch the jail, got %+v", f.Calls)
-	}
-}
-
-func TestWorkerPurgeUnknownWorker(t *testing.T) {
-	dir := workerInstanceDir(t)
-	t.Chdir(dir)
-
-	f := proc.NewFakeRunner()
-	root := stubRoot(&stubBackend{runner: f})
-	var out bytes.Buffer
-	root.SetOut(&out)
-	root.SetErr(&out)
-	root.SetArgs([]string{"worker", "purge", "ghost", "--force"})
-
-	if err := root.Execute(); err == nil {
-		t.Fatal("purge of an undeclared worker must error")
-	}
-	if len(f.Calls) != 0 {
-		t.Fatalf("unknown worker must not call scion, got %+v", f.Calls)
-	}
-}
-
-func containsArg(args []string, want string) bool {
-	for _, a := range args {
-		if a == want {
-			return true
+// Without --force, for an undeclared name without --orphan, and for a
+// declared one with it, purge sends nothing.
+func TestWorkerPurgeRefusesBeforeTheBroker(t *testing.T) {
+	for _, tc := range []struct {
+		args   []string
+		reason string
+	}{
+		{[]string{"worker", "purge", "scratch"}, reasonNoForce},
+		{[]string{"worker", "purge", "ghost", "--force"}, broker.ReasonNotAWorker},
+		{[]string{"worker", "purge", "scratch", "--orphan", "--force"}, broker.ReasonNotOrphan},
+	} {
+		dir := msgDir(t)
+		t.Chdir(dir)
+		rec := startResumeUDS(t, dir, map[string]canned{broker.PathOperatorWorkerPurge: {body: `{"worker":"x","was":"none"}`}})
+		out, err := clitest.Exec(t, stubRoot(&stubBackend{runner: proc.NewFakeRunner()}), append(tc.args, "--json")...)
+		if exitCodeOf(err) != exitWorkerRefused {
+			t.Fatalf("%v: exit %d (%v)", tc.args, exitCodeOf(err), err)
+		}
+		var res workerPurgeResult
+		if json.Unmarshal([]byte(strings.TrimSpace(out)), &res) != nil || res.Reason != tc.reason || res.OK {
+			t.Fatalf("%v: json %q", tc.args, out)
+		}
+		if n := len(rec.all()); n != 0 {
+			t.Fatalf("%v: sent %d request(s)", tc.args, n)
 		}
 	}
-	return false
+}
+
+// --orphan sends the flag, and --json reports what the broker answered.
+func TestWorkerPurgeOrphan(t *testing.T) {
+	dir := msgDir(t)
+	t.Chdir(dir)
+	rec := startResumeUDS(t, dir, map[string]canned{broker.PathOperatorWorkerPurge: {body: `{"worker":"ghost","was":"running","ticket_left":true}`}})
+	out, err := clitest.Exec(t, stubRoot(&stubBackend{runner: proc.NewFakeRunner()}), "worker", "purge", "ghost", "--orphan", "--force", "--json")
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if got := purgeRequestOf(t, rec); got.Worker != "ghost" || !got.Orphan {
+		t.Fatalf("request %+v", got)
+	}
+	var res workerPurgeResult
+	if json.Unmarshal([]byte(strings.TrimSpace(out)), &res) != nil || !res.OK || res.Was != "running" || !res.TicketLeft {
+		t.Fatalf("json %q", out)
+	}
+}
+
+// A broker refusal keeps its reason and exit code.
+func TestWorkerPurgeBrokerRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		reason string
+		exit   int
+	}{
+		{http.StatusServiceUnavailable, broker.ReasonBusy, exitWorkerBusy},
+		{http.StatusNotFound, broker.ReasonNoRecord, exitWorkerNoRecord},
+		{http.StatusBadGateway, broker.ReasonRuntimeError, exitWorkerResumeFailed},
+		{http.StatusForbidden, broker.ReasonNotOrphan, exitWorkerRefused},
+	} {
+		dir := msgDir(t)
+		t.Chdir(dir)
+		startResumeUDS(t, dir, map[string]canned{broker.PathOperatorWorkerPurge: {status: tc.status, body: "refused",
+			header: map[string]string{broker.ReasonHeader: tc.reason}}})
+		_, err := clitest.Exec(t, stubRoot(&stubBackend{runner: proc.NewFakeRunner()}), "worker", "purge", "ghost", "--orphan", "--force")
+		if exitCodeOf(err) != tc.exit {
+			t.Fatalf("%s: exit %d (%v), want %d", tc.reason, exitCodeOf(err), err, tc.exit)
+		}
+	}
+}
+
+// With no broker on the operator socket, purge says so and touches nothing.
+func TestWorkerPurgeNeedsTheBroker(t *testing.T) {
+	dir := msgDir(t)
+	t.Chdir(dir)
+	fr := proc.NewFakeRunner()
+	_, err := clitest.Exec(t, stubRoot(&stubBackend{runner: fr}), "worker", "purge", "scratch", "--force")
+	if exitCodeOf(err) != exitOperatorSocketMissing || len(fr.Calls) != 0 {
+		t.Fatalf("exit %d (%v), jail calls %+v", exitCodeOf(err), err, fr.Calls)
+	}
 }

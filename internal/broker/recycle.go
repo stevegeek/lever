@@ -193,7 +193,11 @@ func (b *Broker) recycleWorker(ctx context.Context, w http.ResponseWriter, spec 
 			// The start stages a fresh ticket over what is left.
 			b.audit("worker", actor, "error", verb+": removing the staged ticket: "+ticketErr.Error())
 		}
-		b.audit("worker", actor, "allow", verb+": record deleted (phase "+phase+"), workspace kept; "+preview)
+		// Before the fresh start enrols: its leaf is issued after the cutoff.
+		if err := b.Supersede(spec.Name); err != nil {
+			b.audit("worker", actor, "error", verb+": saving the certificate cutoff: "+err.Error())
+		}
+		b.audit("worker", actor, "allow", verb+": record deleted (phase "+phase+"), workspace kept, certificates superseded; "+preview)
 	}
 	b.startFreshWorker(ctx, w, spec, task, false, actor)
 }

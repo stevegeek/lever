@@ -45,6 +45,37 @@ type WorkerListEntry struct {
 // WorkerListResponse is the answer of GET PathOperatorWorkerList.
 type WorkerListResponse struct {
 	Workers []WorkerListEntry `json:"workers"`
+	// Orphans are the project's hub records that are neither the manager
+	// nor a declared worker, sorted by name. Nothing drives them, and a
+	// running one counts against broker.max_running_workers.
+	Orphans []OrphanEntry `json:"orphans,omitempty"`
+	// UnnamedOrphans counts orphans whose name is not an agent name, so
+	// is not shown.
+	UnnamedOrphans int `json:"unnamed_orphans,omitempty"`
+}
+
+// OrphanEntry is one orphan record: its name and phase label.
+type OrphanEntry struct {
+	Name  string `json:"name"`
+	Phase string `json:"phase"`
+}
+
+// orphansOf splits agents' records that are neither the manager nor a
+// registered worker into named orphans (sorted) and a count of the rest.
+// A record's slug is hub text, so only an agent-shaped name leaves here.
+func (b *Broker) orphansOf(agents []scion.Agent) (named []OrphanEntry, unnamed int) {
+	for _, a := range agents {
+		if a.Slug == b.managerSlug || a.Slug == b.manager || b.workers.has(a.Slug) {
+			continue
+		}
+		if !purgeNameRE.MatchString(a.Slug) {
+			unnamed++
+			continue
+		}
+		named = append(named, OrphanEntry{Name: a.Slug, Phase: scion.PhaseLabel(a.Phase)})
+	}
+	slices.SortFunc(named, func(x, y OrphanEntry) int { return strings.Compare(x.Name, y.Name) })
+	return named, unnamed
 }
 
 func (b *Broker) handleOperatorWorkerList(w http.ResponseWriter, r *http.Request) {
@@ -61,16 +92,13 @@ func (b *Broker) handleOperatorWorkerList(w http.ResponseWriter, r *http.Request
 	for _, a := range agents {
 		bySlug[a.Slug] = a
 	}
-	names := make([]string, 0, len(b.workers))
-	for name := range b.workers {
-		names = append(names, name)
-	}
-	slices.Sort(names)
+	names := b.workers.names()
 	out := WorkerListResponse{Workers: make([]WorkerListEntry, 0, len(names))}
 	for _, name := range names {
 		stranded := func() bool { return b.strandedCreated(r.Context(), name) }
 		out.Workers = append(out.Workers, workerListEntry(name, bySlug[name], bySlug[name].Slug == name, stranded))
 	}
+	out.Orphans, out.UnnamedOrphans = b.orphansOf(agents)
 	writeJSON(w, out)
 }
 

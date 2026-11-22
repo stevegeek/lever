@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"context"
 	"errors"
-	"slices"
 	"time"
 
 	"github.com/stevegeek/lever/internal/scion"
@@ -36,12 +35,7 @@ func (b *Broker) tokenWatchAgents() []string {
 		return []string{b.managerSlug}
 	}
 	out := []string{b.managerSlug}
-	names := make([]string, 0, len(b.workers))
-	for name := range b.workers {
-		names = append(names, name)
-	}
-	slices.Sort(names)
-	return append(out, names...)
+	return append(out, b.workers.names()...)
 }
 
 func (b *Broker) tokenWatchEnabled() bool {

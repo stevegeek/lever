@@ -17,9 +17,32 @@ version bump moves the block under the new version heading.
   documented as equivalent and still a restrictive managed setting), and the environment variables
   lever sets. The Claude Code binary grows from 267 MB to 342 MB (linux-x64), so the agent image
   grows by about as much.
+- **`lever worker purge` runs in the broker, under the worker's lock, and cuts off the purged
+  agent's certificates.** The command used to delete the scion record itself, so it could race a
+  start, resume or heal of the same worker. It now asks the broker on the operator socket, which
+  takes the worker's lock (a purge never waits: 503 `busy` while another action holds it) and
+  then deletes the record and the staged ticket as before, never the workspace. Once the delete is
+  confirmed, the broker refuses every client certificate of that name issued before the purge, on
+  every jail route: a copy of the deleted agent's key and certificate is worth nothing, while the
+  name enrols afresh at its next start. A recycle does the same. The cutoff is kept in
+  `.lever-state/revocation.json` (`superseded`). A delete that fails or is not confirmed leaves
+  the certificates alone, since the record may still be resumed. A declared worker with no record
+  is only cut off. `--json` prints one object (worker, ok, was, reason, error, exit), and the exit
+  codes are those of the other worker verbs.
+- **Orphan records are reported and can be purged.** A hub record of the instance that is neither
+  the manager nor a declared worker (a worker removed from the config leaves one) was invisible:
+  no verb could reach it, `lever stop` left it running, and a running one still counted against
+  `broker.max_running_workers`. `lever worker list` now names them, `lever doctor` has an *orphan
+  agent records* warning row, and `lever worker purge NAME --orphan --force` deletes one through the
+  broker. A name that is not an agent name is only counted.
+- **Internal: the broker reads its workers through one locked registry**, the groundwork for
+  agents spawned from templates. No behaviour changes.
 
 ### Upgrade
 
+- **`lever worker purge` needs the broker running** (`lever up`), like the other worker verbs, and
+  no longer takes `--machine` or `--backend`. Run `lever apply` (or `lever reload`) so the running
+  broker has the purge route: an older broker answers that it has none.
 - **Jail ABI 12.** The agent image changed (Claude Code 2.1.322): rebuild the agent image (`make
   lever-image` or `make lever-image-slim`, then any instance image built from it) and recreate the
   manager on it with `lever up --fresh --keep-conversation`. Doctor's *agent lever version* row says

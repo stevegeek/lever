@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/url"
 	"sync"
@@ -45,6 +46,10 @@ const (
 type RevocationState struct {
 	MinEpoch int      `json:"min_epoch"`
 	Revoked  []string `json:"revoked"`
+	// Superseded maps an agent name to the time its record was purged: a
+	// client certificate of that name issued before it is refused (see
+	// Supersede). Unlike Revoked, the name itself stays usable.
+	Superseded map[string]time.Time `json:"superseded,omitempty"`
 }
 
 // Config assembles a Broker.
@@ -362,7 +367,7 @@ type Broker struct {
 	// afterWorkspaceMkdir is a test seam between a strict workspace mkdir
 	// and the walk that follows it.
 	afterWorkspaceMkdir func()
-	workers             map[string]WorkerSpec
+	workers             *agentRegistry
 	brokerCAPEM         string
 	brokerURL           string
 	// liveAttempts/liveInterval bound waitWorkerLive's poll (test seams).
@@ -387,10 +392,13 @@ type Broker struct {
 	admitMu           sync.Mutex
 	admitting         map[string]int
 
-	mu           sync.Mutex
-	minEpoch     int
-	revoked      map[string]bool
-	persist      func(RevocationState) error
+	mu         sync.Mutex
+	minEpoch   int
+	revoked    map[string]bool
+	superseded map[string]time.Time
+	persist    func(RevocationState) error
+	// clock is Supersede's test seam (nil: time.Now).
+	clock        func() time.Time
 	bootstrapped bool // /bootstrap latch (one manager ticket per process)
 
 	directives *DirectiveStore
@@ -480,11 +488,11 @@ func New(c Config) *Broker {
 	for _, a := range pe.Revocation.Revoked {
 		revoked[a] = true
 	}
-	up, _ := url.Parse(cmp.Or(llm.Upstream, "https://api.anthropic.com")) // operator/test-controlled, validated at serve time
-	workers := make(map[string]WorkerSpec, len(d.Workers))
-	for _, g := range d.Workers {
-		workers[g.Name] = g
+	superseded := make(map[string]time.Time, len(pe.Revocation.Superseded))
+	for a, at := range pe.Revocation.Superseded {
+		superseded[a] = at
 	}
+	up, _ := url.Parse(cmp.Or(llm.Upstream, "https://api.anthropic.com")) // operator/test-controlled, validated at serve time
 	return &Broker{
 		keys: id.Keys, ca: id.CA, tickets: id.Tickets, rules: id.Rules, reg: id.Registry,
 		manager: id.ManagerIdentity, managerSlug: id.ManagerSlug, managerClaude: id.ManagerClaude,
@@ -492,10 +500,10 @@ func New(c Config) *Broker {
 		log: c.Log, version: c.Version, configHash: c.ConfigHash, epochInstanceID: c.InstanceID, toolSecret: c.ToolSecret,
 		serviceHosts: c.ServiceHosts,
 		timeouts:     c.Timeouts.withDefaults(),
-		minEpoch:     pe.Revocation.MinEpoch, revoked: revoked, persist: pe.PersistRevocation,
+		minEpoch:     pe.Revocation.MinEpoch, revoked: revoked, superseded: superseded, persist: pe.PersistRevocation,
 		directives: newDirectiveStore(pe.Directives, pe.PersistDirectives, c.Log),
 		apiKey:     llm.APIKey, llmUpstream: up,
-		runtime: d.Runtime, workers: workers, brokerCAPEM: d.BrokerCAPEM, brokerURL: d.BrokerURL,
+		runtime: d.Runtime, workers: newAgentRegistry(d.Workers), brokerCAPEM: d.BrokerCAPEM, brokerURL: d.BrokerURL,
 		instanceProject: d.InstanceProject, workerToWorker: d.WorkerToWorker,
 		verifyRole: d.VerifyAgentRole, resolveAgentID: d.ResolveAgentID, beginSession: d.BeginSession, tree: d.Tree, readOnlyDirs: d.ReadOnlyDirs,
 		recordVolumes: d.RecordVolumes, leftoverShareVolumes: d.LeftoverShareVolumes, sharedGuard: d.SharedGuard,
@@ -555,18 +563,34 @@ func (b *Broker) Revoke(agent string) {
 	b.persistLocked()
 }
 
+func (b *Broker) now() time.Time {
+	if b.clock != nil {
+		return b.clock()
+	}
+	return time.Now()
+}
+
 // persistLocked requires b.mu held.
 func (b *Broker) persistLocked() {
+	if err := b.saveRevocationLocked(); err != nil {
+		b.log.Error("broker.persist_revocation", "err", err.Error())
+	}
+}
+
+// saveRevocationLocked requires b.mu held.
+func (b *Broker) saveRevocationLocked() error {
 	if b.persist == nil {
-		return
+		return nil
 	}
 	revoked := make([]string, 0, len(b.revoked))
 	for a := range b.revoked {
 		revoked = append(revoked, a)
 	}
-	if err := b.persist(RevocationState{MinEpoch: b.minEpoch, Revoked: revoked}); err != nil {
-		b.log.Error("broker.persist_revocation", "err", err.Error())
+	var superseded map[string]time.Time
+	if len(b.superseded) > 0 {
+		superseded = maps.Clone(b.superseded)
 	}
+	return b.persist(RevocationState{MinEpoch: b.minEpoch, Revoked: revoked, Superseded: superseded})
 }
 
 func (b *Broker) isRevoked(agent string) bool {

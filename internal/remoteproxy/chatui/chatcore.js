@@ -152,6 +152,8 @@ export function agentList(body) {
       a.id = str(r.id);
       a.conversation = str(r.conversation);
       a.terminal = str(r.terminal);
+      // noFiles: the file exchange is not offered for this agent (spawned).
+      if (r.noFiles === true) a.noFiles = true;
       if (Number.isInteger(r.unread) && r.unread >= 0 && r.unread <= UNREAD_MAX) a.unread = r.unread;
     }
     agents.push(a);

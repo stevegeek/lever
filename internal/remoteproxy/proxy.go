@@ -106,6 +106,10 @@ type Config struct {
 	ChatAgent string
 	// Workers is every configured worker name in config order.
 	Workers []string
+	// Spawned lists the broker's registry of agents spawned from templates
+	// (spawned.go). The operator's logins see and message the active ones
+	// after Workers, and reach them by /lever/go/<name>/. Nil: none.
+	Spawned func(ctx context.Context) ([]SpawnedAgent, error)
 	// ContactSee maps a contact login to the agents it may see but not message.
 	ContactSee map[string][]string
 	// AgentRecords lists the hub agent records by name; nil answers every
@@ -423,9 +427,20 @@ func topLevelNavigation(r *http.Request) bool {
 		len(dest) == 1 && strings.EqualFold(dest[0], "document")
 }
 
-// entryPage: "/" and, when on, the chat page. p is the decoded path.
+// entryPage: "/" and, when on, the chat page and its stable agent links
+// (/lever/go/). p is the decoded path.
 func entryPage(p string, chatPage bool) bool {
-	return p == "/" || (chatPage && p == chatPagePath)
+	if p == "/" {
+		return true
+	}
+	if !chatPage {
+		return false
+	}
+	if p == chatPagePath {
+		return true
+	}
+	name, _, under := goTarget(p)
+	return under && name != ""
 }
 
 const (
@@ -444,7 +459,9 @@ func navigationReason(r *http.Request) string {
 }
 
 // denyFraming forbids framing an entry page without relying on the hub's
-// X-Frame-Options. A second CSP header only narrows the hub's.
+// X-Frame-Options. A second CSP header only narrows the hub's. (The /lever/
+// entry pages, /lever/go/ included, are answered by the proxy itself and
+// never reach the hub; answerChat sets their framing headers.)
 func denyFraming(resp *http.Response) {
 	if resp.Request == nil || !entryPage(resp.Request.URL.Path, true) {
 		return
@@ -700,6 +717,7 @@ type gate struct {
 	newConv     newConvOp
 	// newConvWaitFor overrides newConvAnswerWait (tests).
 	newConvWaitFor time.Duration
+	spawnedList    spawnedCache
 }
 
 func (g *gate) audit(line AuditLine) {

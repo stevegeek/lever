@@ -28,8 +28,13 @@ version bump moves the block under the new version heading.
     (`lever-manager agent spawn|destroy|spawned`, at most 4 spawns a minute and 200 a day); such a
     template may obtain only what the manager obtains and may delegate nothing. Its skill teaches
     the verbs only then.
-  - `lever attach NAME` takes a spawned agent's name. Spawned agents are not yet in the remote web
-    UI.
+  - `lever attach NAME` takes a spawned agent's name.
+  - In the remote chat page, operator logins see, chat with, wake and open the terminal of active
+    spawned agents, read from the broker's registry. Contacts never see them; the file exchange is
+    not offered for them yet.
+  - Stable links: `/lever/go/<name>/chat` and `/lever/go/<name>/terminal` (operator only) open an
+    agent's chat or terminal, also from a link on another site. A destroyed agent's link says when it
+    was destroyed and names its conversation backup.
   - A `delegate` may name `template:<name>`, which holds for that template's active agents.
   - Config load checks that every template's `max_running` agents fit in the VM's memory and,
     with the manager and the workers, within scion's cap of 12 running agents.

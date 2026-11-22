@@ -423,7 +423,7 @@ func TestRegistryAcrossARestart(t *testing.T) {
 	if states["s-cccccc"] != AgentDestroyed || states["s-dddddd"] != AgentDestroyed || states["x-eeeeee"] != AgentActive || !e.b.isRevoked("s-cccccc") {
 		t.Fatalf("%v", states)
 	}
-	list := e.b.agentList(context.Background(), false, "")
+	list := e.b.agentList(context.Background(), false, "", true)
 	orphaned := false
 	for _, a := range list.Agents {
 		if a.Name == "x-eeeeee" {
@@ -814,5 +814,51 @@ func TestReconcileLeavesThisBrokersSpawns(t *testing.T) {
 	}
 	if st := e.state(); st.Agents[0].State != AgentSpawning {
 		t.Fatalf("reconcile touched a live spawn: %+v", st)
+	}
+}
+
+// The remote proxy's list (registry=1) reads no hub; a chat login of a
+// contact may not wake a spawned agent, the operator's login may.
+func TestRegistryListAndContactWakeOfASpawnedAgent(t *testing.T) {
+	e := newSpawnEnv(t, AgentsState{})
+	got := e.spawn(t, `{"template":"session","label":"PR 42"}`)
+	e.rt.mu.Lock()
+	e.rt.listCalls = 0
+	e.rt.mu.Unlock()
+	rec := callOperator(t, e.b, http.MethodGet, PathOperatorAgentList+"?all=1&registry=1", "")
+	var list AgentListResponse
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &list) != nil {
+		t.Fatalf("list: %d %s", rec.Code, rec.Body)
+	}
+	e.rt.mu.Lock()
+	calls := e.rt.listCalls
+	e.rt.mu.Unlock()
+	if calls != 0 || len(list.Agents) != 1 || list.Agents[0].Name != got.Name || list.Agents[0].Phase != "" || list.Agents[0].Label != "PR 42" {
+		t.Fatalf("hub reads %d, list %+v", calls, list.Agents)
+	}
+
+	e.rt.staticPhases = true
+	e.rt.agents[testInstanceProject] = []scion.Agent{{Slug: got.Name, Phase: "suspended"}}
+	body := `{"for":{"worker":"` + got.Name + `","login":"c@x","tier":"contact"}}`
+	if rec := callOperator(t, e.b, http.MethodPost, PathOperatorWorkerResume, body); rec.Code != http.StatusForbidden || rec.Header().Get(ReasonHeader) != ReasonNotAWorker {
+		t.Fatalf("contact wake: %d %q", rec.Code, rec.Header().Get(ReasonHeader))
+	}
+	if len(e.rt.resumed) != 0 {
+		t.Fatalf("resumed %v", e.rt.resumed)
+	}
+	body = `{"for":{"worker":"` + got.Name + `","login":"op@x","tier":"operator"}}`
+	// The fake keeps the record suspended, so only the resume call is checked.
+	callOperator(t, e.b, http.MethodPost, PathOperatorWorkerResume, body)
+	if len(e.rt.resumed) != 1 || e.rt.resumed[0] != got.Name {
+		t.Fatalf("operator wake resumed %v", e.rt.resumed)
+	}
+	// Destroyed (revoked): a contact still gets the answer of a name that is
+	// no worker, not the revoked one.
+	if rec := callOperator(t, e.b, http.MethodPost, PathOperatorAgentDestroy, `{"name":"`+got.Name+`","no_backup":true}`); rec.Code != http.StatusOK {
+		t.Fatalf("destroy: %d %s", rec.Code, rec.Body)
+	}
+	body = `{"for":{"worker":"` + got.Name + `","login":"c@x","tier":"contact"}}`
+	if rec := callOperator(t, e.b, http.MethodPost, PathOperatorWorkerResume, body); rec.Code != http.StatusForbidden || rec.Header().Get(ReasonHeader) != ReasonNotAWorker {
+		t.Fatalf("contact wake of a destroyed agent: %d %q", rec.Code, rec.Header().Get(ReasonHeader))
 	}
 }

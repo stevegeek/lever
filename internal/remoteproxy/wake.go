@@ -8,7 +8,6 @@ import (
 	"math"
 	"net/http"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -135,7 +134,7 @@ func (g *gate) serveWake(w http.ResponseWriter, r *http.Request, line *AuditLine
 	}
 	// One answer for the manager, a see-only agent, a hidden agent and a
 	// name that does not exist, so the answer tells none apart.
-	if name == g.cfg.ChatAgent || !v.mayMessage(name) || !slices.Contains(g.cfg.Workers, name) {
+	if name == g.cfg.ChatAgent || !v.mayMessage(name) || !g.isWorker(r.Context(), name) {
 		refuse(http.StatusForbidden, "not-allowed", nil)
 		return
 	}

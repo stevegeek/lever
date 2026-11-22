@@ -341,6 +341,9 @@ checkx "its container runs" 'X ps --format "{{.Names}}" | grep -q -- "$S1"'
 checkx "its workspace holds its lever skill" '[ -f "$INST/workspace/sessions/$S1/.claude/skills/lever-agent/SKILL.md" ]'
 checkx "lever agent list shows it active" 'LA list | grep -E "^$S1 .*active" >/dev/null'
 checkx "lever msg send reaches it" '(cd "$INST" && "$LEVER" msg send --to "$S1" "stack e2e hello" 2>&1) | grep -q Sent'
+# The remote proxy's roster source: the registry over the operator socket.
+checkx "the registry list for the remote proxy names it active" \
+	'curl -fsS --unix-socket "$INST/.lever-state/operator.sock" "http://lever/operator/agent/list?all=1&registry=1" | python3 -c "import json,sys; a=[x for x in json.load(sys.stdin)[\"agents\"] if x[\"name\"]==sys.argv[1]]; sys.exit(0 if a and a[0][\"state\"]==\"active\" and not a[0].get(\"phase\") else 1)" "$S1"'
 out=$(mgr agent spawn session --task probe)
 echo "      | $out" | tail -1 | cut -c1-300
 checkx "max_running refuses a second running agent of the template" '[[ "$out" == *"allows 1 running"* ]]'

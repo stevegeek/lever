@@ -159,8 +159,15 @@ func (b *Broker) handleOperatorAgentDestroy(w http.ResponseWriter, r *http.Reque
 }
 
 func (b *Broker) handleOperatorAgentList(w http.ResponseWriter, r *http.Request) {
-	all := r.URL.Query().Get("all") == "1"
-	writeJSON(w, b.agentList(r.Context(), all, ""))
+	q := r.URL.Query()
+	all := q.Get("all") == "1"
+	if q.Get("registry") == "1" {
+		// The registry alone, with no hub read: the remote proxy asks every
+		// few seconds and reads the hub's phases itself.
+		writeJSON(w, b.agentList(r.Context(), all, "", false))
+		return
+	}
+	writeJSON(w, b.agentList(r.Context(), all, "", true))
 }
 
 func firstLineOf(s string) string {
@@ -172,12 +179,13 @@ func firstLineOf(s string) string {
 }
 
 // agentList lists the templates and the spawned agents (destroyed ones only
-// with all). createdBy filters on the spawner ("" = every agent). A failed
-// read of the hub leaves the phases empty.
-func (b *Broker) agentList(ctx context.Context, all bool, createdBy string) AgentListResponse {
+// with all). createdBy filters on the spawner ("" = every agent). With hub,
+// it reads each agent's phase; a failed read leaves the phases empty, and
+// so does hub false (the running counts are then zero).
+func (b *Broker) agentList(ctx context.Context, all bool, createdBy string, hub bool) AgentListResponse {
 	phases := map[string]string{}
 	listed := false
-	if b.runtime != nil {
+	if b.runtime != nil && hub {
 		if agents, err := b.runtime.List(ctx, b.instanceProject); err == nil {
 			listed = true
 			for _, a := range agents {
@@ -864,7 +872,7 @@ func (b *Broker) handleAgentList(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	full := b.agentList(r.Context(), false, caller)
+	full := b.agentList(r.Context(), false, caller, true)
 	out := wire.AgentListResponse{Templates: []wire.AgentTemplate{}, Agents: []wire.SpawnedAgent{}}
 	for _, t := range full.Templates {
 		if t.ManagerMay {

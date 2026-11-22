@@ -902,7 +902,7 @@ function showFilesNote(text) {
 }
 
 function syncAttach() {
-  const on = !!(roster && roster.files && chat);
+  const on = !!(roster && roster.files && chat && !chat.noFiles);
   el.attach.hidden = !on || !roster.files.uploads;
   el.files.hidden = !on;
   el.attach.disabled = uploading || sending || !chat || !chat.view || !chat.view.input;
@@ -1749,7 +1749,7 @@ function openChat(name) {
   }
   el.viewonly.hidden = true;
   el.form.hidden = false;
-  chat = { name: a.name, id: a.id, conversation: a.conversation, userId: roster.userId, unsent: null, view: null };
+  chat = { name: a.name, id: a.id, conversation: a.conversation, userId: roster.userId, unsent: null, view: null, noFiles: !!a.noFiles };
   if (chat.conversation) loadUnsent(chat);
   loadDraft();
   applyView(a);

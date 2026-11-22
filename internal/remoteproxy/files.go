@@ -337,8 +337,9 @@ func sameLogin(a, b string) bool { return strings.ToLower(a) == strings.ToLower(
 
 // serveFiles answers only for an agent v may message.
 func (g *gate) serveFiles(w http.ResponseWriter, r *http.Request, line *AuditLine, v viewer, agent, id string) {
-	if !slices.Contains(v.message, agent) {
-		// One answer for a see-only agent, a hidden one and an unknown name.
+	if _, configured := g.files.cfg.Workspaces[agent]; !configured || !slices.Contains(v.message, agent) {
+		// One answer for a see-only agent, a hidden one, an unknown name and
+		// a spawned agent (no configured workspace: no file exchange yet).
 		g.refuseFile(w, r, line, http.StatusForbidden, "not-allowed")
 		return
 	}

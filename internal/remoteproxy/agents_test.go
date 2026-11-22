@@ -181,7 +181,7 @@ func TestAgentsListHidesWhatALoginMayNotSee(t *testing.T) {
 	g := NewHandler(cfg).(*gate)
 	rw := httptest.NewRecorder()
 	line := AuditLine{}
-	g.serveAgents(rw, proxyRequest("GET", chatAgentsPath, nil), &line, g.viewerFor("c@x"), testCookie)
+	g.serveAgents(rw, proxyRequest("GET", chatAgentsPath, nil), &line, g.viewerFor(context.Background(), "c@x"), testCookie)
 	if rw.Code != 200 || rw.Header().Get("Cache-Control") != "no-store" || rw.Header().Get("Content-Security-Policy") != "sandbox" {
 		t.Fatalf("%d %v", rw.Code, rw.Header())
 	}
@@ -317,7 +317,7 @@ func TestAgentsListUnread(t *testing.T) {
 	// A see-only agent gets no unread key, even with an unread DM.
 	g := NewHandler(chatConfig(t, hub)).(*gate)
 	rw := httptest.NewRecorder()
-	g.serveAgents(rw, proxyRequest("GET", chatAgentsPath, nil), &AuditLine{}, g.viewerFor("c@x"), testCookie)
+	g.serveAgents(rw, proxyRequest("GET", chatAgentsPath, nil), &AuditLine{}, g.viewerFor(context.Background(), "c@x"), testCookie)
 	var c agentsAnswer
 	_ = json.Unmarshal(rw.Body.Bytes(), &c)
 	if len(c.Agents) != 2 || c.Agents[1].Access != "see" || strings.Count(rw.Body.String(), `"unread"`) != 1 {

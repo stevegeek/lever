@@ -484,6 +484,11 @@ broker checks. What spawning adds, and how it is held:
 - **Destroy cuts authority before it deletes.** Grants are dropped and the name revoked before the
   workspace and the hub record are touched; a spawn or destroy that a restart interrupted holds no
   grants and is no worker until the broker settles it.
+- **Only the operator's web logins reach them.** The remote proxy lists, wakes and links spawned
+  agents for operator logins only, from the broker's registry over the host-only operator socket;
+  a contact's lists name configured agents only, and the broker itself refuses a contact-tier wake
+  of a spawned agent. A spawned agent never takes the place of a configured agent of the same
+  name in the web page.
 
 **Residual risks.** The manager mounts the whole tree, so it can write a spawned agent's workspace
 (its `.claude` settings included) as it can a worker's. An operator-only template with grants wider

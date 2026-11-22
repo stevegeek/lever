@@ -149,6 +149,7 @@ func remoteIdentity(app *config.App, hub state.HubIdentity) state.RemoteIdentity
 		}
 		id.Tree = app.Tree
 		id.LabelsFile = app.Remote.LabelsFile
+		id.Spawned = len(app.Templates) > 0
 		if app.FilesOn() {
 			f := &state.FilesIdentity{MaxBytes: app.EffectiveFilesMaxBytes(), Extensions: app.EffectiveFilesExtensions(),
 				Workspaces: []string{app.Name + "=."}}

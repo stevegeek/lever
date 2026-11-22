@@ -263,7 +263,7 @@ func (g *gate) serveChatPage(w http.ResponseWriter, r *http.Request, line *Audit
 	if p != strings.TrimSuffix(chatPrefix, "/") && !strings.HasPrefix(p, chatPrefix) {
 		return false
 	}
-	v := g.viewerFor(login)
+	v := g.viewerFor(r.Context(), login)
 	if p == chatContactsPath || strings.HasPrefix(p, chatContactsPath+"/") {
 		// Before the method check: a contact gets the fence's refusal whatever
 		// it sends.
@@ -276,6 +276,15 @@ func (g *gate) serveChatPage(w http.ResponseWriter, r *http.Request, line *Audit
 	}
 	if name, ok := activityTarget(p); ok {
 		g.serveActivity(w, r, line, v, name, cookie)
+		return true
+	}
+	if name, view, under := goTarget(p); under {
+		if !read {
+			w.Header().Set("Allow", "GET, HEAD")
+			g.answerChat(w, line, DecisionAllow, http.StatusMethodNotAllowed, nil, []byte("method not allowed\n"), r)
+			return true
+		}
+		g.serveGo(w, r, line, v, name, view)
 		return true
 	}
 	if name, under := wakeTarget(p); under {

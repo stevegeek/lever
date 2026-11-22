@@ -867,7 +867,8 @@ is given and nothing else.
   manager's chat has a **New conversation** button (the speech bubble with a plus)
   ([below](#a-new-conversation-for-the-manager)), and every chat a **Recent activity** button
   (the pulse line) that shows the last lines of the agent's terminal
-  ([below](#recent-activity)).
+  ([below](#recent-activity)). Agents [spawned from a template](#spawned-agents-and-stable-links)
+  appear after the workers while they are active.
 - **A [contact](#contacts-chat-only-logins)** sees the agents of its entry: those in `agents:` it
   may message, those in `see:` it may only see (name, label and state, greyed as "view only";
   no history, no input). An agent in neither list never appears: not its name, its id, or its
@@ -1040,6 +1041,32 @@ part of the tree. So `lever.yaml` refuses a `labels_file` equal to or inside any
 or the state directory (host-written files). Keep the file in the manager's own part of the tree,
 and treat a label as the manager's words, not lever's: it can say anything up to 60 characters,
 but never replaces the name.
+
+### Spawned agents and stable links
+
+Agents spawned from a `templates:` entry (`lever agent spawn`, see the operations guide) come and
+go while the proxy runs, so the proxy asks the broker's registry for them, over the host-only
+operator socket, at most every 3 seconds. Adding the first template restarts the proxy at the next
+`lever apply`.
+
+- **Who sees them.** Operator logins only. Each active spawned agent is listed after the configured
+  workers, in spawn order, with its label from `labels_file`, else its spawn label, else "from
+  template NAME". An agent that is still spawning, being destroyed, or whose template left the
+  config is not listed. A contact's lists never include a spawned agent, and the broker refuses a
+  contact's wake of one.
+- **What works.** Chat, wake, Terminal, Recent activity and notifications, as for a worker. The
+  file exchange is not offered for spawned agents yet: the page hides it, and the proxy refuses it.
+- **When the broker does not answer**, the last list is kept for 30 seconds, then spawned agents
+  drop out of the page until it answers again. Configured agents are never affected.
+- **Stable links.** `GET /lever/go/<name>/chat` opens the chat page on that agent, and
+  `GET /lever/go/<name>/terminal` (operator logins only) opens its terminal. A link from another
+  site lands on them, like `/`: they are entry pages, change nothing, and cannot be framed. The
+  terminal is a live session, so a terminal link followed from another site shows a page with an
+  **Open it** link, which you click yourself; from lever's own pages it opens directly. They work
+  for configured agents too, when the name is lower-case letters, digits and hyphens. Spawned names are never reused, so a link stored elsewhere (a ticket,
+  a tracker) means the same agent for its whole life. Once the agent is destroyed, the link answers
+  410 with when it was destroyed and the id of its conversation backup. A name the login may not
+  reach and a name that does not exist get the same 404.
 
 ### What it is, and is not
 

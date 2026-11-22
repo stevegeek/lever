@@ -43,7 +43,7 @@ type pushSession struct {
 // pushTargets are the agents login may message that have a usable hub
 // record, each with its DM key. See-only and hidden agents are never one.
 func (g *gate) pushTargets(ctx context.Context, login, uid string) ([]pushTarget, error) {
-	v := g.viewerFor(login)
+	v := g.viewerFor(ctx, login)
 	recs, err := g.records(ctx)
 	if err != nil {
 		return nil, err

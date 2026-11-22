@@ -168,9 +168,14 @@ and tokens can never name another agent.
   messages and reads the inbox of only its own spawned agents.
 - **Delegating to spawned agents.** A `delegate` grant's `to` may name `template:<name>`: it holds
   for each active agent of that template.
-- **Not yet.** Spawned agents do not appear in the remote web UI's agent list or chat, and doctor's
-  per-agent network row skips them. Reach them with `lever attach NAME`, `lever msg send`,
-  `lever worker watch` and `lever agent list`.
+- **In the web page.** With `remote.landing: chat`, the operator's logins see each active spawned
+  agent after the workers, labelled with its spawn label (or its template), and can chat with it,
+  wake it and open its terminal. Every agent has a stable link,
+  `https://<host>/lever/go/<name>/chat` or `.../terminal`; because names are never reused, a link
+  always means the same agent, and after its destroy it says when and names its conversation backup
+  (see [Remote access](/remote-access/#spawned-agents-and-stable-links)). Contacts never see
+  spawned agents, and the chat's file exchange is not offered for them yet.
+- **Not yet.** Doctor's per-agent network row skips spawned agents.
 
 ## Driving workers from a host program
 

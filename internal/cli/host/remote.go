@@ -259,6 +259,7 @@ func buildRemoteHandler(app *config.App, st state.State, configPath string, dial
 		ContactSession:     func(agent string) error { return contactSession(app, st, agent) },
 		ChatAgent:          remoteChatAgent(app),
 		Workers:            remoteWorkers(app),
+		Spawned:            remoteSpawned(app, st),
 		ContactSee:         remoteContactSee(app),
 		AgentRecords:       records,
 		Labels:             remoteLabels(app),
@@ -387,6 +388,29 @@ func remoteWorkers(app *config.App) []string {
 		out[i] = w.Name
 	}
 	return out
+}
+
+// remoteSpawned reads the broker's registry of spawned agents over the 0600
+// operator socket, with no hub read (the proxy reads the hub itself). Nil
+// when no template is configured, or when the state directory is inside the
+// tree: the broker then binds no operator socket and keeps no registry.
+func remoteSpawned(app *config.App, st state.State) func(ctx context.Context) ([]remoteproxy.SpawnedAgent, error) {
+	if len(app.Templates) == 0 || brokerctl.StateInsideTree(app, st) {
+		return nil
+	}
+	sock := st.OperatorSock()
+	return func(ctx context.Context) ([]remoteproxy.SpawnedAgent, error) {
+		var resp broker.AgentListResponse
+		if err := operatorGet(ctx, sock, broker.PathOperatorAgentList+"?all=1&registry=1", &resp); err != nil {
+			return nil, err
+		}
+		out := make([]remoteproxy.SpawnedAgent, 0, len(resp.Agents))
+		for _, a := range resp.Agents {
+			out = append(out, remoteproxy.SpawnedAgent{Name: a.Name, Template: a.Template, Label: a.Label, State: a.State,
+				Orphaned: a.Orphaned, DestroyedAt: a.DestroyedAt, Transcript: a.Transcript})
+		}
+		return out, nil
+	}
 }
 
 // remoteFiles is remote.files, or nil when off. The ledger stays off when the

@@ -41,8 +41,23 @@ const readOnlyForbiddenChars = "$~:,"
 // A shared folder the manager does not write is an entry; one it writes is
 // pinned, so the manager cannot swap it for a link that a worker would then
 // mount in its place.
+//
+// Every template's dir_root is an entry too: a spawned agent's workspace is
+// created under it at runtime, after the manager's mounts are fixed, so no
+// pin can hold each one. Read-only, the manager can neither swap a workspace
+// for a link between the broker's check and the agent's mount, nor write a
+// spawned agent's files.
 func (a *App) ManagerTreeMounts() []TreeMount {
-	return a.treeMountPlan(a.managerReadOnlyDirs(), a.managerWrittenShared())
+	return a.treeMountPlan(append(a.managerReadOnlyDirs(), a.templateDirRoots()...), a.managerWrittenShared())
+}
+
+// templateDirRoots is every template's dir_root, cleaned.
+func (a *App) templateDirRoots() []string {
+	out := make([]string, 0, len(a.Templates))
+	for _, t := range a.Templates {
+		out = append(out, cleanRel(t.DirRoot))
+	}
+	return out
 }
 
 // ReadOnlyEntryMounts is the manager.read_only part of the plan alone, which
@@ -154,10 +169,10 @@ func (a *App) validateManagerReadOnly() error {
 	// Every worker dir becomes a pin, so the same character rules apply.
 	for _, d := range a.AgentDirs() {
 		if strings.ContainsAny(d.Dir, readOnlyForbiddenChars) {
-			return fmt.Errorf("config: %s must not contain any of %q while manager.read_only or shared_folders is set (the manager pins each worker dir with a mount, and scion expands $VAR and ~ in a mount path)", d, readOnlyForbiddenChars)
+			return fmt.Errorf("config: %s must not contain any of %q while manager.read_only, shared_folders or templates are set (the manager pins each worker dir with a mount, and scion expands $VAR and ~ in a mount path)", d, readOnlyForbiddenChars)
 		}
 		if !isASCII(d.Dir) {
-			return fmt.Errorf("config: %s must be ASCII while manager.read_only or shared_folders is set — APFS treats the composed and decomposed spellings of an accented name as one directory, so the overlap check with the read_only entries could miss an alias", d)
+			return fmt.Errorf("config: %s must be ASCII while manager.read_only, shared_folders or templates are set — APFS treats the composed and decomposed spellings of an accented name as one directory, so the overlap check with the read_only entries could miss an alias", d)
 		}
 	}
 	return nil
@@ -207,7 +222,7 @@ func (a *App) PrepareManagerReadOnlyHost() error {
 	for _, d := range a.AgentDirs() {
 		rel := filepath.Clean(d.Dir)
 		if err := walkNoSymlink(a.Tree, rel, true); err != nil {
-			return fmt.Errorf("config: %s (pinned while manager.read_only or shared_folders is set): %w", d, err)
+			return fmt.Errorf("config: %s (pinned while manager.read_only, shared_folders or templates are set): %w", d, err)
 		}
 		if err := root.MkdirAll(rel, 0o755); err != nil {
 			return fmt.Errorf("config: %s: creating it: %w", d, err)
@@ -216,7 +231,7 @@ func (a *App) PrepareManagerReadOnlyHost() error {
 			afterWorkerDirMkdir(rel)
 		}
 		if err := walkNoSymlink(a.Tree, rel, false); err != nil {
-			return fmt.Errorf("config: %s (pinned while manager.read_only or shared_folders is set): %w", d, err)
+			return fmt.Errorf("config: %s (pinned while manager.read_only, shared_folders or templates are set): %w", d, err)
 		}
 	}
 	return nil

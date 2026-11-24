@@ -118,6 +118,15 @@ func (g *gate) spawned(ctx context.Context) []SpawnedAgent {
 	return c.list
 }
 
+// spawnedStale reports whether the last registry read failed: what spawned
+// returns is then the kept list, or none past the grace.
+func (g *gate) spawnedStale() bool {
+	c := &g.spawnedList
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.at.Equal(c.good)
+}
+
 // readSpawned is one read of the registry, filtered. A panic in the source
 // is an error, so the read under way always ends (spawned).
 func (g *gate) readSpawned(ctx context.Context) (out []SpawnedAgent, err error) {
@@ -164,6 +173,27 @@ func (g *gate) spawnedNamed(ctx context.Context, name string) (SpawnedAgent, boo
 		}
 	}
 	return SpawnedAgent{}, false
+}
+
+// spawnedRecord reads one record from the broker, destroyed ones included,
+// bounded and detached from the request as readSpawned is. A failed read is
+// no record.
+func (g *gate) spawnedRecord(ctx context.Context, name string) (a SpawnedAgent, ok bool) {
+	if g.cfg.SpawnedRecord == nil || !spawnedName.MatchString(name) || name == g.cfg.ChatAgent || slices.Contains(g.cfg.Workers, name) {
+		return SpawnedAgent{}, false
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			a, ok = SpawnedAgent{}, false
+		}
+	}()
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), spawnedReadTimeout)
+	defer cancel()
+	a, ok, err := g.cfg.SpawnedRecord(rctx, name)
+	if err != nil || !ok || a.Name != name {
+		return SpawnedAgent{}, false
+	}
+	return a, true
 }
 
 // isWorker: a config worker, or a live spawned agent.
@@ -222,7 +252,7 @@ func (g *gate) serveGo(w http.ResponseWriter, r *http.Request, line *AuditLine, 
 			notFound()
 			return
 		}
-		if a, ok := g.spawnedNamed(r.Context(), name); ok && a.State == SpawnedDestroyed {
+		if a, ok := g.spawnedRecord(r.Context(), name); ok && a.State == SpawnedDestroyed {
 			msg := "Agent " + name + " was destroyed"
 			if !a.DestroyedAt.IsZero() {
 				msg += " at " + a.DestroyedAt.UTC().Format("2006-01-02 15:04 UTC")
@@ -271,8 +301,10 @@ func (g *gate) serveGo(w http.ResponseWriter, r *http.Request, line *AuditLine, 
 // typed by the user (Sec-Fetch-Site same-origin or none). A missing or
 // repeated header reads as cross-site.
 func sameOriginArrival(r *http.Request) bool {
+	// Exactly same-origin: "none" is also a link from a mail or chat app, a
+	// bookmark or a typed address, which gets the Open it page too.
 	v := r.Header.Values("Sec-Fetch-Site")
-	return len(v) == 1 && secFetchSiteAllowed(v[0])
+	return len(v) == 1 && v[0] == "same-origin"
 }
 
 // goPage is a small page with no script. Every text is escaped; link, when

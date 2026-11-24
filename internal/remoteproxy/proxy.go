@@ -110,6 +110,10 @@ type Config struct {
 	// (spawned.go). The operator's logins see and message the active ones
 	// after Workers, and reach them by /lever/go/<name>/. Nil: none.
 	Spawned func(ctx context.Context) ([]SpawnedAgent, error)
+	// SpawnedRecord reads one spawned agent's record, destroyed ones
+	// included (false: no such record). The stable link of a destroyed agent
+	// uses it; nil: such a link reads as unknown.
+	SpawnedRecord func(ctx context.Context, name string) (SpawnedAgent, bool, error)
 	// ContactSee maps a contact login to the agents it may see but not message.
 	ContactSee map[string][]string
 	// AgentRecords lists the hub agent records by name; nil answers every

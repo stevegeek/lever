@@ -2,6 +2,7 @@ package remoteproxy
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -111,5 +112,37 @@ func TestWaitingPushOnlyForLiveAgents(t *testing.T) {
 	e.p.waitingPass(ctx, seen)
 	if s := e.sent(); len(s) != 0 {
 		t.Fatalf("sent %v", s)
+	}
+}
+
+// A broker that fails for longer than the grace does not make every wait
+// push again when it answers.
+func TestWaitingPushSurvivesABrokerOutage(t *testing.T) {
+	e := newWaitingEnv(t)
+	ctx := context.Background()
+	seen := e.p.waitingPass(ctx, nil)
+	e.set(spawnedAt("s-abc234", t0))
+	seen = e.p.waitingPass(ctx, seen)
+	if s := e.sent(); len(s) != 1 {
+		t.Fatalf("first wait: %v", s)
+	}
+	fail := true
+	list := e.g.cfg.Spawned
+	e.g.cfg.Spawned = func(c context.Context) ([]SpawnedAgent, error) {
+		if fail {
+			return nil, errors.New("broker down")
+		}
+		return list(c)
+	}
+	e.g.spawnedList.mu.Lock()
+	e.g.spawnedList.at, e.g.spawnedList.good = time.Time{}, time.Now().Add(-time.Hour) // past the grace
+	e.g.spawnedList.mu.Unlock()
+	seen = e.p.waitingPass(ctx, seen)
+	fail = false
+	e.now = e.now.Add(pushEvery + time.Second)
+	e.set(spawnedAt("s-abc234", t0))
+	e.p.waitingPass(ctx, seen)
+	if s := e.sent(); len(s) != 0 {
+		t.Fatalf("the same wait pushed again after the outage: %v", s)
 	}
 }

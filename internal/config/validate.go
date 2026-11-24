@@ -938,9 +938,9 @@ func (a *App) validLabelsFileOwner(lf string) error {
 		p, dir = strings.ToLower(p), strings.ToLower(dir)
 		return p == dir || strings.HasPrefix(p, dir+"/")
 	}
-	for _, w := range a.Workers {
-		if d := filepath.ToSlash(filepath.Clean(w.Dir)); d != "." && inside(lf, d) {
-			return fmt.Errorf("config: remote: labels_file %q is inside worker %q's dir %q; that worker would write the labels contacts see — keep it outside every worker dir", lf, w.Name, w.Dir)
+	for _, d := range a.AgentDirs() {
+		if c := filepath.ToSlash(filepath.Clean(d.Dir)); c != "." && inside(lf, c) {
+			return fmt.Errorf("config: remote: labels_file %q is inside %s; that agent would write the labels contacts see — keep it outside every agent's dir", lf, d)
 		}
 	}
 	for _, part := range strings.Split(lf, "/") {

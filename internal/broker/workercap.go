@@ -72,7 +72,8 @@ func (b *Broker) admitWorker(ctx context.Context, name string) (release func(), 
 	}
 	// Records are read under the lock, or a read taken before another
 	// admission's start finished would miss that worker once it is released.
-	// admitMu is a leaf lock.
+	// Under admitMu only the registry's read lock is taken (the template
+	// count); nothing holding the registry lock takes admitMu.
 	b.admitMu.Lock()
 	defer b.admitMu.Unlock()
 	agents, err := b.runtime.List(ctx, b.instanceProject)

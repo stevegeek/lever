@@ -254,7 +254,7 @@ func printAgentList(cmd *cobra.Command, resp broker.AgentListResponse) {
 	for _, a := range resp.Agents {
 		state := safeToken(a.State)
 		if a.Orphaned {
-			state += " (template gone)"
+			state += " (template gone or moved)"
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", safeToken(a.Name), safeToken(a.Template), state, cmp.Or(safeToken(a.Phase), "-"),
 			creatorOf(a.CreatedBy), a.CreatedAt.Format("2006-01-02 15:04"), strings.ReplaceAll(termsafe.Sanitize(a.Label), "\t", " "))

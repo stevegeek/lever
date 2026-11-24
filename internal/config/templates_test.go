@@ -131,3 +131,26 @@ func TestDelegationToManagerTemplateIsTheManagers(t *testing.T) {
 		"{name: scratch, dir: workers/scratch, obtain: [{tool: db, op: write}], delegate: [{tool: db, op: write, to: [\"template:session\"]}]}", 1)
 	rejectNoHost(t, wk+tmpl, "only the manager may delegate")
 }
+
+// A template's dir_root is read-only in the manager, with no
+// manager.read_only set: the manager cannot swap a spawned workspace for a
+// link, nor write one. Worker dirs are pinned around it.
+func TestTemplateDirRootIsReadOnlyForTheManager(t *testing.T) {
+	app := loadTemplates(t, templateBase+strings.Replace(sessionTmpl, "dir_root: sessions", "dir_root: work/sessions", 1))
+	got := map[string]TreeMount{}
+	for _, m := range app.ManagerTreeMounts() {
+		got[m.Rel] = m
+	}
+	if m, ok := got["work/sessions"]; !ok || !m.ReadOnly {
+		t.Fatalf("dir_root not read-only: %+v", app.ManagerTreeMounts())
+	}
+	if m, ok := got["work"]; !ok || m.ReadOnly {
+		t.Fatalf("dir_root's parent not pinned: %+v", app.ManagerTreeMounts())
+	}
+	if m, ok := got["workers/scratch"]; !ok || m.ReadOnly || !m.WorkerPin {
+		t.Fatalf("worker dir not pinned: %+v", app.ManagerTreeMounts())
+	}
+	if len(app.ReadOnlyEntryMounts()) != 0 {
+		t.Fatalf("a dir_root is no manager.read_only entry for the tool guard: %+v", app.ReadOnlyEntryMounts())
+	}
+}

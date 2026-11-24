@@ -3,6 +3,9 @@ package broker
 import (
 	"context"
 	"errors"
+	"io"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -247,5 +250,26 @@ func TestAgentsLoopDailyBackup(t *testing.T) {
 	e.b0().agentsPass(context.Background())
 	if len(calls) != 2 || calls[0] != e.b || calls[1] != e.b {
 		t.Fatalf("after a failed backup: %v", calls)
+	}
+}
+
+// An archive refuses a workspace nested past archiveMaxDepth, rather than
+// holding a directory open per level without end.
+func TestArchiveRefusesDeepNesting(t *testing.T) {
+	root := t.TempDir()
+	p := root
+	for range archiveMaxDepth + 2 {
+		p = filepath.Join(p, "d")
+	}
+	if err := os.MkdirAll(p, 0o755); err != nil {
+		t.Skipf("cannot nest that deep here: %v", err)
+	}
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if _, _, err := archiveDir(context.Background(), r, io.Discard); !errors.Is(err, errArchiveLimit) {
+		t.Fatalf("deep nesting: %v", err)
 	}
 }

@@ -44,9 +44,15 @@ func (p *Push) watchWaiting(ctx context.Context) {
 // waitingPass is one read: it pushes for each agent whose WaitingSince is
 // new since the last pass, and returns the new seen set.
 func (p *Push) waitingPass(ctx context.Context, seen map[string]time.Time) map[string]time.Time {
+	live := p.g.liveSpawned(ctx)
+	if p.g.spawnedStale() {
+		// A failed read says nothing about who waits: forgetting what was
+		// pushed would push every wait again once the broker answers.
+		return seen
+	}
 	next := map[string]time.Time{}
 	var fresh []string
-	for _, a := range p.g.liveSpawned(ctx) {
+	for _, a := range live {
 		if a.WaitingSince.IsZero() {
 			continue
 		}
@@ -59,6 +65,14 @@ func (p *Push) waitingPass(ctx context.Context, seen map[string]time.Time) map[s
 		return next
 	}
 	for _, login := range p.store.Logins() {
+		if ctx.Err() != nil {
+			return next // shutting down: no new sends
+		}
+		// A login whose session ended, or with no device, would spend the
+		// slot (holding back its next message push) for nothing.
+		if !p.g.loginCurrent(login) || len(p.store.Subs(login)) == 0 {
+			continue
+		}
 		v := p.g.viewerFor(ctx, login)
 		for _, agent := range fresh {
 			if !v.mayMessage(agent) {

@@ -484,6 +484,9 @@ type Broker struct {
 	archiveDir         string
 	backupConversation func(ctx context.Context, agent string) (string, error)
 	dailyBackup        func(ctx context.Context, agent string) (string, error)
+	// captureSem lets one conversation capture run at a time: each holds the
+	// whole compressed conversation in memory (convbackup's cap is 512 MiB).
+	captureSem chan struct{}
 	// agentWatch and agentLoopEvery serve the agents loop (agentloop.go).
 	agentWatch     agentWatch
 	agentLoopEvery time.Duration
@@ -594,7 +597,8 @@ func New(c Config) *Broker {
 		files:       c.Files.withDefaults(), fileLedger: &fileRecord{dir: c.Files.LedgerDir},
 		filesRate:  newRateWindow(filesCallLimit),
 		archiveDir: d.ArchiveDir, backupConversation: d.BackupConversation, dailyBackup: d.DailyBackup, agentLoopEvery: time.Minute,
-		spawnRate: newRateWindow(managerSpawnRateLimit), inheritedUnsettled: inherited,
+		captureSem: make(chan struct{}, 1),
+		spawnRate:  newRateWindow(managerSpawnRateLimit), inheritedUnsettled: inherited,
 	}
 	if addRevoked {
 		b.mu.Lock()

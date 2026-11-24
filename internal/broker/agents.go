@@ -137,7 +137,7 @@ func (r *agentRegistry) load(templates []TemplateSpec, st AgentsState, tree stri
 		if rec.State == AgentDestroyed {
 			continue
 		}
-		if t, ok := r.templates[rec.Template]; ok && t.Worker != nil {
+		if t, ok := r.templates[rec.Template]; ok && t.Worker != nil && inPlace(rec, t) {
 			r.specs[rec.Name] = spawnedSpec(t, rec.Name)
 			continue
 		}
@@ -145,7 +145,17 @@ func (r *agentRegistry) load(templates []TemplateSpec, st AgentsState, tree stri
 	}
 }
 
-// bareSpec is enough of a spec to destroy an agent whose template is gone.
+// inPlace reports whether rec's workspace is where its template puts it
+// now. One whose template's dir_root changed is driven no more, as if its
+// template were gone: its old directory is no longer read-only for the
+// manager nor checked against the other agents' dirs, so only destroy (which
+// acts on the directory spawn made, by its device and inode) may touch it.
+func inPlace(rec AgentRecord, t TemplateSpec) bool {
+	return rec.Dir != "" && rec.Dir == strings.TrimSuffix(t.DirRoot, "/")+"/"+rec.Name
+}
+
+// bareSpec is enough of a spec to destroy an agent whose template is gone
+// or whose workspace is not where its template puts it now.
 func bareSpec(rec AgentRecord, tree string) WorkerSpec {
 	ws := ""
 	if tree != "" && rec.Dir != "" {
@@ -221,8 +231,8 @@ func (r *agentRegistry) usable(name string) bool {
 		_, ok := r.specs[name]
 		return ok
 	}
-	_, tmpl := r.templates[rec.Template]
-	return rec.State == AgentActive && tmpl
+	t, tmpl := r.templates[rec.Template]
+	return rec.State == AgentActive && tmpl && inPlace(*rec, t)
 }
 
 // activeTemplateOf is the policy's template resolver: only an active agent
@@ -234,7 +244,7 @@ func (r *agentRegistry) activeTemplateOf(name string) (string, bool) {
 	if !ok || rec.State != AgentActive {
 		return "", false
 	}
-	if _, ok := r.templates[rec.Template]; !ok {
+	if t, ok := r.templates[rec.Template]; !ok || !inPlace(*rec, t) {
 		return "", false
 	}
 	return rec.Template, true

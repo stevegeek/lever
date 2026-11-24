@@ -351,9 +351,16 @@ after it. The proxy admits such a request only when all of these hold:
   another mode);
 - `Sec-Fetch-Site` is `cross-site` or `same-site`, and there is no `Origin` header (a browser
   sends none on a `GET` navigation);
-- the path is `/`, or `/lever/chat` while the [chat page](#the-chat-page) is on.
+- the path is `/`, or `/lever/chat` while the [chat page](#the-chat-page) is on, or a stable
+  link `/lever/go/<name>/chat` or `/lever/go/<name>/terminal` (see
+  [Spawned agents and stable links](#spawned-agents-and-stable-links)).
 
-Neither page changes anything on `GET`. `/` is the chat page's fixed redirect, the hub's web UI
+None of these pages changes anything on `GET`. A stable link only answers with a redirect to the
+chat page, a short page, or (for a terminal link, and only when `Sec-Fetch-Site` is exactly
+`same-origin`) a redirect to the agent's terminal: a terminal link that arrives from another site,
+from an app outside the browser, a bookmark or a typed address gets a page with an **Open it**
+link instead, so no link can drop the operator straight into a live terminal. `/` is the chat
+page's fixed redirect, the hub's web UI
 shell, or a contact's landing page; `/lever/chat` is a file from the lever binary. Every answer
 to them forbids framing (`frame-ancestors 'none'` and `X-Frame-Options: DENY`), and a page on
 another site cannot read what a cross-origin page shows. The requests the page makes after it
@@ -1061,8 +1068,9 @@ operator socket, at most every 3 seconds. Adding the first template restarts the
 - **Stable links.** `GET /lever/go/<name>/chat` opens the chat page on that agent, and
   `GET /lever/go/<name>/terminal` (operator logins only) opens its terminal. A link from another
   site lands on them, like `/`: they are entry pages, change nothing, and cannot be framed. The
-  terminal is a live session, so a terminal link followed from another site shows a page with an
-  **Open it** link, which you click yourself; from lever's own pages it opens directly. They work
+  terminal is a live session, so a terminal link followed from another site, an app, a bookmark or
+  a typed address shows a page with an **Open it** link, which you click yourself; from lever's
+  own pages it opens directly. They work
   for configured agents too, when the name is lower-case letters, digits and hyphens. Spawned
   names are never reused, so a link stored elsewhere (a ticket, a tracker) means the same agent for
   its whole life. Once the agent is destroyed, the link answers 410 with when it was destroyed and
@@ -1385,7 +1393,7 @@ on a real device yet (Linux Chrome, iPhone).
 
 - **What a login sees.** "New message from <agent>" (or "New message" when the agent is not in
   the login's list). A tap opens the chat with that agent. No message text leaves the host, not
-  even encrypted: the push carries only `{"v":1,"agent":"<name>"}`, encrypted for the device
+  even encrypted: a message push carries only `{"v":1,"agent":"<name>"}`, encrypted for the device
   (Web Push, VAPID and aes128gcm, on the Go standard library).
 - **Waiting agents.** An operator login also gets "<agent> is waiting for you" when one of the
   spawned agents it may message starts waiting at its prompt: the push carries

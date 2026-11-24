@@ -206,6 +206,16 @@ func (b *Broker) dailyBackupOf(ctx context.Context, name string) {
 	if rec, ok := b.workers.record(name); !ok || rec.State != AgentActive {
 		return
 	}
+	// A capture under way (a destroy's, or another's) skips this one until
+	// the next round: the daily backup never queues.
+	if b.captureSem != nil {
+		select {
+		case b.captureSem <- struct{}{}:
+		default:
+			return
+		}
+		defer func() { <-b.captureSem }()
+	}
 	id, err := b.dailyBackup(ctx, name)
 	if err != nil {
 		b.audit("agent", "broker", "error", "daily backup of "+name+": "+err.Error())
@@ -218,4 +228,19 @@ func (b *Broker) dailyBackupOf(ctx context.Context, name string) {
 	delete(b.agentWatch.ran, name)
 	b.agentWatch.mu.Unlock()
 	b.audit("agent", "broker", "allow", "daily backup of "+name+": "+id)
+}
+
+// capture runs one conversation capture when no other runs, waiting for its
+// turn as long as ctx allows.
+func (b *Broker) capture(ctx context.Context, do func() (string, error)) (string, error) {
+	if b.captureSem == nil {
+		return do()
+	}
+	select {
+	case b.captureSem <- struct{}{}:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+	defer func() { <-b.captureSem }()
+	return do()
 }

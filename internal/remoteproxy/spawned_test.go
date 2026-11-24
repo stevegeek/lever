@@ -39,6 +39,15 @@ func spawnedConfig(t *testing.T, hub *pageHub, calls *atomic.Int32) Config {
 			{Name: "Bad<Name>", Template: "session", State: SpawnedActive},
 		}, nil
 	}
+	cfg.SpawnedRecord = func(ctx context.Context, name string) (SpawnedAgent, bool, error) {
+		list, _ := cfg.Spawned(ctx)
+		for _, a := range list {
+			if a.Name == name {
+				return a, true, nil
+			}
+		}
+		return SpawnedAgent{}, false, nil
+	}
 	return cfg
 }
 
@@ -251,6 +260,11 @@ func TestGoLinks(t *testing.T) {
 		if got := rw.Header().Get(k); got != v {
 			t.Errorf("%s = %q, want %q", k, got, v)
 		}
+	}
+	// Sec-Fetch-Site "none" is a link from a mail or chat app, a bookmark or
+	// a typed address: the Open it page too.
+	if rw := chatDo(h, chatOp, "GET", "/lever/go/s-abc234/terminal", "Sec-Fetch-Site", "none"); rw.Code != http.StatusOK || rw.Header().Get("Location") != "" {
+		t.Fatalf("an arrival from outside the browser hops to the terminal: %d %q", rw.Code, rw.Header().Get("Location"))
 	}
 	if rw := chatDo(h, chatOp, "HEAD", "/lever/go/s-abc234/chat", "Sec-Fetch-Site", "same-origin"); rw.Code != http.StatusSeeOther || rw.Body.Len() != 0 {
 		t.Errorf("HEAD: %d %q", rw.Code, rw.Body)

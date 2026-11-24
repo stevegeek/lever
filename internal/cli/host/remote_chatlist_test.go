@@ -448,12 +448,22 @@ func TestRemoteSpawnedOverTheOperatorSocket(t *testing.T) {
 		t.Fatal("no registry source with a template configured")
 	}
 	got, err := list(context.Background())
-	if err != nil || len(got) != 2 || query != "all=1&registry=1" {
+	// Live agents only: tombstones are never pruned.
+	if err != nil || len(got) != 2 || query != "registry=1" {
 		t.Fatalf("%+v %v query %q", got, err, query)
 	}
 	if got[0] != (remoteproxy.SpawnedAgent{Name: "s-abc234", Template: "session", Label: "PR 42", State: "active"}) ||
 		got[1].State != "destroyed" || !got[1].Orphaned || got[1].Transcript != "t1" {
 		t.Fatalf("%+v", got)
+	}
+	// One record, destroyed ones included, by name.
+	one := remoteSpawnedRecord(app, st)
+	a, ok, err := one(context.Background(), "s-old777")
+	if err != nil || !ok || a.Transcript != "t1" || query != "all=1&registry=1&name=s-old777" {
+		t.Fatalf("%+v %v %v query %q", a, ok, err, query)
+	}
+	if _, ok, _ := one(context.Background(), "s-nobody"); ok {
+		t.Fatal("a record the broker did not name")
 	}
 	if remoteSpawned(&config.App{Name: "boss", Tree: app.Tree}, st) != nil {
 		t.Fatal("a registry source with no template")

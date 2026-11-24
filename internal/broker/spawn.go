@@ -122,8 +122,8 @@ type TemplateEntry struct {
 type AgentEntry struct {
 	AgentRecord
 	Phase string `json:"phase,omitempty"`
-	// Orphaned: its template is no longer configured; it can only be
-	// destroyed.
+	// Orphaned: its template is no longer configured, or its dir_root
+	// changed since the spawn; it can only be destroyed.
 	Orphaned bool `json:"orphaned,omitempty"`
 	// WaitingSince is when the agents loop first saw it waiting at its
 	// prompt, as the hub reports it (agent-reported: a hint, never
@@ -198,13 +198,21 @@ func (b *Broker) handleOperatorAgentDestroy(w http.ResponseWriter, r *http.Reque
 func (b *Broker) handleOperatorAgentList(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	all := q.Get("all") == "1"
-	if q.Get("registry") == "1" {
-		// The registry alone, with no hub read: the remote proxy asks every
-		// few seconds and reads the hub's phases itself.
-		writeJSON(w, b.agentList(r.Context(), all, "", false))
-		return
+	// The registry alone, with no hub read: the remote proxy asks every few
+	// seconds and reads the hub's phases itself.
+	out := b.agentList(r.Context(), all, "", q.Get("registry") != "1")
+	// One agent's record (destroyed ones too, with all): the remote proxy's
+	// stable link to a destroyed agent, which must not need every tombstone.
+	if name := q.Get("name"); name != "" {
+		kept := out.Agents[:0]
+		for _, a := range out.Agents {
+			if a.Name == name {
+				kept = append(kept, a)
+			}
+		}
+		out.Agents = kept
 	}
-	writeJSON(w, b.agentList(r.Context(), all, "", true))
+	writeJSON(w, out)
 }
 
 func firstLineOf(s string) string {
@@ -254,7 +262,8 @@ func (b *Broker) agentList(ctx context.Context, all bool, createdBy string, hub 
 			if e.Phase == "" && listed {
 				e.Phase = PhaseNone
 			}
-			e.Orphaned = t == nil
+			ts, configured := b.workers.template(rec.Template)
+			e.Orphaned = t == nil || !configured || !inPlace(rec, ts)
 			if t != nil {
 				t.Instances++
 				if e.Phase == scion.PhaseRunning || comingUp(e.Phase) {
@@ -597,13 +606,39 @@ func (b *Broker) destroyAgent(ctx context.Context, w http.ResponseWriter, req De
 	}
 	// Once begun, a destroy is not cut short by a caller that hung up.
 	res := b.teardown(context.WithoutCancel(ctx), rec, actor, teardownOpts{noBackup: req.NoBackup, phase: phase, havePhase: true})
+	// The operator's answer names host paths and carries error text; the
+	// manager (in the jail) gets lever's words only, and the audit log keeps
+	// the detail.
+	jailed := actor != operatorActor && req.By == ""
 	if res.err != nil {
 		b.audit("agent", actor, "error", verb+": "+res.err.Error())
-		refuse(w, res.reason, res.err.Error(), res.status)
+		msg := res.err.Error()
+		if jailed {
+			msg = "the destroy of " + rec.Name + " did not finish (" + res.reason + "); the operator can see why in the broker's audit log"
+		}
+		refuse(w, res.reason, msg, res.status)
 		return
 	}
 	b.audit("agent", actor, "allow", verb+": destroyed (was "+res.Was+"), workspace "+res.Workspace)
-	writeJSON(w, res.DestroyResponse)
+	out := res.DestroyResponse
+	if jailed {
+		out.Workspace = workspaceOutcome(out.Workspace)
+		if len(out.Warnings) > 0 {
+			out.Warnings = []string{fmt.Sprintf("%d step(s) after the revoke failed; the operator can see them in the broker's audit log", len(out.Warnings))}
+		}
+	}
+	writeJSON(w, out)
+}
+
+// workspaceOutcome is a destroy's workspace line without its path: what was
+// done, in a word.
+func workspaceOutcome(s string) string {
+	for _, w := range []string{"archived", "removed", "kept"} {
+		if strings.HasPrefix(s, w) {
+			return w
+		}
+	}
+	return "see the broker's audit log"
 }
 
 // stopAndConfirm stops name and waits until podman shows its container down.
@@ -685,7 +720,7 @@ func (b *Broker) teardown(ctx context.Context, rec AgentRecord, actor string, o 
 	}
 	// 1. Backup. A record already being destroyed was backed up before.
 	if !o.noBackup && rec.State != AgentDestroying && phase != "" && b.backupConversation != nil {
-		id, err := b.backupConversation(ctx, rec.Name)
+		id, err := b.capture(ctx, func() (string, error) { return b.backupConversation(ctx, rec.Name) })
 		if err != nil {
 			return stop(http.StatusBadGateway, ReasonBackupFailed, fmt.Errorf("the conversation backup of %s failed (%v); nothing was destroyed. Destroy with no_backup (`lever agent destroy --no-backup`) to go on without one", rec.Name, err))
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/stevegeek/lever/internal/fsutil"
 	"io"
 	"io/fs"
 	"os"
@@ -99,6 +100,9 @@ func agentConversationBackup(app *config.App, st state.State, jr proc.Runner, ja
 	}
 }
 
+// backupMinFree is the space a conversation backup leaves free.
+const backupMinFree = 2 << 30
+
 // dailyBackupDue is how old an agent's newest backup must be before the
 // daily backup takes another. A little under a day, so an hourly check does
 // not drift a day later each time.
@@ -146,6 +150,13 @@ func saveAgentConversation(ctx context.Context, app *config.App, st state.State,
 	}
 	if err := os.MkdirAll(st.AgentConversations(), 0o700); err != nil {
 		return "", err
+	}
+	// A backup never fills the host's disk: it needs its own size and
+	// backupMinFree besides.
+	if free, err := fsutil.FreeBytes(st.AgentConversations()); err != nil {
+		return "", fmt.Errorf("reading the free space for the backup: %w", err)
+	} else if free < backupMinFree+uint64(len(raw)) {
+		return "", fmt.Errorf("less than %d GiB would be left free in the state directory after the backup", backupMinFree>>30)
 	}
 	store := convbackup.Store{Dir: filepath.Join(st.AgentConversations(), agent)}
 	m, err := store.Save(convbackup.Meta{Agent: agent, Created: time.Now().UTC(), Reason: reason, Version: version},

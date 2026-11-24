@@ -371,9 +371,16 @@ func (b *Broker) handleMsgList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, wire.MsgListResponse[scion.Event]{Events: kept})
 }
 
-// managerMayReach reports whether the manager may message or read the inbox
-// of name: a config worker, or a spawned agent the manager spawned.
+// managerMayReach reports whether the manager may message, drive or read
+// the inbox of name: a config worker, or a spawned agent the manager spawned
+// from a template that still lets the manager spawn. A template whose
+// spawners dropped the manager may since have been given wider grants, so
+// its agents are the operator's alone.
 func (b *Broker) managerMayReach(name string) bool {
 	rec, spawned := b.workers.record(name)
-	return !spawned || rec.CreatedBy == b.manager
+	if !spawned {
+		return true
+	}
+	t, ok := b.workers.template(rec.Template)
+	return rec.CreatedBy == b.manager && ok && t.ManagerMay
 }

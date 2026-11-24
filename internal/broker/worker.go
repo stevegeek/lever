@@ -149,8 +149,9 @@ func (b *Broker) requireManagerWorker(w http.ResponseWriter, r *http.Request, re
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return WorkerSpec{}, false
 	}
-	// The manager drives only the spawned agents it spawned itself.
-	if rec, spawned := b.workers.record(spec.Name); spawned && rec.CreatedBy != caller {
+	// The manager drives only the spawned agents it spawned itself, from a
+	// template that still lets it.
+	if !b.managerMayReach(spec.Name) {
 		b.audit("worker", caller, "deny", spec.Name+": a spawned agent the manager did not spawn")
 		refuse(w, ReasonNotYours, "forbidden: "+spec.Name+" was not spawned by the manager", http.StatusForbidden)
 		return WorkerSpec{}, false
@@ -1208,11 +1209,17 @@ func (b *Broker) handleWorkerList(w http.ResponseWriter, r *http.Request) {
 	}
 	// Phase, activity and container status are agent-settable text and the
 	// manager reads this list: only known labels go out, so a worker cannot
-	// write to the manager through its own status.
-	for i := range agents {
-		agents[i].Phase = scion.PhaseLabel(agents[i].Phase)
-		agents[i].Activity = scion.ActivityLabel(agents[i].Activity)
-		agents[i].ContainerStatus = scion.ContainerLabel(agents[i].ContainerStatus)
+	// write to the manager through its own status. A spawned agent the
+	// manager may not reach is left out, as it is from every other answer.
+	out := agents[:0]
+	for _, a := range agents {
+		if !b.managerMayReach(a.Slug) {
+			continue
+		}
+		a.Phase = scion.PhaseLabel(a.Phase)
+		a.Activity = scion.ActivityLabel(a.Activity)
+		a.ContainerStatus = scion.ContainerLabel(a.ContainerStatus)
+		out = append(out, a)
 	}
-	writeJSON(w, wire.WorkerListResponse[scion.Agent]{Agents: agents})
+	writeJSON(w, wire.WorkerListResponse[scion.Agent]{Agents: out})
 }

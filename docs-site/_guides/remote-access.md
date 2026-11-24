@@ -1074,8 +1074,8 @@ operator socket, at most every 3 seconds. Adding the first template restarts the
   for configured agents too, when the name is lower-case letters, digits and hyphens. Spawned
   names are never reused, so a link stored elsewhere (a ticket, a tracker) means the same agent for
   its whole life. Once the agent is destroyed, the link answers 410 with when it was destroyed and
-  the id of its conversation backup. A name the login may not reach and a name that does not exist
-  get the same 404.
+  the id of its conversation backup, until `lever agent gc` collects it. A name the login may not
+  reach, a collected one and a name that does not exist get the same 404.
 
 ### What it is, and is not
 

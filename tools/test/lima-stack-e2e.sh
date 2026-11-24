@@ -396,6 +396,18 @@ echo "      | $rd" | cut -c1-300
 checkx "the key destroys its agent" 'printf "%s" "$rd" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if d[\"ok\"] else 1)"'
 checkx "its name is revoked for good" 'grep -q "\"$S3\"" "$INST/.lever-state/revocation.json"'
 
+say "lever agent gc"
+gj=$(LA gc --older 0 --dry-run --json)
+echo "      | $gj" | cut -c1-300
+checkx "a dry run lists the destroyed agents and deletes nothing" 'printf "%s" "$gj" | grep -q "\"$S1\"" && [ -f "$INST/.lever-state/agent-archives/$S1.tar.gz" ]'
+gj=$(LA gc --older 0 --force --json)
+echo "      | $gj" | cut -c1-300
+checkx "gc collects the destroyed agents" 'for n in "$S1" "$S2" "$S3"; do printf "%s" "$gj" | grep -q "\"$n\"" || exit 1; done'
+checkx "their archives and backups are gone" '[ ! -e "$INST/.lever-state/agent-archives/$S1.tar.gz" ] && [ ! -e "$INST/.lever-state/agent-conversations/$S1" ]'
+checkx "their names stay retired and revoked" 'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if sys.argv[2] in d.get(\"retired\",[]) and all(a[\"name\"]!=sys.argv[2] for a in d[\"agents\"]) else 1)" "$INST/.lever-state/agents.json" "$S1" && grep -q "\"$S1\"" "$INST/.lever-state/revocation.json"'
+checkx "lever agent list --all no longer lists them" '! LA list --all | grep -q -- "$S1"'
+
+
 say "the experiment fence on the hub"
 for p in /api/v1/conduit/grant-keys /api/v1/artifacts /api/v1/thread-groups; do
 	code=$(hub GET "$p")

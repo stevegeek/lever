@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -134,6 +135,53 @@ func agentDailyBackup(app *config.App, st state.State, jr proc.Runner, jailMount
 	}
 }
 
+// gcNameRE is a spawned agent's name: gc joins it to a host path.
+var gcNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+
+// removeAgentConversations is the broker's RemoveConversations: it deletes
+// agent's backup directory under the state directory (no link followed: the
+// directory and every entry are Lstat'ed) and returns the bytes it held.
+func removeAgentConversations(app *config.App, st state.State) func(agent string, dryRun bool) (int64, error) {
+	return func(agent string, dryRun bool) (int64, error) {
+		if !gcNameRE.MatchString(agent) {
+			return 0, fmt.Errorf("%q is not an agent name", agent)
+		}
+		if StateInsideTree(app, st) {
+			return 0, nil // no backup is kept there
+		}
+		dir := filepath.Join(st.AgentConversations(), agent)
+		fi, err := os.Lstat(dir)
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0, nil
+		}
+		if err != nil {
+			return 0, err
+		}
+		if !fi.IsDir() {
+			return 0, fmt.Errorf("%s is not a directory; left for the operator", dir)
+		}
+		var size int64
+		err = filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.Type().IsRegular() {
+				if i, err := d.Info(); err == nil {
+					size += i.Size()
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return 0, err
+		}
+		if dryRun {
+			return size, nil
+		}
+		return size, os.RemoveAll(dir)
+	}
+}
+
 // saveAgentConversation captures agent's conversation from its home in the
 // guest and saves it under the state directory with reason. "" with no
 // error: there was nothing to save.
@@ -180,6 +228,11 @@ func checkRegistryNames(app *config.App, st broker.AgentsState) error {
 	for _, r := range st.Agents {
 		if fixed[r.Name] {
 			return fmt.Errorf("brokerctl: %q is both a configured agent and a spawned agent in %s (state %s); rename the configured one: a spawned agent's name is never reused", r.Name, "agents.json", r.State)
+		}
+	}
+	for _, n := range st.Retired {
+		if fixed[n] {
+			return fmt.Errorf("brokerctl: %q is both a configured agent and a destroyed agent's retired name in %s; rename the configured one: a spawned agent's name is never reused", n, "agents.json")
 		}
 	}
 	return nil

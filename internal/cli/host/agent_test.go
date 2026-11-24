@@ -145,3 +145,21 @@ func TestHostMsgSendTakesASpawnedName(t *testing.T) {
 		t.Fatal("a name of no shape was sent")
 	}
 }
+
+// gc needs --force or --dry-run, and sends the age in seconds.
+func TestAgentGCCommand(t *testing.T) {
+	dir := msgDir(t)
+	t.Chdir(dir)
+	rec := startResumeUDS(t, dir, map[string]canned{broker.PathOperatorAgentGC: {body: `{"agents":["s-old111"],"freed_bytes":2097152,"dry_run":true}`}})
+	if _, err := clitest.Exec(t, stubRoot(&stubBackend{runner: proc.NewFakeRunner()}), "agent", "gc"); exitCodeOf(err) != exitWorkerRefused || len(rec.all()) != 0 {
+		t.Fatalf("no --force: %v", err)
+	}
+	out, err := clitest.Exec(t, stubRoot(&stubBackend{runner: proc.NewFakeRunner()}), "agent", "gc", "--older", "2d", "--dry-run")
+	if err != nil || !strings.Contains(out, "would collect 1 destroyed agent(s), 2.0 MiB: s-old111") {
+		t.Fatalf("%v %q", err, out)
+	}
+	var got broker.GCRequest
+	if reqs := rec.all(); len(reqs) != 1 || json.Unmarshal([]byte(reqs[0].body), &got) != nil || got != (broker.GCRequest{OlderThan: 2 * 86400, DryRun: true}) {
+		t.Fatalf("%+v", rec.all())
+	}
+}

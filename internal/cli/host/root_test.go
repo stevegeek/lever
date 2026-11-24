@@ -33,7 +33,7 @@ func TestHostRootHasProvisioningOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if verbs := clitest.Names(agent); len(verbs) != 4 || !verbs["spawn"] || !verbs["destroy"] || !verbs["list"] || !verbs["remote-verb"] {
+	if verbs := clitest.Names(agent); len(verbs) != 5 || !verbs["spawn"] || !verbs["destroy"] || !verbs["list"] || !verbs["gc"] || !verbs["remote-verb"] {
 		t.Errorf("host agent verbs: %v", verbs)
 	}
 	// "down" is a deprecated alias of "destroy", not its own top-level Name().

@@ -348,6 +348,8 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 	d.BackupConversation = agentConversationBackup(app, st, jr, jailMount, version)
 	// The agents loop backs up each spawned agent's conversation daily.
 	d.DailyBackup = agentDailyBackup(app, st, jr, jailMount, version)
+	// lever agent gc deletes a destroyed agent's backups.
+	d.RemoveConversations = removeAgentConversations(app, st)
 	// A recycle deletes the record and ticket like `lever worker purge`.
 	d.Purge = jailWorkerPurger{sc: sc, r: jr, project: jailMount}
 	d.ContainerRunning = func(ctx context.Context, worker string) (bool, error) {

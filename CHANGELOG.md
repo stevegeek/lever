@@ -53,7 +53,12 @@ version bump moves the block under the new version heading.
     `lever doctor` say so. With templates configured, worker dirs also follow the rules they
     follow under `manager.read_only` (no `$`, `~`, `:` or `,`, ASCII only, no symlink on the
     path).
-  - A `delegate` may name `template:<name>`, which holds for that template's active agents.
+  - A `delegate` may name `template:<name>`, which holds for that template's active agents; the
+    manager's only for those it spawned, a spawned agent's only for its own spawner's. With
+    `worker_to_worker`, a spawned agent messages only its own spawner's agents.
+  - `lever agent gc --older 30d --force` deletes the archives and conversation backups of agents
+    destroyed long ago and drops their records, keeping their names retired (never reused, still
+    revoked).
   - Config load checks that every template's `max_running` agents fit in the VM's memory and,
     with the manager and the workers, within scion's cap of 12 running agents.
   - `lever doctor` has a *spawned agents* row, and the *orphan agent records* row no longer counts

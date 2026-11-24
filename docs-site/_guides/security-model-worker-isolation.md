@@ -529,16 +529,22 @@ broker checks. What spawning adds, and how it is held:
   per login and agent. The loop never stops, starts or destroys an agent. Its daily backup reads
   the agent's conversation from the guest, as destroy does, into the host-only state directory.
 
+- **Spawners stay apart.** A `delegate` to `template:<name>` held by the manager reaches only the
+  agents the manager spawned, and one held by a spawned agent only its own spawner's. With
+  `worker_to_worker`, a spawned agent messages and is messaged by only the agents of its own
+  spawner. So the operator's, the manager's and each ssh key's agents form separate groups that no
+  agent can join.
+- **What is kept is bounded.** Conversation backups and archives stay in the host-only state
+  directory: daily backups keep the newest 10 per agent, and `lever agent gc` deletes the archives
+  and backups of agents destroyed long enough ago, keeping only their names (still revoked, never
+  drawn again).
+
 **Residual risks.**
 
 - An operator-only template with grants wider than the manager's holds them for whatever it is
-  asked: its brief comes from whoever spawns it. Keep such templates' grants as narrow as their
-  work allows.
-- A manager `delegate` grant with `to: [template:<name>]` holds for every active agent of that
-  template, whoever spawned it, and with `worker_to_worker` on, spawned agents may message one
-  another across spawners as workers do.
-- Conversation backups hold whatever the agent saw. They stay in the host-only state directory:
-  the backup taken at destroy is kept for good, and the daily ones keep the newest 10 per agent.
-  Destroyed records, revocations, archives and destroy-time backups are never pruned; their
-  growth is bounded by the spawn quotas and the disk floors above, and an operator command to
-  prune them is future work.
+  asked: its brief comes from whoever spawns it (the operator, or an ssh key allowed that
+  template). Keep such templates' grants as narrow as their work allows.
+- A configured worker's `delegate` to `template:<name>` reaches every agent of that template,
+  whoever spawned it: that is the operator's word in config.
+- Until `lever agent gc` runs, destroyed agents' archives and backups stay; the spawn quotas and
+  the disk floors above bound how fast they grow.

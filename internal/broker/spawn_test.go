@@ -367,21 +367,74 @@ func TestSpawnedAgentIsNotStartedFresh(t *testing.T) {
 }
 
 // A "template:" delegate matches only an active agent of that template.
+// A configured worker's delegate reaches every such agent; the manager's
+// only those it spawned; a spawned agent's only its own spawner's.
 func TestTemplateDelegateFollowsTheRegistry(t *testing.T) {
-	e := newSpawnEnv(t, AgentsState{})
-	e.b.rules.AllowDelegate("test-manager", "db", "read", rules.TemplateRefPrefix+"session")
-	name := e.spawn(t, `{"template":"session"}`).Name
-	if _, ok := e.b.rules.MayObtainRule("test-manager", name, "db", "read"); !ok {
-		t.Fatal("not delegable to an active agent")
+	e := newSpawnEnv(t, AgentsState{}, func(t *TemplateSpec) { t.ManagerMay = true; t.MaxRunning = 3 })
+	for _, from := range []string{"worker", "test-manager"} {
+		e.b.rules.AllowDelegate(from, "db", "read", rules.TemplateRefPrefix+"session")
+	}
+	theirs := e.spawn(t, `{"template":"session"}`).Name
+	rec := callWorker(t, e.b, "/agent/spawn", `{"template":"session"}`, "test-manager")
+	var mine SpawnResponse
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &mine) != nil {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	for _, c := range []struct {
+		from, to string
+		want     bool
+	}{
+		{"worker", theirs, true}, {"worker", mine.Name, true},
+		{"test-manager", mine.Name, true}, {"test-manager", theirs, false},
+	} {
+		if _, ok := e.b.rules.MayObtainRule(c.from, c.to, "db", "read"); ok != c.want {
+			t.Fatalf("%s -> %s: %v", c.from, c.to, ok)
+		}
 	}
 	for _, bound := range []string{"worker", "template:session", "s-zzzzzz"} {
-		if _, ok := e.b.rules.MayObtainRule("test-manager", bound, "db", "read"); ok {
+		if _, ok := e.b.rules.MayObtainRule("worker", bound, "db", "read"); ok && bound != "worker" {
 			t.Fatalf("delegable to %q", bound)
 		}
 	}
-	callOperator(t, e.b, http.MethodPost, PathOperatorAgentDestroy, `{"name":"`+name+`","stop":true}`)
-	if _, ok := e.b.rules.MayObtainRule("test-manager", name, "db", "read"); ok {
+	// A spawned agent delegates only to its own spawner's agents.
+	e.b.rules.AllowDelegate(theirs, "db", "read", rules.TemplateRefPrefix+"session")
+	if _, ok := e.b.rules.MayObtainRule(theirs, mine.Name, "db", "read"); ok {
+		t.Fatal("an operator's agent delegates to the manager's")
+	}
+	callOperator(t, e.b, http.MethodPost, PathOperatorAgentDestroy, `{"name":"`+theirs+`","stop":true}`)
+	if _, ok := e.b.rules.MayObtainRule("worker", theirs, "db", "read"); ok {
 		t.Fatal("delegable to a destroyed agent")
+	}
+}
+
+// worker_to_worker joins configured workers, and a spawned agent only with
+// its own spawner's agents.
+func TestWorkerToWorkerKeepsSpawnersApart(t *testing.T) {
+	e := newSpawnEnv(t, AgentsState{}, func(t *TemplateSpec) { t.MaxRunning = 3 })
+	e.b.workerToWorker = true
+	a := e.spawn(t, `{"template":"session"}`).Name
+	b := e.spawn(t, `{"template":"session"}`).Name
+	c := e.spawn(t, `{"template":"session","by":"ssh:other"}`).Name
+	for _, tc := range []struct {
+		from, to string
+		want     bool
+	}{
+		{a, b, true}, {a, c, false}, {c, a, false}, {a, "worker", false}, {"worker", a, false},
+	} {
+		if got := e.b.peerMayReach(tc.from, tc.to); got != tc.want {
+			t.Fatalf("%s -> %s: %v", tc.from, tc.to, got)
+		}
+	}
+	if _, err := e.b.resolveMsgTarget(a, "agent:"+c); err == nil {
+		t.Fatal("a message across spawners was routed")
+	}
+	if _, err := e.b.resolveMsgTarget(a, "agent:"+b); err != nil {
+		t.Fatalf("same spawner: %v", err)
+	}
+	for _, r := range e.b.msgRecipients(a) {
+		if r == "agent:"+c || r == "agent:worker" {
+			t.Fatalf("recipients of %s list %s", a, r)
+		}
 	}
 }
 
@@ -465,7 +518,7 @@ func TestSpawnRefusedWhenTheRegistryIsNotSaved(t *testing.T) {
 func TestSpawnRoutesAreNotOnTheTCPListeners(t *testing.T) {
 	e := newSpawnEnv(t, AgentsState{})
 	for name, h := range map[string]http.Handler{"admin": e.b.AdminHandler(), "jail": e.b.JailHandler()} {
-		for _, p := range []string{PathOperatorAgentSpawn, PathOperatorAgentDestroy, PathOperatorAgentList, PathOperatorAgentSuspend, PathOperatorAgentResume} {
+		for _, p := range []string{PathOperatorAgentSpawn, PathOperatorAgentDestroy, PathOperatorAgentList, PathOperatorAgentSuspend, PathOperatorAgentResume, PathOperatorAgentGC} {
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, p, strings.NewReader(`{"template":"session"}`)))
 			if rec.Code != http.StatusNotFound && rec.Code != http.StatusMethodNotAllowed {

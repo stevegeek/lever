@@ -157,7 +157,7 @@ Three independent handles, all host-side:
   revocation that is not saved stops the destroy. The name is never drawn again, so nothing the
   agent held ever names another agent. A spawned agent's grants are its template's, added to the
   policy when it is spawned and dropped when it is destroyed; a `delegate` to `template:<name>`
-  holds only for that template's active agents.
+  holds only for that template's active agents, and the manager's only for those it spawned.
 
 ## Teaching agents the flow
 

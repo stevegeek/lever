@@ -313,6 +313,10 @@ type DispatchConfig struct {
 	// backup is a day old or more, and returns the new backup's id ("" when
 	// none was due or there was nothing to save).
 	DailyBackup func(ctx context.Context, agent string) (string, error)
+	// RemoveConversations deletes a destroyed agent's conversation backups
+	// (`lever agent gc`) and returns their size; dryRun only counts. nil:
+	// none are kept.
+	RemoveConversations func(agent string, dryRun bool) (int64, error)
 }
 
 // TimeoutConfig bounds request handling on the jail listener per route class.
@@ -481,9 +485,10 @@ type Broker struct {
 	serviceHosts    map[string]ServiceHostRoute
 	// archiveDir, backupConversation and spawnRate serve spawn and
 	// destroy (spawn.go).
-	archiveDir         string
-	backupConversation func(ctx context.Context, agent string) (string, error)
-	dailyBackup        func(ctx context.Context, agent string) (string, error)
+	archiveDir          string
+	backupConversation  func(ctx context.Context, agent string) (string, error)
+	dailyBackup         func(ctx context.Context, agent string) (string, error)
+	removeConversations func(agent string, dryRun bool) (int64, error)
 	// captureSem lets one conversation capture run at a time: each holds the
 	// whole compressed conversation in memory (convbackup's cap is 512 MiB).
 	captureSem chan struct{}
@@ -544,8 +549,17 @@ func New(c Config) *Broker {
 			addRevoked = true
 		}
 	}
+	for _, name := range workers.retiredList() {
+		if !revoked[name] {
+			revoked[name] = true
+			addRevoked = true
+		}
+	}
 	if id.Rules != nil {
-		id.Rules.SetTemplateResolver(workers.activeTemplateOf)
+		mgr := id.ManagerIdentity
+		id.Rules.SetTemplateResolver(func(requester, agent string) (string, bool) {
+			return workers.delegateTemplateOf(requester, agent, mgr)
+		})
 		for _, rec := range workers.recordList() {
 			// A moved agent (dir_root changed) is driven no more and holds
 			// no grants: its old directory is no longer read-only for the
@@ -599,7 +613,7 @@ func New(c Config) *Broker {
 		contactRate: newRateWindow(contactCallLimit),
 		files:       c.Files.withDefaults(), fileLedger: &fileRecord{dir: c.Files.LedgerDir},
 		filesRate:  newRateWindow(filesCallLimit),
-		archiveDir: d.ArchiveDir, backupConversation: d.BackupConversation, dailyBackup: d.DailyBackup, agentLoopEvery: time.Minute,
+		archiveDir: d.ArchiveDir, backupConversation: d.BackupConversation, dailyBackup: d.DailyBackup, removeConversations: d.RemoveConversations, agentLoopEvery: time.Minute,
 		captureSem: make(chan struct{}, 1),
 		spawnRate:  newRateWindow(managerSpawnRateLimit), inheritedUnsettled: inherited,
 	}

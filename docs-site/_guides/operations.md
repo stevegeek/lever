@@ -168,7 +168,16 @@ and tokens can never name another agent.
   may obtain only capabilities the manager obtains itself, and may delegate nothing. The manager
   messages and reads the inbox of only its own spawned agents.
 - **Delegating to spawned agents.** A `delegate` grant's `to` may name `template:<name>`: it holds
-  for each active agent of that template.
+  for each active agent of that template, though the manager's holds only for those it spawned,
+  and a spawned agent's only for its own spawner's.
+- **Messaging between agents.** With `messaging.worker_to_worker` (on by default), a spawned agent
+  messages, and is messaged by, only the agents of its own spawner: the operator's agents form one
+  group, the manager's another, and each ssh key's its own. Configured workers message each other
+  as before.
+- **Clearing out destroyed agents.** `lever agent gc --older 30d --force` deletes the archives and
+  conversation backups of agents destroyed at least 30 days ago and drops their records, keeping
+  only their names so they are never used again (`--dry-run` lists what would go). A workspace an
+  `on_destroy: keep` template left in the tree is not touched. Run it from a timer if you like.
 - **In the web page.** With `remote.landing: chat`, the operator's logins see each active spawned
   agent after the workers, labelled with its spawn label (or its template), and can chat with it,
   wake it and open its terminal. Every agent has a stable link,

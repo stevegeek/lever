@@ -160,7 +160,7 @@ func TestTemplateRecipient(t *testing.T) {
 	if _, ok := p.MayObtainRule("manager", "s-aaaaaa", "db", "read"); ok {
 		t.Fatal("matched with no resolver")
 	}
-	p.SetTemplateResolver(func(n string) (string, bool) {
+	p.SetTemplateResolver(func(_, n string) (string, bool) {
 		switch n {
 		case "s-aaaaaa":
 			return "session", true
@@ -182,7 +182,7 @@ func TestTemplateRecipient(t *testing.T) {
 // Reads and writes may run at once (go test -race).
 func TestPolicyConcurrent(t *testing.T) {
 	p := NewPolicy()
-	p.SetTemplateResolver(func(string) (string, bool) { return "", false })
+	p.SetTemplateResolver(func(_, _ string) (string, bool) { return "", false })
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

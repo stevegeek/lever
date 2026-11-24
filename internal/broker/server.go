@@ -155,6 +155,7 @@ func (b *Broker) OperatorHandler() http.Handler {
 	mux.HandleFunc("POST "+PathOperatorAgentSpawn, b.handleOperatorAgentSpawn)
 	mux.HandleFunc("POST "+PathOperatorAgentDestroy, b.handleOperatorAgentDestroy)
 	mux.HandleFunc("GET "+PathOperatorAgentList, b.handleOperatorAgentList)
+	mux.HandleFunc("POST "+PathOperatorAgentGC, b.handleOperatorAgentGC)
 	mux.HandleFunc("POST "+PathOperatorAgentSuspend, b.handleOperatorAgentSuspend)
 	mux.HandleFunc("POST "+PathOperatorAgentResume, b.handleOperatorAgentResume)
 	mux.HandleFunc("POST "+PathOperatorWorkerEvents, b.handleOperatorWorkerEvents)

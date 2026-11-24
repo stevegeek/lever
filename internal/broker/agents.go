@@ -27,6 +27,8 @@ type agentRegistry struct {
 	// records are the spawned agents, destroyed ones included.
 	records   map[string]*AgentRecord
 	templates map[string]TemplateSpec
+	// retired are the names gc dropped the records of (AgentsState.Retired).
+	retired map[string]bool
 	// persist saves the records, under mu; nil: not saved (tests).
 	persist func(AgentsState) error
 }
@@ -64,6 +66,9 @@ type AgentRecord struct {
 // AgentsState is the registry file.
 type AgentsState struct {
 	Agents []AgentRecord `json:"agents"`
+	// Retired are the names of destroyed agents whose records `lever agent
+	// gc` dropped: a name only, kept for good, so it is never drawn again.
+	Retired []string `json:"retired,omitempty"`
 }
 
 // TemplateSpec is one template, from config only.
@@ -127,6 +132,14 @@ func (r *agentRegistry) load(templates []TemplateSpec, st AgentsState, tree stri
 	defer r.mu.Unlock()
 	for _, t := range templates {
 		r.templates[t.Name] = t
+	}
+	if r.retired == nil {
+		r.retired = map[string]bool{}
+	}
+	for _, n := range st.Retired {
+		if n != "" {
+			r.retired[n] = true
+		}
 	}
 	for _, rec := range st.Agents {
 		rec := rec
@@ -235,8 +248,33 @@ func (r *agentRegistry) usable(name string) bool {
 	return rec.State == AgentActive && tmpl && inPlace(*rec, t)
 }
 
-// activeTemplateOf is the policy's template resolver: only an active agent
-// of a configured template matches a "template:" recipient.
+// delegateTemplateOf is the policy's template resolver: agent's template
+// when requester may delegate to it through a "template:" recipient. Only
+// an active agent of a configured template matches, and the spawner rule
+// holds as everywhere else: the manager reaches only the agents it spawned
+// from templates that still let it, and a spawned agent only the agents of
+// its own spawner. A configured worker's delegate is the operator's word and
+// reaches every agent of the template.
+func (r *agentRegistry) delegateTemplateOf(requester, agent, manager string) (string, bool) {
+	tmpl, ok := r.activeTemplateOf(agent)
+	if !ok {
+		return "", false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	target := r.records[agent]
+	if requester == manager {
+		t := r.templates[tmpl]
+		return tmpl, target.CreatedBy == manager && t.ManagerMay
+	}
+	if from, spawned := r.records[requester]; spawned {
+		return tmpl, from.CreatedBy == target.CreatedBy
+	}
+	return tmpl, true
+}
+
+// activeTemplateOf: only an active agent of a configured template, in place,
+// matches a "template:" recipient.
 func (r *agentRegistry) activeTemplateOf(name string) (string, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -307,7 +345,46 @@ func (r *agentRegistry) saveLocked() error {
 	if r.persist == nil {
 		return nil
 	}
-	return r.persist(AgentsState{Agents: r.recordListLocked()})
+	return r.persist(AgentsState{Agents: r.recordListLocked(), Retired: r.retiredListLocked()})
+}
+
+func (r *agentRegistry) retiredListLocked() []string {
+	out := make([]string, 0, len(r.retired))
+	for n := range r.retired {
+		out = append(out, n)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// retiredList is every retired name, sorted.
+func (r *agentRegistry) retiredList() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.retiredListLocked()
+}
+
+// retire drops destroyed agent name's record, keeping its name as retired,
+// and saves. A record that is not destroyed is refused.
+func (r *agentRegistry) retire(name string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rec, ok := r.records[name]
+	if !ok || rec.State != AgentDestroyed {
+		return fmt.Errorf("%s is not a destroyed agent", name)
+	}
+	if r.retired == nil {
+		r.retired = map[string]bool{}
+	}
+	r.retired[name] = true
+	delete(r.records, name)
+	delete(r.specs, name)
+	if err := r.saveLocked(); err != nil {
+		r.records[name] = rec
+		delete(r.retired, name)
+		return err
+	}
+	return nil
 }
 
 // instanceIDEncoding is lowercase base32 without padding.
@@ -345,7 +422,7 @@ func (r *agentRegistry) reserve(t TemplateSpec, createdBy, label string, now tim
 			return AgentRecord{}, err
 		}
 		cand := t.Prefix + "-" + id
-		if _, ok := r.records[cand]; ok {
+		if _, ok := r.records[cand]; ok || r.retired[cand] {
 			continue
 		}
 		if _, ok := r.specs[cand]; ok || taken(cand) {

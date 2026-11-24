@@ -497,8 +497,10 @@ broker checks. What spawning adds, and how it is held:
   the brief goes on stdin, bounded. The key spawns from its listed templates only, is the
   recorded creator (`ssh:<name>`, which no agent or manager name can equal, since those hold no
   colon), and lists and drives only its own agents. The broker itself refuses that caller's
-  destroy of another's agent and a destroy without a backup, and rate-limits its spawns apart from
-  the manager's. Within those bounds the key holds the operator's authority over the socket: treat
+  suspend, resume or destroy of another's agent and a destroy without a backup, audits each verb
+  under its name, and rate-limits its spawns apart from the manager's. The caller gets a fixed
+  sentence per refusal, never the broker's text or a host path, and at most 4 of its commands run
+  at once, each for at most 10 minutes. Within those bounds the key holds the operator's authority over the socket: treat
   it like a deploy key for those templates.
 
 **Residual risks.** The manager mounts the whole tree, so it can write a spawned agent's workspace

@@ -192,7 +192,9 @@ func TestRemoteVerbNeedsSSH(t *testing.T) {
 	t.Chdir(dir)
 	root := stubRoot(&stubBackend{runner: proc.NewFakeRunner()})
 	out, err := clitest.Exec(t, root, "agent", "remote-verb", "--templates", "session", "--as", "factory")
-	if exitCodeOf(err) != exitWorkerRefused || !strings.Contains(out, remoteCommandEnv) {
+	var res agentResult
+	if exitCodeOf(err) != exitWorkerRefused || json.Unmarshal([]byte(strings.TrimSpace(out)), &res) != nil ||
+		res.Reason != broker.ReasonBadRequest || res.Exit != exitWorkerRefused || !strings.Contains(res.Error, remoteCommandEnv) {
 		t.Fatalf("%v: %s", err, out)
 	}
 }
@@ -203,16 +205,16 @@ func TestRemoteVerbActsOnItsOwnAgent(t *testing.T) {
 	for _, tc := range []struct{ command, path, want string }{
 		{"destroy s-mine01 --stop", broker.PathOperatorAgentDestroy, `{"name":"s-mine01","stop":true,"by":"ssh:factory"}`},
 		{"destroy s-mine01", broker.PathOperatorAgentDestroy, `{"name":"s-mine01","by":"ssh:factory"}`},
-		{"suspend s-mine01", broker.PathOperatorWorkerSuspend, `{"worker":"s-mine01"}`},
-		{"resume s-mine01", broker.PathOperatorWorkerResume, `{"worker":"s-mine01"}`},
+		{"suspend s-mine01", broker.PathOperatorAgentSuspend, `{"name":"s-mine01","by":"ssh:factory"}`},
+		{"resume s-mine01", broker.PathOperatorAgentResume, `{"name":"s-mine01","by":"ssh:factory"}`},
 	} {
 		dir := msgDir(t)
 		t.Chdir(dir)
 		rec := startResumeUDS(t, dir, map[string]canned{
-			broker.PathOperatorAgentList:     registryWith,
-			broker.PathOperatorAgentDestroy:  {body: `{"name":"s-mine01","was":"running","transcript":"20261122T120000Z","workspace":"archived"}`},
-			broker.PathOperatorWorkerSuspend: {body: `{"worker":"s-mine01","phase":"suspended"}`},
-			broker.PathOperatorWorkerResume:  {body: `{"worker":"s-mine01","phase":"running"}`},
+			broker.PathOperatorAgentList:    registryWith,
+			broker.PathOperatorAgentDestroy: {body: `{"name":"s-mine01","was":"running","transcript":"20261122T120000Z","workspace":"archived"}`},
+			broker.PathOperatorAgentSuspend: {body: `{"worker":"s-mine01","phase":"suspended"}`},
+			broker.PathOperatorAgentResume:  {body: `{"worker":"s-mine01","phase":"running"}`},
 		})
 		res, out, err := remoteExec(t, tc.command, "")
 		if err != nil || !res.OK || res.Name != "s-mine01" {
@@ -228,15 +230,81 @@ func TestRemoteVerbActsOnItsOwnAgent(t *testing.T) {
 	}
 }
 
-// A broker refusal keeps its reason and exit code.
+// A broker refusal keeps its reason and exit code, but not the broker's
+// text, which is the operator's: it can name other agents and host paths.
 func TestRemoteVerbBrokerRefusal(t *testing.T) {
+	for _, reason := range []string{broker.ReasonRateLimited, broker.ReasonTemplateBusy, broker.ReasonRuntimeError, "x\u001b[2J"} {
+		dir := msgDir(t)
+		t.Chdir(dir)
+		startResumeUDS(t, dir, map[string]canned{broker.PathOperatorAgentSpawn: {status: http.StatusConflict,
+			body:   "template session allows 1 running: s-theirs1 is running; see /home/op/inst/workspace/sessions",
+			header: map[string]string{broker.ReasonHeader: reason}}})
+		res, out, err := remoteExec(t, "spawn session", "")
+		if exitCodeOf(err) == 0 || res.OK || res.Error == "" {
+			t.Fatalf("%s: %v: %s", reason, err, out)
+		}
+		if strings.Contains(out, "s-theirs1") || strings.Contains(out, "/home/op") || strings.Contains(out, "\x1b") {
+			t.Fatalf("%s: the broker's text reached the caller: %s", reason, out)
+		}
+	}
+}
+
+// A destroy's workspace line and warnings name host paths: the caller sees
+// neither.
+func TestRemoteVerbDestroyHidesHostPaths(t *testing.T) {
 	dir := msgDir(t)
 	t.Chdir(dir)
-	startResumeUDS(t, dir, map[string]canned{broker.PathOperatorAgentSpawn: {status: http.StatusTooManyRequests, body: "rate limited",
-		header: map[string]string{broker.ReasonHeader: broker.ReasonRateLimited}}})
-	res, out, err := remoteExec(t, "spawn session", "")
-	if exitCodeOf(err) == 0 || res.Reason != broker.ReasonRateLimited || res.OK {
+	startResumeUDS(t, dir, map[string]canned{
+		broker.PathOperatorAgentList:    registryWith,
+		broker.PathOperatorAgentDestroy: {body: `{"name":"s-mine01","was":"running","workspace":"archived to /home/op/x.tar.gz","warnings":["/home/op/y failed"]}`},
+	})
+	res, out, err := remoteExec(t, "destroy s-mine01", "")
+	if err != nil || !res.OK || len(res.Warnings) != 1 || strings.Contains(out, "/home/op") {
 		t.Fatalf("%v: %s", err, out)
+	}
+}
+
+// With no config or no broker, the caller learns no host path.
+func TestRemoteVerbHidesHostErrors(t *testing.T) {
+	dir := msgDir(t)
+	t.Chdir(dir)
+	res, out, err := remoteExec(t, "list", "", "--templates", "session", "--as", "factory", "--config", dir+"/nowhere/lever.yaml")
+	if exitCodeOf(err) == 0 || res.OK || strings.Contains(out, dir) {
+		t.Fatalf("no config: %v: %s", err, out)
+	}
+	res, out, err = remoteExec(t, "list", "") // no broker serves the socket
+	if exitCodeOf(err) == 0 || res.OK || strings.Contains(out, dir) {
+		t.Fatalf("no broker: %v: %s", err, out)
+	}
+}
+
+// A key runs at most remoteSlots commands at once.
+func TestRemoteSlots(t *testing.T) {
+	dir := t.TempDir()
+	var held []func()
+	for range remoteSlots {
+		release, err := takeRemoteSlot(dir, "factory")
+		if err != nil {
+			t.Fatal(err)
+		}
+		held = append(held, release)
+	}
+	if _, err := takeRemoteSlot(dir, "factory"); err == nil || !strings.Contains(err.Error(), "busy") {
+		t.Fatalf("slot %d: %v", remoteSlots+1, err)
+	}
+	if release, err := takeRemoteSlot(dir, "other"); err != nil {
+		t.Fatalf("another key: %v", err)
+	} else {
+		release()
+	}
+	held[0]()
+	if release, err := takeRemoteSlot(dir, "factory"); err != nil {
+		t.Fatalf("a freed slot: %v", err)
+	} else {
+		release()
+	}
+	for _, r := range held[1:] {
+		r()
 	}
 }
 
@@ -254,7 +322,7 @@ func TestRemoteVerbList(t *testing.T) {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &got); err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
-	if len(got.Templates) != 1 || got.Templates[0].Name != "session" || got.Templates[0].Running != 1 {
+	if !got.OK || len(got.Templates) != 1 || got.Templates[0].Name != "session" || got.Templates[0].Running != 1 {
 		t.Fatalf("templates %+v", got.Templates)
 	}
 	if len(got.Agents) != 1 || got.Agents[0].Name != "s-mine01" || got.Agents[0].Label != "PR 42" || got.Agents[0].Phase != "running" {

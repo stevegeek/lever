@@ -374,6 +374,26 @@ echo "      | $out" | head -1 | cut -c1-300
 checkx "the manager destroys its own agent" '[[ "$out" == *"destroyed"* ]]'
 checkx "lever agent list --all keeps both as destroyed" '[ "$(LA list --all | grep -cE "^s-[a-z2-7]{6} .*destroyed")" = 2 ]'
 
+say "agents spawned over ssh (the forced command)"
+# sshd runs the key's forced command from the home directory with the
+# caller's words in SSH_ORIGINAL_COMMAND; this runs it the same way.
+RV() { (cd "$HOME" && SSH_ORIGINAL_COMMAND="$1" "$LEVER" agent remote-verb --config "$INST/lever.yaml" --templates session --as e2e 2>/dev/null); }
+rj=$(RV "spawn session e2e over ssh" < "$WORK/brief.md")
+echo "      | $rj" | cut -c1-300
+S3=$(printf '%s' "$rj" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("name",""))' 2>/dev/null)
+checkx "the key spawns an agent ($S3)" '[[ "$S3" =~ ^s-[a-z2-7]{6}$ ]]'
+checkx "it is recorded as created by ssh:e2e" 'LA list | grep -E "^$S3 .* ssh:e2e " >/dev/null'
+checkx "the key lists it, and no other agent" 'o=$(RV list </dev/null); [[ "$o" == *"\"$S3\""* && "$o" != *"$S1"* && "$o" != *"$S2"* ]]'
+checkx "a shell command is refused" 'RV "sh -c id" </dev/null | grep -q "\"reason\":\"bad-request\""'
+checkx "a template not listed is refused" 'RV "spawn other" </dev/null | grep -q "\"reason\":\"no-template\""'
+checkx "a destroyed agent of the operator's is not the key's" 'RV "destroy $S1" </dev/null | grep -q "\"reason\":\"not-spawned\""'
+checkx "the key suspends its agent" 'RV "suspend $S3" </dev/null | grep -q "\"ok\":true"'
+checkx "the key resumes its agent" 'RV "resume $S3" </dev/null | grep -q "\"ok\":true"'
+rd=$(RV "destroy $S3 --stop" </dev/null)
+echo "      | $rd" | cut -c1-300
+checkx "the key destroys its agent" 'printf "%s" "$rd" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if d[\"ok\"] else 1)"'
+checkx "its name is revoked for good" 'grep -q "\"$S3\"" "$INST/.lever-state/revocation.json"'
+
 say "the experiment fence on the hub"
 for p in /api/v1/conduit/grant-keys /api/v1/artifacts /api/v1/thread-groups; do
 	code=$(hub GET "$p")

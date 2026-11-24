@@ -2,10 +2,12 @@ package host
 
 import (
 	"cmp"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -17,7 +19,7 @@ import (
 	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/cli"
 	"github.com/stevegeek/lever/internal/convbackup"
-	"github.com/stevegeek/lever/internal/termsafe"
+	"github.com/stevegeek/lever/internal/hostledger"
 	"github.com/stevegeek/lever/internal/wire"
 )
 
@@ -45,11 +47,45 @@ const maxRemoteCommand = 1024
 // that never closes it is refused, not waited on.
 var remoteBriefTimeout = 60 * time.Second
 
+// remoteDeadline bounds one run: a stalled broker or hub never holds a
+// caller's process for good (sshd keeps no time limit, and with restrict a
+// caller that hangs up does not stop it).
+var remoteDeadline = 10 * time.Minute
+
+// remoteSlots bounds the runs of one key at once: each holds a slot, a
+// flock on <state>/remote-verb/<as>.<n>.lock.
+const remoteSlots = 4
+
 // remoteNameRE is a template or agent name (config's nameRE).
 var remoteNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 // remoteGrammar is the whole grammar, for refusals.
 const remoteGrammar = "spawn TEMPLATE [LABEL...] (brief on stdin) | destroy NAME [--stop] | suspend NAME | resume NAME | list [--json]"
+
+// remoteRefusal is what the caller is told for a broker refusal: a fixed
+// text per reason, since the broker's own text is written for the operator
+// and can name other agents, host paths and commands.
+func remoteRefusal(reason string) string {
+	switch reason {
+	case broker.ReasonNoTemplate:
+		return "no template that this key may spawn from"
+	case broker.ReasonNotSpawned, broker.ReasonNotYours, broker.ReasonNotAWorker:
+		return "no agent of yours by that name"
+	case broker.ReasonTemplateFull:
+		return "the template has as many agents as it may: destroy one first"
+	case broker.ReasonTemplateBusy, broker.ReasonWorkerCap, broker.ReasonBusy:
+		return "busy: too many agents are running, or another verb is acting on this one; try again later"
+	case broker.ReasonRateLimited:
+		return "rate limited: at most 4 spawns a minute and 200 a day; try again later"
+	case broker.ReasonBadLabel:
+		return "the label is not allowed: at most 60 printable characters"
+	case broker.ReasonRunning:
+		return "the agent is running: destroy it with --stop"
+	case broker.ReasonBadRequest:
+		return "bad request"
+	}
+	return "refused (" + cmp.Or(safeToken(reason), "unknown") + "); the operator can see why in the broker's audit log"
+}
 
 // remoteVerb is one parsed caller command.
 type remoteVerb struct {
@@ -142,10 +178,13 @@ func readBrief(r io.Reader) (string, error) {
 
 // remoteList is `list`: the caller's templates, and its own agents.
 type remoteList struct {
+	OK        bool             `json:"ok"`
 	Templates []remoteTemplate `json:"templates"`
 	Agents    []remoteAgent    `json:"agents"`
 }
 
+// remoteTemplate's counts are of every agent of the template, the caller's
+// or not: they are what a spawn is checked against.
 type remoteTemplate struct {
 	Name         string `json:"name"`
 	MaxInstances int    `json:"max_instances"`
@@ -217,22 +256,33 @@ func runRemoteVerb(cmd *cobra.Command, templates []string, as, configPath string
 	if configPath != "" {
 		args = []string{configPath}
 	}
+	// Host paths stay on the host: the caller is told only that lever is
+	// not available, and the operator runs the command by hand to see why.
 	app, st, err := loadAppAndState(args)
 	if err != nil {
-		return fail(err, "", 1)
+		return fail(errors.New("lever is not available on this host (its config does not load)"), "", 1)
 	}
 	sock, err := operatorSocket(app, st)
 	if err != nil {
-		return fail(err, reasonNoOperatorSocket, exitOperatorSocketMissing)
+		return fail(errors.New("lever is not running on this host"), reasonNoOperatorSocket, exitOperatorSocketMissing)
 	}
-	ctx := cmd.Context()
-	post := func(path string, body, out any) error {
-		err := operatorPost(ctx, sock, path, body, out)
+	release, err := takeRemoteSlot(st.Dir, as)
+	if err != nil {
+		return fail(err, broker.ReasonBusy, exitWorkerBusy)
+	}
+	defer release()
+	ctx, cancel := context.WithTimeout(cmd.Context(), remoteDeadline)
+	defer cancel()
+	brokerFail := func(err error, path string) error {
 		if ref, ok := operatorFailure(err, path); ok {
 			res.Phase = safeToken(ref.Phase)
-			return fail(ref, ref.Reason, agentExit(ref.Reason))
-		} else if err != nil {
-			return fail(err, "", 1)
+			return fail(errors.New(remoteRefusal(ref.Reason)), ref.Reason, agentExit(ref.Reason))
+		}
+		return fail(errors.New("lever did not answer; try again later"), "", 1)
+	}
+	post := func(path string, body, out any) error {
+		if err := operatorPost(ctx, sock, path, body, out); err != nil {
+			return brokerFail(err, path)
 		}
 		return nil
 	}
@@ -243,11 +293,8 @@ func runRemoteVerb(cmd *cobra.Command, templates []string, as, configPath string
 			path += "?registry=1"
 		}
 		var resp broker.AgentListResponse
-		err := operatorGet(ctx, sock, path, &resp)
-		if ref, ok := operatorFailure(err, broker.PathOperatorAgentList); ok {
-			return resp, fail(ref, ref.Reason, agentExit(ref.Reason))
-		} else if err != nil {
-			return resp, fail(err, "", 1)
+		if err := operatorGet(ctx, sock, path, &resp); err != nil {
+			return resp, brokerFail(err, broker.PathOperatorAgentList)
 		}
 		return resp, nil
 	}
@@ -265,14 +312,14 @@ func runRemoteVerb(cmd *cobra.Command, templates []string, as, configPath string
 				return nil
 			}
 		}
-		return fail(fmt.Errorf("no agent %s of yours", v.name), broker.ReasonNotSpawned, exitWorkerRefused)
+		return fail(errors.New(remoteRefusal(broker.ReasonNotSpawned)), broker.ReasonNotSpawned, exitWorkerRefused)
 	}
 
 	switch v.verb {
 	case "spawn":
 		res.Template, res.Label = v.template, v.label
 		if !slices.Contains(templates, v.template) {
-			return fail(fmt.Errorf("no template %s that this key may spawn from", v.template), broker.ReasonNoTemplate, exitWorkerRefused)
+			return fail(errors.New(remoteRefusal(broker.ReasonNoTemplate)), broker.ReasonNoTemplate, exitWorkerRefused)
 		}
 		brief, err := readBrief(cmd.InOrStdin())
 		if err != nil {
@@ -295,20 +342,23 @@ func runRemoteVerb(cmd *cobra.Command, templates []string, as, configPath string
 		if convbackup.ValidID(resp.Transcript) {
 			res.Transcript = resp.Transcript
 		}
-		res.Workspace = termsafe.Sanitize(resp.Workspace)
-		for _, w := range resp.Warnings {
-			res.Warnings = append(res.Warnings, termsafe.Sanitize(w))
+		// The workspace line and warnings name host paths: the caller is
+		// told that something needs the operator, not what.
+		if len(resp.Warnings) > 0 {
+			res.Warnings = []string{"destroyed, with warnings the operator can see in the broker's audit log"}
 		}
 	case "suspend", "resume":
 		if err := own(); err != nil {
 			return err
 		}
-		path := broker.PathOperatorWorkerSuspend
+		// The broker checks again that the agent is the caller's, and
+		// audits the verb as the caller's.
+		path := broker.PathOperatorAgentSuspend
 		if v.verb == "resume" {
-			path = broker.PathOperatorWorkerResume
+			path = broker.PathOperatorAgentResume
 		}
 		var resp wire.WorkerResponse
-		if err := post(path, wire.WorkerRequest{Worker: v.name}, &resp); err != nil {
+		if err := post(path, broker.AgentVerbRequest{Name: v.name, By: by}, &resp); err != nil {
 			return err
 		}
 		res.OK, res.Phase = true, safeToken(resp.Phase)
@@ -317,7 +367,7 @@ func runRemoteVerb(cmd *cobra.Command, templates []string, as, configPath string
 		if err != nil {
 			return err
 		}
-		out := remoteList{Templates: []remoteTemplate{}, Agents: []remoteAgent{}}
+		out := remoteList{OK: true, Templates: []remoteTemplate{}, Agents: []remoteAgent{}}
 		for _, t := range list.Templates {
 			if slices.Contains(templates, t.Name) {
 				out.Templates = append(out.Templates, remoteTemplate{Name: t.Name, MaxInstances: t.MaxInstances, MaxRunning: t.MaxRunning, Instances: t.Instances, Running: t.Running})
@@ -333,4 +383,23 @@ func runRemoteVerb(cmd *cobra.Command, templates []string, as, configPath string
 	}
 	printJSONLine(cmd, res)
 	return nil
+}
+
+// takeRemoteSlot takes one of the key's remoteSlots, or refuses: a key
+// cannot hold more than that many processes on the host at once.
+func takeRemoteSlot(stateDir, as string) (func(), error) {
+	dir := filepath.Join(stateDir, "remote-verb")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, errors.New("lever is not available on this host")
+	}
+	for n := range remoteSlots {
+		release, err := hostledger.TryLockFile(filepath.Join(dir, fmt.Sprintf("%s.%d.lock", as, n)))
+		if err == nil {
+			return release, nil
+		}
+		if !errors.Is(err, hostledger.ErrLocked) {
+			return nil, errors.New("lever is not available on this host")
+		}
+	}
+	return nil, fmt.Errorf("busy: this key already runs %d commands; try again when one ends", remoteSlots)
 }

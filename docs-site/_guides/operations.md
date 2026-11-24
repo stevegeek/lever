@@ -208,23 +208,27 @@ $ ssh lever-host destroy s-k3f7qa --stop < /dev/null
 
 The whole grammar is `spawn TEMPLATE [LABEL...]`, `destroy NAME [--stop]`, `suspend NAME`,
 `resume NAME` and `list [--json]`. Each answer is one JSON line, with `ok`, and on a refusal
-`reason`, `error` and `exit` (the process exits with the same code, as `lever agent` does). Words
+`reason`, `error` and `exit` (the process exits with the same code, as `lever agent` does). A
+refusal's `error` is a fixed sentence per reason: the broker's own text, which can name other
+agents and host paths, stays in its audit log. Words
 are split on spaces only, the label is the words after the template, and any tab, newline, control
 or formatting character refuses the whole command. Nothing the caller sends reaches a shell or a
 flag.
 
 What the key may do:
 
-- spawn from the listed templates only, at most 4 a minute and 200 a day, counted apart from the
-  manager and from other keys;
-- list the listed templates and the live agents it spawned, and nothing else;
+- spawn from the listed templates only, at most 4 a minute and 200 in a day, counted apart from
+  the manager and from other keys (the counts live in the broker, so `lever reload` resets them);
+- list the listed templates, with counts that include every agent of the template, and the live
+  agents it spawned, and nothing else;
 - suspend, resume and destroy only the agents it spawned, from a template still listed. A destroy
-  always backs up the conversation.
+  always backs up the conversation;
+- run at most 4 commands at once, each for at most 10 minutes.
 
 The key works through the broker's operator socket, on the host. Within those bounds it acts with
-the operator's authority. The broker's audit log names it (`ssh:factory`) for spawn and destroy,
-and names the operator for suspend and resume. Revoke the key by removing its line from
-`authorized_keys`; the agents it spawned stay until you destroy them.
+the operator's authority. The broker checks again that an agent is the key's before a suspend,
+resume or destroy, and its audit log names the key (`ssh:factory`) for every verb. Revoke the key
+by removing its line from `authorized_keys`; the agents it spawned stay until you destroy them.
 
 ## Driving workers from a host program
 

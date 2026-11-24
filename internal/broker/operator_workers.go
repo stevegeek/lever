@@ -229,27 +229,32 @@ func (b *Broker) operatorWorkerHalt(w http.ResponseWriter, r *http.Request, verb
 	if !b.runtimeReady(w) {
 		return
 	}
-	ctx := r.Context()
-	unlock, ok := b.lockWorkerOrRefuse(w, ctx, operatorActor, verb, spec.Name)
+	b.haltWorker(w, r.Context(), spec, verb, operatorActor, do)
+}
+
+// haltWorker is operatorWorkerHalt once the worker is known: actor is the
+// operator, or a remote caller the operator socket speaks for.
+func (b *Broker) haltWorker(w http.ResponseWriter, ctx context.Context, spec WorkerSpec, verb, actor string, do func(context.Context, string) error) {
+	unlock, ok := b.lockWorkerOrRefuse(w, ctx, actor, verb, spec.Name)
 	if !ok {
 		return
 	}
 	defer unlock()
 	agents, err := b.runtime.List(ctx, b.instanceProject)
 	if err != nil {
-		b.audit("worker", operatorActor, "error", verb+" "+spec.Name+": list: "+err.Error())
+		b.audit("worker", actor, "error", verb+" "+spec.Name+": list: "+err.Error())
 		refuse(w, ReasonRuntimeError, "runtime error", http.StatusBadGateway)
 		return
 	}
 	if !slices.ContainsFunc(agents, func(a scion.Agent) bool { return a.Slug == spec.Name }) {
-		b.audit("worker", operatorActor, "deny", verb+" "+spec.Name+": no record")
+		b.audit("worker", actor, "deny", verb+" "+spec.Name+": no record")
 		refuse(w, ReasonNoRecord, "worker "+spec.Name+" has no record on the hub (never started, purged, or a new jail); there is nothing to "+verb, http.StatusNotFound)
 		return
 	}
 	if err := do(ctx, spec.Name); err != nil {
 		// The detail stays in the audit log: scion's text can echo the
 		// container env.
-		b.audit("worker", operatorActor, "error", verb+" "+spec.Name+": "+err.Error())
+		b.audit("worker", actor, "error", verb+" "+spec.Name+": "+err.Error())
 		refuse(w, ReasonRuntimeError, "runtime error: worker "+spec.Name+" did not "+verb+"; see the broker log", http.StatusBadGateway)
 		return
 	}
@@ -257,6 +262,6 @@ func (b *Broker) operatorWorkerHalt(w http.ResponseWriter, r *http.Request, verb
 	if err != nil || after == "" {
 		after = "unknown"
 	}
-	b.audit("worker", operatorActor, "allow", verb+" "+spec.Name)
+	b.audit("worker", actor, "allow", verb+" "+spec.Name)
 	writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: after})
 }

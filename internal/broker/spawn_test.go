@@ -465,7 +465,7 @@ func TestSpawnRefusedWhenTheRegistryIsNotSaved(t *testing.T) {
 func TestSpawnRoutesAreNotOnTheTCPListeners(t *testing.T) {
 	e := newSpawnEnv(t, AgentsState{})
 	for name, h := range map[string]http.Handler{"admin": e.b.AdminHandler(), "jail": e.b.JailHandler()} {
-		for _, p := range []string{PathOperatorAgentSpawn, PathOperatorAgentDestroy, PathOperatorAgentList} {
+		for _, p := range []string{PathOperatorAgentSpawn, PathOperatorAgentDestroy, PathOperatorAgentList, PathOperatorAgentSuspend, PathOperatorAgentResume} {
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, p, strings.NewReader(`{"template":"session"}`)))
 			if rec.Code != http.StatusNotFound && rec.Code != http.StatusMethodNotAllowed {
@@ -941,5 +941,50 @@ func TestDailySpawnQuotaIsPerSpawner(t *testing.T) {
 	}
 	if !b.takeDailySpawn("ssh:factory", now.Add(24*time.Hour)) {
 		t.Fatal("a new day is still refused")
+	}
+}
+
+// A remote caller suspends and resumes only an active agent it spawned:
+// the operator's, another caller's, a configured worker and the manager are
+// refused alike, and so is a body that is not an AgentVerbRequest.
+func TestRemoteCallerSuspendAndResume(t *testing.T) {
+	e := newSpawnEnv(t, AgentsState{}, func(t *TemplateSpec) { t.MaxRunning = 5 })
+	theirs := e.spawn(t, `{"template":"session"}`).Name
+	other := e.spawn(t, `{"template":"session","by":"ssh:other"}`).Name
+	mine := e.spawn(t, `{"template":"session","by":"ssh:factory"}`).Name
+	for _, body := range []string{
+		`{"name":"` + theirs + `","by":"ssh:factory"}`,
+		`{"name":"` + other + `","by":"ssh:factory"}`,
+		`{"name":"worker","by":"ssh:factory"}`,
+		`{"name":"test-manager","by":"ssh:factory"}`,
+		`{"name":"s-zzzzzz","by":"ssh:factory"}`,
+	} {
+		for _, path := range []string{PathOperatorAgentSuspend, PathOperatorAgentResume} {
+			rec := callOperator(t, e.b, http.MethodPost, path, body)
+			if rec.Code != http.StatusNotFound || rec.Header().Get(ReasonHeader) != ReasonNotSpawned {
+				t.Fatalf("%s %s: %d", path, body, rec.Code)
+			}
+		}
+	}
+	for _, body := range []string{`{"name":"` + mine + `"}`, `{"name":"` + mine + `","by":"factory"}`, `{"name":"` + mine + `","by":"ssh:factory","worker":"x"}`} {
+		if rec := callOperator(t, e.b, http.MethodPost, PathOperatorAgentSuspend, body); rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s: %d", body, rec.Code)
+		}
+	}
+	if len(e.rt.suspend) != 0 {
+		t.Fatalf("suspended %v", e.rt.suspend)
+	}
+	rec := callOperator(t, e.b, http.MethodPost, PathOperatorAgentSuspend, `{"name":"`+mine+`","by":"ssh:factory"}`)
+	if rec.Code != http.StatusOK || len(e.rt.suspend) != 1 || e.rt.suspend[0] != mine {
+		t.Fatalf("suspend mine: %d %s %v", rec.Code, rec.Body, e.rt.suspend)
+	}
+	rec = callOperator(t, e.b, http.MethodPost, PathOperatorAgentResume, `{"name":"`+mine+`","by":"ssh:factory"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("resume mine: %d %s", rec.Code, rec.Body)
+	}
+	// A revoked agent is not resumed.
+	e.b.Revoke(mine)
+	if rec := callOperator(t, e.b, http.MethodPost, PathOperatorAgentResume, `{"name":"`+mine+`","by":"ssh:factory"}`); rec.Code != http.StatusForbidden {
+		t.Fatalf("resume revoked: %d", rec.Code)
 	}
 }

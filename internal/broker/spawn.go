@@ -997,3 +997,69 @@ func spawnerName(spawner, by string) string {
 	}
 	return "the " + spawner
 }
+
+// Operator routes for a remote caller's suspend and resume of its own
+// agents (`lever agent remote-verb`). The operator's own verbs are the
+// /operator/worker routes.
+const (
+	PathOperatorAgentSuspend = "/operator/agent/suspend"
+	PathOperatorAgentResume  = "/operator/agent/resume"
+)
+
+// AgentVerbRequest is the body of PathOperatorAgentSuspend and
+// PathOperatorAgentResume: an agent, and the remote caller that spawned it.
+type AgentVerbRequest struct {
+	Name string `json:"name"`
+	By   string `json:"by"`
+}
+
+// remoteCallersAgent decodes an AgentVerbRequest and finds its agent: an
+// active agent that By spawned. Anything else is refused alike, so the
+// caller learns nothing of other agents.
+func (b *Broker) remoteCallersAgent(w http.ResponseWriter, r *http.Request, verb string) (WorkerSpec, string, bool) {
+	var req AgentVerbRequest
+	if err := decodeStrict(w, r, smallBodyLimit, &req); err != nil {
+		b.audit("agent", operatorActor, "deny", verb+": bad body")
+		refuse(w, ReasonBadRequest, "bad request: "+firstLineOf(err.Error()), http.StatusBadRequest)
+		return WorkerSpec{}, "", false
+	}
+	if !ValidRemoteCaller(req.By) {
+		b.audit("agent", operatorActor, "deny", verb+": bad caller name")
+		refuse(w, ReasonBadRequest, "bad request: by must be ssh:<name>", http.StatusBadRequest)
+		return WorkerSpec{}, "", false
+	}
+	rec, ok := b.workers.record(req.Name)
+	spec, isWorker := b.workerSpec(req.Name)
+	if !ok || !isWorker || rec.State != AgentActive || rec.CreatedBy != req.By {
+		b.audit("agent", req.By, "deny", verb+" "+boundedLogin(req.Name)+": not an active agent it spawned")
+		refuse(w, ReasonNotSpawned, "no agent "+boundedLogin(req.Name)+" of yours", http.StatusNotFound)
+		return WorkerSpec{}, "", false
+	}
+	return spec, req.By, true
+}
+
+func (b *Broker) handleOperatorAgentSuspend(w http.ResponseWriter, r *http.Request) {
+	spec, by, ok := b.remoteCallersAgent(w, r, "suspend")
+	if !ok || !b.runtimeReady(w) {
+		return
+	}
+	b.haltWorker(w, r.Context(), spec, "suspend", by, func(ctx context.Context, name string) error {
+		return b.runtime.Suspend(ctx, name, b.instanceProject)
+	})
+}
+
+func (b *Broker) handleOperatorAgentResume(w http.ResponseWriter, r *http.Request) {
+	spec, by, ok := b.remoteCallersAgent(w, r, "resume")
+	if !ok {
+		return
+	}
+	if b.isRevoked(spec.Name) {
+		b.audit("agent", by, "deny", "resume "+spec.Name+": revoked")
+		refuse(w, ReasonRevoked, "agent "+spec.Name+" is revoked", http.StatusForbidden)
+		return
+	}
+	if !b.runtimeReady(w) {
+		return
+	}
+	b.resumeWorker(r.Context(), w, spec, by)
+}

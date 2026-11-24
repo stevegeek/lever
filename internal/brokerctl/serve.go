@@ -378,8 +378,9 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 	// sender; /message/verify learns that label from the hub, the way the hub
 	// stamps it, rather than assuming the dev user's address.
 	d.ResolveControllerSender = controllerSenderFrom(hc)
-	// No worker that mounts a shared folder starts or resumes while the
-	// running manager lacks the pins that keep it from swapping a folder.
+	// With shared folders or templates configured, no worker or spawned
+	// agent starts or resumes while the running manager lacks the mounts
+	// that keep it from swapping a folder or a workspace for a link.
 	d.SharedGuard = sharedGuard(app, jr, jailMount)
 	// A resume is refused when the worker's record holds a shared mount the
 	// config does not grant (broker.refuseStaleShares). With a folder

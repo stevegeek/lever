@@ -376,7 +376,9 @@ checkx "lever agent list --all keeps both as destroyed" '[ "$(LA list --all | gr
 
 say "agents spawned over ssh (the forced command)"
 # sshd runs the key's forced command from the home directory with the
-# caller's words in SSH_ORIGINAL_COMMAND; this runs it the same way.
+# caller's words in SSH_ORIGINAL_COMMAND; this runs it the same way. A
+# refusal exits non-zero, so its line is captured before it is matched
+# (pipefail).
 RV() { (cd "$HOME" && SSH_ORIGINAL_COMMAND="$1" "$LEVER" agent remote-verb --config "$INST/lever.yaml" --templates session --as e2e 2>/dev/null); }
 rj=$(RV "spawn session e2e over ssh" < "$WORK/brief.md")
 echo "      | $rj" | cut -c1-300
@@ -384,9 +386,9 @@ S3=$(printf '%s' "$rj" | python3 -c 'import json,sys; print(json.load(sys.stdin)
 checkx "the key spawns an agent ($S3)" '[[ "$S3" =~ ^s-[a-z2-7]{6}$ ]]'
 checkx "it is recorded as created by ssh:e2e" 'LA list | grep -E "^$S3 .* ssh:e2e " >/dev/null'
 checkx "the key lists it, and no other agent" 'o=$(RV list </dev/null); [[ "$o" == *"\"$S3\""* && "$o" != *"$S1"* && "$o" != *"$S2"* ]]'
-checkx "a shell command is refused" 'RV "sh -c id" </dev/null | grep -q "\"reason\":\"bad-request\""'
-checkx "a template not listed is refused" 'RV "spawn other" </dev/null | grep -q "\"reason\":\"no-template\""'
-checkx "a destroyed agent of the operator's is not the key's" 'RV "destroy $S1" </dev/null | grep -q "\"reason\":\"not-spawned\""'
+checkx "a shell command is refused" 'o=$(RV "sh -c id" </dev/null); [[ "$o" == *"\"reason\":\"bad-request\""* ]]'
+checkx "a template not listed is refused" 'o=$(RV "spawn other" </dev/null); [[ "$o" == *"\"reason\":\"no-template\""* ]]'
+checkx "a destroyed agent of the operator's is not the key's" 'o=$(RV "destroy $S1" </dev/null); [[ "$o" == *"\"reason\":\"not-spawned\""* ]]'
 checkx "the key suspends its agent" 'RV "suspend $S3" </dev/null | grep -q "\"ok\":true"'
 checkx "the key resumes its agent" 'RV "resume $S3" </dev/null | grep -q "\"ok\":true"'
 rd=$(RV "destroy $S3 --stop" </dev/null)

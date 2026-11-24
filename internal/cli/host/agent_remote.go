@@ -83,6 +83,8 @@ func remoteRefusal(reason string) string {
 		return "the agent is running: destroy it with --stop"
 	case broker.ReasonBadRequest:
 		return "bad request"
+	case reasonNoOperatorSocket, "":
+		return "lever did not answer; try again later"
 	}
 	return "refused (" + cmp.Or(safeToken(reason), "unknown") + "); the operator can see why in the broker's audit log"
 }
@@ -276,7 +278,8 @@ func runRemoteVerb(cmd *cobra.Command, templates []string, as, configPath string
 	brokerFail := func(err error, path string) error {
 		if ref, ok := operatorFailure(err, path); ok {
 			res.Phase = safeToken(ref.Phase)
-			return fail(errors.New(remoteRefusal(ref.Reason)), ref.Reason, agentExit(ref.Reason))
+			reason := safeToken(ref.Reason)
+			return fail(errors.New(remoteRefusal(reason)), reason, agentExit(reason))
 		}
 		return fail(errors.New("lever did not answer; try again later"), "", 1)
 	}

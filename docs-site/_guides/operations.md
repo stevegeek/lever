@@ -227,7 +227,9 @@ What the key may do:
 
 The key works through the broker's operator socket, on the host. Within those bounds it acts with
 the operator's authority. The broker checks again that an agent is the key's before a suspend,
-resume or destroy, and its audit log names the key (`ssh:factory`) for every verb. Revoke the key
+resume or destroy, and its audit log names the key (`ssh:factory`) for each of those and each
+spawn. A command the wrapper refuses itself (a bad command, a template or agent that is not the
+key's) never reaches the broker. Revoke the key
 by removing its line from `authorized_keys`; the agents it spawned stay until you destroy them.
 
 ## Driving workers from a host program

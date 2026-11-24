@@ -35,6 +35,11 @@ version bump moves the block under the new version heading.
   - Stable links: `/lever/go/<name>/chat` and `/lever/go/<name>/terminal` (operator only) open an
     agent's chat or terminal, also from a link on another site. A destroyed agent's link says when it
     was destroyed and names its conversation backup.
+  - Spawning over ssh: `lever agent remote-verb --templates T --as NAME` is the forced command of an
+    `authorized_keys` key, for a caller on another machine (a factory's tick). The key may spawn
+    from the listed templates (brief on stdin, at most 4 a minute and 200 a day), and list, suspend,
+    resume and destroy only the agents it spawned, which are recorded as created by `ssh:NAME`. A
+    destroy always backs up. The caller's command has a fixed grammar and never reaches a shell.
   - A `delegate` may name `template:<name>`, which holds for that template's active agents.
   - Config load checks that every template's `max_running` agents fit in the VM's memory and,
     with the manager and the workers, within scion's cap of 12 running agents.

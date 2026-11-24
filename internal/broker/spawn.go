@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -40,6 +41,10 @@ type SpawnRequest struct {
 	Template string `json:"template"`
 	Task     string `json:"task,omitempty"`
 	Label    string `json:"label,omitempty"`
+	// By names a remote caller the operator socket speaks for (see
+	// ValidRemoteCaller): it is recorded as the agent's creator and is the
+	// key of its rate limits. Operator socket only.
+	By string `json:"by,omitempty"`
 }
 
 // SpawnResponse answers a spawn.
@@ -58,6 +63,28 @@ type DestroyRequest struct {
 	Stop bool `json:"stop,omitempty"`
 	// NoBackup skips the conversation backup (operator only).
 	NoBackup bool `json:"no_backup,omitempty"`
+	// By names a remote caller the operator socket speaks for: it may
+	// destroy only the agents it spawned, always with a backup. Operator
+	// socket only.
+	By string `json:"by,omitempty"`
+}
+
+// remoteCallerRE: "ssh:" and a key's name. The colon keeps it apart from
+// every agent and manager name, which are what CreatedBy holds otherwise.
+var remoteCallerRE = regexp.MustCompile(`^ssh:[a-z0-9][a-z0-9-]{0,31}$`)
+
+// ValidRemoteCaller reports whether s names a remote caller, such as
+// "ssh:factory" (`lever agent remote-verb --as factory`).
+func ValidRemoteCaller(s string) bool { return remoteCallerRE.MatchString(s) }
+
+// checkBy refuses a By that is not a remote caller's name.
+func (b *Broker) checkBy(w http.ResponseWriter, verb, by string) bool {
+	if by == "" || ValidRemoteCaller(by) {
+		return true
+	}
+	b.audit("agent", operatorActor, "deny", verb+": bad caller name")
+	refuse(w, ReasonBadRequest, "bad request: by must be ssh:<name>", http.StatusBadRequest)
+	return false
 }
 
 // DestroyResponse answers a destroy.
@@ -145,6 +172,9 @@ func (b *Broker) handleOperatorAgentSpawn(w http.ResponseWriter, r *http.Request
 		refuse(w, ReasonBadRequest, "bad request: "+firstLineOf(err.Error()), http.StatusBadRequest)
 		return
 	}
+	if !b.checkBy(w, "spawn", req.By) {
+		return
+	}
 	b.spawnAgent(r.Context(), w, req, operatorActor)
 }
 
@@ -153,6 +183,9 @@ func (b *Broker) handleOperatorAgentDestroy(w http.ResponseWriter, r *http.Reque
 	if err := decodeStrict(w, r, smallBodyLimit, &req); err != nil {
 		b.audit("agent", operatorActor, "deny", "destroy: bad body")
 		refuse(w, ReasonBadRequest, "bad request: "+firstLineOf(err.Error()), http.StatusBadRequest)
+		return
+	}
+	if !b.checkBy(w, "destroy", req.By) {
 		return
 	}
 	b.destroyAgent(r.Context(), w, req, operatorActor)
@@ -275,6 +308,16 @@ func (b *Broker) spawnAgent(ctx context.Context, w http.ResponseWriter, req Spaw
 	if actor != operatorActor {
 		spawner = "manager"
 	}
+	// A remote caller spawns with the operator's templates, under its own
+	// name and rate limits. Only the operator socket sets By.
+	limited := spawner == "manager"
+	if req.By != "" {
+		if actor != operatorActor {
+			refuse(w, ReasonBadRequest, "bad request", http.StatusBadRequest)
+			return
+		}
+		actor, limited = req.By, true
+	}
 	t, ok := b.workers.template(req.Template)
 	if !ok || (spawner == "manager" && !t.ManagerMay) {
 		b.audit("agent", actor, "deny", "spawn: no template "+boundedLogin(req.Template)+" for the "+spawner)
@@ -290,7 +333,7 @@ func (b *Broker) spawnAgent(ctx context.Context, w http.ResponseWriter, req Spaw
 	if !b.taskOK(w, actor, verb, req.Task, "") {
 		return
 	}
-	if spawner == "manager" {
+	if limited {
 		if ok, wait := b.spawnRate.take(actor, time.Now()); !ok {
 			b.audit("agent", actor, "deny", verb+": rate limited")
 			refuse(w, ReasonRateLimited, fmt.Sprintf("rate limited: try again in %ds", int(wait.Seconds())+1), http.StatusTooManyRequests)
@@ -318,9 +361,9 @@ func (b *Broker) spawnAgent(ctx context.Context, w http.ResponseWriter, req Spaw
 	}
 	// Counted last, so only a spawn that passed every other check uses up
 	// the day's quota.
-	if spawner == "manager" && !b.takeDailySpawn(time.Now()) {
+	if limited && !b.takeDailySpawn(actor, time.Now()) {
 		b.audit("agent", actor, "deny", verb+": daily spawn quota reached")
-		refuse(w, ReasonRateLimited, fmt.Sprintf("rate limited: the manager may spawn at most %d agents a day; ask the operator", managerSpawnDailyLimit), http.StatusTooManyRequests)
+		refuse(w, ReasonRateLimited, fmt.Sprintf("rate limited: %s may spawn at most %d agents a day; ask the operator", spawnerName(spawner, req.By), managerSpawnDailyLimit), http.StatusTooManyRequests)
 		return
 	}
 	// taken runs under the registry's lock: it must not read the registry.
@@ -456,6 +499,13 @@ func (b *Broker) rollbackSpawn(ctx context.Context, rec AgentRecord, actor strin
 // destroyAgent is the destroy verb after its caller is authenticated. The
 // manager may destroy only the agents it spawned.
 func (b *Broker) destroyAgent(ctx context.Context, w http.ResponseWriter, req DestroyRequest, actor string) {
+	if req.By != "" {
+		if actor != operatorActor {
+			refuse(w, ReasonBadRequest, "bad request", http.StatusBadRequest)
+			return
+		}
+		actor = req.By
+	}
 	rec, ok := b.workers.record(req.Name)
 	verb := "destroy " + boundedLogin(req.Name)
 	if !ok || rec.State == AgentDestroyed {
@@ -465,8 +515,12 @@ func (b *Broker) destroyAgent(ctx context.Context, w http.ResponseWriter, req De
 	}
 	if actor != operatorActor {
 		if rec.CreatedBy != actor {
-			b.audit("agent", actor, "deny", verb+": not spawned by the manager")
-			refuse(w, ReasonNotYours, "forbidden: "+rec.Name+" was not spawned by the manager", http.StatusForbidden)
+			who := "the manager"
+			if req.By != "" {
+				who = req.By
+			}
+			b.audit("agent", actor, "deny", verb+": not spawned by "+who)
+			refuse(w, ReasonNotYours, "forbidden: "+rec.Name+" was not spawned by "+who, http.StatusForbidden)
 			return
 		}
 		if req.NoBackup {
@@ -916,15 +970,30 @@ func (b *Broker) templateAtMaxRunning(ctx context.Context, t TemplateSpec) (erro
 // spawn leaves a tombstone, a revocation entry, a backup and an archive.
 const managerSpawnDailyLimit = 200
 
-func (b *Broker) takeDailySpawn(now time.Time) bool {
+// takeDailySpawn counts one spawn against who's day: the manager's, or a
+// remote caller's. Each has its own day, which starts at its first spawn.
+func (b *Broker) takeDailySpawn(who string, now time.Time) bool {
 	b.spawnDayMu.Lock()
 	defer b.spawnDayMu.Unlock()
-	if now.Sub(b.spawnDayStart) >= 24*time.Hour {
-		b.spawnDayStart, b.spawnDayCount = now, 0
+	if b.spawnDays == nil {
+		b.spawnDays = map[string]*winCount{}
 	}
-	if b.spawnDayCount >= managerSpawnDailyLimit {
+	d := b.spawnDays[who]
+	if d == nil || now.Sub(d.start) >= 24*time.Hour {
+		d = &winCount{start: now}
+		b.spawnDays[who] = d
+	}
+	if d.n >= managerSpawnDailyLimit {
 		return false
 	}
-	b.spawnDayCount++
+	d.n++
 	return true
+}
+
+// spawnerName names a limited spawner in a refusal.
+func spawnerName(spawner, by string) string {
+	if by != "" {
+		return by
+	}
+	return "the " + spawner
 }

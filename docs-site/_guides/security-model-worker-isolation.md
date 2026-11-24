@@ -490,6 +490,17 @@ broker checks. What spawning adds, and how it is held:
   of a spawned agent. A spawned agent never takes the place of a configured agent of the same
   name in the web page.
 
+- **An ssh key spawns only within its forced command.** `lever agent remote-verb` is the key's
+  `authorized_keys` command, so the caller never picks the program, only the words it parses.
+  Those words have a fixed grammar: spaces split them, and any other whitespace, control or
+  formatting character refuses the line. They never reach a shell, a flag parser or a path, and
+  the brief goes on stdin, bounded. The key spawns from its listed templates only, is the
+  recorded creator (`ssh:<name>`, which no agent or manager name can equal, since those hold no
+  colon), and lists and drives only its own agents. The broker itself refuses that caller's
+  destroy of another's agent and a destroy without a backup, and rate-limits its spawns apart from
+  the manager's. Within those bounds the key holds the operator's authority over the socket: treat
+  it like a deploy key for those templates.
+
 **Residual risks.** The manager mounts the whole tree, so it can write a spawned agent's workspace
 (its `.claude` settings included) as it can a worker's. An operator-only template with grants wider
 than the manager's is therefore reachable by a compromised manager the same way a wider worker is:

@@ -175,7 +175,56 @@ and tokens can never name another agent.
   always means the same agent, and after its destroy it says when and names its conversation backup
   (see [Remote access](/remote-access/#spawned-agents-and-stable-links)). Contacts never see
   spawned agents, and the chat's file exchange is not offered for them yet.
+- **From another machine.** A program elsewhere (a factory's tick, a script on your laptop) can
+  spawn and destroy over ssh with a key that may run nothing else: see
+  [Spawning over ssh](#spawning-over-ssh).
 - **Not yet.** Doctor's per-agent network row skips spawned agents.
+
+### Spawning over ssh
+
+Give the caller its own ssh key, and add it to the host user's `~/.ssh/authorized_keys` with a
+forced command, so the key runs `lever agent remote-verb` whatever the caller asks for:
+
+```text
+restrict,command="/usr/local/bin/lever agent remote-verb --config /srv/lever/lever.yaml --templates session --as factory" ssh-ed25519 AAAA... factory
+```
+
+- `restrict` turns off the terminal, forwarding and the user's `~/.ssh/rc` for this key.
+- `--templates` lists the templates this key may spawn from.
+- `--as` names the caller. Its agents are recorded as created by `ssh:factory`; give each key its
+  own name.
+- `--config` is the instance's `lever.yaml`, because a forced command starts in the home directory.
+
+The caller then sends one of these commands. The brief of a spawn goes on stdin (at most 64 KiB):
+
+```console
+$ ssh lever-host spawn session PR 412: fix the flaky test < brief.md
+{"name":"s-k3f7qa","template":"session","label":"PR 412: fix the flaky test","ok":true,"phase":"running","exit":0}
+$ ssh lever-host list
+{"templates":[{"name":"session","max_instances":8,"max_running":2,"instances":1,"running":1}],"agents":[...]}
+$ ssh lever-host suspend s-k3f7qa < /dev/null     # and resume
+$ ssh lever-host destroy s-k3f7qa --stop < /dev/null
+```
+
+The whole grammar is `spawn TEMPLATE [LABEL...]`, `destroy NAME [--stop]`, `suspend NAME`,
+`resume NAME` and `list [--json]`. Each answer is one JSON line, with `ok`, and on a refusal
+`reason`, `error` and `exit` (the process exits with the same code, as `lever agent` does). Words
+are split on spaces only, the label is the words after the template, and any tab, newline, control
+or formatting character refuses the whole command. Nothing the caller sends reaches a shell or a
+flag.
+
+What the key may do:
+
+- spawn from the listed templates only, at most 4 a minute and 200 a day, counted apart from the
+  manager and from other keys;
+- list the listed templates and the live agents it spawned, and nothing else;
+- suspend, resume and destroy only the agents it spawned, from a template still listed. A destroy
+  always backs up the conversation.
+
+The key works through the broker's operator socket, on the host. Within those bounds it acts with
+the operator's authority. The broker's audit log names it (`ssh:factory`) for spawn and destroy,
+and names the operator for suspend and resume. Revoke the key by removing its line from
+`authorized_keys`; the agents it spawned stay until you destroy them.
 
 ## Driving workers from a host program
 

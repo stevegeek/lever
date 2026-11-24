@@ -18,7 +18,7 @@ import (
 // lever.yaml. Every verb goes through the broker's operator socket.
 func newAgentCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "agent", Short: "Spawn and destroy agents from templates"}
-	cmd.AddCommand(newAgentSpawnCmd(), newAgentDestroyCmd(), newAgentListCmd())
+	cmd.AddCommand(newAgentSpawnCmd(), newAgentDestroyCmd(), newAgentListCmd(), newAgentRemoteVerbCmd())
 	return cmd
 }
 
@@ -257,7 +257,16 @@ func printAgentList(cmd *cobra.Command, resp broker.AgentListResponse) {
 			state += " (template gone)"
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", safeToken(a.Name), safeToken(a.Template), state, cmp.Or(safeToken(a.Phase), "-"),
-			safeToken(a.CreatedBy), a.CreatedAt.Format("2006-01-02 15:04"), strings.ReplaceAll(termsafe.Sanitize(a.Label), "\t", " "))
+			creatorOf(a.CreatedBy), a.CreatedAt.Format("2006-01-02 15:04"), strings.ReplaceAll(termsafe.Sanitize(a.Label), "\t", " "))
 	}
 	tw.Flush()
+}
+
+// creatorOf is a record's creator for the terminal: an agent or manager
+// name, "operator", or a remote caller ("ssh:<name>").
+func creatorOf(s string) string {
+	if broker.ValidRemoteCaller(s) {
+		return s
+	}
+	return safeToken(s)
 }

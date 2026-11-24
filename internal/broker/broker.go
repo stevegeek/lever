@@ -481,8 +481,8 @@ type Broker struct {
 	backupConversation func(ctx context.Context, agent string) (string, error)
 	spawnRate          *rateWindow
 	spawnDayMu         sync.Mutex
-	spawnDayStart      time.Time
-	spawnDayCount      int
+	// spawnDays counts each limited spawner's spawns in its day.
+	spawnDays map[string]*winCount
 	// inheritedUnsettled are the records a previous broker left spawning or
 	// destroying: the only ones ReconcileAgents settles.
 	inheritedUnsettled map[string]bool

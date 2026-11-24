@@ -862,3 +862,84 @@ func TestRegistryListAndContactWakeOfASpawnedAgent(t *testing.T) {
 		t.Fatalf("contact wake of a destroyed agent: %d %q", rec.Code, rec.Header().Get(ReasonHeader))
 	}
 }
+
+// A remote caller (lever agent remote-verb) spawns through the operator
+// socket under its own name: it is the record's creator, it may destroy
+// only its own agents and always with a backup, and its spawns are rate
+// limited apart from everyone else's. Only the operator socket takes By.
+func TestRemoteCallerSpawnAndDestroy(t *testing.T) {
+	e := newSpawnEnv(t, AgentsState{}, func(t *TemplateSpec) { t.ManagerMay = true; t.MaxInstances = 20; t.MaxRunning = 20 })
+	for _, by := range []string{"factory", "ssh:", "ssh:Factory", "ssh:-x", "ssh:a:b", "ssh:" + strings.Repeat("a", 33), "operator", "test-manager"} {
+		rec := callOperator(t, e.b, http.MethodPost, PathOperatorAgentSpawn, `{"template":"session","by":"`+by+`"}`)
+		if rec.Code != http.StatusBadRequest || len(e.state().Agents) != 0 {
+			t.Fatalf("by %q: %d", by, rec.Code)
+		}
+		rec = callOperator(t, e.b, http.MethodPost, PathOperatorAgentDestroy, `{"name":"s-aaaaaa","by":"`+by+`"}`)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("destroy by %q: %d", by, rec.Code)
+		}
+	}
+	if rec := callWorker(t, e.b, "/agent/spawn", `{"template":"session","by":"ssh:factory"}`, "test-manager"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("the manager set by: %d", rec.Code)
+	}
+	if rec := callWorker(t, e.b, "/agent/destroy", `{"name":"s-aaaaaa","by":"ssh:factory"}`, "test-manager"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("the manager set by on destroy: %d", rec.Code)
+	}
+	theirs := e.spawn(t, `{"template":"session"}`).Name
+	other := e.spawn(t, `{"template":"session","by":"ssh:other"}`).Name
+	// Last, so the fake runtime has it running.
+	mine := e.spawn(t, `{"template":"session","task":"t","by":"ssh:factory"}`).Name
+	if r, _ := e.b.workers.record(mine); r.CreatedBy != "ssh:factory" {
+		t.Fatalf("created_by %q", r.CreatedBy)
+	}
+	for _, name := range []string{theirs, other} {
+		rec := callOperator(t, e.b, http.MethodPost, PathOperatorAgentDestroy, `{"name":"`+name+`","stop":true,"by":"ssh:factory"}`)
+		if rec.Code != http.StatusForbidden || rec.Header().Get(ReasonHeader) != ReasonNotYours {
+			t.Fatalf("destroy %s: %d", name, rec.Code)
+		}
+	}
+	if rec := callOperator(t, e.b, http.MethodPost, PathOperatorAgentDestroy, `{"name":"`+mine+`","stop":true,"no_backup":true,"by":"ssh:factory"}`); rec.Code != http.StatusForbidden {
+		t.Fatalf("no_backup by a remote caller: %d", rec.Code)
+	}
+	if rec := callOperator(t, e.b, http.MethodPost, PathOperatorAgentDestroy, `{"name":"`+mine+`","stop":true,"by":"ssh:factory"}`); rec.Code != http.StatusOK {
+		t.Fatalf("destroy mine: %d %s", rec.Code, rec.Body)
+	}
+	if len(e.backups) != 1 || e.backups[0] != mine {
+		t.Fatalf("backups %v", e.backups)
+	}
+	// Its rate limit is its own: ssh:factory used one spawn this minute,
+	// ssh:other one; the operator has none.
+	var last int
+	for range managerSpawnRateLimit {
+		last = callOperator(t, e.b, http.MethodPost, PathOperatorAgentSpawn, `{"template":"session","by":"ssh:factory"}`).Code
+	}
+	if last != http.StatusTooManyRequests {
+		t.Fatalf("spawn %d by ssh:factory: %d", managerSpawnRateLimit+1, last)
+	}
+	if rec := callOperator(t, e.b, http.MethodPost, PathOperatorAgentSpawn, `{"template":"session","by":"ssh:other"}`); rec.Code != http.StatusOK {
+		t.Fatalf("ssh:other: %d %s", rec.Code, rec.Body)
+	}
+	if rec := callOperator(t, e.b, http.MethodPost, PathOperatorAgentSpawn, `{"template":"session"}`); rec.Code != http.StatusOK {
+		t.Fatalf("the operator: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// Each limited spawner has its own day.
+func TestDailySpawnQuotaIsPerSpawner(t *testing.T) {
+	b := &Broker{}
+	now := time.Now()
+	for range managerSpawnDailyLimit {
+		if !b.takeDailySpawn("ssh:factory", now) {
+			t.Fatal("refused under the quota")
+		}
+	}
+	if b.takeDailySpawn("ssh:factory", now) {
+		t.Fatal("over the quota")
+	}
+	if !b.takeDailySpawn("test-manager", now) {
+		t.Fatal("the manager shares a remote caller's day")
+	}
+	if !b.takeDailySpawn("ssh:factory", now.Add(24*time.Hour)) {
+		t.Fatal("a new day is still refused")
+	}
+}

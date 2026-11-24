@@ -132,6 +132,7 @@ templates:
     obtain: [{tool: github, op: "*"}]
     on_destroy: {workspace: archive}
     spawners: [operator, manager]   # optional: let the manager spawn too
+    idle_suspend: 2h          # optional: suspend one waiting at its prompt for 2 hours
 ```
 
 After `lever reload` (the broker reads templates at start):
@@ -167,10 +168,86 @@ and tokens can never name another agent.
   may obtain only capabilities the manager obtains itself, and may delegate nothing. The manager
   messages and reads the inbox of only its own spawned agents.
 - **Delegating to spawned agents.** A `delegate` grant's `to` may name `template:<name>`: it holds
-  for each active agent of that template.
-- **Not yet.** Spawned agents do not appear in the remote web UI's agent list or chat, and doctor's
-  per-agent network row skips them. Reach them with `lever attach NAME`, `lever msg send`,
-  `lever worker watch` and `lever agent list`.
+  for each active agent of that template, though the manager's holds only for those it spawned,
+  and a spawned agent's only for its own spawner's.
+- **Messaging between agents.** With `messaging.worker_to_worker` (on by default), a spawned agent
+  messages, and is messaged by, only the agents of its own spawner: the operator's agents form one
+  group, the manager's another, and each ssh key's its own. Configured workers message each other
+  as before.
+- **Clearing out destroyed agents.** `lever agent gc --older 30d --force` deletes the archives and
+  conversation backups of agents destroyed at least 30 days ago and drops their records, keeping
+  only their names so they are never used again (`--dry-run` lists what would go). A workspace an
+  `on_destroy: keep` template left in the tree is not touched. Run it from a timer if you like.
+- **In the web page.** With `remote.landing: chat`, the operator's logins see each active spawned
+  agent after the workers, labelled with its spawn label (or its template), and can chat with it,
+  wake it and open its terminal. Every agent has a stable link,
+  `https://<host>/lever/go/<name>/chat` or `.../terminal`; because names are never reused, a link
+  always means the same agent, and after its destroy it says when and names its conversation backup
+  (see [Remote access](/remote-access/#spawned-agents-and-stable-links)). Contacts never see
+  spawned agents, and the chat's file exchange is not offered for them yet.
+- **Idle agents and backups.** Once a minute the broker looks at each spawned agent. One that has
+  waited at its prompt longer than its template's `idle_suspend` is suspended (its conversation
+  is kept; resume it, or wake it from the web page). Operator logins with notifications on get a
+  "waiting for you" push when an agent starts waiting. Once a day, the conversation of each agent
+  that ran is backed up to `.lever-state/agent-conversations/<name>/` (the newest 10 are kept),
+  so a long-lived agent has a recent backup before any destroy. The broker's audit log has a line
+  for each idle suspend and each daily backup.
+- **From another machine.** A program elsewhere (a factory's tick, a script on your laptop) can
+  spawn and destroy over ssh with a key that may run nothing else: see
+  [Spawning over ssh](#spawning-over-ssh).
+- **Not yet.** Doctor's per-agent network row skips spawned agents.
+
+### Spawning over ssh
+
+Give the caller its own ssh key, and add it to the host user's `~/.ssh/authorized_keys` with a
+forced command, so the key runs `lever agent remote-verb` whatever the caller asks for:
+
+```text
+restrict,command="/usr/local/bin/lever agent remote-verb --config /srv/lever/lever.yaml --templates session --as factory" ssh-ed25519 AAAA... factory
+```
+
+- `restrict` turns off the terminal, forwarding and the user's `~/.ssh/rc` for this key.
+- `--templates` lists the templates this key may spawn from.
+- `--as` names the caller. Its agents are recorded as created by `ssh:factory`; give each key its
+  own name.
+- `--config` is the instance's `lever.yaml`, because a forced command starts in the home directory.
+
+The caller then sends one of these commands. The brief of a spawn goes on stdin (at most 64 KiB):
+
+```console
+$ ssh lever-host spawn session PR 412: fix the flaky test < brief.md
+{"name":"s-k3f7qa","template":"session","label":"PR 412: fix the flaky test","ok":true,"phase":"running","exit":0}
+$ ssh lever-host list
+{"templates":[{"name":"session","max_instances":8,"max_running":2,"instances":1,"running":1}],"agents":[...]}
+$ ssh lever-host suspend s-k3f7qa < /dev/null     # and resume
+$ ssh lever-host destroy s-k3f7qa --stop < /dev/null
+```
+
+The whole grammar is `spawn TEMPLATE [LABEL...]`, `destroy NAME [--stop]`, `suspend NAME`,
+`resume NAME` and `list [--json]`. Each answer is one JSON line, with `ok`, and on a refusal
+`reason`, `error` and `exit` (the process exits with the same code, as `lever agent` does). A
+refusal's `error` is a fixed sentence per reason: the broker's own text, which can name other
+agents and host paths, stays in its audit log. Words
+are split on spaces only, the label is the words after the template, and any tab, newline, control
+or formatting character refuses the whole command. Nothing the caller sends reaches a shell or a
+flag.
+
+What the key may do:
+
+- spawn from the listed templates only, at most 4 a minute and 200 in a day, counted apart from
+  the manager and from other keys (the counts live in the broker, so `lever reload` resets them);
+- list the listed templates, with counts that include every agent of the template, and the live
+  agents it spawned, and nothing else;
+- suspend, resume and destroy only the agents it spawned, from a template still listed. A destroy
+  always backs up the conversation;
+- run at most 4 commands at once, each for at most 10 minutes.
+
+The key works through the broker's operator socket, on the host. Within those bounds it acts with
+the operator's authority. The broker checks again that an agent is the key's before a suspend,
+resume or destroy, and its audit log names the key (`ssh:factory`) for each of those and each
+spawn. A command the wrapper refuses itself (a bad command, a template or agent that is not the
+key's) never reaches the broker. Revoke the key
+by removing its line from `authorized_keys`; the agents it spawned stay until you destroy them.
 
 ## Driving workers from a host program
 

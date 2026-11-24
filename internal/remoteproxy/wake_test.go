@@ -379,7 +379,7 @@ func TestWakeRouteOriginRuleItself(t *testing.T) {
 		}
 		rw := httptest.NewRecorder()
 		line := AuditLine{}
-		g.serveWake(rw, req, &line, g.viewerFor("c@x"), "w1")
+		g.serveWake(rw, req, &line, g.viewerFor(context.Background(), "c@x"), "w1")
 		if rw.Code != http.StatusForbidden || line.Reason != "origin" {
 			t.Errorf("%s: %d %+v", name, rw.Code, line)
 		}

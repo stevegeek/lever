@@ -414,3 +414,62 @@ func TestCachedAgentRecordsStrandedCreated(t *testing.T) {
 		t.Fatal("the count did not start again")
 	}
 }
+
+// remoteSpawned reads the registry alone (no hub read) over the operator
+// socket, and is off with no template or with the state inside the tree.
+func TestRemoteSpawnedOverTheOperatorSocket(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "ls") // short: socket paths are capped
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	st := state.State{Dir: dir}
+	ln, err := net.Listen("unix", st.OperatorSock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var query string
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != broker.PathOperatorAgentList || r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		query = r.URL.RawQuery
+		_ = json.NewEncoder(w).Encode(broker.AgentListResponse{Agents: []broker.AgentEntry{
+			{AgentRecord: broker.AgentRecord{Name: "s-abc234", Template: "session", Label: "PR 42", State: broker.AgentActive}},
+			{AgentRecord: broker.AgentRecord{Name: "s-old777", Template: "session", State: broker.AgentDestroyed, Transcript: "t1"}, Orphaned: true},
+		}})
+	})}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+	app := &config.App{Name: "boss", Tree: t.TempDir(), Templates: []config.Template{{Name: "session"}}}
+	list := remoteSpawned(app, st)
+	if list == nil {
+		t.Fatal("no registry source with a template configured")
+	}
+	got, err := list(context.Background())
+	// Live agents only: tombstones are never pruned.
+	if err != nil || len(got) != 2 || query != "registry=1" {
+		t.Fatalf("%+v %v query %q", got, err, query)
+	}
+	if got[0] != (remoteproxy.SpawnedAgent{Name: "s-abc234", Template: "session", Label: "PR 42", State: "active"}) ||
+		got[1].State != "destroyed" || !got[1].Orphaned || got[1].Transcript != "t1" {
+		t.Fatalf("%+v", got)
+	}
+	// One record, destroyed ones included, by name.
+	one := remoteSpawnedRecord(app, st)
+	a, ok, err := one(context.Background(), "s-old777")
+	if err != nil || !ok || a.Transcript != "t1" || query != "all=1&registry=1&name=s-old777" {
+		t.Fatalf("%+v %v %v query %q", a, ok, err, query)
+	}
+	if _, ok, _ := one(context.Background(), "s-nobody"); ok {
+		t.Fatal("a record the broker did not name")
+	}
+	if remoteSpawned(&config.App{Name: "boss", Tree: app.Tree}, st) != nil {
+		t.Fatal("a registry source with no template")
+	}
+	tree := t.TempDir()
+	if remoteSpawned(&config.App{Name: "boss", Tree: tree, Templates: app.Templates}, state.State{Dir: filepath.Join(tree, ".lever-state")}) != nil {
+		t.Fatal("a registry source with the state inside the tree")
+	}
+}

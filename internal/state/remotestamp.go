@@ -40,6 +40,10 @@ type RemoteIdentity struct {
 	Workers    []string `json:",omitempty"`
 	Tree       string   `json:",omitempty"`
 	LabelsFile string   `json:",omitempty"`
+	// Spawned (landing chat only): a template is configured, so the proxy
+	// lists the broker's spawned agents. Omitted when off, so the stamp is
+	// unchanged.
+	Spawned bool `json:",omitempty"`
 	// AgentMessages: the proxy filters a contact's history, events and
 	// previews. Omitted when off, so the stamp is unchanged.
 	AgentMessages bool `json:",omitempty"`

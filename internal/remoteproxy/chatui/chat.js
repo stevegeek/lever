@@ -902,7 +902,7 @@ function showFilesNote(text) {
 }
 
 function syncAttach() {
-  const on = !!(roster && roster.files && chat);
+  const on = !!(roster && roster.files && chat && !chat.noFiles);
   el.attach.hidden = !on || !roster.files.uploads;
   el.files.hidden = !on;
   el.attach.disabled = uploading || sending || !chat || !chat.view || !chat.view.input;
@@ -1613,7 +1613,7 @@ function sendFile(name, file, progress) {
 async function upload(file) {
   const c = chat;
   const cfg = roster && roster.files;
-  if (!file || !c || !cfg || uploading || sending) return;
+  if (!file || !c || c.noFiles || !cfg || uploading || sending) return;
   const why = fileCheck(file, cfg);
   if (why) {
     showError(why);
@@ -1749,7 +1749,7 @@ function openChat(name) {
   }
   el.viewonly.hidden = true;
   el.form.hidden = false;
-  chat = { name: a.name, id: a.id, conversation: a.conversation, userId: roster.userId, unsent: null, view: null };
+  chat = { name: a.name, id: a.id, conversation: a.conversation, userId: roster.userId, unsent: null, view: null, noFiles: !!a.noFiles };
   if (chat.conversation) loadUnsent(chat);
   loadDraft();
   applyView(a);

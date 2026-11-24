@@ -155,6 +155,9 @@ func (b *Broker) OperatorHandler() http.Handler {
 	mux.HandleFunc("POST "+PathOperatorAgentSpawn, b.handleOperatorAgentSpawn)
 	mux.HandleFunc("POST "+PathOperatorAgentDestroy, b.handleOperatorAgentDestroy)
 	mux.HandleFunc("GET "+PathOperatorAgentList, b.handleOperatorAgentList)
+	mux.HandleFunc("POST "+PathOperatorAgentGC, b.handleOperatorAgentGC)
+	mux.HandleFunc("POST "+PathOperatorAgentSuspend, b.handleOperatorAgentSuspend)
+	mux.HandleFunc("POST "+PathOperatorAgentResume, b.handleOperatorAgentResume)
 	mux.HandleFunc("POST "+PathOperatorWorkerEvents, b.handleOperatorWorkerEvents)
 	mux.HandleFunc("POST "+wire.PathOperatorAgentMessagesMatch, b.handleAgentMessagesMatch)
 	return mux
@@ -198,6 +201,9 @@ func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn, directiveL
 	}
 	if b.hostWatchEnabled() {
 		go b.runHostWatch(ctx)
+	}
+	if b.agentLoopEnabled() {
+		go b.runAgentLoop(ctx)
 	}
 	if b.tokenWatchEnabled() {
 		// scion's hub token refresh timer stalls while the host sleeps, and

@@ -341,6 +341,9 @@ checkx "its container runs" 'X ps --format "{{.Names}}" | grep -q -- "$S1"'
 checkx "its workspace holds its lever skill" '[ -f "$INST/workspace/sessions/$S1/.claude/skills/lever-agent/SKILL.md" ]'
 checkx "lever agent list shows it active" 'LA list | grep -E "^$S1 .*active" >/dev/null'
 checkx "lever msg send reaches it" '(cd "$INST" && "$LEVER" msg send --to "$S1" "stack e2e hello" 2>&1) | grep -q Sent'
+# The remote proxy's roster source: the registry over the operator socket.
+checkx "the registry list for the remote proxy names it active" \
+	'curl -fsS --unix-socket "$INST/.lever-state/operator.sock" "http://lever/operator/agent/list?all=1&registry=1" | python3 -c "import json,sys; a=[x for x in json.load(sys.stdin)[\"agents\"] if x[\"name\"]==sys.argv[1]]; sys.exit(0 if a and a[0][\"state\"]==\"active\" and not a[0].get(\"phase\") else 1)" "$S1"'
 out=$(mgr agent spawn session --task probe)
 echo "      | $out" | tail -1 | cut -c1-300
 checkx "max_running refuses a second running agent of the template" '[[ "$out" == *"allows 1 running"* ]]'
@@ -370,6 +373,40 @@ out=$(mgr agent destroy "$S2" --stop)
 echo "      | $out" | head -1 | cut -c1-300
 checkx "the manager destroys its own agent" '[[ "$out" == *"destroyed"* ]]'
 checkx "lever agent list --all keeps both as destroyed" '[ "$(LA list --all | grep -cE "^s-[a-z2-7]{6} .*destroyed")" = 2 ]'
+
+say "agents spawned over ssh (the forced command)"
+# sshd runs the key's forced command from the home directory with the
+# caller's words in SSH_ORIGINAL_COMMAND; this runs it the same way. A
+# refusal exits non-zero, so its line is captured before it is matched
+# (pipefail).
+RV() { (cd "$HOME" && SSH_ORIGINAL_COMMAND="$1" "$LEVER" agent remote-verb --config "$INST/lever.yaml" --templates session --as e2e 2>/dev/null); }
+rj=$(RV "spawn session e2e over ssh" < "$WORK/brief.md")
+echo "      | $rj" | cut -c1-300
+S3=$(printf '%s' "$rj" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("name",""))' 2>/dev/null)
+checkx "the key spawns an agent ($S3)" '[[ "$S3" =~ ^s-[a-z2-7]{6}$ ]]'
+checkx "it is recorded as created by ssh:e2e" 'LA list | grep -E "^$S3 .* ssh:e2e " >/dev/null'
+checkx "the key lists it, and no other agent" 'o=$(RV list </dev/null); [[ "$o" == *"\"$S3\""* && "$o" != *"$S1"* && "$o" != *"$S2"* ]]'
+checkx "a shell command is refused" 'o=$(RV "sh -c id" </dev/null); [[ "$o" == *"\"reason\":\"bad-request\""* ]]'
+checkx "a template not listed is refused" 'o=$(RV "spawn other" </dev/null); [[ "$o" == *"\"reason\":\"no-template\""* ]]'
+checkx "a destroyed agent of the operator's is not the key's" 'o=$(RV "destroy $S1" </dev/null); [[ "$o" == *"\"reason\":\"not-spawned\""* ]]'
+checkx "the key suspends its agent" 'RV "suspend $S3" </dev/null | grep -q "\"ok\":true"'
+checkx "the key resumes its agent" 'RV "resume $S3" </dev/null | grep -q "\"ok\":true"'
+rd=$(RV "destroy $S3 --stop" </dev/null)
+echo "      | $rd" | cut -c1-300
+checkx "the key destroys its agent" 'printf "%s" "$rd" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if d[\"ok\"] else 1)"'
+checkx "its name is revoked for good" 'grep -q "\"$S3\"" "$INST/.lever-state/revocation.json"'
+
+say "lever agent gc"
+gj=$(LA gc --older 0 --dry-run --json)
+echo "      | $gj" | cut -c1-300
+checkx "a dry run lists the destroyed agents and deletes nothing" 'printf "%s" "$gj" | grep -q "\"$S1\"" && [ -f "$INST/.lever-state/agent-archives/$S1.tar.gz" ]'
+gj=$(LA gc --older 0 --force --json)
+echo "      | $gj" | cut -c1-300
+checkx "gc collects the destroyed agents" 'for n in "$S1" "$S2" "$S3"; do printf "%s" "$gj" | grep -q "\"$n\"" || exit 1; done'
+checkx "their archives and backups are gone" '[ ! -e "$INST/.lever-state/agent-archives/$S1.tar.gz" ] && [ ! -e "$INST/.lever-state/agent-conversations/$S1" ]'
+checkx "their names stay retired and revoked" 'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if sys.argv[2] in d.get(\"retired\",[]) and all(a[\"name\"]!=sys.argv[2] for a in d[\"agents\"]) else 1)" "$INST/.lever-state/agents.json" "$S1" && grep -q "\"$S1\"" "$INST/.lever-state/revocation.json"'
+checkx "lever agent list --all no longer lists them" '! LA list --all | grep -q -- "$S1"'
+
 
 say "the experiment fence on the hub"
 for p in /api/v1/conduit/grant-keys /api/v1/artifacts /api/v1/thread-groups; do

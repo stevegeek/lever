@@ -128,8 +128,10 @@ func (b *Broker) handleOperatorWorkerResume(w http.ResponseWriter, r *http.Reque
 // login. Its answers are short words: the proxy shows none of them.
 func (b *Broker) wakeFor(w http.ResponseWriter, r *http.Request, who ResumeFor) {
 	actor := "remote:" + boundedLogin(who.Login)
+	// A spawned agent (any state) is on the operator's logins' pages only:
+	// a contact's wake of one gets the answer of a name that is no worker.
 	spec, ok := b.workerSpec(who.Worker)
-	if !ok {
+	if !ok || who.Tier != "operator" && b.workers.spawned(who.Worker) {
 		b.audit("worker", actor, "deny", "wake: not a declared worker")
 		refuse(w, ReasonNotAWorker, "not a worker", http.StatusForbidden)
 		return

@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 )
 
 // Template is one `templates:` entry: the shape of agents the broker spawns
@@ -44,7 +45,14 @@ type Template struct {
 	// Spawners are who may spawn from it: "operator" (always allowed, the
 	// default) and "manager".
 	Spawners []string `yaml:"spawners" json:",omitempty"`
+	// IdleSuspend suspends an instance that has waited at its prompt this
+	// long (0, the default, never does). Suspend keeps the conversation.
+	IdleSuspend time.Duration `yaml:"idle_suspend" json:",omitempty"`
 }
+
+// MinIdleSuspend is the shortest idle_suspend: the broker looks once a
+// minute, and a shorter one would suspend an agent between two prompts.
+const MinIdleSuspend = 5 * time.Minute
 
 // TemplateOnDestroy is what destroy does with an instance's workspace.
 type TemplateOnDestroy struct {
@@ -287,6 +295,9 @@ func (a *App) validateTemplate(t Template) error {
 	}
 	if t.MaxInstances < t.MaxRunning || t.MaxInstances > MaxTemplateInstances {
 		return fmt.Errorf("config: %s max_instances %d must be between max_running (%d) and %d", who, t.MaxInstances, t.MaxRunning, MaxTemplateInstances)
+	}
+	if t.IdleSuspend != 0 && (t.IdleSuspend < MinIdleSuspend || t.IdleSuspend > 30*24*time.Hour) {
+		return fmt.Errorf("config: %s idle_suspend %s must be 0 (off) or between %s and 30 days", who, t.IdleSuspend, MinIdleSuspend)
 	}
 	switch t.OnDestroy.Workspace {
 	case "", WorkspaceArchive, WorkspaceRemove, WorkspaceKeep:

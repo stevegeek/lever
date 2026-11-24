@@ -54,6 +54,22 @@ test('anything else shows the plain text', async () => {
   assert.equal(down.shown[0].title, 'New message');
 });
 
+test('a waiting push says the agent waits, and nothing more', async () => {
+  const env = await loadSW();
+  await env.push('{"v":1,"agent":"w1","kind":"waiting"}');
+  assert.equal(env.shown[0].title, 'w1 is waiting for you');
+  assert.deepEqual(env.shown[0].o.data, { agent: 'w1' });
+  assert.equal(env.shown[0].o.body, undefined);
+  for (const raw of ['{"v":1,"agent":"nobody","kind":"waiting"}', '{"v":1,"agent":"<b>","kind":"waiting"}']) {
+    const other = await loadSW();
+    await other.push(raw);
+    assert.equal(other.shown[0].title, 'An agent is waiting for you', raw);
+  }
+  const odd = await loadSW();
+  await odd.push('{"v":1,"agent":"w1","kind":"<script>"}');
+  assert.equal(odd.shown[0].title, 'New message from w1');
+});
+
 test('a tap focuses an open chat or opens one', async () => {
   let env = await loadSW({ windows: ['https://mac.ts.net/lever/chat'] });
   assert.equal(await env.click({ agent: 'w1' }), true);

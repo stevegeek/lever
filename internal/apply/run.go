@@ -1917,7 +1917,7 @@ func (r *run) warnManagerTreeMounts(ctx context.Context, jp string) {
 		gaps = live
 	}
 	if !gaps.Empty() {
-		r.d.Log("start-manager: warning: manager %q does not hold its manager.read_only or shared_folders protection: %s. To protect them, %s", r.app.Name, gaps, ManagerTreeMountsFix(gaps))
+		r.d.Log("start-manager: warning: manager %q does not hold its manager.read_only, shared_folders or template dir_root protection: %s. To protect them, %s", r.app.Name, gaps, ManagerTreeMountsFix(gaps))
 		if tools := r.toolsOnReadOnly(); len(tools) > 0 {
 			r.d.Log("start-manager: the broker does not start tool(s) %s until then: each runs a program from a protected directory, which this manager could have rewritten", strings.Join(tools, ", "))
 		}

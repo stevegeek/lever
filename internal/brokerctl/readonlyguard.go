@@ -95,15 +95,19 @@ func checkManagerReadOnly(ctx context.Context, name, tree, jailMount string, wan
 	return nil
 }
 
-// sharedGuard is the check before any worker starts or resumes while shared
-// folders are configured: the manager container must hold its whole tree
-// plan (the pins over every shared folder and its ancestors, and the worker
-// dirs), read as the tool guard reads it. With no manager container, or a
+// sharedGuard is the check before any worker or spawned agent starts or
+// resumes while shared folders or templates are configured: the manager
+// container must hold its whole tree plan (the pins over every shared folder
+// and its ancestors, the worker dirs, and each template's dir_root
+// read-only), read as the tool guard reads it. With no manager container, or a
 // stopped one whose configured mounts hold the plan, it passes: a manager
 // that is down cannot swap anything. An unreadable mount table is
-// ErrSharedCheckUnavailable. nil when no shared folder is configured.
+// ErrSharedCheckUnavailable. nil when neither is configured.
 func sharedGuard(app *config.App, jr proc.Runner, jailMount string) func(context.Context) error {
-	if len(app.SharedFolders) == 0 {
+	// Templates too: a manager created before them lacks the read-only
+	// dir_root mounts, and could swap a spawned workspace for a link
+	// between lever's check and the guest's mount.
+	if len(app.SharedFolders) == 0 && len(app.Templates) == 0 {
 		return nil
 	}
 	ref := jail.ContainerName(path.Base(jailMount), app.Name)

@@ -47,6 +47,11 @@ type agentEntry struct {
 	Activity     string `json:"activity,omitempty"`
 	Unread       *int   `json:"unread,omitempty"`
 	Terminal     string `json:"terminal,omitempty"` // operator only
+	// Template: the agent was spawned from it (operator only).
+	Template string `json:"template,omitempty"`
+	// NoFiles: the file exchange is not offered for this agent (a spawned
+	// agent has no configured workspace for it yet).
+	NoFiles bool `json:"noFiles,omitempty"`
 }
 
 type agentsAnswer struct {
@@ -121,15 +126,27 @@ func activityWord(a string) string {
 	return ""
 }
 
-// viewerFor: an operator messages the manager and every worker; a contact
-// messages its agents: list and sees its see: list.
-func (g *gate) viewerFor(login string) viewer {
+// viewerFor: an operator messages the manager, every worker and every live
+// spawned agent; a contact messages its agents: list and sees its see: list.
+func (g *gate) viewerFor(ctx context.Context, login string) viewer {
 	mgr := g.cfg.ChatAgent
 	if names, ok := g.cfg.Contacts[login]; ok {
 		return viewer{login: login, tier: chatledger.TierContact,
 			message: managerFirst(mgr, names), see: managerFirst(mgr, g.cfg.ContactSee[login])}
 	}
-	return viewer{login: login, tier: chatledger.TierOperator, message: append([]string{mgr}, g.cfg.Workers...)}
+	msg := append([]string{mgr}, g.cfg.Workers...)
+	for _, a := range g.liveSpawned(ctx) {
+		msg = append(msg, a.Name)
+	}
+	return viewer{login: login, tier: chatledger.TierOperator, message: msg}
+}
+
+// tierFor is viewerFor's tier alone, without the registry read.
+func (g *gate) tierFor(login string) string {
+	if _, ok := g.cfg.Contacts[login]; ok {
+		return chatledger.TierContact
+	}
+	return chatledger.TierOperator
 }
 
 func managerFirst(mgr string, names []string) []string {
@@ -200,6 +217,21 @@ func buildAgents(v viewer, manager, uid string, recs map[string]AgentRecord, hub
 		ans.Agents = append(ans.Agents, entry(r.name, r.access))
 	}
 	return ans
+}
+
+// markSpawned names the template of each spawned agent in ans and, where
+// the labels file gives it none, shows its spawn label, else its template.
+func markSpawned(ans *agentsAnswer, spawned map[string]SpawnedAgent) {
+	for i := range ans.Agents {
+		a, ok := spawned[ans.Agents[i].Name]
+		if !ok {
+			continue
+		}
+		ans.Agents[i].Template, ans.Agents[i].NoFiles = a.Template, true
+		if ans.Agents[i].Label == "" {
+			ans.Agents[i].Label = cmp.Or(a.Label, "from template "+a.Template)
+		}
+	}
 }
 
 func boolInt(b bool) int {
@@ -447,6 +479,9 @@ func (g *gate) serveAgents(w http.ResponseWriter, r *http.Request, line *AuditLi
 	}
 	recs, err := g.records(ctx)
 	ans := buildAgents(v, g.cfg.ChatAgent, uid, recs, err != nil, g.labels(), g.cfg.ContactSession)
+	if v.tier == chatledger.TierOperator {
+		markSpawned(&ans, spawnedInfo(g.liveSpawned(ctx)))
+	}
 	if g.filesOnFor(v.login) {
 		ans.Files = &filesInfo{MaxBytes: g.files.cfg.MaxBytes, Extensions: g.files.cfg.Extensions,
 			Uploads: !g.files.cfg.NoUploads, Shares: !g.files.cfg.NoShares}

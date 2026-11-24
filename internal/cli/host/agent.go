@@ -2,9 +2,11 @@ package host
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stevegeek/lever/internal/broker"
@@ -18,7 +20,7 @@ import (
 // lever.yaml. Every verb goes through the broker's operator socket.
 func newAgentCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "agent", Short: "Spawn and destroy agents from templates"}
-	cmd.AddCommand(newAgentSpawnCmd(), newAgentDestroyCmd(), newAgentListCmd())
+	cmd.AddCommand(newAgentSpawnCmd(), newAgentDestroyCmd(), newAgentListCmd(), newAgentGCCmd(), newAgentRemoteVerbCmd())
 	return cmd
 }
 
@@ -254,10 +256,89 @@ func printAgentList(cmd *cobra.Command, resp broker.AgentListResponse) {
 	for _, a := range resp.Agents {
 		state := safeToken(a.State)
 		if a.Orphaned {
-			state += " (template gone)"
+			state += " (template gone or moved)"
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", safeToken(a.Name), safeToken(a.Template), state, cmp.Or(safeToken(a.Phase), "-"),
-			safeToken(a.CreatedBy), a.CreatedAt.Format("2006-01-02 15:04"), strings.ReplaceAll(termsafe.Sanitize(a.Label), "\t", " "))
+			creatorOf(a.CreatedBy), a.CreatedAt.Format("2006-01-02 15:04"), strings.ReplaceAll(termsafe.Sanitize(a.Label), "\t", " "))
 	}
 	tw.Flush()
+}
+
+// creatorOf is a record's creator for the terminal: an agent or manager
+// name, "operator", or a remote caller ("ssh:<name>").
+func creatorOf(s string) string {
+	if broker.ValidRemoteCaller(s) {
+		return s
+	}
+	return safeToken(s)
+}
+
+func newAgentGCCmd() *cobra.Command {
+	var older string
+	var force, dryRun, asJSON bool
+	c := &cobra.Command{
+		Use:   "gc",
+		Args:  cobra.NoArgs,
+		Short: "Delete the archives and conversation backups of agents destroyed long ago",
+		Long: "For every agent destroyed at least --older ago (default 30d), delete its workspace archive and its\n" +
+			"conversation backups from the state directory, and drop its record, keeping only its name so it is\n" +
+			"never used again. A workspace kept in the tree (on_destroy: keep) is not touched. Destructive, so it\n" +
+			"requires --force; --dry-run lists what would go.",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			fail := func(err error, reason string, code int) error {
+				if asJSON {
+					printJSONLine(cmd, agentResult{Reason: reason, Error: err.Error(), Exit: code})
+				}
+				return cli.WithExitCode(fmt.Errorf("agent gc: %w", err), code)
+			}
+			age, err := config.ParseDays(older)
+			if err != nil || age < 0 {
+				return fail(fmt.Errorf("--older: %v", err), broker.ReasonBadRequest, exitWorkerRefused)
+			}
+			if !force && !dryRun {
+				return fail(errors.New("this deletes archives and conversation backups for good; re-run with --force, or with --dry-run to see what would go"), reasonNoForce, exitWorkerRefused)
+			}
+			app, st, err := loadAppAndState(nil)
+			if err != nil {
+				return fail(err, "", 1)
+			}
+			sock, err := operatorSocket(app, st)
+			if err != nil {
+				return fail(err, reasonNoOperatorSocket, exitOperatorSocketMissing)
+			}
+			var resp broker.GCResponse
+			err = operatorPost(cmd.Context(), sock, broker.PathOperatorAgentGC, broker.GCRequest{OlderThan: int64(age / time.Second), DryRun: dryRun}, &resp)
+			if ref, ok := operatorFailure(err, broker.PathOperatorAgentGC); ok {
+				return fail(ref, ref.Reason, agentExit(ref.Reason))
+			} else if err != nil {
+				return fail(err, "", 1)
+			}
+			names := make([]string, 0, len(resp.Agents))
+			for _, n := range resp.Agents {
+				names = append(names, safeToken(n))
+			}
+			warnings := make([]string, 0, len(resp.Warnings))
+			for _, w := range resp.Warnings {
+				warnings = append(warnings, termsafe.Sanitize(w))
+			}
+			if asJSON {
+				printJSONLine(cmd, broker.GCResponse{Agents: names, Freed: resp.Freed, DryRun: resp.DryRun, Warnings: warnings})
+				return nil
+			}
+			for _, w := range warnings {
+				cmd.PrintErrf("lever: warning: %s\n", w)
+			}
+			verb := "collected"
+			if dryRun {
+				verb = "would collect"
+			}
+			cmd.Printf("%s %d destroyed agent(s), %.1f MiB: %s\n", verb, len(names), float64(resp.Freed)/(1<<20), cmp.Or(strings.Join(names, ", "), "none"))
+			return nil
+		},
+	}
+	c.Flags().StringVar(&older, "older", "30d", "only agents destroyed at least this long ago (e.g. 90d, 12h, 0)")
+	c.Flags().BoolVar(&force, "force", false, "confirm the deletion (required unless --dry-run)")
+	c.Flags().BoolVar(&dryRun, "dry-run", false, "list what would be deleted, and delete nothing")
+	c.Flags().BoolVar(&asJSON, "json", false, "print one JSON object: agents, freed_bytes, dry_run, warnings")
+	return c
 }

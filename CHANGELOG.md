@@ -28,9 +28,38 @@ version bump moves the block under the new version heading.
     (`lever-manager agent spawn|destroy|spawned`, at most 4 spawns a minute and 200 a day); such a
     template may obtain only what the manager obtains and may delegate nothing. Its skill teaches
     the verbs only then.
-  - `lever attach NAME` takes a spawned agent's name. Spawned agents are not yet in the remote web
-    UI.
-  - A `delegate` may name `template:<name>`, which holds for that template's active agents.
+  - `lever attach NAME` takes a spawned agent's name.
+  - In the remote chat page, operator logins see, chat with, wake and open the terminal of active
+    spawned agents, read from the broker's registry. Contacts never see them; the file exchange is
+    not offered for them yet.
+  - Stable links: `/lever/go/<name>/chat` and `/lever/go/<name>/terminal` (operator only) open an
+    agent's chat or terminal, also from a link on another site. A destroyed agent's link says when it
+    was destroyed and names its conversation backup.
+  - Spawning over ssh: `lever agent remote-verb --templates T --as NAME` is the forced command of an
+    `authorized_keys` key, for a caller on another machine (a factory's tick). The key may spawn
+    from the listed templates (brief on stdin, at most 4 a minute and 200 a day), and list, suspend,
+    resume and destroy only the agents it spawned, which are recorded as created by `ssh:NAME`. A
+    destroy always backs up, and the broker checks ownership and audits every verb under the key's
+    name. The caller's command has a fixed grammar and never reaches a shell; a key runs at most 4
+    commands at once.
+  - `idle_suspend` on a template suspends an agent that has waited at its prompt that long (off by
+    default). Operator logins with notifications on get a content-free "<agent> is waiting for
+    you" push when a spawned agent starts waiting. Each spawned agent that ran has its
+    conversation backed up once a day (the newest 10 are kept).
+  - Each template's `dir_root` is mounted read-only into the manager, so the manager can neither
+    write a spawned agent's workspace nor swap it for a link before the agent's mount. A manager
+    created before templates were configured needs `lever up --fresh --keep-conversation`: until
+    then the broker refuses every worker and spawned agent start and resume, and `lever apply` and
+    `lever doctor` say so. With templates configured, worker dirs also follow the rules they
+    follow under `manager.read_only` (no `$`, `~`, `:` or `,`, ASCII only, no symlink on the
+    path).
+  - A `delegate` may name `template:<name>`, which holds for that template's active agents; the
+    manager's only for those it spawned, a spawned agent's only for its own spawner's. With
+    `worker_to_worker`, a spawned agent messages only its own spawner's agents.
+  - `lever agent gc --older 30d --force` deletes the archives and conversation backups of agents
+    destroyed long ago and drops their records, keeping their names retired (never reused, still
+    revoked). Do not downgrade lever after a gc: an older broker would drop the retired list (the
+    revocation file still keeps those names unused).
   - Config load checks that every template's `max_running` agents fit in the VM's memory and,
     with the manager and the workers, within scion's cap of 12 running agents.
   - `lever doctor` has a *spawned agents* row, and the *orphan agent records* row no longer counts

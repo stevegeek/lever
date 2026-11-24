@@ -367,21 +367,74 @@ func TestSpawnedAgentIsNotStartedFresh(t *testing.T) {
 }
 
 // A "template:" delegate matches only an active agent of that template.
+// A configured worker's delegate reaches every such agent; the manager's
+// only those it spawned; a spawned agent's only its own spawner's.
 func TestTemplateDelegateFollowsTheRegistry(t *testing.T) {
-	e := newSpawnEnv(t, AgentsState{})
-	e.b.rules.AllowDelegate("test-manager", "db", "read", rules.TemplateRefPrefix+"session")
-	name := e.spawn(t, `{"template":"session"}`).Name
-	if _, ok := e.b.rules.MayObtainRule("test-manager", name, "db", "read"); !ok {
-		t.Fatal("not delegable to an active agent")
+	e := newSpawnEnv(t, AgentsState{}, func(t *TemplateSpec) { t.ManagerMay = true; t.MaxRunning = 3 })
+	for _, from := range []string{"worker", "test-manager"} {
+		e.b.rules.AllowDelegate(from, "db", "read", rules.TemplateRefPrefix+"session")
+	}
+	theirs := e.spawn(t, `{"template":"session"}`).Name
+	rec := callWorker(t, e.b, "/agent/spawn", `{"template":"session"}`, "test-manager")
+	var mine SpawnResponse
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &mine) != nil {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	for _, c := range []struct {
+		from, to string
+		want     bool
+	}{
+		{"worker", theirs, true}, {"worker", mine.Name, true},
+		{"test-manager", mine.Name, true}, {"test-manager", theirs, false},
+	} {
+		if _, ok := e.b.rules.MayObtainRule(c.from, c.to, "db", "read"); ok != c.want {
+			t.Fatalf("%s -> %s: %v", c.from, c.to, ok)
+		}
 	}
 	for _, bound := range []string{"worker", "template:session", "s-zzzzzz"} {
-		if _, ok := e.b.rules.MayObtainRule("test-manager", bound, "db", "read"); ok {
+		if _, ok := e.b.rules.MayObtainRule("worker", bound, "db", "read"); ok && bound != "worker" {
 			t.Fatalf("delegable to %q", bound)
 		}
 	}
-	callOperator(t, e.b, http.MethodPost, PathOperatorAgentDestroy, `{"name":"`+name+`","stop":true}`)
-	if _, ok := e.b.rules.MayObtainRule("test-manager", name, "db", "read"); ok {
+	// A spawned agent delegates only to its own spawner's agents.
+	e.b.rules.AllowDelegate(theirs, "db", "read", rules.TemplateRefPrefix+"session")
+	if _, ok := e.b.rules.MayObtainRule(theirs, mine.Name, "db", "read"); ok {
+		t.Fatal("an operator's agent delegates to the manager's")
+	}
+	callOperator(t, e.b, http.MethodPost, PathOperatorAgentDestroy, `{"name":"`+theirs+`","stop":true}`)
+	if _, ok := e.b.rules.MayObtainRule("worker", theirs, "db", "read"); ok {
 		t.Fatal("delegable to a destroyed agent")
+	}
+}
+
+// worker_to_worker joins configured workers, and a spawned agent only with
+// its own spawner's agents.
+func TestWorkerToWorkerKeepsSpawnersApart(t *testing.T) {
+	e := newSpawnEnv(t, AgentsState{}, func(t *TemplateSpec) { t.MaxRunning = 3 })
+	e.b.workerToWorker = true
+	a := e.spawn(t, `{"template":"session"}`).Name
+	b := e.spawn(t, `{"template":"session"}`).Name
+	c := e.spawn(t, `{"template":"session","by":"ssh:other"}`).Name
+	for _, tc := range []struct {
+		from, to string
+		want     bool
+	}{
+		{a, b, true}, {a, c, false}, {c, a, false}, {a, "worker", false}, {"worker", a, false},
+	} {
+		if got := e.b.peerMayReach(tc.from, tc.to); got != tc.want {
+			t.Fatalf("%s -> %s: %v", tc.from, tc.to, got)
+		}
+	}
+	if _, err := e.b.resolveMsgTarget(a, "agent:"+c); err == nil {
+		t.Fatal("a message across spawners was routed")
+	}
+	if _, err := e.b.resolveMsgTarget(a, "agent:"+b); err != nil {
+		t.Fatalf("same spawner: %v", err)
+	}
+	for _, r := range e.b.msgRecipients(a) {
+		if r == "agent:"+c || r == "agent:worker" {
+			t.Fatalf("recipients of %s list %s", a, r)
+		}
 	}
 }
 
@@ -423,7 +476,7 @@ func TestRegistryAcrossARestart(t *testing.T) {
 	if states["s-cccccc"] != AgentDestroyed || states["s-dddddd"] != AgentDestroyed || states["x-eeeeee"] != AgentActive || !e.b.isRevoked("s-cccccc") {
 		t.Fatalf("%v", states)
 	}
-	list := e.b.agentList(context.Background(), false, "")
+	list := e.b.agentList(context.Background(), false, "", true)
 	orphaned := false
 	for _, a := range list.Agents {
 		if a.Name == "x-eeeeee" {
@@ -465,7 +518,7 @@ func TestSpawnRefusedWhenTheRegistryIsNotSaved(t *testing.T) {
 func TestSpawnRoutesAreNotOnTheTCPListeners(t *testing.T) {
 	e := newSpawnEnv(t, AgentsState{})
 	for name, h := range map[string]http.Handler{"admin": e.b.AdminHandler(), "jail": e.b.JailHandler()} {
-		for _, p := range []string{PathOperatorAgentSpawn, PathOperatorAgentDestroy, PathOperatorAgentList} {
+		for _, p := range []string{PathOperatorAgentSpawn, PathOperatorAgentDestroy, PathOperatorAgentList, PathOperatorAgentSuspend, PathOperatorAgentResume, PathOperatorAgentGC} {
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, p, strings.NewReader(`{"template":"session"}`)))
 			if rec.Code != http.StatusNotFound && rec.Code != http.StatusMethodNotAllowed {
@@ -814,5 +867,177 @@ func TestReconcileLeavesThisBrokersSpawns(t *testing.T) {
 	}
 	if st := e.state(); st.Agents[0].State != AgentSpawning {
 		t.Fatalf("reconcile touched a live spawn: %+v", st)
+	}
+}
+
+// The remote proxy's list (registry=1) reads no hub; a chat login of a
+// contact may not wake a spawned agent, the operator's login may.
+func TestRegistryListAndContactWakeOfASpawnedAgent(t *testing.T) {
+	e := newSpawnEnv(t, AgentsState{})
+	got := e.spawn(t, `{"template":"session","label":"PR 42"}`)
+	e.rt.mu.Lock()
+	e.rt.listCalls = 0
+	e.rt.mu.Unlock()
+	rec := callOperator(t, e.b, http.MethodGet, PathOperatorAgentList+"?all=1&registry=1", "")
+	var list AgentListResponse
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &list) != nil {
+		t.Fatalf("list: %d %s", rec.Code, rec.Body)
+	}
+	e.rt.mu.Lock()
+	calls := e.rt.listCalls
+	e.rt.mu.Unlock()
+	if calls != 0 || len(list.Agents) != 1 || list.Agents[0].Name != got.Name || list.Agents[0].Phase != "" || list.Agents[0].Label != "PR 42" {
+		t.Fatalf("hub reads %d, list %+v", calls, list.Agents)
+	}
+
+	e.rt.staticPhases = true
+	e.rt.agents[testInstanceProject] = []scion.Agent{{Slug: got.Name, Phase: "suspended"}}
+	body := `{"for":{"worker":"` + got.Name + `","login":"c@x","tier":"contact"}}`
+	if rec := callOperator(t, e.b, http.MethodPost, PathOperatorWorkerResume, body); rec.Code != http.StatusForbidden || rec.Header().Get(ReasonHeader) != ReasonNotAWorker {
+		t.Fatalf("contact wake: %d %q", rec.Code, rec.Header().Get(ReasonHeader))
+	}
+	if len(e.rt.resumed) != 0 {
+		t.Fatalf("resumed %v", e.rt.resumed)
+	}
+	body = `{"for":{"worker":"` + got.Name + `","login":"op@x","tier":"operator"}}`
+	// The fake keeps the record suspended, so only the resume call is checked.
+	callOperator(t, e.b, http.MethodPost, PathOperatorWorkerResume, body)
+	if len(e.rt.resumed) != 1 || e.rt.resumed[0] != got.Name {
+		t.Fatalf("operator wake resumed %v", e.rt.resumed)
+	}
+	// Destroyed (revoked): a contact still gets the answer of a name that is
+	// no worker, not the revoked one.
+	if rec := callOperator(t, e.b, http.MethodPost, PathOperatorAgentDestroy, `{"name":"`+got.Name+`","no_backup":true}`); rec.Code != http.StatusOK {
+		t.Fatalf("destroy: %d %s", rec.Code, rec.Body)
+	}
+	body = `{"for":{"worker":"` + got.Name + `","login":"c@x","tier":"contact"}}`
+	if rec := callOperator(t, e.b, http.MethodPost, PathOperatorWorkerResume, body); rec.Code != http.StatusForbidden || rec.Header().Get(ReasonHeader) != ReasonNotAWorker {
+		t.Fatalf("contact wake of a destroyed agent: %d %q", rec.Code, rec.Header().Get(ReasonHeader))
+	}
+}
+
+// A remote caller (lever agent remote-verb) spawns through the operator
+// socket under its own name: it is the record's creator, it may destroy
+// only its own agents and always with a backup, and its spawns are rate
+// limited apart from everyone else's. Only the operator socket takes By.
+func TestRemoteCallerSpawnAndDestroy(t *testing.T) {
+	e := newSpawnEnv(t, AgentsState{}, func(t *TemplateSpec) { t.ManagerMay = true; t.MaxInstances = 20; t.MaxRunning = 20 })
+	for _, by := range []string{"factory", "ssh:", "ssh:Factory", "ssh:-x", "ssh:a:b", "ssh:" + strings.Repeat("a", 33), "operator", "test-manager"} {
+		rec := callOperator(t, e.b, http.MethodPost, PathOperatorAgentSpawn, `{"template":"session","by":"`+by+`"}`)
+		if rec.Code != http.StatusBadRequest || len(e.state().Agents) != 0 {
+			t.Fatalf("by %q: %d", by, rec.Code)
+		}
+		rec = callOperator(t, e.b, http.MethodPost, PathOperatorAgentDestroy, `{"name":"s-aaaaaa","by":"`+by+`"}`)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("destroy by %q: %d", by, rec.Code)
+		}
+	}
+	if rec := callWorker(t, e.b, "/agent/spawn", `{"template":"session","by":"ssh:factory"}`, "test-manager"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("the manager set by: %d", rec.Code)
+	}
+	if rec := callWorker(t, e.b, "/agent/destroy", `{"name":"s-aaaaaa","by":"ssh:factory"}`, "test-manager"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("the manager set by on destroy: %d", rec.Code)
+	}
+	theirs := e.spawn(t, `{"template":"session"}`).Name
+	other := e.spawn(t, `{"template":"session","by":"ssh:other"}`).Name
+	// Last, so the fake runtime has it running.
+	mine := e.spawn(t, `{"template":"session","task":"t","by":"ssh:factory"}`).Name
+	if r, _ := e.b.workers.record(mine); r.CreatedBy != "ssh:factory" {
+		t.Fatalf("created_by %q", r.CreatedBy)
+	}
+	for _, name := range []string{theirs, other} {
+		rec := callOperator(t, e.b, http.MethodPost, PathOperatorAgentDestroy, `{"name":"`+name+`","stop":true,"by":"ssh:factory"}`)
+		if rec.Code != http.StatusForbidden || rec.Header().Get(ReasonHeader) != ReasonNotYours {
+			t.Fatalf("destroy %s: %d", name, rec.Code)
+		}
+	}
+	if rec := callOperator(t, e.b, http.MethodPost, PathOperatorAgentDestroy, `{"name":"`+mine+`","stop":true,"no_backup":true,"by":"ssh:factory"}`); rec.Code != http.StatusForbidden {
+		t.Fatalf("no_backup by a remote caller: %d", rec.Code)
+	}
+	if rec := callOperator(t, e.b, http.MethodPost, PathOperatorAgentDestroy, `{"name":"`+mine+`","stop":true,"by":"ssh:factory"}`); rec.Code != http.StatusOK {
+		t.Fatalf("destroy mine: %d %s", rec.Code, rec.Body)
+	}
+	if len(e.backups) != 1 || e.backups[0] != mine {
+		t.Fatalf("backups %v", e.backups)
+	}
+	// Its rate limit is its own: ssh:factory used one spawn this minute,
+	// ssh:other one; the operator has none.
+	var last int
+	for range managerSpawnRateLimit {
+		last = callOperator(t, e.b, http.MethodPost, PathOperatorAgentSpawn, `{"template":"session","by":"ssh:factory"}`).Code
+	}
+	if last != http.StatusTooManyRequests {
+		t.Fatalf("spawn %d by ssh:factory: %d", managerSpawnRateLimit+1, last)
+	}
+	if rec := callOperator(t, e.b, http.MethodPost, PathOperatorAgentSpawn, `{"template":"session","by":"ssh:other"}`); rec.Code != http.StatusOK {
+		t.Fatalf("ssh:other: %d %s", rec.Code, rec.Body)
+	}
+	if rec := callOperator(t, e.b, http.MethodPost, PathOperatorAgentSpawn, `{"template":"session"}`); rec.Code != http.StatusOK {
+		t.Fatalf("the operator: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// Each limited spawner has its own day.
+func TestDailySpawnQuotaIsPerSpawner(t *testing.T) {
+	b := &Broker{}
+	now := time.Now()
+	for range managerSpawnDailyLimit {
+		if !b.takeDailySpawn("ssh:factory", now) {
+			t.Fatal("refused under the quota")
+		}
+	}
+	if b.takeDailySpawn("ssh:factory", now) {
+		t.Fatal("over the quota")
+	}
+	if !b.takeDailySpawn("test-manager", now) {
+		t.Fatal("the manager shares a remote caller's day")
+	}
+	if !b.takeDailySpawn("ssh:factory", now.Add(24*time.Hour)) {
+		t.Fatal("a new day is still refused")
+	}
+}
+
+// A remote caller suspends and resumes only an active agent it spawned:
+// the operator's, another caller's, a configured worker and the manager are
+// refused alike, and so is a body that is not an AgentVerbRequest.
+func TestRemoteCallerSuspendAndResume(t *testing.T) {
+	e := newSpawnEnv(t, AgentsState{}, func(t *TemplateSpec) { t.MaxRunning = 5 })
+	theirs := e.spawn(t, `{"template":"session"}`).Name
+	other := e.spawn(t, `{"template":"session","by":"ssh:other"}`).Name
+	mine := e.spawn(t, `{"template":"session","by":"ssh:factory"}`).Name
+	for _, body := range []string{
+		`{"name":"` + theirs + `","by":"ssh:factory"}`,
+		`{"name":"` + other + `","by":"ssh:factory"}`,
+		`{"name":"worker","by":"ssh:factory"}`,
+		`{"name":"test-manager","by":"ssh:factory"}`,
+		`{"name":"s-zzzzzz","by":"ssh:factory"}`,
+	} {
+		for _, path := range []string{PathOperatorAgentSuspend, PathOperatorAgentResume} {
+			rec := callOperator(t, e.b, http.MethodPost, path, body)
+			if rec.Code != http.StatusNotFound || rec.Header().Get(ReasonHeader) != ReasonNotSpawned {
+				t.Fatalf("%s %s: %d", path, body, rec.Code)
+			}
+		}
+	}
+	for _, body := range []string{`{"name":"` + mine + `"}`, `{"name":"` + mine + `","by":"factory"}`, `{"name":"` + mine + `","by":"ssh:factory","worker":"x"}`} {
+		if rec := callOperator(t, e.b, http.MethodPost, PathOperatorAgentSuspend, body); rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s: %d", body, rec.Code)
+		}
+	}
+	if len(e.rt.suspend) != 0 {
+		t.Fatalf("suspended %v", e.rt.suspend)
+	}
+	rec := callOperator(t, e.b, http.MethodPost, PathOperatorAgentSuspend, `{"name":"`+mine+`","by":"ssh:factory"}`)
+	if rec.Code != http.StatusOK || len(e.rt.suspend) != 1 || e.rt.suspend[0] != mine {
+		t.Fatalf("suspend mine: %d %s %v", rec.Code, rec.Body, e.rt.suspend)
+	}
+	rec = callOperator(t, e.b, http.MethodPost, PathOperatorAgentResume, `{"name":"`+mine+`","by":"ssh:factory"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("resume mine: %d %s", rec.Code, rec.Body)
+	}
+	// A revoked agent is not resumed.
+	e.b.Revoke(mine)
+	if rec := callOperator(t, e.b, http.MethodPost, PathOperatorAgentResume, `{"name":"`+mine+`","by":"ssh:factory"}`); rec.Code != http.StatusForbidden {
+		t.Fatalf("resume revoked: %d", rec.Code)
 	}
 }

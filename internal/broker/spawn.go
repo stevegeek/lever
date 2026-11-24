@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -40,6 +41,10 @@ type SpawnRequest struct {
 	Template string `json:"template"`
 	Task     string `json:"task,omitempty"`
 	Label    string `json:"label,omitempty"`
+	// By names a remote caller the operator socket speaks for (see
+	// ValidRemoteCaller): it is recorded as the agent's creator and is the
+	// key of its rate limits. Operator socket only.
+	By string `json:"by,omitempty"`
 }
 
 // SpawnResponse answers a spawn.
@@ -58,6 +63,28 @@ type DestroyRequest struct {
 	Stop bool `json:"stop,omitempty"`
 	// NoBackup skips the conversation backup (operator only).
 	NoBackup bool `json:"no_backup,omitempty"`
+	// By names a remote caller the operator socket speaks for: it may
+	// destroy only the agents it spawned, always with a backup. Operator
+	// socket only.
+	By string `json:"by,omitempty"`
+}
+
+// remoteCallerRE: "ssh:" and a key's name. The colon keeps it apart from
+// every agent and manager name, which are what CreatedBy holds otherwise.
+var remoteCallerRE = regexp.MustCompile(`^ssh:[a-z0-9][a-z0-9-]{0,31}$`)
+
+// ValidRemoteCaller reports whether s names a remote caller, such as
+// "ssh:factory" (`lever agent remote-verb --as factory`).
+func ValidRemoteCaller(s string) bool { return remoteCallerRE.MatchString(s) }
+
+// checkBy refuses a By that is not a remote caller's name.
+func (b *Broker) checkBy(w http.ResponseWriter, verb, by string) bool {
+	if by == "" || ValidRemoteCaller(by) {
+		return true
+	}
+	b.audit("agent", operatorActor, "deny", verb+": bad caller name")
+	refuse(w, ReasonBadRequest, "bad request: by must be ssh:<name>", http.StatusBadRequest)
+	return false
 }
 
 // DestroyResponse answers a destroy.
@@ -95,9 +122,13 @@ type TemplateEntry struct {
 type AgentEntry struct {
 	AgentRecord
 	Phase string `json:"phase,omitempty"`
-	// Orphaned: its template is no longer configured; it can only be
-	// destroyed.
+	// Orphaned: its template is no longer configured, or its dir_root
+	// changed since the spawn; it can only be destroyed.
 	Orphaned bool `json:"orphaned,omitempty"`
+	// WaitingSince is when the agents loop first saw it waiting at its
+	// prompt, as the hub reports it (agent-reported: a hint, never
+	// authority). Unset when it is not waiting or was not looked at yet.
+	WaitingSince *time.Time `json:"waiting_since,omitempty"`
 }
 
 // Operator routes.
@@ -145,6 +176,9 @@ func (b *Broker) handleOperatorAgentSpawn(w http.ResponseWriter, r *http.Request
 		refuse(w, ReasonBadRequest, "bad request: "+firstLineOf(err.Error()), http.StatusBadRequest)
 		return
 	}
+	if !b.checkBy(w, "spawn", req.By) {
+		return
+	}
 	b.spawnAgent(r.Context(), w, req, operatorActor)
 }
 
@@ -155,12 +189,30 @@ func (b *Broker) handleOperatorAgentDestroy(w http.ResponseWriter, r *http.Reque
 		refuse(w, ReasonBadRequest, "bad request: "+firstLineOf(err.Error()), http.StatusBadRequest)
 		return
 	}
+	if !b.checkBy(w, "destroy", req.By) {
+		return
+	}
 	b.destroyAgent(r.Context(), w, req, operatorActor)
 }
 
 func (b *Broker) handleOperatorAgentList(w http.ResponseWriter, r *http.Request) {
-	all := r.URL.Query().Get("all") == "1"
-	writeJSON(w, b.agentList(r.Context(), all, ""))
+	q := r.URL.Query()
+	all := q.Get("all") == "1"
+	// The registry alone, with no hub read: the remote proxy asks every few
+	// seconds and reads the hub's phases itself.
+	out := b.agentList(r.Context(), all, "", q.Get("registry") != "1")
+	// One agent's record (destroyed ones too, with all): the remote proxy's
+	// stable link to a destroyed agent, which must not need every tombstone.
+	if name := q.Get("name"); name != "" {
+		kept := out.Agents[:0]
+		for _, a := range out.Agents {
+			if a.Name == name {
+				kept = append(kept, a)
+			}
+		}
+		out.Agents = kept
+	}
+	writeJSON(w, out)
 }
 
 func firstLineOf(s string) string {
@@ -172,12 +224,13 @@ func firstLineOf(s string) string {
 }
 
 // agentList lists the templates and the spawned agents (destroyed ones only
-// with all). createdBy filters on the spawner ("" = every agent). A failed
-// read of the hub leaves the phases empty.
-func (b *Broker) agentList(ctx context.Context, all bool, createdBy string) AgentListResponse {
+// with all). createdBy filters on the spawner ("" = every agent). With hub,
+// it reads each agent's phase; a failed read leaves the phases empty, and
+// so does hub false (the running counts are then zero).
+func (b *Broker) agentList(ctx context.Context, all bool, createdBy string, hub bool) AgentListResponse {
 	phases := map[string]string{}
 	listed := false
-	if b.runtime != nil {
+	if b.runtime != nil && hub {
 		if agents, err := b.runtime.List(ctx, b.instanceProject); err == nil {
 			listed = true
 			for _, a := range agents {
@@ -201,12 +254,16 @@ func (b *Broker) agentList(ctx context.Context, all bool, createdBy string) Agen
 	for _, rec := range b.workers.recordList() {
 		e := AgentEntry{AgentRecord: rec}
 		t := counts[rec.Template]
+		if rec.State == AgentActive {
+			e.WaitingSince = b.agentWatch.waiting(rec.Name)
+		}
 		if rec.State != AgentDestroyed {
 			e.Phase = phases[rec.Name]
 			if e.Phase == "" && listed {
 				e.Phase = PhaseNone
 			}
-			e.Orphaned = t == nil
+			ts, configured := b.workers.template(rec.Template)
+			e.Orphaned = t == nil || !configured || !inPlace(rec, ts)
 			if t != nil {
 				t.Instances++
 				if e.Phase == scion.PhaseRunning || comingUp(e.Phase) {
@@ -267,6 +324,16 @@ func (b *Broker) spawnAgent(ctx context.Context, w http.ResponseWriter, req Spaw
 	if actor != operatorActor {
 		spawner = "manager"
 	}
+	// A remote caller spawns with the operator's templates, under its own
+	// name and rate limits. Only the operator socket sets By.
+	limited := spawner == "manager"
+	if req.By != "" {
+		if actor != operatorActor {
+			refuse(w, ReasonBadRequest, "bad request", http.StatusBadRequest)
+			return
+		}
+		actor, limited = req.By, true
+	}
 	t, ok := b.workers.template(req.Template)
 	if !ok || (spawner == "manager" && !t.ManagerMay) {
 		b.audit("agent", actor, "deny", "spawn: no template "+boundedLogin(req.Template)+" for the "+spawner)
@@ -282,7 +349,7 @@ func (b *Broker) spawnAgent(ctx context.Context, w http.ResponseWriter, req Spaw
 	if !b.taskOK(w, actor, verb, req.Task, "") {
 		return
 	}
-	if spawner == "manager" {
+	if limited {
 		if ok, wait := b.spawnRate.take(actor, time.Now()); !ok {
 			b.audit("agent", actor, "deny", verb+": rate limited")
 			refuse(w, ReasonRateLimited, fmt.Sprintf("rate limited: try again in %ds", int(wait.Seconds())+1), http.StatusTooManyRequests)
@@ -310,9 +377,9 @@ func (b *Broker) spawnAgent(ctx context.Context, w http.ResponseWriter, req Spaw
 	}
 	// Counted last, so only a spawn that passed every other check uses up
 	// the day's quota.
-	if spawner == "manager" && !b.takeDailySpawn(time.Now()) {
+	if limited && !b.takeDailySpawn(actor, time.Now()) {
 		b.audit("agent", actor, "deny", verb+": daily spawn quota reached")
-		refuse(w, ReasonRateLimited, fmt.Sprintf("rate limited: the manager may spawn at most %d agents a day; ask the operator", managerSpawnDailyLimit), http.StatusTooManyRequests)
+		refuse(w, ReasonRateLimited, fmt.Sprintf("rate limited: %s may spawn at most %d agents a day; ask the operator", spawnerName(spawner, req.By), managerSpawnDailyLimit), http.StatusTooManyRequests)
 		return
 	}
 	// taken runs under the registry's lock: it must not read the registry.
@@ -448,6 +515,13 @@ func (b *Broker) rollbackSpawn(ctx context.Context, rec AgentRecord, actor strin
 // destroyAgent is the destroy verb after its caller is authenticated. The
 // manager may destroy only the agents it spawned.
 func (b *Broker) destroyAgent(ctx context.Context, w http.ResponseWriter, req DestroyRequest, actor string) {
+	if req.By != "" {
+		if actor != operatorActor {
+			refuse(w, ReasonBadRequest, "bad request", http.StatusBadRequest)
+			return
+		}
+		actor = req.By
+	}
 	rec, ok := b.workers.record(req.Name)
 	verb := "destroy " + boundedLogin(req.Name)
 	if !ok || rec.State == AgentDestroyed {
@@ -456,9 +530,15 @@ func (b *Broker) destroyAgent(ctx context.Context, w http.ResponseWriter, req De
 		return
 	}
 	if actor != operatorActor {
-		if rec.CreatedBy != actor {
-			b.audit("agent", actor, "deny", verb+": not spawned by the manager")
-			refuse(w, ReasonNotYours, "forbidden: "+rec.Name+" was not spawned by the manager", http.StatusForbidden)
+		// The manager destroys only what it may still reach: an agent of a
+		// template that dropped it from spawners is the operator's alone.
+		if rec.CreatedBy != actor || (req.By == "" && !b.managerMayReach(rec.Name)) {
+			who := "the manager"
+			if req.By != "" {
+				who = req.By
+			}
+			b.audit("agent", actor, "deny", verb+": not spawned by "+who)
+			refuse(w, ReasonNotYours, "forbidden: "+rec.Name+" was not spawned by "+who, http.StatusForbidden)
 			return
 		}
 		if req.NoBackup {
@@ -528,13 +608,39 @@ func (b *Broker) destroyAgent(ctx context.Context, w http.ResponseWriter, req De
 	}
 	// Once begun, a destroy is not cut short by a caller that hung up.
 	res := b.teardown(context.WithoutCancel(ctx), rec, actor, teardownOpts{noBackup: req.NoBackup, phase: phase, havePhase: true})
+	// The operator's answer names host paths and carries error text; the
+	// manager (in the jail) gets lever's words only, and the audit log keeps
+	// the detail.
+	jailed := actor != operatorActor && req.By == ""
 	if res.err != nil {
 		b.audit("agent", actor, "error", verb+": "+res.err.Error())
-		refuse(w, res.reason, res.err.Error(), res.status)
+		msg := res.err.Error()
+		if jailed {
+			msg = "the destroy of " + rec.Name + " did not finish (" + res.reason + "); the operator can see why in the broker's audit log"
+		}
+		refuse(w, res.reason, msg, res.status)
 		return
 	}
 	b.audit("agent", actor, "allow", verb+": destroyed (was "+res.Was+"), workspace "+res.Workspace)
-	writeJSON(w, res.DestroyResponse)
+	out := res.DestroyResponse
+	if jailed {
+		out.Workspace = workspaceOutcome(out.Workspace)
+		if len(out.Warnings) > 0 {
+			out.Warnings = []string{fmt.Sprintf("%d step(s) after the revoke failed; the operator can see them in the broker's audit log", len(out.Warnings))}
+		}
+	}
+	writeJSON(w, out)
+}
+
+// workspaceOutcome is a destroy's workspace line without its path: what was
+// done, in a word.
+func workspaceOutcome(s string) string {
+	for _, w := range []string{"archived", "removed", "kept"} {
+		if strings.HasPrefix(s, w) {
+			return w
+		}
+	}
+	return "see the broker's audit log"
 }
 
 // stopAndConfirm stops name and waits until podman shows its container down.
@@ -616,7 +722,7 @@ func (b *Broker) teardown(ctx context.Context, rec AgentRecord, actor string, o 
 	}
 	// 1. Backup. A record already being destroyed was backed up before.
 	if !o.noBackup && rec.State != AgentDestroying && phase != "" && b.backupConversation != nil {
-		id, err := b.backupConversation(ctx, rec.Name)
+		id, err := b.capture(ctx, func() (string, error) { return b.backupConversation(ctx, rec.Name) })
 		if err != nil {
 			return stop(http.StatusBadGateway, ReasonBackupFailed, fmt.Errorf("the conversation backup of %s failed (%v); nothing was destroyed. Destroy with no_backup (`lever agent destroy --no-backup`) to go on without one", rec.Name, err))
 		}
@@ -784,7 +890,7 @@ func (b *Broker) ReconcileAgents(ctx context.Context) (settled bool) {
 					b.audit("agent", "broker", "error", "reconcile "+rec.Name+": "+err.Error())
 					return
 				}
-				if t, ok := b.workers.template(rec.Template); ok {
+				if t, ok := b.workers.template(rec.Template); ok && inPlace(rec, t) {
 					b.policyAdd(rec.Name, t)
 				}
 				b.audit("agent", "broker", "allow", "reconcile "+rec.Name+": spawned before the restart; active")
@@ -864,7 +970,7 @@ func (b *Broker) handleAgentList(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	full := b.agentList(r.Context(), false, caller)
+	full := b.agentList(r.Context(), false, caller, true)
 	out := wire.AgentListResponse{Templates: []wire.AgentTemplate{}, Agents: []wire.SpawnedAgent{}}
 	for _, t := range full.Templates {
 		if t.ManagerMay {
@@ -872,6 +978,11 @@ func (b *Broker) handleAgentList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	for _, a := range full.Agents {
+		// Only those it may still reach: not those of a template that
+		// dropped it from spawners.
+		if !b.managerMayReach(a.Name) {
+			continue
+		}
 		out.Agents = append(out.Agents, wire.SpawnedAgent{Name: a.Name, Template: a.Template, Label: a.Label, State: a.State, Phase: a.Phase})
 	}
 	writeJSON(w, out)
@@ -908,15 +1019,96 @@ func (b *Broker) templateAtMaxRunning(ctx context.Context, t TemplateSpec) (erro
 // spawn leaves a tombstone, a revocation entry, a backup and an archive.
 const managerSpawnDailyLimit = 200
 
-func (b *Broker) takeDailySpawn(now time.Time) bool {
+// takeDailySpawn counts one spawn against who's day: the manager's, or a
+// remote caller's. Each has its own day, which starts at its first spawn.
+func (b *Broker) takeDailySpawn(who string, now time.Time) bool {
 	b.spawnDayMu.Lock()
 	defer b.spawnDayMu.Unlock()
-	if now.Sub(b.spawnDayStart) >= 24*time.Hour {
-		b.spawnDayStart, b.spawnDayCount = now, 0
+	if b.spawnDays == nil {
+		b.spawnDays = map[string]*winCount{}
 	}
-	if b.spawnDayCount >= managerSpawnDailyLimit {
+	d := b.spawnDays[who]
+	if d == nil || now.Sub(d.start) >= 24*time.Hour {
+		d = &winCount{start: now}
+		b.spawnDays[who] = d
+	}
+	if d.n >= managerSpawnDailyLimit {
 		return false
 	}
-	b.spawnDayCount++
+	d.n++
 	return true
+}
+
+// spawnerName names a limited spawner in a refusal.
+func spawnerName(spawner, by string) string {
+	if by != "" {
+		return by
+	}
+	return "the " + spawner
+}
+
+// Operator routes for a remote caller's suspend and resume of its own
+// agents (`lever agent remote-verb`). The operator's own verbs are the
+// /operator/worker routes.
+const (
+	PathOperatorAgentSuspend = "/operator/agent/suspend"
+	PathOperatorAgentResume  = "/operator/agent/resume"
+)
+
+// AgentVerbRequest is the body of PathOperatorAgentSuspend and
+// PathOperatorAgentResume: an agent, and the remote caller that spawned it.
+type AgentVerbRequest struct {
+	Name string `json:"name"`
+	By   string `json:"by"`
+}
+
+// remoteCallersAgent decodes an AgentVerbRequest and finds its agent: an
+// active agent that By spawned. Anything else is refused alike, so the
+// caller learns nothing of other agents.
+func (b *Broker) remoteCallersAgent(w http.ResponseWriter, r *http.Request, verb string) (WorkerSpec, string, bool) {
+	var req AgentVerbRequest
+	if err := decodeStrict(w, r, smallBodyLimit, &req); err != nil {
+		b.audit("agent", operatorActor, "deny", verb+": bad body")
+		refuse(w, ReasonBadRequest, "bad request: "+firstLineOf(err.Error()), http.StatusBadRequest)
+		return WorkerSpec{}, "", false
+	}
+	if !ValidRemoteCaller(req.By) {
+		b.audit("agent", operatorActor, "deny", verb+": bad caller name")
+		refuse(w, ReasonBadRequest, "bad request: by must be ssh:<name>", http.StatusBadRequest)
+		return WorkerSpec{}, "", false
+	}
+	rec, ok := b.workers.record(req.Name)
+	spec, isWorker := b.workerSpec(req.Name)
+	if !ok || !isWorker || rec.State != AgentActive || rec.CreatedBy != req.By {
+		b.audit("agent", req.By, "deny", verb+" "+boundedLogin(req.Name)+": not an active agent it spawned")
+		refuse(w, ReasonNotSpawned, "no agent "+boundedLogin(req.Name)+" of yours", http.StatusNotFound)
+		return WorkerSpec{}, "", false
+	}
+	return spec, req.By, true
+}
+
+func (b *Broker) handleOperatorAgentSuspend(w http.ResponseWriter, r *http.Request) {
+	spec, by, ok := b.remoteCallersAgent(w, r, "suspend")
+	if !ok || !b.runtimeReady(w) {
+		return
+	}
+	b.haltWorker(w, r.Context(), spec, "suspend", by, func(ctx context.Context, name string) error {
+		return b.runtime.Suspend(ctx, name, b.instanceProject)
+	})
+}
+
+func (b *Broker) handleOperatorAgentResume(w http.ResponseWriter, r *http.Request) {
+	spec, by, ok := b.remoteCallersAgent(w, r, "resume")
+	if !ok {
+		return
+	}
+	if b.isRevoked(spec.Name) {
+		b.audit("agent", by, "deny", "resume "+spec.Name+": revoked")
+		refuse(w, ReasonRevoked, "agent "+spec.Name+" is revoked", http.StatusForbidden)
+		return
+	}
+	if !b.runtimeReady(w) {
+		return
+	}
+	b.resumeWorker(r.Context(), w, spec, by)
 }

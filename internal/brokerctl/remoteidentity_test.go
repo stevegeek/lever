@@ -117,10 +117,11 @@ func TestRemoteIdentityMirrorsConfigRemote(t *testing.T) {
 			t.Errorf("state.RemoteIdentity.%s is %s, config.Remote.%s is %s", f.Name, g.Type, f.Name, f.Type)
 		}
 	}
-	// Name, Backend, Workers, Tree, and the hub identity (HubUsers, HubKey).
-	const appExtras = 4 + 2
+	// Name, Backend, Workers, Tree, Spawned (templates configured), and the
+	// hub identity (HubUsers, HubKey).
+	const appExtras = 5 + 2
 	if got, want := identity.NumField(), remote.NumField()+appExtras; got != want {
-		t.Errorf("state.RemoteIdentity has %d fields, want %d (config.Remote + Name + Backend + Workers + Tree + HubUsers + HubKey)", got, want)
+		t.Errorf("state.RemoteIdentity has %d fields, want %d (config.Remote + Name + Backend + Workers + Tree + Spawned + HubUsers + HubKey)", got, want)
 	}
 }
 
@@ -152,6 +153,7 @@ func TestRemoteHashCoversChatListInputs(t *testing.T) {
 		"labels_file": func(a *config.App) { a.Remote.LabelsFile = "workers/labels.json" },
 		"workers":     func(a *config.App) { a.Workers = append(a.Workers, config.Worker{Name: "w9", Dir: "workers/w9"}) },
 		"tree":        func(a *config.App) { a.Tree = "/other" },
+		"templates":   func(a *config.App) { a.Templates = []config.Template{{Name: "session"}} },
 	} {
 		a := *app
 		a.Workers = slices.Clone(app.Workers)

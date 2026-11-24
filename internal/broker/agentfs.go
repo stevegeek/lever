@@ -146,29 +146,48 @@ const (
 	archiveMaxBytes = 8 << 30
 	archiveMaxFiles = 200_000
 	archiveTimeout  = 15 * time.Minute
+	// archiveMaxDepth bounds nesting: each level holds an open directory.
+	archiveMaxDepth = 256
+	// archiveReadBatch is how many entries of a directory are read at once.
+	archiveReadBatch = 256
+	// An archive starts only with archiveMinFree free where it is written,
+	// and stops (keeping the workspace) once less than archiveStopFree is
+	// left, checked every archiveFreeEvery bytes read: a spawner that fills
+	// workspaces and destroys them cannot fill the host's disk.
+	archiveMinFree   = 2 << 30
+	archiveStopFree  = 1 << 30
+	archiveFreeEvery = 256 << 20
 )
+
+// freeBytes is fsutil.FreeBytes, a seam for tests.
+var freeBytes = fsutil.FreeBytes
 
 var errArchiveLimit = errors.New("the workspace is past the archive limits")
 
 // archiveDir writes dir as a gzip tar to out. Links are stored as links,
 // never followed; only regular files are read, each opened with no link at
 // its leaf and checked against the walk's Lstat; FIFOs, devices and sockets
-// are skipped.
+// are skipped. The walk descends only into what its own Lstat found to be a
+// directory, through a handle checked to be that directory, so an entry
+// swapped meanwhile is never archived as a link with files "under" it.
+// Directories are read in batches, so a huge one is refused at the entry
+// limit, not read whole first.
 func archiveDir(ctx context.Context, dir *os.Root, out io.Writer) (files int, skipped int, err error) {
+	return archiveDirFree(ctx, dir, out, nil)
+}
+
+// archiveDirFree is archiveDir that also asks roomLeft every
+// archiveFreeEvery bytes read (nil: never).
+func archiveDirFree(ctx context.Context, dir *os.Root, out io.Writer, roomLeft func() error) (files int, skipped int, err error) {
 	ctx, cancel := context.WithTimeout(ctx, archiveTimeout)
 	defer cancel()
 	gz := gzip.NewWriter(out)
 	tw := tar.NewWriter(gz)
 	var total int64
-	walkErr := fs.WalkDir(dir.FS(), ".", func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
+	var walk func(p string, depth int) error
+	visit := func(p string, depth int) error {
 		if cerr := ctx.Err(); cerr != nil {
 			return cerr
-		}
-		if p == "." {
-			return nil
 		}
 		fi, err := dir.Lstat(p)
 		if err != nil {
@@ -179,7 +198,13 @@ func archiveDir(ctx context.Context, dir *os.Root, out io.Writer) (files int, sk
 		}
 		switch {
 		case fi.IsDir():
-			return tw.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: p + "/", Mode: int64(fi.Mode().Perm()), ModTime: fi.ModTime()})
+			if err := tw.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: p + "/", Mode: int64(fi.Mode().Perm()), ModTime: fi.ModTime()}); err != nil {
+				return err
+			}
+			if depth >= archiveMaxDepth {
+				return fmt.Errorf("%w (nested more than %d deep)", errArchiveLimit, archiveMaxDepth)
+			}
+			return walk(p, depth+1)
 		case fi.Mode()&fs.ModeSymlink != 0:
 			target, err := dir.Readlink(p)
 			if err != nil {
@@ -191,8 +216,14 @@ func archiveDir(ctx context.Context, dir *os.Root, out io.Writer) (files int, sk
 			skipped++
 			return nil
 		}
+		before := total
 		if total += fi.Size(); total > archiveMaxBytes {
 			return fmt.Errorf("%w (more than %d GiB)", errArchiveLimit, archiveMaxBytes>>30)
+		}
+		if roomLeft != nil && total/archiveFreeEvery != before/archiveFreeEvery {
+			if err := roomLeft(); err != nil {
+				return err
+			}
 		}
 		f, err := dir.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 		if err != nil {
@@ -218,9 +249,41 @@ func archiveDir(ctx context.Context, dir *os.Root, out io.Writer) (files int, sk
 			return fmt.Errorf("%s shrank while it was archived", p)
 		}
 		return nil
-	})
-	if walkErr != nil {
-		return files, skipped, walkErr
+	}
+	walk = func(p string, depth int) error {
+		want, err := dir.Lstat(p)
+		if err != nil {
+			return err
+		}
+		d, err := dir.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_DIRECTORY, 0)
+		if err != nil {
+			return err
+		}
+		defer d.Close()
+		if st, err := d.Stat(); err != nil || !st.IsDir() || !os.SameFile(st, want) {
+			return fmt.Errorf("%s changed while it was archived", p)
+		}
+		for {
+			ents, err := d.ReadDir(archiveReadBatch)
+			for _, e := range ents {
+				child := e.Name()
+				if p != "." {
+					child = p + "/" + e.Name()
+				}
+				if verr := visit(child, depth); verr != nil {
+					return verr
+				}
+			}
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if err := walk(".", 0); err != nil {
+		return files, skipped, err
 	}
 	if err := tw.Close(); err != nil {
 		return files, skipped, err
@@ -240,12 +303,25 @@ func (b *Broker) archiveAgentDir(ctx context.Context, dir *os.Root, rec AgentRec
 	if fi, err := os.Lstat(b.archiveDir); err != nil || !fi.IsDir() || fi.Mode().Perm()&0o077 != 0 {
 		return "", fmt.Errorf("the archive directory %s is not a private directory", b.archiveDir)
 	}
+	roomLeft := func(floor uint64) error {
+		free, err := freeBytes(b.archiveDir)
+		if err != nil {
+			return fmt.Errorf("reading the free space for the archive: %w", err)
+		}
+		if free < floor {
+			return fmt.Errorf("%w (less than %d GiB free in %s)", errArchiveLimit, floor>>30, b.archiveDir)
+		}
+		return nil
+	}
+	if err := roomLeft(archiveMinFree); err != nil {
+		return "", err
+	}
 	dst := path.Join(b.archiveDir, rec.Name+".tar.gz")
 	f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return "", err
 	}
-	_, _, err = archiveDir(ctx, dir, f)
+	_, _, err = archiveDirFree(ctx, dir, f, func() error { return roomLeft(archiveStopFree) })
 	if err == nil {
 		err = f.Sync()
 	}
@@ -263,13 +339,29 @@ func (b *Broker) archiveAgentDir(ctx context.Context, dir *os.Root, rec AgentRec
 // nothing outside it is reached whatever is renamed meanwhile, then removes
 // the empty directory from its parent.
 func removeAgentDir(parent, dir *os.Root, name string) error {
-	entries, err := fs.ReadDir(dir.FS(), ".")
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		if err := dir.RemoveAll(e.Name()); err != nil {
+	// In batches, from the top each time (removing shifts what a read
+	// returns), so a huge directory is never read whole. Bounded: entries
+	// that keep coming back (a writer still at work) fail the removal.
+	for round := 0; ; round++ {
+		if round > archiveMaxFiles/archiveReadBatch+2 {
+			return errors.New("the workspace kept filling while it was removed")
+		}
+		d, err := dir.Open(".")
+		if err != nil {
 			return err
+		}
+		ents, err := d.ReadDir(archiveReadBatch)
+		d.Close()
+		if err != nil && !errors.Is(err, io.EOF) {
+			return err
+		}
+		if len(ents) == 0 {
+			break
+		}
+		for _, e := range ents {
+			if err := dir.RemoveAll(e.Name()); err != nil {
+				return err
+			}
 		}
 	}
 	return parent.Remove(name)

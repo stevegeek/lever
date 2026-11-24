@@ -55,6 +55,13 @@ func (p *Push) Run(ctx context.Context) {
 		}
 	}
 	reconcile()
+	if p.g.cfg.Spawned != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p.watchWaiting(ctx)
+		}()
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -164,7 +171,7 @@ func (p *Push) streamOnce(ctx context.Context, login string) error {
 	if ct, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type")); resp.StatusCode != http.StatusOK || ct != "text/event-stream" {
 		return fmt.Errorf("hub events: HTTP %d", resp.StatusCode)
 	}
-	s := &pushSession{uid: uid, cookie: cookie, tier: g.viewerFor(login).tier, end: func() { cancel(errPushSession) }}
+	s := &pushSession{uid: uid, cookie: cookie, tier: g.tierFor(login), end: func() { cancel(errPushSession) }}
 	sched := newPushScheduler(sctx, p, login, s)
 	s.schedule = func(t pushTarget, after time.Duration) { sched.add(t.key, after, false) }
 	schedDone := make(chan struct{})

@@ -102,7 +102,7 @@ func (b *Broker) resolveMsgTarget(caller, to string) (msgTarget, error) {
 		// Before the unknown check, with one text for both, so a worker cannot
 		// probe for the names of peers it may not message.
 		return msgTarget{}, fmt.Errorf("recipient %q is not the manager or this worker (worker→worker messaging is disabled)", to)
-	case !known, isManager && !b.managerMayReach(cn):
+	case !known, isManager && !b.managerMayReach(cn), !isManager && caller != name && !b.peerMayReach(caller, cn):
 		return msgTarget{}, fmt.Errorf("%w %q", errUnknownRecipient, to)
 	}
 	return msgTarget{scionTo: "agent:" + slug, project: b.instanceProject, relayFrom: relayFrom, recipientCN: cn}, nil
@@ -127,7 +127,7 @@ func (b *Broker) msgRecipients(caller string) []string {
 		for _, name := range b.workers.names() {
 			// Only agents that may be driven, and for the manager only the
 			// spawned agents it spawned.
-			if _, ok := b.workerSpec(name); !ok || (isManager && !b.managerMayReach(name)) {
+			if _, ok := b.workerSpec(name); !ok || (isManager && !b.managerMayReach(name)) || (!isManager && !b.peerMayReach(caller, name)) {
 				continue
 			}
 			workers = append(workers, "agent:"+name)
@@ -371,9 +371,30 @@ func (b *Broker) handleMsgList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, wire.MsgListResponse[scion.Event]{Events: kept})
 }
 
-// managerMayReach reports whether the manager may message or read the inbox
-// of name: a config worker, or a spawned agent the manager spawned.
+// peerMayReach reports whether worker caller may message worker target
+// with worker_to_worker on: two configured workers may, as before; a
+// spawned agent only reaches, and is reached by, the agents of its own
+// spawner, so worker_to_worker never joins the agents of the operator, the
+// manager and an ssh key.
+func (b *Broker) peerMayReach(caller, target string) bool {
+	from, fromSpawned := b.workers.record(caller)
+	to, toSpawned := b.workers.record(target)
+	if !fromSpawned && !toSpawned {
+		return true
+	}
+	return fromSpawned && toSpawned && from.CreatedBy == to.CreatedBy
+}
+
+// managerMayReach reports whether the manager may message, drive or read
+// the inbox of name: a config worker, or a spawned agent the manager spawned
+// from a template that still lets the manager spawn. A template whose
+// spawners dropped the manager may since have been given wider grants, so
+// its agents are the operator's alone.
 func (b *Broker) managerMayReach(name string) bool {
 	rec, spawned := b.workers.record(name)
-	return !spawned || rec.CreatedBy == b.manager
+	if !spawned {
+		return true
+	}
+	t, ok := b.workers.template(rec.Template)
+	return rec.CreatedBy == b.manager && ok && t.ManagerMay
 }

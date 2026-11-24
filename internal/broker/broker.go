@@ -309,6 +309,14 @@ type DispatchConfig struct {
 	// BackupConversation saves agent's conversation on the host before a
 	// destroy and returns the backup's id. nil ⇒ none is taken.
 	BackupConversation func(ctx context.Context, agent string) (string, error)
+	// DailyBackup backs up a spawned agent's conversation when its newest
+	// backup is a day old or more, and returns the new backup's id ("" when
+	// none was due or there was nothing to save).
+	DailyBackup func(ctx context.Context, agent string) (string, error)
+	// RemoveConversations deletes a destroyed agent's conversation backups
+	// (`lever agent gc`) and returns their size; dryRun only counts. nil:
+	// none are kept.
+	RemoveConversations func(agent string, dryRun bool) (int64, error)
 }
 
 // TimeoutConfig bounds request handling on the jail listener per route class.
@@ -477,12 +485,20 @@ type Broker struct {
 	serviceHosts    map[string]ServiceHostRoute
 	// archiveDir, backupConversation and spawnRate serve spawn and
 	// destroy (spawn.go).
-	archiveDir         string
-	backupConversation func(ctx context.Context, agent string) (string, error)
-	spawnRate          *rateWindow
-	spawnDayMu         sync.Mutex
-	spawnDayStart      time.Time
-	spawnDayCount      int
+	archiveDir          string
+	backupConversation  func(ctx context.Context, agent string) (string, error)
+	dailyBackup         func(ctx context.Context, agent string) (string, error)
+	removeConversations func(agent string, dryRun bool) (int64, error)
+	// captureSem lets one conversation capture run at a time: each holds the
+	// whole compressed conversation in memory (convbackup's cap is 512 MiB).
+	captureSem chan struct{}
+	// agentWatch and agentLoopEvery serve the agents loop (agentloop.go).
+	agentWatch     agentWatch
+	agentLoopEvery time.Duration
+	spawnRate      *rateWindow
+	spawnDayMu     sync.Mutex
+	// spawnDays counts each limited spawner's spawns in its day.
+	spawnDays map[string]*winCount
 	// inheritedUnsettled are the records a previous broker left spawning or
 	// destroying: the only ones ReconcileAgents settles.
 	inheritedUnsettled map[string]bool
@@ -533,10 +549,22 @@ func New(c Config) *Broker {
 			addRevoked = true
 		}
 	}
+	for _, name := range workers.retiredList() {
+		if !revoked[name] {
+			revoked[name] = true
+			addRevoked = true
+		}
+	}
 	if id.Rules != nil {
-		id.Rules.SetTemplateResolver(workers.activeTemplateOf)
+		mgr := id.ManagerIdentity
+		id.Rules.SetTemplateResolver(func(requester, agent string) (string, bool) {
+			return workers.delegateTemplateOf(requester, agent, mgr)
+		})
 		for _, rec := range workers.recordList() {
-			if t, ok := workers.template(rec.Template); ok && rec.State == AgentActive {
+			// A moved agent (dir_root changed) is driven no more and holds
+			// no grants: its old directory is no longer read-only for the
+			// manager.
+			if t, ok := workers.template(rec.Template); ok && rec.State == AgentActive && inPlace(rec, t) {
 				id.Rules.AddAgent(rec.Name, t.Obtain, t.Delegate)
 			}
 		}
@@ -585,8 +613,9 @@ func New(c Config) *Broker {
 		contactRate: newRateWindow(contactCallLimit),
 		files:       c.Files.withDefaults(), fileLedger: &fileRecord{dir: c.Files.LedgerDir},
 		filesRate:  newRateWindow(filesCallLimit),
-		archiveDir: d.ArchiveDir, backupConversation: d.BackupConversation,
-		spawnRate: newRateWindow(managerSpawnRateLimit), inheritedUnsettled: inherited,
+		archiveDir: d.ArchiveDir, backupConversation: d.BackupConversation, dailyBackup: d.DailyBackup, removeConversations: d.RemoveConversations, agentLoopEvery: time.Minute,
+		captureSem: make(chan struct{}, 1),
+		spawnRate:  newRateWindow(managerSpawnRateLimit), inheritedUnsettled: inherited,
 	}
 	if addRevoked {
 		b.mu.Lock()

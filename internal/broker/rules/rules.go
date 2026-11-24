@@ -29,8 +29,9 @@ type Policy struct {
 	mu     sync.RWMutex
 	agents map[string]*agentPolicy
 	// templateOf resolves a recipient to the template of its active
-	// instance (SetTemplateResolver). nil: no recipient is an instance.
-	templateOf func(agent string) (string, bool)
+	// instance, for that requester (SetTemplateResolver). nil: no recipient
+	// is an instance.
+	templateOf func(requester, agent string) (string, bool)
 }
 
 // NewPolicy returns an empty, default-deny policy.
@@ -49,9 +50,10 @@ type Delegation struct {
 }
 
 // SetTemplateResolver sets how a "template:<name>" recipient is matched:
-// templateOf(boundTo) must report boundTo's template, and only for an
-// active instance. Fails closed while unset.
-func (p *Policy) SetTemplateResolver(templateOf func(agent string) (string, bool)) {
+// templateOf(requester, boundTo) must report boundTo's template, and only
+// for an active instance that requester may delegate to. Fails closed while
+// unset.
+func (p *Policy) SetTemplateResolver(templateOf func(requester, agent string) (string, bool)) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.templateOf = templateOf
@@ -150,7 +152,7 @@ func (p *Policy) MayObtainRule(requester, boundTo, tool, op string) (string, boo
 	if p.templateOf == nil {
 		return "", false
 	}
-	tmpl, ok := p.templateOf(boundTo)
+	tmpl, ok := p.templateOf(requester, boundTo)
 	if !ok {
 		return "", false
 	}

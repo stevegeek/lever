@@ -398,3 +398,7 @@ textarea {
 @media (min-width: 720px) {
   .activitytext { font-size: 13px; }
 }
+
+/* The stable-link pages (/lever/go/): plain text that wraps and scrolls. */
+.go { box-sizing: border-box; height: 100%; overflow: auto; padding: 16px; }
+.go h1 { white-space: normal; margin-bottom: 12px; }

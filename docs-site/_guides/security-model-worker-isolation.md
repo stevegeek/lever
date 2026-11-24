@@ -475,18 +475,77 @@ broker checks. What spawning adds, and how it is held:
   live up to 24 hours. A destroyed agent's name is revoked for good and kept as a tombstone in
   `.lever-state/agents.json`; a revocation that is not saved stops the destroy, and the broker
   re-asserts the revocation of every destroyed name at start.
-- **The workspace is only the directory spawn made.** The tree is manager-writable, so spawn
-  creates the workspace exclusively with no link on its path and records its device and inode.
-  Every resume refuses a workspace that is no longer that directory, whatever `manager.read_only`
-  says, so a manager that swaps it for a link to another agent's directory gains nothing. Destroy
-  archives and removes only through a handle on that directory: links inside are archived as
-  links, never followed, and special files are skipped.
+- **The manager cannot touch a spawned agent's workspace.** Each template's `dir_root` is mounted
+  read-only into the manager, whatever `manager.read_only` says, with its ancestors pinned. A
+  workspace is created at runtime, after the manager's mounts are fixed, so no per-agent pin could
+  hold it; read-only, the manager can neither swap one for a link between the broker's check and
+  the agent's mount (which would mount a protected directory read-write in an agent the manager
+  briefs), nor write a spawned agent's files or settings. The broker also creates each workspace
+  exclusively with no link on its path, records its device and inode, and refuses a resume of a
+  workspace that is no longer that directory. An agent whose template's `dir_root` changed since
+  its spawn is driven no more and holds no grants (only destroy reaches it, by that device and
+  inode). A manager created before templates were configured lacks the read-only mount: while it
+  runs, the broker refuses every worker and spawned agent start and resume, `lever apply` and
+  `lever doctor` say so, and `lever up --fresh --keep-conversation` recreates it.
+- **Destroy reads the workspace without following it.** It archives and removes only through a
+  handle on that directory, so nothing outside the workspace is read or removed. The archive walk
+  descends only into what its own `Lstat` found to be a directory, through a handle checked to
+  be that directory, so a link swapped in meanwhile is stored as a link and never followed; files
+  are opened with no link at their leaf; special files are skipped; directories are read in
+  batches, and nesting and entries are bounded.
+- **The host's disk and memory stay bounded.** An archive starts only with 2 GiB free in the
+  state directory and stops (keeping the workspace) below 1 GiB; a conversation backup leaves
+  2 GiB free. One conversation capture runs at a time in the broker, so destroying many agents at
+  once does not hold many conversations in memory.
 - **Destroy cuts authority before it deletes.** Grants are dropped and the name revoked before the
   workspace and the hub record are touched; a spawn or destroy that a restart interrupted holds no
   grants and is no worker until the broker settles it.
+- **The manager reaches only its own.** It drives, messages, lists, destroys and reads the inbox
+  of only the agents it spawned, and only while their template still lists `manager` in
+  `spawners` (a template that drops the manager may since have been given wider grants). Its
+  answers name no host path.
+- **Only the operator's web logins reach them.** The remote proxy lists, wakes and links spawned
+  agents for operator logins only, from the broker's registry over the host-only operator socket;
+  a contact's lists name configured agents only, and the broker itself refuses a contact-tier wake
+  of a spawned agent. A spawned agent never takes the place of a configured agent of the same
+  name in the web page.
+- **An ssh key spawns only within its forced command.** `lever agent remote-verb` is the key's
+  `authorized_keys` command, so the caller never picks the program, only the words it parses.
+  Those words have a fixed grammar: spaces split them, and any other whitespace, control or
+  formatting character refuses the line. They never reach a shell, a flag parser or a path, and
+  the brief goes on stdin, bounded. The key spawns from its listed templates only, is the
+  recorded creator (`ssh:<name>`, which no agent or manager name can equal, since those hold no
+  colon), and lists and drives only its own agents. The broker itself refuses that caller's
+  suspend, resume or destroy of another's agent and a destroy without a backup, audits its
+  spawns, suspends, resumes and destroys under its name, and rate-limits its spawns apart from
+  the manager's. The caller gets a fixed sentence per refusal, never the broker's text or a host
+  path, and at most 4 of its commands run at once, each for at most 10 minutes. Within those
+  bounds the key holds the operator's authority over the socket: treat it like a deploy key for
+  those templates.
+- **The agents loop only suspends.** Whether an agent waits at its prompt is what the agent
+  reports to the hub, so the broker's once-a-minute loop acts on it only in ways that harm no one
+  else: it suspends that agent (keeping its conversation) under the agent's lock after reading the
+  hub again, and the remote proxy sends operator logins a content-free "waiting" push, bounded
+  per login and agent. The loop never stops, starts or destroys an agent. Its daily backup reads
+  the agent's conversation from the guest, as destroy does, into the host-only state directory.
 
-**Residual risks.** The manager mounts the whole tree, so it can write a spawned agent's workspace
-(its `.claude` settings included) as it can a worker's. An operator-only template with grants wider
-than the manager's is therefore reachable by a compromised manager the same way a wider worker is:
-keep such templates' grants as narrow as their work allows. Conversation backups hold whatever the
-agent saw; they stay in the host-only state directory and are never removed by lever.
+- **Spawners stay apart.** A `delegate` to `template:<name>` held by the manager reaches only the
+  agents the manager spawned, and one held by a spawned agent only its own spawner's. With
+  `worker_to_worker`, a spawned agent messages and is messaged by only the agents of its own
+  spawner. So the operator's, the manager's and each ssh key's agents form separate groups, joined
+  only through the manager (whom every agent may message) or a configured worker's delegate.
+- **Archives and backups are bounded.** Conversation backups and archives stay in the host-only state
+  directory: daily backups keep the newest 10 per agent, and `lever agent gc` deletes the archives
+  and backups of agents destroyed long enough ago, keeping only their names (still revoked, never
+  drawn again). The retired names and the revocations grow by one short entry per spawn, bounded
+  by the spawn quotas.
+
+**Residual risks.**
+
+- An operator-only template with grants wider than the manager's holds them for whatever it is
+  asked: its brief comes from whoever spawns it (the operator, or an ssh key allowed that
+  template). Keep such templates' grants as narrow as their work allows.
+- A configured worker's `delegate` to `template:<name>` reaches every agent of that template,
+  whoever spawned it: that is the operator's word in config.
+- Until `lever agent gc` runs, destroyed agents' archives and backups stay; the spawn quotas and
+  the disk floors above bound how fast they grow.

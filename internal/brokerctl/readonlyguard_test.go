@@ -175,4 +175,7 @@ func TestSharedGuardDecision(t *testing.T) {
 	if sharedGuard(&config.App{Name: "m"}, nil, "/lever") != nil {
 		t.Error("no shared folders: the guard must be nil")
 	}
+	if sharedGuard(&config.App{Name: "m", Templates: []config.Template{{Name: "session", DirRoot: "sessions"}}}, nil, "/lever") == nil {
+		t.Error("templates: the guard must check the manager holds each dir_root read-only")
+	}
 }

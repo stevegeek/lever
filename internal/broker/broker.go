@@ -547,7 +547,10 @@ func New(c Config) *Broker {
 	if id.Rules != nil {
 		id.Rules.SetTemplateResolver(workers.activeTemplateOf)
 		for _, rec := range workers.recordList() {
-			if t, ok := workers.template(rec.Template); ok && rec.State == AgentActive {
+			// A moved agent (dir_root changed) is driven no more and holds
+			// no grants: its old directory is no longer read-only for the
+			// manager.
+			if t, ok := workers.template(rec.Template); ok && rec.State == AgentActive && inPlace(rec, t) {
 				id.Rules.AddAgent(rec.Name, t.Obtain, t.Delegate)
 			}
 		}

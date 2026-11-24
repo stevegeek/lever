@@ -530,7 +530,9 @@ func (b *Broker) destroyAgent(ctx context.Context, w http.ResponseWriter, req De
 		return
 	}
 	if actor != operatorActor {
-		if rec.CreatedBy != actor {
+		// The manager destroys only what it may still reach: an agent of a
+		// template that dropped it from spawners is the operator's alone.
+		if rec.CreatedBy != actor || (req.By == "" && !b.managerMayReach(rec.Name)) {
 			who := "the manager"
 			if req.By != "" {
 				who = req.By
@@ -888,7 +890,7 @@ func (b *Broker) ReconcileAgents(ctx context.Context) (settled bool) {
 					b.audit("agent", "broker", "error", "reconcile "+rec.Name+": "+err.Error())
 					return
 				}
-				if t, ok := b.workers.template(rec.Template); ok {
+				if t, ok := b.workers.template(rec.Template); ok && inPlace(rec, t) {
 					b.policyAdd(rec.Name, t)
 				}
 				b.audit("agent", "broker", "allow", "reconcile "+rec.Name+": spawned before the restart; active")
@@ -976,6 +978,11 @@ func (b *Broker) handleAgentList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	for _, a := range full.Agents {
+		// Only those it may still reach: not those of a template that
+		// dropped it from spawners.
+		if !b.managerMayReach(a.Name) {
+			continue
+		}
 		out.Agents = append(out.Agents, wire.SpawnedAgent{Name: a.Name, Template: a.Template, Label: a.Label, State: a.State, Phase: a.Phase})
 	}
 	writeJSON(w, out)

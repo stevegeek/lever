@@ -48,8 +48,11 @@ version bump moves the block under the new version heading.
     conversation backed up once a day (the newest 10 are kept).
   - Each template's `dir_root` is mounted read-only into the manager, so the manager can neither
     write a spawned agent's workspace nor swap it for a link before the agent's mount. A manager
-    created before templates were configured needs `lever up --fresh --keep-conversation`
-    (`lever apply` and `lever doctor` say so).
+    created before templates were configured needs `lever up --fresh --keep-conversation`: until
+    then the broker refuses every worker and spawned agent start and resume, and `lever apply` and
+    `lever doctor` say so. With templates configured, worker dirs also follow the rules they
+    follow under `manager.read_only` (no `$`, `~`, `:` or `,`, ASCII only, no symlink on the
+    path).
   - A `delegate` may name `template:<name>`, which holds for that template's active agents.
   - Config load checks that every template's `max_running` agents fit in the VM's memory and,
     with the manager and the workers, within scion's cap of 12 running agents.

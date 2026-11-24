@@ -340,8 +340,12 @@ func (b *Broker) archiveAgentDir(ctx context.Context, dir *os.Root, rec AgentRec
 // the empty directory from its parent.
 func removeAgentDir(parent, dir *os.Root, name string) error {
 	// In batches, from the top each time (removing shifts what a read
-	// returns), so a huge directory is never read whole.
-	for {
+	// returns), so a huge directory is never read whole. Bounded: entries
+	// that keep coming back (a writer still at work) fail the removal.
+	for round := 0; ; round++ {
+		if round > archiveMaxFiles/archiveReadBatch+2 {
+			return errors.New("the workspace kept filling while it was removed")
+		}
 		d, err := dir.Open(".")
 		if err != nil {
 			return err

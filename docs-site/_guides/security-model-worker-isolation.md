@@ -483,14 +483,16 @@ broker checks. What spawning adds, and how it is held:
   briefs), nor write a spawned agent's files or settings. The broker also creates each workspace
   exclusively with no link on its path, records its device and inode, and refuses a resume of a
   workspace that is no longer that directory. An agent whose template's `dir_root` changed since
-  its spawn is driven no more (only destroy reaches it, by that device and inode). A manager
-  created before templates were configured lacks the read-only mount: `lever apply` and
+  its spawn is driven no more and holds no grants (only destroy reaches it, by that device and
+  inode). A manager created before templates were configured lacks the read-only mount: while it
+  runs, the broker refuses every worker and spawned agent start and resume, `lever apply` and
   `lever doctor` say so, and `lever up --fresh --keep-conversation` recreates it.
 - **Destroy reads the workspace without following it.** It archives and removes only through a
-  handle on that directory. The archive walk descends only into what its own `Lstat` found to be
-  a directory, through a handle checked to be that directory, so a link swapped in meanwhile is
-  stored as a link with nothing "under" it; files are opened with no link at their leaf; special
-  files are skipped; directories are read in batches, nesting and entries are bounded.
+  handle on that directory, so nothing outside the workspace is read or removed. The archive walk
+  descends only into what its own `Lstat` found to be a directory, through a handle checked to
+  be that directory, so a link swapped in meanwhile is stored as a link and never followed; files
+  are opened with no link at their leaf; special files are skipped; directories are read in
+  batches, and nesting and entries are bounded.
 - **The host's disk and memory stay bounded.** An archive starts only with 2 GiB free in the
   state directory and stops (keeping the workspace) below 1 GiB; a conversation backup leaves
   2 GiB free. One conversation capture runs at a time in the broker, so destroying many agents at
@@ -498,10 +500,10 @@ broker checks. What spawning adds, and how it is held:
 - **Destroy cuts authority before it deletes.** Grants are dropped and the name revoked before the
   workspace and the hub record are touched; a spawn or destroy that a restart interrupted holds no
   grants and is no worker until the broker settles it.
-- **The manager reaches only its own.** It drives, messages, lists and reads the inbox of only
-  the agents it spawned, and only while their template still lists `manager` in `spawners` (a
-  template that drops the manager may since have been given wider grants). Its answers name no
-  host path.
+- **The manager reaches only its own.** It drives, messages, lists, destroys and reads the inbox
+  of only the agents it spawned, and only while their template still lists `manager` in
+  `spawners` (a template that drops the manager may since have been given wider grants). Its
+  answers name no host path.
 - **Only the operator's web logins reach them.** The remote proxy lists, wakes and links spawned
   agents for operator logins only, from the broker's registry over the host-only operator socket;
   a contact's lists name configured agents only, and the broker itself refuses a contact-tier wake

@@ -297,12 +297,11 @@ func (g *gate) serveGo(w http.ResponseWriter, r *http.Request, line *AuditLine, 
 	g.goPage(w, r, line, http.StatusOK, "Open terminal", "The terminal of agent "+name+" is a live session: open it only from a link you trust.", target)
 }
 
-// sameOriginArrival: the request came from this origin's own page or was
-// typed by the user (Sec-Fetch-Site same-origin or none). A missing or
-// repeated header reads as cross-site.
+// sameOriginArrival: the request came from this origin's own page
+// (Sec-Fetch-Site exactly same-origin). "none" is also a link from a mail or
+// chat app, a bookmark or a typed address, which gets the Open it page; a
+// missing or repeated header reads as cross-site.
 func sameOriginArrival(r *http.Request) bool {
-	// Exactly same-origin: "none" is also a link from a mail or chat app, a
-	// bookmark or a typed address, which gets the Open it page too.
 	v := r.Header.Values("Sec-Fetch-Site")
 	return len(v) == 1 && v[0] == "same-origin"
 }

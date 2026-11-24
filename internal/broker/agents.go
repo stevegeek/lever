@@ -256,21 +256,25 @@ func (r *agentRegistry) usable(name string) bool {
 // its own spawner. A configured worker's delegate is the operator's word and
 // reaches every agent of the template.
 func (r *agentRegistry) delegateTemplateOf(requester, agent, manager string) (string, bool) {
-	tmpl, ok := r.activeTemplateOf(agent)
-	if !ok {
-		return "", false
-	}
+	// One read lock for the whole answer: a destroy (or gc) between two
+	// would leave it reading a record that is gone.
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	target := r.records[agent]
+	target, ok := r.records[agent]
+	if !ok || target.State != AgentActive {
+		return "", false
+	}
+	t, ok := r.templates[target.Template]
+	if !ok || !inPlace(*target, t) {
+		return "", false
+	}
 	if requester == manager {
-		t := r.templates[tmpl]
-		return tmpl, target.CreatedBy == manager && t.ManagerMay
+		return t.Name, target.CreatedBy == manager && t.ManagerMay
 	}
 	if from, spawned := r.records[requester]; spawned {
-		return tmpl, from.CreatedBy == target.CreatedBy
+		return t.Name, from.CreatedBy == target.CreatedBy
 	}
-	return tmpl, true
+	return t.Name, true
 }
 
 // activeTemplateOf: only an active agent of a configured template, in place,

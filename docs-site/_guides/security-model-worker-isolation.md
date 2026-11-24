@@ -532,12 +532,13 @@ broker checks. What spawning adds, and how it is held:
 - **Spawners stay apart.** A `delegate` to `template:<name>` held by the manager reaches only the
   agents the manager spawned, and one held by a spawned agent only its own spawner's. With
   `worker_to_worker`, a spawned agent messages and is messaged by only the agents of its own
-  spawner. So the operator's, the manager's and each ssh key's agents form separate groups that no
-  agent can join.
-- **What is kept is bounded.** Conversation backups and archives stay in the host-only state
+  spawner. So the operator's, the manager's and each ssh key's agents form separate groups, joined
+  only through the manager (whom every agent may message) or a configured worker's delegate.
+- **Archives and backups are bounded.** Conversation backups and archives stay in the host-only state
   directory: daily backups keep the newest 10 per agent, and `lever agent gc` deletes the archives
   and backups of agents destroyed long enough ago, keeping only their names (still revoked, never
-  drawn again).
+  drawn again). The retired names and the revocations grow by one short entry per spawn, bounded
+  by the spawn quotas.
 
 **Residual risks.**
 

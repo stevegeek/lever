@@ -58,7 +58,8 @@ version bump moves the block under the new version heading.
     `worker_to_worker`, a spawned agent messages only its own spawner's agents.
   - `lever agent gc --older 30d --force` deletes the archives and conversation backups of agents
     destroyed long ago and drops their records, keeping their names retired (never reused, still
-    revoked).
+    revoked). Do not downgrade lever after a gc: an older broker would drop the retired list (the
+    revocation file still keeps those names unused).
   - Config load checks that every template's `max_running` agents fit in the VM's memory and,
     with the manager and the workers, within scion's cap of 12 running agents.
   - `lever doctor` has a *spawned agents* row, and the *orphan agent records* row no longer counts

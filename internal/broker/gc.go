@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"net/http"
 	"os"
 	"path"
@@ -40,7 +41,7 @@ type GCResponse struct {
 
 func (b *Broker) handleOperatorAgentGC(w http.ResponseWriter, r *http.Request) {
 	var req GCRequest
-	if err := decodeStrict(w, r, smallBodyLimit, &req); err != nil || req.OlderThan < 0 {
+	if err := decodeStrict(w, r, smallBodyLimit, &req); err != nil || req.OlderThan < 0 || req.OlderThan > math.MaxInt64/int64(time.Second) {
 		b.audit("agent", operatorActor, "deny", "gc: bad body")
 		refuse(w, ReasonBadRequest, "bad request", http.StatusBadRequest)
 		return

@@ -132,6 +132,7 @@ templates:
     obtain: [{tool: github, op: "*"}]
     on_destroy: {workspace: archive}
     spawners: [operator, manager]   # optional: let the manager spawn too
+    idle_suspend: 2h          # optional: suspend one waiting at its prompt for 2 hours
 ```
 
 After `lever reload` (the broker reads templates at start):
@@ -175,6 +176,13 @@ and tokens can never name another agent.
   always means the same agent, and after its destroy it says when and names its conversation backup
   (see [Remote access](/remote-access/#spawned-agents-and-stable-links)). Contacts never see
   spawned agents, and the chat's file exchange is not offered for them yet.
+- **Idle agents and backups.** Once a minute the broker looks at each spawned agent. One that has
+  waited at its prompt longer than its template's `idle_suspend` is suspended (its conversation
+  is kept; resume it, or wake it from the web page). Operator logins with notifications on get a
+  "waiting for you" push when an agent starts waiting. Once a day, the conversation of each agent
+  that ran is backed up to `.lever-state/agent-conversations/<name>/` (the newest 10 are kept),
+  so a long-lived agent has a recent backup before any destroy. The broker's audit log has a line
+  for each idle suspend and each daily backup.
 - **From another machine.** A program elsewhere (a factory's tick, a script on your laptop) can
   spawn and destroy over ssh with a key that may run nothing else: see
   [Spawning over ssh](#spawning-over-ssh).

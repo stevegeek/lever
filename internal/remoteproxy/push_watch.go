@@ -55,6 +55,13 @@ func (p *Push) Run(ctx context.Context) {
 		}
 	}
 	reconcile()
+	if p.g.cfg.Spawned != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p.watchWaiting(ctx)
+		}()
+	}
 	for {
 		select {
 		case <-ctx.Done():

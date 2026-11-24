@@ -85,6 +85,9 @@ type TemplateSpec struct {
 	// written into a new workspace before its start.
 	SkillRel string
 	Skill    []byte
+	// IdleSuspend suspends an agent waiting at its prompt this long (0:
+	// never).
+	IdleSuspend time.Duration
 }
 
 // errStateBackwards: a change would move a record back (destroying to

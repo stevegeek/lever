@@ -30,6 +30,9 @@ type SpawnedAgent struct {
 	DestroyedAt time.Time
 	// Transcript is the conversation backup destroy took, or "".
 	Transcript string
+	// WaitingSince is when it began waiting at its prompt, as the broker's
+	// agents loop saw it (zero: not waiting). A hint the agent reports.
+	WaitingSince time.Time
 }
 
 // SpawnedActive is the registry state of an agent that may be driven.

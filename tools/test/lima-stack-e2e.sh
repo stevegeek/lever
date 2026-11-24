@@ -389,6 +389,12 @@ checkx "the key lists it, and no other agent" 'o=$(RV list </dev/null); [[ "$o" 
 checkx "a shell command is refused" 'o=$(RV "sh -c id" </dev/null); [[ "$o" == *"\"reason\":\"bad-request\""* ]]'
 checkx "a template not listed is refused" 'o=$(RV "spawn other" </dev/null); [[ "$o" == *"\"reason\":\"no-template\""* ]]'
 checkx "a destroyed agent of the operator's is not the key's" 'o=$(RV "destroy $S1" </dev/null); [[ "$o" == *"\"reason\":\"not-spawned\""* ]]'
+# Its brief is "say hello, then wait": the broker's agents loop (once a
+# minute) sees it waiting at its prompt and lists when it began.
+waiting_since() { curl -fsS --unix-socket "$INST/.lever-state/operator.sock" "http://lever/operator/agent/list?registry=1" |
+	python3 -c "import json,sys; a=[x for x in json.load(sys.stdin)[\"agents\"] if x[\"name\"]==sys.argv[1]]; print(a[0].get(\"waiting_since\",\"\") if a else \"\")" "$1"; }
+for _ in $(seq 1 36); do [ -n "$(waiting_since "$S3")" ] && break; sleep 5; done
+checkx "the agents loop lists it as waiting at its prompt ($(waiting_since "$S3"))" '[ -n "$(waiting_since "$S3")" ]'
 checkx "the key suspends its agent" 'RV "suspend $S3" </dev/null | grep -q "\"ok\":true"'
 checkx "the key resumes its agent" 'RV "resume $S3" </dev/null | grep -q "\"ok\":true"'
 rd=$(RV "destroy $S3 --stop" </dev/null)

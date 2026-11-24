@@ -406,8 +406,12 @@ func remoteSpawned(app *config.App, st state.State) func(ctx context.Context) ([
 		}
 		out := make([]remoteproxy.SpawnedAgent, 0, len(resp.Agents))
 		for _, a := range resp.Agents {
-			out = append(out, remoteproxy.SpawnedAgent{Name: a.Name, Template: a.Template, Label: a.Label, State: a.State,
-				Orphaned: a.Orphaned, DestroyedAt: a.DestroyedAt, Transcript: a.Transcript})
+			s := remoteproxy.SpawnedAgent{Name: a.Name, Template: a.Template, Label: a.Label, State: a.State,
+				Orphaned: a.Orphaned, DestroyedAt: a.DestroyedAt, Transcript: a.Transcript}
+			if a.WaitingSince != nil {
+				s.WaitingSince = *a.WaitingSince
+			}
+			out = append(out, s)
 		}
 		return out, nil
 	}

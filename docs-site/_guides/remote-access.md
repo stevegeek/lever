@@ -1387,6 +1387,10 @@ on a real device yet (Linux Chrome, iPhone).
   the login's list). A tap opens the chat with that agent. No message text leaves the host, not
   even encrypted: the push carries only `{"v":1,"agent":"<name>"}`, encrypted for the device
   (Web Push, VAPID and aes128gcm, on the Go standard library).
+- **Waiting agents.** An operator login also gets "<agent> is waiting for you" when one of the
+  spawned agents it may message starts waiting at its prompt: the push carries
+  `{"v":1,"agent":"<name>","kind":"waiting"}` and nothing more. Contacts never get one. Waiting is
+  what the agent reports, and a message push for the same agent in the last minute stands for it.
 - **Turning it on.** Per device, from **Turn on notifications** in the agent list (the browser
   asks for permission then). On an iPhone, add the page to the Home Screen first and open it from
   there (iOS 16.4 or later). On Linux Chrome, the browser tab or the installed app both work.

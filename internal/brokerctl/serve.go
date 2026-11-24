@@ -346,6 +346,8 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 	d.Tickets = jailTicketStager{jr}
 	// A destroy backs up the agent's conversation first.
 	d.BackupConversation = agentConversationBackup(app, st, jr, jailMount, version)
+	// The agents loop backs up each spawned agent's conversation daily.
+	d.DailyBackup = agentDailyBackup(app, st, jr, jailMount, version)
 	// A recycle deletes the record and ticket like `lever worker purge`.
 	d.Purge = jailWorkerPurger{sc: sc, r: jr, project: jailMount}
 	d.ContainerRunning = func(ctx context.Context, worker string) (bool, error) {

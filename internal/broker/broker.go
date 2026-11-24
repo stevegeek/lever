@@ -309,6 +309,10 @@ type DispatchConfig struct {
 	// BackupConversation saves agent's conversation on the host before a
 	// destroy and returns the backup's id. nil ⇒ none is taken.
 	BackupConversation func(ctx context.Context, agent string) (string, error)
+	// DailyBackup backs up a spawned agent's conversation when its newest
+	// backup is a day old or more, and returns the new backup's id ("" when
+	// none was due or there was nothing to save).
+	DailyBackup func(ctx context.Context, agent string) (string, error)
 }
 
 // TimeoutConfig bounds request handling on the jail listener per route class.
@@ -479,8 +483,12 @@ type Broker struct {
 	// destroy (spawn.go).
 	archiveDir         string
 	backupConversation func(ctx context.Context, agent string) (string, error)
-	spawnRate          *rateWindow
-	spawnDayMu         sync.Mutex
+	dailyBackup        func(ctx context.Context, agent string) (string, error)
+	// agentWatch and agentLoopEvery serve the agents loop (agentloop.go).
+	agentWatch     agentWatch
+	agentLoopEvery time.Duration
+	spawnRate      *rateWindow
+	spawnDayMu     sync.Mutex
 	// spawnDays counts each limited spawner's spawns in its day.
 	spawnDays map[string]*winCount
 	// inheritedUnsettled are the records a previous broker left spawning or
@@ -585,7 +593,7 @@ func New(c Config) *Broker {
 		contactRate: newRateWindow(contactCallLimit),
 		files:       c.Files.withDefaults(), fileLedger: &fileRecord{dir: c.Files.LedgerDir},
 		filesRate:  newRateWindow(filesCallLimit),
-		archiveDir: d.ArchiveDir, backupConversation: d.BackupConversation,
+		archiveDir: d.ArchiveDir, backupConversation: d.BackupConversation, dailyBackup: d.DailyBackup, agentLoopEvery: time.Minute,
 		spawnRate: newRateWindow(managerSpawnRateLimit), inheritedUnsettled: inherited,
 	}
 	if addRevoked {

@@ -59,16 +59,19 @@ type PushOptions struct {
 
 // Push is the proxy's Web Push service.
 type Push struct {
-	store  *PushStore
-	send   pushSender
-	pub    string
-	dir    string
-	test   webpush.TestHosts
-	audit  func(AuditLine)
-	now    func() time.Time
-	kicks  chan struct{}
-	g      *gate
-	writes *loginRate // subscribe and unsubscribe, per login
+	// waitingEvery is how often the waiting push reads the registry (0:
+	// pushWaitingEvery).
+	waitingEvery time.Duration
+	store        *PushStore
+	send         pushSender
+	pub          string
+	dir          string
+	test         webpush.TestHosts
+	audit        func(AuditLine)
+	now          func() time.Time
+	kicks        chan struct{}
+	g            *gate
+	writes       *loginRate // subscribe and unsubscribe, per login
 
 	mu   sync.Mutex
 	last map[string]time.Time // login\x00agent → last push (push_trigger.go)

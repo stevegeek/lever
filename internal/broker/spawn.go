@@ -125,6 +125,10 @@ type AgentEntry struct {
 	// Orphaned: its template is no longer configured; it can only be
 	// destroyed.
 	Orphaned bool `json:"orphaned,omitempty"`
+	// WaitingSince is when the agents loop first saw it waiting at its
+	// prompt, as the hub reports it (agent-reported: a hint, never
+	// authority). Unset when it is not waiting or was not looked at yet.
+	WaitingSince *time.Time `json:"waiting_since,omitempty"`
 }
 
 // Operator routes.
@@ -242,6 +246,9 @@ func (b *Broker) agentList(ctx context.Context, all bool, createdBy string, hub 
 	for _, rec := range b.workers.recordList() {
 		e := AgentEntry{AgentRecord: rec}
 		t := counts[rec.Template]
+		if rec.State == AgentActive {
+			e.WaitingSince = b.agentWatch.waiting(rec.Name)
+		}
 		if rec.State != AgentDestroyed {
 			e.Phase = phases[rec.Name]
 			if e.Phase == "" && listed {

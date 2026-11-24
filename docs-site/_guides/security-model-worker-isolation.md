@@ -503,6 +503,13 @@ broker checks. What spawning adds, and how it is held:
   at once, each for at most 10 minutes. Within those bounds the key holds the operator's authority over the socket: treat
   it like a deploy key for those templates.
 
+- **The agents loop only suspends.** Whether an agent waits at its prompt is what the agent
+  reports to the hub, so the broker's once-a-minute loop acts on it only in ways that harm no one
+  else: it suspends that agent (keeping its conversation) under the agent's lock after reading the
+  hub again, and the remote proxy sends operator logins a content-free "waiting" push, bounded
+  per login and agent. The loop never stops, starts or destroys an agent. Its daily backup reads
+  the agent's conversation from the guest, as destroy does, into the host-only state directory.
+
 **Residual risks.** The manager mounts the whole tree, so it can write a spawned agent's workspace
 (its `.claude` settings included) as it can a worker's. An operator-only template with grants wider
 than the manager's is therefore reachable by a compromised manager the same way a wider worker is:

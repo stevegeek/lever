@@ -201,6 +201,9 @@ func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn, directiveL
 	if b.hostWatchEnabled() {
 		go b.runHostWatch(ctx)
 	}
+	if b.agentLoopEnabled() {
+		go b.runAgentLoop(ctx)
+	}
 	if b.tokenWatchEnabled() {
 		// scion's hub token refresh timer stalls while the host sleeps, and
 		// nothing else notices.

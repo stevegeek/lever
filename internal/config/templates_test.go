@@ -26,6 +26,12 @@ func TestTemplateLoads(t *testing.T) {
 	if !ok || tm.EffectivePrefix() != "s" || tm.EffectiveOnDestroy() != WorkspaceArchive || tm.MaySpawn(SpawnerManager) || !tm.MaySpawn(SpawnerOperator) {
 		t.Fatalf("%+v", tm)
 	}
+	if tm.IdleSuspend != 0 {
+		t.Fatalf("idle_suspend defaults to %s", tm.IdleSuspend)
+	}
+	if tm2, _ := loadTemplates(t, templateBase+sessionTmpl+"    idle_suspend: 2h\n").TemplateByName("session"); tm2.IdleSuspend.Hours() != 2 {
+		t.Fatalf("idle_suspend 2h read as %s", tm2.IdleSuspend)
+	}
 	if got, ok := app.TemplateOf("s-abc234"); !ok || got.Name != "session" {
 		t.Fatal("instance name not recognised")
 	}
@@ -61,6 +67,9 @@ func TestTemplateRefusals(t *testing.T) {
 		"instances < running":        {strings.Replace(sessionTmpl, "max_instances: 4", "max_instances: 1", 1), "max_instances"},
 		"bad on_destroy":             {sessionTmpl + "    on_destroy: {workspace: shred}\n", "on_destroy"},
 		"bad spawner":                {sessionTmpl + "    spawners: [worker]\n", "spawners"},
+		"idle_suspend too short":     {sessionTmpl + "    idle_suspend: 1m\n", "idle_suspend"},
+		"idle_suspend too long":      {sessionTmpl + "    idle_suspend: 1000h\n", "idle_suspend"},
+		"idle_suspend negative":      {sessionTmpl + "    idle_suspend: -1h\n", "idle_suspend"},
 		"unknown tool":               {sessionTmpl + "    obtain: [{tool: nope, op: x}]\n", "nope"},
 		"manager wider":              {sessionTmpl + "    spawners: [manager]\n    obtain: [{tool: db, op: write}]\n", "wider than itself"},
 		"manager wider by delegate":  {sessionTmpl + "    spawners: [manager]\n    delegate: [{tool: db, op: write, to: [scratch]}]\n", "wider than itself"},

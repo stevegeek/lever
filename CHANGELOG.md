@@ -42,6 +42,10 @@ version bump moves the block under the new version heading.
     destroy always backs up, and the broker checks ownership and audits every verb under the key's
     name. The caller's command has a fixed grammar and never reaches a shell; a key runs at most 4
     commands at once.
+  - `idle_suspend` on a template suspends an agent that has waited at its prompt that long (off by
+    default). Operator logins with notifications on get a content-free "<agent> is waiting for
+    you" push when a spawned agent starts waiting. Each spawned agent that ran has its
+    conversation backed up once a day (the newest 10 are kept).
   - A `delegate` may name `template:<name>`, which holds for that template's active agents.
   - Config load checks that every template's `max_running` agents fit in the VM's memory and,
     with the manager and the workers, within scion's cap of 12 running agents.

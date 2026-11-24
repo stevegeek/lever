@@ -233,13 +233,21 @@ func (p *Push) takeSlot(login, agent string) (wait time.Duration, release func()
 // bounded by SendTimeout, so a slow push service holds the login's checks for
 // one send time. After Run stops the sends get shutdownGrace more.
 func (p *Push) notify(ctx context.Context, login, agent string) {
+	p.notifyKind(ctx, login, agent, "")
+}
+
+// notifyKind is notify with a kind: "" for a message, pushKindWaiting for
+// an agent waiting at its prompt. The kind is lever's constant, never text
+// from an agent.
+func (p *Push) notifyKind(ctx context.Context, login, agent, kind string) {
 	if p.g != nil && !p.g.loginCurrent(login) {
 		return
 	}
 	payload, _ := json.Marshal(struct {
 		V     int    `json:"v"`
 		Agent string `json:"agent"`
-	}{1, agent})
+		Kind  string `json:"kind,omitempty"`
+	}{1, agent, kind})
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go func() {

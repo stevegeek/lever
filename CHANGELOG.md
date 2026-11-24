@@ -7,6 +7,8 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [1.0.0-beta.10] - 2026-11-24
+
 ### Added
 
 - **Agents spawned from templates.** A new `templates:` list in `lever.yaml` declares the shape of

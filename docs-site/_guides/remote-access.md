@@ -749,13 +749,16 @@ suspended applies nothing else, so it neither suspends at the hub nor restarts t
 suspends the removed login's hub user and drops its role bindings (the ceiling stays). The hub
 refuses a suspended user's web session at once, and its API access within the hub's 60-second user
 cache. Nothing an agent can do to the hub, nor a later step failing, delays either. Adding the
-login back reactivates the same hub user and binds it again. Turning remote access off stops the
+login back reactivates the same hub user and binds it again. A login that was invited and never
+signed in is not suspended (scion refuses to change an invited user's status): its role bindings
+are dropped and the pending invite stays, which grants nothing while the proxy refuses the login;
+adding the login back binds the same hub user again. Turning remote access off stops the
 proxy before any other step and suspends every login (none can sign in then); turning it back on
 reactivates and binds them before the proxy starts.
 
 `lever doctor`'s `remote web role` row reads the hub, not the record: each configured login's hub
 user is the one lever recorded, bound to its tier's role, capped and not suspended, and each removed
-login's hub user is suspended.
+login's hub user is suspended, or still invited and bound to neither of lever's roles.
 
 ## Verified web chat
 

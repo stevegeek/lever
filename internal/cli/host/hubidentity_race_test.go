@@ -56,6 +56,7 @@ func TestHubIdentityRenameLoopCannotBlockContactRemoval(t *testing.T) {
 	if c == nil || c.Status == "suspended" {
 		t.Fatalf("setup: contact %+v", c)
 	}
+	c.Status = "active" // signed in
 	e.hub.user(devUserID).Email = "agent-chosen@example.org"
 	e.app.Remote.AllowedUsers = []config.RemoteUser{hiOperator(op)}
 	for i := range 3 {
@@ -83,6 +84,7 @@ func TestHubIdentityRenameLoopDuringAMintFailsNamingTheCause(t *testing.T) {
 	e.seedMigrated("dev@localhost", true)
 	e.mustRun()
 	c := e.hub.byEmail(contact)
+	c.Status = "active" // signed in
 	e.app.Remote.AllowedUsers = []config.RemoteUser{hiOperator(op)}
 	if err := e.st.SaveControllerPATRecord(state.PATRecord{ID: "tok-x", Requested: []string{"agent:manage"},
 		MintedAt: e.now, ExpiresAt: e.now.AddDate(0, 0, 300)}); err != nil {
@@ -119,6 +121,7 @@ func TestHubIdentitySuspendsRemovedLoginsBeforeTheController(t *testing.T) {
 	e.seedMigrated("dev@localhost", true)
 	e.mustRun()
 	c := e.hub.byEmail(contact)
+	c.Status = "active" // signed in
 	e.app.Remote.AllowedUsers = []config.RemoteUser{hiOperator(op)}
 	e.hub.user(devUserID).Status = "suspended"
 	if err := e.run(); err == nil || !strings.Contains(err.Error(), "want an active member") {
@@ -135,6 +138,7 @@ func TestHubIdentityRemoteOffSuspendsEveryLoginFirst(t *testing.T) {
 	e := newHIEnv(t, hiRemoteApp(true, hiOperator(op)))
 	e.mustRun()
 	u := e.hub.byEmail(op)
+	u.Status = "active" // signed in
 	e.app = hiRemoteApp(false, hiOperator(op))
 	e.hub.down = map[string]int{"GET /api/v1/auth/tokens": 500, "POST /api/v1/auth/tokens": 500}
 	_ = e.run()

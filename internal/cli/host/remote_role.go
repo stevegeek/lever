@@ -303,6 +303,12 @@ func (h *hubIdentity) remoteUserID(ctx context.Context, email string, rec *state
 
 // suspendRemoteUser suspends first: it fails closed sooner than the unbind.
 //
+// A login that was invited but never signed in stays invited: scion (from
+// d34ffbc1) refuses any status change of an invited user. Its project roles
+// are still removed, and the proxy refuses the login, so the pending invite
+// grants nothing. Revoking it instead would delete the user, and a later
+// re-add would get a new user ID that lever refuses as not the one it bound.
+//
 // It never touches lever's own hub users, whatever the record says: every
 // agent hangs off the controller (scion's dev user on a migrated hub), and a
 // suspended controller, or one unbound from the project, holds them all.
@@ -316,7 +322,9 @@ func (h *hubIdentity) suspendRemoteUser(ctx context.Context, rec *state.HubIdent
 	if err != nil {
 		return errHubIdentity("reading removed login %s: %w", email, err)
 	}
-	if ok && u.Status != "suspended" {
+	switch {
+	case ok && u.Status == "invited":
+	case ok && u.Status != "suspended":
 		if _, err := h.admin.UpdateUser(ctx, id, "", "suspended"); err != nil {
 			return errHubIdentity("suspending removed login %s: %w", email, err)
 		}

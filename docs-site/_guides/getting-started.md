@@ -42,7 +42,8 @@ two workers; see [system requirements & sizing](/getting-started/requirements/).
   used by this walkthrough). A `lima` backend also exists for macOS and Linux; see
   [backends](/reference/backends/).
 - **Go 1.26.9+** (an older Go 1.21 or later downloads it by itself, unless `GOTOOLCHAIN=local`) — to build the binaries, and on `PATH` at runtime: `lever apply`/`lever up`
-  cross-compile the pinned Scion engine into the jail. A lever from a release archive needs no Go
+  cross-compile the pinned Scion engine into the jail. Scion `d34ffbc1` needs Go 1.26.11+: an
+  older Go downloads that toolchain at the first scion build, unless `GOTOOLCHAIN=local`. A lever from a release archive needs no Go
   for the scion pin of its release: it downloads that release's prebuilt scion (see
   [prebuilt scion](/reference/config/#prebuilt-scion)). A version-manager shim (asdf, mise) that is
   not initialised in the non-interactive sub-process fails with `resolve go toolchain (is go on

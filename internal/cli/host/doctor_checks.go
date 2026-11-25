@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/version"
 	"io/fs"
 	"maps"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -66,6 +68,8 @@ func tcpDial(addr string) error {
 type doctorProbes struct {
 	dial      dialFunc
 	goVersion func() (string, error)
+	// goToolchain is `go env GOTOOLCHAIN`.
+	goToolchain func() (string, error)
 	// nodeToolchain validates node and npm for the scion web-asset build.
 	nodeToolchain func() (string, error)
 	// claudeVersion reads an image's baked Claude Code version label from the host
@@ -88,6 +92,7 @@ func productionProbes(r proc.Runner) doctorProbes {
 	return doctorProbes{
 		dial:          tcpDial,
 		goVersion:     func() (string, error) { return goVersionProbe(r) },
+		goToolchain:   func() (string, error) { return goEnvProbe(r, "GOTOOLCHAIN") },
 		nodeToolchain: func() (string, error) { return nodeToolchainProbe(r) },
 		claudeVersion: func(imageRef string) (string, error) { return imageLabelProbe(r, imageRef, claudeVersionLabel) },
 		claudeVersionTar: func(tarPath, imageRef string) (string, error) {
@@ -1681,7 +1686,84 @@ func checkGoToolchain(scion config.ScionConfig, prebuilt bool, p doctorProbes) c
 		return checkResult{name, false, "go toolchain not usable: " + err.Error(),
 			`put a REAL Go toolchain on PATH (not just an asdf/mise shim), e.g. export PATH="$HOME/.asdf/installs/golang/<ver>/go/bin:$PATH"; ` + "`go version` should print"}
 	}
-	return checkResult{name, true, strings.TrimSpace(out), ""}
+	have := strings.TrimSpace(out)
+	need, what := scionGoRequirement(scion)
+	local := goVersionOf(have)
+	if need == "" || local == "" || version.Compare(local, "go"+need) >= 0 {
+		return checkResult{name, true, have, ""}
+	}
+	if prebuilt {
+		return checkResult{name, true, have + "; not required: lever downloads this release's prebuilt scion " + scion.Version +
+			" (a failed download builds it, which needs Go " + need + " or a toolchain download)", ""}
+	}
+	tc := ""
+	if p.goToolchain != nil {
+		if v, err := p.goToolchain(); err == nil {
+			tc = strings.TrimSpace(v)
+		}
+	}
+	if goToolchainLocal(tc) {
+		return checkResult{name, false, fmt.Sprintf("%s, but %s needs Go %s and GOTOOLCHAIN=%s forbids a toolchain download: the scion build fails", have, what, need, tc),
+			"install Go " + need + " or later, or set GOTOOLCHAIN=auto (the first build then downloads go" + need + " from the Go module proxy)"}
+	}
+	return checkResult{name, true, fmt.Sprintf("%s; %s needs Go %s, so the first scion build downloads go%s from the Go module proxy (about 70 MB, the same egress as the module download; it fails with GOPROXY=off). Install Go %s or later to skip it",
+		have, what, need, need, need), ""}
+}
+
+// scionGoRequirement is the Go version the configured scion's go.mod asks
+// for and what to call that scion: read from a source tree's go.mod, or
+// known for ReleasePin. "" when lever cannot tell.
+func scionGoRequirement(sc config.ScionConfig) (need, what string) {
+	if sc.Source != "" {
+		b, err := os.ReadFile(filepath.Join(sc.Source, "go.mod"))
+		if err != nil {
+			return "", ""
+		}
+		for line := range strings.Lines(string(b)) {
+			if f := strings.Fields(line); len(f) == 2 && f[0] == "go" && goVersionRE.MatchString(f[1]) {
+				return f[1], "the scion source at " + sc.Source
+			}
+		}
+		return "", ""
+	}
+	if scionbin.IsReleasePin(sc.Version) {
+		return scionbin.ReleasePinGo, "scion " + sc.Version
+	}
+	return "", ""
+}
+
+var goVersionRE = regexp.MustCompile(`^1\.[0-9]+(\.[0-9]+)?$`)
+
+// goVersionOf is the "go1.N.M" word of `go version` output, "" when it has
+// none (a development build reads "devel").
+func goVersionOf(out string) string {
+	for _, f := range strings.Fields(out) {
+		if version.IsValid(f) && strings.HasPrefix(f, "go1.") {
+			return f
+		}
+	}
+	return ""
+}
+
+// goToolchainLocal reports a GOTOOLCHAIN that never downloads a newer
+// toolchain: local, or a minimum with +path.
+func goToolchainLocal(tc string) bool {
+	return tc == "local" || tc == "path" || strings.HasSuffix(tc, "+path")
+}
+
+// goEnvProbe is `go env key`.
+func goEnvProbe(r proc.Runner, key string) (string, error) {
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, err := r.Run(ctx, nil, goBin, "env", key)
+	if err != nil {
+		return "", fmt.Errorf("%s env %s: %w", goBin, key, err)
+	}
+	return res.Stdout, nil
 }
 
 // scionPrebuilt reports whether apply downloads the release's prebuilt scion

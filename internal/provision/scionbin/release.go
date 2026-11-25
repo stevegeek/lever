@@ -29,6 +29,21 @@ import (
 // binaries from, and the scion.version the examples and docs pin.
 const ReleasePin = "d34ffbc1"
 
+// ReleasePinGo is the go line of ReleasePin's go.mod, the oldest Go that
+// builds it. scion's go.mod has no toolchain line, so an older local Go
+// either downloads this toolchain (GOTOOLCHAIN=auto) or refuses the build
+// (GOTOOLCHAIN=local).
+const ReleasePinGo = "1.26.11"
+
+// IsReleasePin reports whether version names ReleasePin: the pin itself, or
+// a hex prefix of at least 7 digits on either side of it.
+func IsReleasePin(version string) bool {
+	if len(version) < 7 || !hexRe.MatchString(version) {
+		return false
+	}
+	return strings.HasPrefix(ReleasePin, version) || strings.HasPrefix(version, ReleasePin)
+}
+
 // ReleaseDir is the directory, relative to this package, that the release
 // build's generator (GenerateRelease) writes the manifest into and the embed
 // reads it from.

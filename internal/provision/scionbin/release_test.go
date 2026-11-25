@@ -616,3 +616,20 @@ func TestResolveCancelledDownloadDoesNotBuild(t *testing.T) {
 		t.Fatalf("err %v, calls %+v: want context.Canceled and no build", err, f.Calls)
 	}
 }
+
+func TestIsReleasePin(t *testing.T) {
+	for v, want := range map[string]bool{
+		scionbin.ReleasePin:         true,
+		scionbin.ReleasePin[:7]:     true,
+		testCommit:                  true,
+		scionbin.ReleasePin[:6]:     false,
+		"":                          false,
+		"main":                      false,
+		"0000000":                   false,
+		strings.ToUpper(testCommit): false,
+	} {
+		if got := scionbin.IsReleasePin(v); got != want {
+			t.Errorf("IsReleasePin(%q) = %v, want %v", v, got, want)
+		}
+	}
+}

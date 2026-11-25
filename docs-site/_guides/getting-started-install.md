@@ -28,6 +28,12 @@ the scion compile. With `remote.enabled` it downloads that release's prebuilt we
 so remote access on that pin needs **neither Go nor node**. Any other pin, and a failed download,
 still need Go (and node for the web UI). See [prebuilt scion](/reference/config/#prebuilt-scion).
 
+Building scion `d34ffbc1` needs **Go 1.26.11 or later** (its `go.mod` says `go 1.26.11`). lever
+itself builds with Go 1.26.9. With an older Go and `GOTOOLCHAIN=auto` (Go's default), the first
+scion build downloads go1.26.11 from the Go module proxy (about 70 MB, the same egress as the
+module download; it fails under `GOPROXY=off`). With `GOTOOLCHAIN=local` it fails. `lever doctor`'s
+`go toolchain` row says which applies.
+
 To build from a checkout instead:
 
 ```sh

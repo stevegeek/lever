@@ -149,9 +149,10 @@ $ lever agent destroy s-k3f7qa --stop --force
 What a spawn does: the broker draws a name that was never used, records the agent in
 `.lever-state/agents.json` (0600), creates its workspace with its `lever-agent` skill, grants it
 exactly the template's capabilities and starts it fresh with your task. What a destroy does: it
-backs up the agent's conversation to `.lever-state/agent-conversations/<name>/`, drops its grants
-and revokes its name for good, archives (or removes, or keeps) its workspace, and deletes its hub
-record. The record stays as a tombstone, so the name is never drawn again: the agent's certificates
+backs up the agent's conversation, drops its grants and revokes its name for good, archives (or
+removes, or keeps) its workspace, and deletes its hub record. The workspace archive and the
+conversation backup end up together, in one private directory per agent,
+`.lever-state/agent-archives/<name>/`. The record stays as a tombstone, so the name is never drawn again: the agent's certificates
 and tokens can never name another agent.
 
 - **Restarts.** Spawned agents survive `lever reload`, `lever stop` (which suspends running ones)
@@ -181,10 +182,19 @@ and tokens can never name another agent.
   messages, and is messaged by, only the agents of its own spawner: the operator's agents form one
   group, the manager's another, and each ssh key's its own. Configured workers message each other
   as before.
+- **Restoring a destroyed agent.** `lever agent archives` lists what destroyed agents left, with
+  sizes and whether each can be restored. `lever agent restore s-k3f7qa --memory 16GiB` spawns a
+  new agent (a new name) from that archive, with the same admission as any spawn: its workspace
+  holds the old files, and the old transcripts are in `.lever/conversation/s-k3f7qa/`, which its
+  task tells it to read. This is how to give a session more memory: destroy it, then restore it
+  with a bigger `--memory`. The new agent starts a fresh Claude Code conversation and catches up
+  from the transcript; it gets only its template's grants. Note that the transcripts are then in
+  the tree, where the manager can read them, like the rest of the workspace.
 - **Clearing out destroyed agents.** `lever agent gc --older 30d --force` deletes the archives and
   conversation backups of agents destroyed at least 30 days ago and drops their records, keeping
-  only their names so they are never used again (`--dry-run` lists what would go). A workspace an
-  `on_destroy: keep` template left in the tree is not touched. Run it from a timer if you like.
+  only their names so they are never used again (`--dry-run` lists what would go);
+  `lever agent archive-delete NAME --force` deletes one now. A workspace an
+  `on_destroy: keep` template left in the tree is not touched. Run gc from a timer if you like.
 - **In the web page.** With `remote.landing: chat`, the operator's logins see each active spawned
   agent after the workers, labelled with its spawn label (or its template), and can chat with it,
   wake it and open its terminal. Every agent has a stable link,
@@ -228,10 +238,16 @@ $ ssh lever-host list
 {"ok":true,"templates":[{"name":"session","max_instances":8,"max_running":2,"instances":1,"running":1,"memory_sizes":["4GiB","8GiB","14GiB"],"memory_default":"4GiB"}],"agents":[...],"memory":{"budget_bytes":32212254720,"used_bytes":8589934592,"free_bytes":23622320128}}
 $ ssh lever-host suspend s-k3f7qa < /dev/null     # and resume
 $ ssh lever-host destroy s-k3f7qa --stop < /dev/null
+$ ssh lever-host archives < /dev/null
+{"ok":true,"archives":[{"name":"s-k3f7qa","template":"session","label":"PR 412: fix the flaky test","destroyed_at":"...","workspace_bytes":81920,"transcript_bytes":40960,"restorable":true}]}
+$ ssh lever-host restore s-k3f7qa --memory 16GiB < /dev/null
+{"name":"s-p2xm4d","template":"session","memory":"16GiB","ok":true,"phase":"running","restored_from":"s-k3f7qa","exit":0}
+$ ssh lever-host archive-delete s-k3f7qa < /dev/null
 ```
 
-The whole grammar is `spawn TEMPLATE [--memory SIZE] [LABEL...]`, `destroy NAME [--stop]`, `suspend NAME`,
-`resume NAME` and `list [--json]`. Each answer is one JSON line, with `ok`, and on a refusal
+The whole grammar is `spawn TEMPLATE [--memory SIZE] [LABEL...]`, `destroy NAME [--stop]`,
+`suspend NAME`, `resume NAME`, `list [--json]`, `archives [--json]`,
+`restore NAME [--memory SIZE] [LABEL...]` and `archive-delete NAME`. Each answer is one JSON line, with `ok`, and on a refusal
 `reason`, `error` and `exit` (the process exits with the same code, as `lever agent` does). A
 refusal's `error` is a fixed sentence per reason: the broker's own text, which can name other
 agents and host paths, stays in its audit log. Words
@@ -252,11 +268,14 @@ What the key may do:
   agents it spawned, and nothing else;
 - suspend, resume and destroy only the agents it spawned, from a template still listed. A destroy
   always backs up the conversation;
+- list, restore and delete only the archives of agents it spawned, from a template still listed. A
+  restore goes into the old agent's template, counts as a spawn (the same caps, rate limits and
+  memory budget) and is recorded as the key's; it keeps the old label unless one is given;
 - run at most 4 commands at once, each for at most 10 minutes.
 
 The key works through the broker's operator socket, on the host. Within those bounds it acts with
-the operator's authority. The broker checks again that an agent is the key's before a suspend,
-resume or destroy, and its audit log names the key (`ssh:factory`) for each of those and each
+the operator's authority. The broker checks again that an agent or archive is the key's before a
+suspend, resume, destroy, restore or archive delete, and its audit log names the key (`ssh:factory`) for each of those and each
 spawn. A command the wrapper refuses itself (a bad command, a template or agent that is not the
 key's) never reaches the broker. Revoke the key
 by removing its line from `authorized_keys`; the agents it spawned stay until you destroy them.

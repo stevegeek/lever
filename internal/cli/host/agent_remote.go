@@ -60,7 +60,8 @@ const remoteSlots = 4
 var remoteNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 // remoteGrammar is the whole grammar, for refusals.
-const remoteGrammar = "spawn TEMPLATE [--memory SIZE] [LABEL...] (brief on stdin) | destroy NAME [--stop] | suspend NAME | resume NAME | list [--json]"
+const remoteGrammar = "spawn TEMPLATE [--memory SIZE] [LABEL...] (brief on stdin) | destroy NAME [--stop] | suspend NAME | resume NAME | list [--json] | " +
+	"archives [--json] | restore NAME [--memory SIZE] [LABEL...] | archive-delete NAME"
 
 // remoteRefusal is what the caller is told for a broker refusal: a fixed
 // text per reason, since the broker's own text is written for the operator
@@ -85,6 +86,10 @@ func remoteRefusal(reason string) string {
 		return "the label is not allowed: at most 60 printable characters"
 	case broker.ReasonRunning:
 		return "the agent is running: destroy it with --stop"
+	case broker.ReasonNoArchive:
+		return "that agent left nothing to restore"
+	case broker.ReasonArchiveRefused:
+		return "the archive cannot be restored (unreadable, unsafe, past the limits, or too large for the free space)"
 	case broker.ReasonBadRequest:
 		return "bad request"
 	case reasonNoOperatorSocket, "":
@@ -95,11 +100,11 @@ func remoteRefusal(reason string) string {
 
 // remoteVerb is one parsed caller command.
 type remoteVerb struct {
-	verb     string // spawn, destroy, suspend, resume, list
+	verb     string // spawn, destroy, suspend, resume, list, archives, restore, archive-delete
 	template string // spawn
-	label    string // spawn
-	memory   string // spawn, "" for the template's default
-	name     string // destroy, suspend, resume
+	label    string // spawn, restore
+	memory   string // spawn, restore; "" for the default
+	name     string // destroy, suspend, resume, restore, archive-delete
 	stop     bool   // destroy
 }
 
@@ -130,29 +135,50 @@ func parseRemoteVerb(line string) (remoteVerb, error) {
 		return nil
 	}
 	v := remoteVerb{verb: w[0]}
-	switch {
-	case v.verb == "spawn" && len(w) >= 2:
-		if err := name("template", w[1]); err != nil {
-			return remoteVerb{}, err
-		}
-		rest := w[2:]
+	// sizeAndLabel reads spawn's and restore's [--memory SIZE] [LABEL...].
+	sizeAndLabel := func(rest []string) error {
 		if len(rest) > 0 && rest[0] == "--memory" {
 			if len(rest) < 2 {
-				return remoteVerb{}, errors.New("--memory needs a size, such as 8GiB")
+				return errors.New("--memory needs a size, such as 8GiB")
 			}
 			if _, ok := broker.ParseMemorySize(rest[1]); !ok {
-				return remoteVerb{}, fmt.Errorf("memory size %q is not a number and MiB or GiB, such as 8GiB", rest[1])
+				return fmt.Errorf("memory size %q is not a number and MiB or GiB, such as 8GiB", rest[1])
 			}
 			v.memory, rest = rest[1], rest[2:]
 		} else if len(rest) > 0 && strings.HasPrefix(rest[0], "--memory") {
 			// "--memory=8GiB" would otherwise become a label and the spawn
 			// silently get the default size.
-			return remoteVerb{}, errors.New("write --memory SIZE, with a space, right after the template")
+			return errors.New("write --memory SIZE, with a space, right after the name")
 		}
-		v.template, v.label = w[1], strings.Join(rest, " ")
+		v.label = strings.Join(rest, " ")
 		if utf8.RuneCountInString(v.label) > broker.MaxAgentLabel {
-			return remoteVerb{}, fmt.Errorf("the label is longer than %d characters", broker.MaxAgentLabel)
+			return fmt.Errorf("the label is longer than %d characters", broker.MaxAgentLabel)
 		}
+		return nil
+	}
+	switch {
+	case v.verb == "spawn" && len(w) >= 2:
+		if err := name("template", w[1]); err != nil {
+			return remoteVerb{}, err
+		}
+		if err := sizeAndLabel(w[2:]); err != nil {
+			return remoteVerb{}, err
+		}
+		v.template = w[1]
+	case v.verb == "restore" && len(w) >= 2:
+		if err := name("agent", w[1]); err != nil {
+			return remoteVerb{}, err
+		}
+		if err := sizeAndLabel(w[2:]); err != nil {
+			return remoteVerb{}, err
+		}
+		v.name = w[1]
+	case v.verb == "archive-delete" && len(w) == 2:
+		if err := name("agent", w[1]); err != nil {
+			return remoteVerb{}, err
+		}
+		v.name = w[1]
+	case v.verb == "archives" && (len(w) == 1 || len(w) == 2 && w[1] == "--json"):
 	case v.verb == "destroy" && (len(w) == 2 || len(w) == 3 && w[2] == "--stop"):
 		v.stop = len(w) == 3
 		fallthrough
@@ -222,6 +248,23 @@ type remoteTemplate struct {
 	MemoryDefault string   `json:"memory_default,omitempty"`
 }
 
+// remoteArchives is `archives`: the caller's own destroyed agents that left
+// an archive, of the templates it may still use.
+type remoteArchives struct {
+	OK       bool            `json:"ok"`
+	Archives []remoteArchive `json:"archives"`
+}
+
+type remoteArchive struct {
+	Name            string    `json:"name"`
+	Template        string    `json:"template"`
+	Label           string    `json:"label,omitempty"`
+	DestroyedAt     time.Time `json:"destroyed_at,omitzero"`
+	WorkspaceBytes  int64     `json:"workspace_bytes"`
+	TranscriptBytes int64     `json:"transcript_bytes"`
+	Restorable      bool      `json:"restorable"`
+}
+
 type remoteAgent struct {
 	Name      string    `json:"name"`
 	Template  string    `json:"template"`
@@ -246,7 +289,8 @@ func newAgentRemoteVerbCmd() *cobra.Command {
 			"  restrict,command=\"lever agent remote-verb --config /path/lever.yaml --templates session --as factory\" ssh-ed25519 AAAA... factory\n\n" +
 			"It reads the caller's command from " + remoteCommandEnv + ", which must be one of:\n  " + remoteGrammar + "\n" +
 			"and prints one JSON line. The caller may spawn from the --templates listed only, and may list, suspend,\n" +
-			"resume and destroy only the agents it spawned, which are recorded as created by ssh:<--as>.\n" +
+			"resume and destroy only the agents it spawned, which are recorded as created by ssh:<--as>; and list,\n" +
+			"restore and delete only the archives those agents left. A restore is a spawn: the same caps and limits.\n" +
 			"A destroy always backs up the conversation. See docs/operations.md, Spawning over ssh.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runRemoteVerb(cmd, templates, as, configPath)
@@ -348,6 +392,35 @@ func runRemoteVerb(cmd *cobra.Command, templates []string, as, configPath string
 		}
 		return fail(errors.New(remoteRefusal(broker.ReasonNotSpawned)), broker.ReasonNotSpawned, exitWorkerRefused)
 	}
+	// archives are the caller's own destroyed agents' archives, of the
+	// templates it may still use.
+	archives := func() ([]broker.ArchiveEntry, error) {
+		var resp broker.ArchiveListResponse
+		if err := operatorGet(ctx, sock, broker.PathOperatorAgentArchives, &resp); err != nil {
+			return nil, brokerFail(err, broker.PathOperatorAgentArchives)
+		}
+		var out []broker.ArchiveEntry
+		for _, a := range resp.Archives {
+			if a.CreatedBy == by && slices.Contains(templates, a.Template) {
+				out = append(out, a)
+			}
+		}
+		return out, nil
+	}
+	// ownArchive finds v.name among them; anything else is refused alike.
+	ownArchive := func() error {
+		res.Name = v.name
+		list, err := archives()
+		if err != nil {
+			return err
+		}
+		for _, a := range list {
+			if a.Name == v.name {
+				return nil
+			}
+		}
+		return fail(errors.New(remoteRefusal(broker.ReasonNotSpawned)), broker.ReasonNotSpawned, exitWorkerRefused)
+	}
 
 	switch v.verb {
 	case "spawn":
@@ -399,6 +472,42 @@ func runRemoteVerb(cmd *cobra.Command, templates []string, as, configPath string
 			return err
 		}
 		res.OK, res.Phase = true, safeToken(resp.Phase)
+	case "archives":
+		list, err := archives()
+		if err != nil {
+			return err
+		}
+		out := remoteArchives{OK: true, Archives: []remoteArchive{}}
+		for _, a := range list {
+			out.Archives = append(out.Archives, remoteArchive{Name: a.Name, Template: a.Template, Label: a.Label, DestroyedAt: a.DestroyedAt,
+				WorkspaceBytes: a.WorkspaceBytes, TranscriptBytes: a.TranscriptBytes, Restorable: a.Restorable})
+		}
+		printJSONLine(cmd, out)
+		return nil
+	case "restore":
+		if err := ownArchive(); err != nil {
+			return err
+		}
+		res.RestoredFrom = v.name
+		// The broker checks again that the archive is the caller's, and
+		// restores it into its own template.
+		var resp broker.SpawnResponse
+		if err := post(broker.PathOperatorAgentRestore, broker.RestoreRequest{Archive: v.name, Label: v.label, Memory: v.memory, By: by}, &resp); err != nil {
+			return err
+		}
+		res.OK, res.Name, res.Phase, res.Template = true, safeToken(resp.Name), safeToken(resp.Phase), safeToken(resp.Template)
+		if _, ok := broker.ParseMemorySize(resp.Memory); ok {
+			res.Memory = resp.Memory
+		}
+	case "archive-delete":
+		if err := ownArchive(); err != nil {
+			return err
+		}
+		var resp broker.ArchiveDeleteResponse
+		if err := post(broker.PathOperatorAgentArchiveDelete, broker.ArchiveDeleteRequest{Name: v.name, By: by}, &resp); err != nil {
+			return err
+		}
+		res.OK, res.Freed = true, resp.Freed
 	case "list":
 		list, err := registry(true)
 		if err != nil {

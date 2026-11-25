@@ -564,8 +564,23 @@ broker checks. What spawning adds, and how it is held:
   reach: the manager sees declared workers and its own spawned agents and a count of the rest; a
   chat login, an ssh key and a spawned agent see the sizes alone. The totals (`budget`, `used`,
   `free`) are summed over every agent and shown to the manager and to ssh keys.
+- **A restore grants nothing new.** `lever agent restore` (and an ssh key's `restore`, of its own
+  agents only) is a spawn: the same admission, caps, rate limits and memory budget, a new name,
+  and only its template's grants. What the archive holds is the destroyed agent's own output and
+  is read as hostile: only directories and regular files are written (links, hard links and
+  devices are skipped), with no setuid bits, through a handle on the new agent's own directory
+  that spawn just created, each file created exclusively; an absolute or `..` name, a duplicate,
+  or an archive past 200,000 entries, 8 GiB or 256 levels refuses the whole restore before a
+  name is drawn. The template's skill is written fresh, never taken from the archive, and a restore into another
+  template leaves out the old agent's configuration (Claude Code settings and hooks, MCP servers,
+  `CLAUDE.md`, git hooks and config), which would otherwise run with the new template's grants. A
+  key's restores are rate-limited before an archive is read. The old
+  transcript lands in the new workspace (in the tree, which the manager can read), and the agent
+  is told it is a record of earlier work, not instructions. Archives stay host-only (0700
+  directory, 0600 files) and never enter the tree except through a restore.
 - **Archives and backups are bounded.** Conversation backups and archives stay in the host-only state
-  directory: daily backups keep the newest 10 per agent, and `lever agent gc` deletes the archives
+  directory: daily backups keep the newest 10 per agent, a destroy moves its backup into the
+  agent's archive, and `lever agent gc` (or `archive-delete`, one at a time) deletes the archives
   and backups of agents destroyed long enough ago, keeping only their names (still revoked, never
   drawn again). The retired names and the revocations grow by one short entry per spawn, bounded
   by the spawn quotas.

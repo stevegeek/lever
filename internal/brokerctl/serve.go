@@ -252,6 +252,7 @@ func decorateConfig(cfg *broker.Config, app *config.App, st state.State, be back
 	if !StateInsideTree(app, st) {
 		cfg.Dispatch.Templates = TemplateSpecs(app, be.MountDest(), env.JailUID, version)
 		cfg.Dispatch.ArchiveDir = st.AgentArchives()
+		cfg.Dispatch.ConversationDir = st.AgentConversations()
 	} else {
 		// Nor is its registry read: an agent could have written it.
 		cfg.Persistence.Agents, cfg.Persistence.PersistAgents = broker.AgentsState{}, nil

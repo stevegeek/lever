@@ -73,6 +73,21 @@ version bump moves the block under the new version heading.
   memory budget. How many run at once is the budget's to decide at each start. A config that passed
   before still passes, and its default budget admits everything it did before.
 
+### Added
+
+- **One archive per destroyed agent.** Destroy now keeps the workspace archive and the
+  conversation backup together in `.lever-state/agent-archives/<name>/`. Older archives, split
+  between `agent-archives/<name>.tar.gz` and `agent-conversations/<name>/`, are still read.
+- **`lever agent restore ARCHIVE` spawns a new agent from a destroyed agent's archive.** It goes
+  through the same admission as a spawn, and takes `--template`, `--label` and `--memory`. Its
+  workspace holds the old files, and the old transcripts are in `.lever/conversation/<old name>/`,
+  which its task tells it to read. The archive is read as hostile: links and devices are skipped,
+  and unsafe names or an archive past the limits are refused before a name is drawn.
+- **`lever agent archives` and `lever agent archive-delete`.** The first lists the archives with
+  sizes and whether each can be restored. The second deletes one for good.
+- **remote-verb: `archives`, `restore NAME` and `archive-delete NAME`.** An ssh key sees, restores
+  and deletes only the archives of its own agents.
+
 ## [1.0.0-beta.11] - 2026-11-25
 
 ### Added

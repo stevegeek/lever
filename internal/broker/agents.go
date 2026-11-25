@@ -66,6 +66,8 @@ type AgentRecord struct {
 	// record from before sizes: its template's resources.memory.
 	Memory      string `json:"memory,omitempty"`
 	MemoryBytes int64  `json:"memory_bytes,omitempty"`
+	// RestoredFrom names the destroyed agent whose archive seeded it.
+	RestoredFrom string `json:"restored_from,omitempty"`
 }
 
 // AgentsState is the registry file.

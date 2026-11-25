@@ -66,6 +66,8 @@ const (
 	ReasonNotSpawned         = "not-spawned"         // 403/404 (destroy): the name is no spawned agent, or one already destroyed
 	ReasonRunning            = "running"             // 409 (destroy): the agent is running and stop was not asked
 	ReasonBackupFailed       = "backup-failed"       // 502 (destroy): the conversation backup failed; nothing was destroyed
+	ReasonNoArchive          = "no-archive"          // 404 (restore): the destroyed agent left nothing to restore
+	ReasonArchiveRefused     = "archive-refused"     // 409/422/507 (restore): the archive is unreadable, unsafe, past the limits or does not fit
 	ReasonSpawned            = "spawned"             // 403 (purge, recycle): a spawned agent is destroyed, never purged or recycled
 )
 

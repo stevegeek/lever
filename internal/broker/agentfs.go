@@ -291,17 +291,13 @@ func archiveDirFree(ctx context.Context, dir *os.Root, out io.Writer, roomLeft f
 	return files, skipped, gz.Close()
 }
 
-// archiveAgentDir packs rec's workspace into the archive directory as
-// <name>.tar.gz (0600, created exclusively, synced) and returns its path.
+// archiveAgentDir packs rec's workspace into its archive directory as
+// <name>/workspace.tar.gz (0600, created exclusively, synced) and returns
+// its path.
 func (b *Broker) archiveAgentDir(ctx context.Context, dir *os.Root, rec AgentRecord) (string, error) {
-	if b.archiveDir == "" {
-		return "", errors.New("no archive directory is wired")
-	}
-	if err := os.MkdirAll(b.archiveDir, 0o700); err != nil {
+	adir, err := b.agentArchiveDir(rec.Name, true)
+	if err != nil {
 		return "", err
-	}
-	if fi, err := os.Lstat(b.archiveDir); err != nil || !fi.IsDir() || fi.Mode().Perm()&0o077 != 0 {
-		return "", fmt.Errorf("the archive directory %s is not a private directory", b.archiveDir)
 	}
 	roomLeft := func(floor uint64) error {
 		free, err := freeBytes(b.archiveDir)
@@ -316,7 +312,7 @@ func (b *Broker) archiveAgentDir(ctx context.Context, dir *os.Root, rec AgentRec
 	if err := roomLeft(archiveMinFree); err != nil {
 		return "", err
 	}
-	dst := path.Join(b.archiveDir, rec.Name+".tar.gz")
+	dst := path.Join(adir, archiveWorkspaceFile)
 	f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return "", err

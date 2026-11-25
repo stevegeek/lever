@@ -58,6 +58,8 @@ type SpawnResponse struct {
 	Label    string `json:"label,omitempty"`
 	Phase    string `json:"phase"`
 	Memory   string `json:"memory,omitempty"`
+	// Restored is what a restore seeded (archives.go).
+	Restored *RestoreInfo `json:"restored,omitempty"`
 }
 
 // DestroyRequest is the body of a destroy.
@@ -353,6 +355,12 @@ func (c *captureWriter) replay(w http.ResponseWriter) {
 // refusal before the registry write changes nothing; a failure after it is
 // rolled back to a destroyed record.
 func (b *Broker) spawnAgent(ctx context.Context, w http.ResponseWriter, req SpawnRequest, actor string) {
+	b.spawnAgentWith(ctx, w, req, actor, spawnExtras{})
+}
+
+// spawnAgentWith is spawnAgent with a restore's extras: a seed step after
+// the workspace is created and before the start.
+func (b *Broker) spawnAgentWith(ctx context.Context, w http.ResponseWriter, req SpawnRequest, actor string, x spawnExtras) {
 	spawner := "operator"
 	if actor != operatorActor {
 		spawner = "manager"
@@ -473,6 +481,12 @@ func (b *Broker) spawnAgent(ctx context.Context, w http.ResponseWriter, req Spaw
 		b.rollbackSpawn(ctx, rec, actor)
 		refuse(w, reason, msg+"; the spawn was undone", status)
 	}
+	if x.restoredFrom != "" {
+		if rec, err = b.workers.update(name, func(r *AgentRecord) { r.RestoredFrom = x.restoredFrom }); err != nil {
+			fail(http.StatusInternalServerError, ReasonRuntimeError, "registry error", err.Error())
+			return
+		}
+	}
 	// A hub record under the fresh name would be started in its place.
 	if phase, _, err := b.recordOf(ctx, spec); err != nil || phase != "" {
 		detail := "the hub already has a record of that name"
@@ -503,12 +517,22 @@ func (b *Broker) spawnAgent(ctx context.Context, w http.ResponseWriter, req Spaw
 	}
 	// The start re-resolves the workspace: it must still be the directory
 	// created above, not a link the manager swapped in meanwhile.
+	var restored *RestoreInfo
 	if parent, dir, err := b.openAgentDir(rec); err != nil {
 		fail(http.StatusForbidden, ReasonWorkspaceUnsafe, "the new agent's workspace changed before its start", err.Error())
 		return
 	} else {
+		// A restore seeds it through the same handle.
+		var serr error
+		if x.seed != nil {
+			restored, serr = x.seed(ctx, dir)
+		}
 		dir.Close()
 		parent.Close()
+		if serr != nil {
+			fail(http.StatusUnprocessableEntity, ReasonArchiveRefused, "the archive could not be restored into the new workspace ("+firstLineOf(serr.Error())+")", serr.Error())
+			return
+		}
 	}
 	if b.isRevoked(name) {
 		fail(http.StatusConflict, ReasonRevoked, "the new agent was revoked before its start", "revoked")
@@ -538,7 +562,7 @@ func (b *Broker) spawnAgent(ctx context.Context, w http.ResponseWriter, req Spaw
 		b.audit("agent", actor, "error", verb+": "+name+": recording it active: "+err.Error())
 	}
 	b.audit("agent", actor, "allow", verb+": "+name+" running")
-	writeJSON(w, SpawnResponse{Name: name, Template: t.Name, Label: req.Label, Phase: scion.PhaseRunning, Memory: size.Name})
+	writeJSON(w, SpawnResponse{Name: name, Template: t.Name, Label: req.Label, Phase: scion.PhaseRunning, Memory: size.Name, Restored: restored})
 }
 
 // rollbackSpawn undoes a spawn that did not come up, its caller holding
@@ -739,7 +763,8 @@ type teardownResult struct {
 //  2. the record becomes destroying, saved;
 //  3. authority is cut: the policy entry, a permanent revoke (saved), the
 //     staged tickets; a revoke that is not saved stops here;
-//  4. the workspace, as on_destroy says;
+//  4. the workspace, as on_destroy says, and the conversation backup moved
+//     into the same archive;
 //  5. the hub record and staged ticket are deleted; a failure stops here
 //     and a later destroy picks up from step 3;
 //  6. the record becomes destroyed.
@@ -816,6 +841,12 @@ func (b *Broker) teardown(ctx context.Context, rec AgentRecord, actor string, o 
 		}
 	}
 	res.Workspace = rec.Workspace
+	// 4b. The conversation backup joins the archive (archives.go).
+	if !o.rollback {
+		if warn := b.archiveConversation(rec); warn != "" {
+			res.Warnings = append(res.Warnings, warn)
+		}
+	}
 	// 5.
 	if phase != "" {
 		ticketErr, err := b.purger.PurgeWorker(ctx, rec.Name)

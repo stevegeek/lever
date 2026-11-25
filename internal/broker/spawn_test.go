@@ -254,7 +254,7 @@ func TestDestroy(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(e.tree, "sessions", name)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("workspace left: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(e.archives, name+".tar.gz")); err != nil {
+	if _, err := os.Stat(filepath.Join(e.archives, name, archiveWorkspaceFile)); err != nil {
 		t.Fatal(err)
 	}
 	st := e.state()

@@ -7,7 +7,27 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **github tool: `branch_delete` deletes a merged branch** (opt-in, its own capability). It deletes
+  one `-branch-prefix` branch only when its head is in the default branch, or a PR into the default
+  branch was merged at exactly that head (a squash merge). It refuses the default branch, a branch
+  with an open PR or that is the base of one, and unmerged commits. The delete is a git push with a
+  lease on the checked head, so a push that lands meanwhile is never lost. The App needs
+  **Pull requests: read** for it. Enable it with `-ops ...,branch_delete`, an `operations` entry
+  `{name: branch_delete, params: [repo, branch]}` and a grant.
+- **`resources.cpu: none` runs an agent with no CPU limit**, for the manager, a worker or a
+  template. The container then shares all of the VM's vCPUs; memory stays capped by
+  `resources.memory`. lever sends scion `limits.cpu: "0"`, which scion keeps instead of filling in
+  its default, and podman reads `--cpus 0` as no limit. An unset `cpu` still gets scion's 2-CPU
+  limit. Create-time only, like the other limits.
+
 ### Changed
+
+- **The memory check covers every config, not only one with templates.** Config load refuses a
+  config whose manager, workers and template instances could not all run at once in the VM's
+  `memory` (with 1GiB for the guest). With `broker.max_running_workers` set, only that many of the
+  largest workers and instances count, so a capped config is no longer over-counted.
 
 - **scion is pinned to `d34ffbc1`, its nightly-20261125 (was `65531d7f`; `e8160a10`, its
   nightly-20261112, in between).** The examples, the release's prebuilt scion, the Makefile's
@@ -177,6 +197,9 @@ version bump moves the block under the new version heading.
 
 ### Upgrade
 
+- **A config without templates can now fail the memory check** when its workers' `resources.memory`
+  add up to more than the VM's `memory`. Lower the limits, set `broker.max_running_workers`, or
+  raise `memory`.
 - **Jail ABI 18.** The agent image changed (sciontool and, in the slim image, scion from the new
   pin) and so did in-jail lever code: rebuild the agent image (`make lever-image` or `make
   lever-image-slim`, then any instance image built from it) and recreate the manager on it with

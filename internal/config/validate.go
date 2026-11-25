@@ -448,6 +448,9 @@ func (a *App) Validate() error {
 	if err := a.validateTemplates(); err != nil {
 		return err
 	}
+	if err := a.validateMemoryFit(); err != nil {
+		return err
+	}
 	if err := a.validateWhisperTools(); err != nil {
 		return err
 	}

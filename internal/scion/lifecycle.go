@@ -656,7 +656,8 @@ func (o StartOpts) hasInlineConfig() bool {
 
 // Resources is an agent's container limits in scion's own notation: Memory a
 // Kubernetes quantity ("1536Mi", "2Gi"), CPU in cores ("1.5") or millicores
-// ("500m"). Config validation bounds them.
+// ("500m"). Config validation bounds them. CPU "0" is no limit: scion keeps
+// it instead of its default and podman reads --cpus 0 as unlimited.
 type Resources struct {
 	Memory string
 	CPU    string

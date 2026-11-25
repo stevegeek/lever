@@ -28,6 +28,11 @@ type BranchDeleteResult struct {
 	MergedBy string `json:"merged_by"`
 }
 
+// RefDeleter deletes a branch only if it still points at sha.
+type RefDeleter interface {
+	DeleteBranch(ctx context.Context, repo, branch, sha, token string) error
+}
+
 type ghClosedPull struct {
 	Number   int        `json:"number"`
 	MergedAt *string    `json:"merged_at"`
@@ -36,9 +41,9 @@ type ghClosedPull struct {
 }
 
 // BranchDelete deletes branch when everything on it is in the default
-// branch, so a delete never loses work. It refuses a branch with an open PR.
-// GitHub has no conditional ref delete: the head is read again just before
-// the delete, which leaves only that short window for a concurrent push.
+// branch, so a delete never loses work. It refuses a branch with an open PR
+// from it or into it (GitHub closes a PR whose base is deleted). The delete
+// is conditional on the head that was checked (RefDeleter).
 func (o *Ops) BranchDelete(ctx context.Context, caller, repo, branch string) (res BranchDeleteResult, err error) {
 	defer func() {
 		o.audit(OpBranchDelete, err, "caller", caller, "repo", repo, "branch", branch, "sha", res.SHA, "merged_by", res.MergedBy)
@@ -73,22 +78,20 @@ func (o *Ops) BranchDelete(ctx context.Context, caller, repo, branch string) (re
 	} else if found {
 		return res, fmt.Errorf("branch %q has an open PR #%d; merge or close it first", branch, open.Number)
 	}
+	if n, found, err := o.openPRInto(ctx, tok, repo, branch); err != nil {
+		return res, err
+	} else if found {
+		return res, fmt.Errorf("branch %q is the base of open PR #%d; deleting it would close that PR", branch, n)
+	}
 	mergedBy, err := o.mergedBy(ctx, tok, repo, branch, sha, info.DefaultBranch)
 	if err != nil {
 		return res, err
 	}
-	again, found, err := o.headSHA(ctx, tok, repo, branch)
-	if err != nil {
+	if o.Refs == nil {
+		return res, fmt.Errorf("branch_delete is not configured")
+	}
+	if err := o.Refs.DeleteBranch(ctx, repo, branch, sha, tok); err != nil {
 		return res, err
-	}
-	if !found {
-		return res, fmt.Errorf("branch %q was deleted meanwhile", branch)
-	}
-	if again != sha {
-		return res, fmt.Errorf("branch %q moved from %s to %s while it was checked; nothing deleted", branch, sha, again)
-	}
-	if err := o.API.do(ctx, tok, http.MethodDelete, "/repos/"+repo+"/git/refs/heads/"+escapeRef(branch), nil, nil); err != nil {
-		return res, fmt.Errorf("delete branch %s: %w", branch, err)
 	}
 	return BranchDeleteResult{OK: true, Repo: repo, Branch: branch, SHA: sha, MergedBy: mergedBy}, nil
 }
@@ -113,7 +116,8 @@ func (o *Ops) mergedBy(ctx context.Context, tok, repo, branch, sha, def string) 
 		Status string `json:"status"`
 	}
 	q = url.Values{"per_page": {"1"}}
-	if err := o.API.do(ctx, tok, http.MethodGet, "/repos/"+repo+"/compare/"+escapeRef(def)+"..."+sha+"?"+q.Encode(), nil, &cmp); err != nil {
+	// heads/ pins the branch: a bare name resolves a tag of the same name first.
+	if err := o.API.do(ctx, tok, http.MethodGet, "/repos/"+repo+"/compare/heads/"+escapeRef(def)+"..."+sha+"?"+q.Encode(), nil, &cmp); err != nil {
 		return "", fmt.Errorf("branch %q is not merged into %s, or that could not be checked (%v); nothing deleted", branch, def, err)
 	}
 	switch cmp.Status {
@@ -121,4 +125,17 @@ func (o *Ops) mergedBy(ctx context.Context, tok, repo, branch, sha, def string) 
 		return "ancestor", nil
 	}
 	return "", fmt.Errorf("branch %q has commits that are not in %s and no PR into %s was merged at its head %s; nothing deleted", branch, def, def, sha)
+}
+
+// openPRInto returns an open PR whose base is branch.
+func (o *Ops) openPRInto(ctx context.Context, tok, repo, branch string) (int, bool, error) {
+	q := url.Values{"state": {"open"}, "base": {branch}, "per_page": {"1"}}
+	var open []ghPull
+	if err := o.API.do(ctx, tok, http.MethodGet, "/repos/"+repo+"/pulls?"+q.Encode(), nil, &open); err != nil {
+		return 0, false, fmt.Errorf("list PRs into %s: %w", branch, err)
+	}
+	if len(open) > 0 {
+		return open[0].Number, true, nil
+	}
+	return 0, false, nil
 }

@@ -52,8 +52,10 @@ tag and trigger the release workflow on unreviewed code, and an admin bypass def
    those for the operations you offer. `pr_status` and `pr_merge` need **Checks: read** and
    **Commit statuses: read** as well as Pull requests: without them every call to those operations
    fails, because GitHub refuses to mint the token (HTTP 422 "permissions requested are not
-   granted"). Never add Administration. Add Workflows only together with
-   `-push-workflows`, after reading [section 9](#9-workflow-pushes-opt-in).
+   granted"). `branch_delete` needs **Pull requests: read** (see
+   [section 8a](#8a-deleting-merged-branches-branch_delete-opt-in)). Never add Administration. Add
+   Workflows only together with `-push-workflows`, after reading
+   [section 9](#9-workflow-pushes-opt-in).
 3. Install it on one repository only.
 4. Generate a private key. Save it as a regular file with mode `0600`, owned by the user that runs
    the broker, outside the instance tree (the agent can read the tree). The tool refuses to start
@@ -538,12 +540,13 @@ The branch is deleted only when one of these holds for its current head:
 - a PR from this repository into the default branch was merged with exactly that head commit: a
   squash or rebase merge, where the branch's own commits never reach the default branch.
 
-It is refused for the default branch, for a branch that has an open PR, and for a branch with any
-commit that is in neither. A branch pushed to after its PR was merged has a new head, so it is
-refused too. The tool reads the head again just before the delete and refuses when it moved;
-GitHub has no conditional delete, so a push in the moment between that read and the delete is the
-one case it cannot catch. The result names the deleted head SHA, so the branch can be pushed back
-from any clone that has the commit. Each call writes an audit line (`github.branch_delete`) with the
+It is refused for the default branch, for a branch that has an open PR, for a branch that is the
+base of an open PR (GitHub would close that PR), and for a branch with any commit that is in
+neither. A branch pushed to after its PR was merged has a new head, so it is refused too. The
+delete itself is a `git push --force-with-lease` of an empty ref, conditional on the head that was
+checked: if anyone pushed to the branch in the meantime, GitHub refuses it and nothing is deleted.
+It also waits for any push of this tool to the same repository. The result names the deleted head
+SHA, so the branch can be pushed back from any clone that has the commit. Each call writes an audit line (`github.branch_delete`) with the
 caller, the repository, the branch, the SHA and how it was found merged.
 
 A ruleset that restricts deletions on `refs/heads/agent/**` still applies: GitHub refuses the

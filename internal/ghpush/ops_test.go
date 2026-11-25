@@ -48,31 +48,30 @@ type fakeStatus struct{ Context, State string }
 
 // fakeGH is an in-memory GitHub REST API for one repository.
 type fakeGH struct {
-	t             *testing.T
-	mu            sync.Mutex
-	repo          string
-	defaultBranch string
-	heads         map[string]string // branch -> sha
-	tags          []string
-	pulls         map[int]map[string]any
-	runs          map[string][]fakeRun
-	runsTotal     int // overrides total_count when set
-	statuses      map[string][]fakeStatus
-	mergeStatus   int              // forces the merge answer's status
-	created       []map[string]any // POST /pulls bodies
-	refs          []map[string]any // POST /git/refs bodies
-	hideOpenList  int              // list calls that miss the open PRs (a race)
-	tagRace       bool             // the tag appears before the ref is created
-	merges        []map[string]any
-	reviews       map[int][]map[string]any
-	retargetTo    string            // the PR's base after a merge (it was retargeted)
-	compare       map[string]string // head sha -> compare status against the default branch
-	compareStatus int               // forces the compare answer's status
-	deleted       []string          // DELETE /git/refs/heads/ branches
-	moveOnRead    map[string]string // branch -> sha its head reads as from the second read on
-	headReads     map[string]int
-	reqs          []string
-	srv           *httptest.Server
+	t                 *testing.T
+	mu                sync.Mutex
+	repo              string
+	defaultBranch     string
+	heads             map[string]string // branch -> sha
+	tags              []string
+	pulls             map[int]map[string]any
+	runs              map[string][]fakeRun
+	runsTotal         int // overrides total_count when set
+	statuses          map[string][]fakeStatus
+	mergeStatus       int              // forces the merge answer's status
+	created           []map[string]any // POST /pulls bodies
+	refs              []map[string]any // POST /git/refs bodies
+	hideOpenList      int              // list calls that miss the open PRs (a race)
+	tagRace           bool             // the tag appears before the ref is created
+	merges            []map[string]any
+	reviews           map[int][]map[string]any
+	retargetTo        string            // the PR's base after a merge (it was retargeted)
+	compare           map[string]string // head sha -> compare status against the default branch
+	compareStatus     int               // forces the compare answer's status
+	pullsStatus       int               // forces the answer to GET /pulls
+	closedIgnoresHead bool              // the closed list answers PRs of any head
+	reqs              []string
+	srv               *httptest.Server
 }
 
 func newFakeGH(t *testing.T) *fakeGH {
@@ -163,13 +162,6 @@ func (f *fakeGH) serve(w http.ResponseWriter, r *http.Request) {
 			f.json(w, 404, map[string]string{"message": "Not Found"})
 			return
 		}
-		if f.headReads == nil {
-			f.headReads = map[string]int{}
-		}
-		f.headReads[b]++
-		if m, ok := f.moveOnRead[b]; ok && f.headReads[b] > 1 {
-			sha = m
-		}
 		f.json(w, 200, map[string]any{"ref": "refs/heads/" + b, "object": map[string]any{"sha": sha, "type": "commit"}})
 	case strings.HasPrefix(p, "/git/ref/tags/") && r.Method == "GET":
 		tg := strings.TrimPrefix(p, "/git/ref/tags/")
@@ -181,17 +173,22 @@ func (f *fakeGH) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		f.json(w, 404, map[string]string{"message": "Not Found"})
 	case p == "/pulls" && r.Method == "GET":
+		if f.pullsStatus != 0 {
+			f.json(w, f.pullsStatus, map[string]string{"message": "Server Error"})
+			return
+		}
 		var out []map[string]any
 		for _, pl := range f.pulls {
 			if f.hideOpenList > 0 {
 				break
 			}
 			h := pl["head"].(map[string]any)
-			if q.Get("state") == "open" && pl["state"] == "open" && q.Get("head") == strings.Split(f.repo, "/")[0]+":"+h["ref"].(string) {
-				out = append(out, pl)
-			}
-			if q.Get("state") == "closed" && pl["state"] == "closed" && q.Get("head") == strings.Split(f.repo, "/")[0]+":"+h["ref"].(string) &&
-				q.Get("base") == pl["base"].(map[string]any)["ref"] {
+			// The closed list does not filter on base, so the code's own base
+			// check is what a test sees.
+			headOK := q.Get("head") == "" || q.Get("head") == strings.Split(f.repo, "/")[0]+":"+h["ref"].(string) ||
+				(f.closedIgnoresHead && q.Get("state") == "closed")
+			baseOK := q.Get("state") == "closed" || q.Get("base") == "" || q.Get("base") == pl["base"].(map[string]any)["ref"]
+			if q.Get("state") == pl["state"] && headOK && baseOK {
 				out = append(out, pl)
 			}
 		}
@@ -309,7 +306,7 @@ func (f *fakeGH) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		base, head, _ := strings.Cut(strings.TrimPrefix(p, "/compare/"), "...")
-		if base != f.defaultBranch {
+		if base != "heads/"+f.defaultBranch {
 			f.t.Errorf("compare base %q", base)
 		}
 		st, ok := f.compare[head]
@@ -317,15 +314,6 @@ func (f *fakeGH) serve(w http.ResponseWriter, r *http.Request) {
 			st = "diverged"
 		}
 		f.json(w, 200, map[string]any{"status": st})
-	case strings.HasPrefix(p, "/git/refs/heads/") && r.Method == "DELETE":
-		b := strings.TrimPrefix(p, "/git/refs/heads/")
-		if _, ok := f.heads[b]; !ok {
-			f.json(w, 422, map[string]string{"message": "Reference does not exist"})
-			return
-		}
-		delete(f.heads, b)
-		f.deleted = append(f.deleted, b)
-		w.WriteHeader(204)
 	case p == "/releases" && r.Method == "POST":
 		f.t.Errorf("release must create only the tag; a GitHub release was requested: %v", body)
 		f.json(w, 201, map[string]any{})

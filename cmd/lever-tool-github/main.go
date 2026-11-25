@@ -622,6 +622,7 @@ func main() {
 		TextMax: o.textMax, MergeMethods: o.mergeMethods, MergeChecks: o.mergeChecks, ReleaseTag: o.releaseTag,
 		AllowUnreviewed: !o.mergeRequireReview, AppSlug: o.appSlug, WebBase: "https://github.com",
 		Deadline: 2 * time.Minute,
+		Refs:     p,
 	}
 	srv, err := captool.New(captool.Config{
 		Name: o.name, Version: Version, Backend: o.backend, AdminURL: o.admin, Log: logger,

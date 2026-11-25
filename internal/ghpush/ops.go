@@ -129,6 +129,8 @@ type Ops struct {
 	// DefaultLogHosts); LogHTTP is a test client for that download.
 	LogHosts []string
 	LogHTTP  *http.Client
+	// Refs makes branch_delete's conditional delete.
+	Refs RefDeleter
 
 	relOnce sync.Once
 	relLock chan struct{}

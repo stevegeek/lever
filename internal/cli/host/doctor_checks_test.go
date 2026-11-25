@@ -1330,6 +1330,10 @@ func TestCheckManagerLive(t *testing.T) {
 		{"running, stalled for days", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days", Activity: "stalled", LastActivityEvent: now.Add(-47 * time.Hour)}), true, "activity stalled, 47h0m0s ago", ""},
 		{"running, offline", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days", Activity: "offline"}), false, "offline", "lever attach"},
 		{"running, crashed", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days", Activity: "crashed"}), false, "crashed", "lever attach"},
+		// idle is the manager waiting for work; harness_error is a live harness
+		// whose turns fail on a model, API or auth error.
+		{"running, idle", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days", Activity: "idle", LastActivityEvent: now.Add(-2 * time.Hour)}), true, "activity idle, 2h0m0s ago", ""},
+		{"running, harness error", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days", Activity: "harness_error", LastActivityEvent: now.Add(-5 * time.Minute)}), false, "model, API or auth error", "credential row"},
 		{"absent", listing(scion.Agent{Slug: "scratch", Phase: "running", ContainerStatus: "Up 1 second"}), false, "no record", "lever up"},
 		{"crashed", listing(scion.Agent{Slug: "assistant", Phase: "error", ContainerStatus: "Exited (1) 3 seconds ago"}), false, `phase "error"`, "--force"},
 		{"suspended", listing(scion.Agent{Slug: "assistant", Phase: "suspended", ContainerStatus: "stopped"}), false, `phase "suspended"`, "resume"},

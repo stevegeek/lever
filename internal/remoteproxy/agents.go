@@ -119,9 +119,11 @@ func activityWord(a string) string {
 	switch a {
 	case "working", "thinking", "executing":
 		return "working"
-	case "waiting_for_input", "blocked":
+	case "waiting_for_input", "blocked", "harness_error":
+		// harness_error: a model or API error ended the turn; the harness
+		// waits at its prompt and the next message retries.
 		return "waiting"
-	case "completed", "stalled":
+	case "completed", "stalled", "idle":
 		// stalled is what an agent at its prompt looks like.
 		return "idle"
 	}

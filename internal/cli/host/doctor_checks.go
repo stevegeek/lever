@@ -907,6 +907,15 @@ func checkManagerLive(ctx context.Context, project, name string, list agentListe
 				fmt.Sprintf("%q is running (container %s; %s) — idle at its prompt, or a turn that never finished: `lever attach` shows which (a stuck LLM call ends in `Request timed out`; then check the `guest DNS` and credential rows)",
 					name, scionpkg.ContainerLabel(a.ContainerStatus), activityAge(a, now)), ""}
 		}
+		if a.Activity == scionpkg.ActivityHarnessError {
+			// The harness is alive at its prompt, but its last turn ended on a
+			// model, API or auth error, and every turn fails the same way until
+			// the cause is fixed. The stall sweeper leaves it alone, so this row
+			// is where it shows.
+			return checkResult{check, false,
+				fmt.Sprintf("manager %q is running (container %s; %s), but its last turn ended on a model, API or auth error — it answers nothing until that is fixed", name, scionpkg.ContainerLabel(a.ContainerStatus), activityAge(a, now)),
+				"`lever attach` shows the error; check the credential row, and on lima the `guest DNS` row; the next message to the manager retries the turn"}
+		}
 		if scionpkg.ActivityDead(a.Activity) {
 			return checkResult{check, false,
 				fmt.Sprintf("manager %q has a live container but its harness is %s — it is not completing turns", name, activityAge(a, now)),

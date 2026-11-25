@@ -311,16 +311,26 @@ type Agent struct {
 
 // Activity values for Agent.Activity, the harness-level state scion's Claude
 // Code hooks report to the hub (pkg/agent/state/state.go). The hub's sweeper
-// sets stalled when no activity event arrives within its stalled_threshold,
-// both for a harness that cannot reach the model and for one idle at its
-// prompt, so stalled alone does not tell the two apart.
+// sets stalled when no activity event arrives within its stalled_threshold.
+// It leaves completed, blocked, waiting_for_input, idle and harness_error
+// alone, so stalled is a harness that cannot reach the model or a prompt
+// that reported none of those; stalled alone does not tell the two apart.
 const (
+	ActivityInitializing    = "initializing"
 	ActivityWorking         = "working"
 	ActivityWaitingForInput = "waiting_for_input"
 	ActivityCompleted       = "completed"
 	ActivityStalled         = "stalled"
 	ActivityOffline         = "offline"
 	ActivityCrashed         = "crashed"
+	// ActivityIdle (scion d34ffbc1 on) is agent-reported: nothing to do
+	// until new work arrives. A claude started or resumed with no task
+	// reports it once ready.
+	ActivityIdle = "idle"
+	// ActivityHarnessError (scion d34ffbc1 on): the harness is alive at its
+	// prompt, but a model, API or auth error ended its turn. It stays until
+	// the next turn; a new message makes the harness try again.
+	ActivityHarnessError = "harness_error"
 )
 
 // ActivityDead reports an activity the hub uses for a harness that has
@@ -386,8 +396,9 @@ func BoundedQuote(s string) string {
 // ActivityLabel is the same for an activity (also agent-reported).
 func ActivityLabel(activity string) string {
 	switch activity {
-	case "", ActivityWorking, "thinking", "executing", ActivityWaitingForInput, "blocked",
-		ActivityCompleted, "limits_exceeded", ActivityStalled, ActivityOffline, ActivityCrashed:
+	case "", ActivityInitializing, ActivityWorking, "thinking", "executing", ActivityWaitingForInput, "blocked",
+		ActivityCompleted, "limits_exceeded", ActivityStalled, ActivityOffline, ActivityCrashed,
+		ActivityIdle, ActivityHarnessError:
 		return activity
 	}
 	return LabelUnrecognised

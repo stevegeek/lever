@@ -1010,6 +1010,11 @@ func TestLabelsNeverCarryAgentText(t *testing.T) {
 			t.Errorf("ContainerLabel(%.30q) = %q, want %q", in, got, want)
 		}
 	}
+	for _, a := range []string{"initializing", "idle", "harness_error"} {
+		if got := ActivityLabel(a); got != a {
+			t.Errorf("ActivityLabel(%q) = %q", a, got)
+		}
+	}
 	if PhaseLabel("resumed") != "resumed" || PhaseLabel(hostile) != LabelUnrecognised || ActivityLabel(hostile) != LabelUnrecognised || ActivityLabel("stalled") != "stalled" {
 		t.Error("phase/activity labels")
 	}

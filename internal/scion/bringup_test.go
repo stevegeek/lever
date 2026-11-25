@@ -618,3 +618,31 @@ func TestIsAgentAbsentMatchesTheNewPinsHubDownWording(t *testing.T) {
 		t.Fatalf("IsAgentAbsent(%q) = false", err)
 	}
 }
+
+func TestIsExistsResumable(t *testing.T) {
+	refusal := `failed to start agent via Hub: agent_exists_resumable: agent "m" already exists (phase: stopped); run 'scion resume m' to resume it, delete it, or use another name (status: 409)`
+	if !IsExistsResumable(errors.New(refusal)) {
+		t.Fatal("the hub's 409 agent_exists_resumable is not recognised")
+	}
+	if !IsExistsResumable(errors.New(strings.Replace(refusal, "(status: 409)", "(status: 409, request: abc)", 1))) {
+		t.Fatal("a refusal with a request id is not recognised")
+	}
+	// The same text also matches AlreadyRunning, which is why callers check
+	// this first.
+	if !AlreadyRunning(errors.New(refusal)) {
+		t.Fatal("AlreadyRunning no longer matches the refusal; the check order is moot")
+	}
+	for _, s := range []string{
+		`failed to start agent via Hub: conflict: agent "m" already exists in this project (status: 409)`,
+		`agent_exists_resumable: agent "m" already exists (status: 409)`,
+		`failed to start agent via Hub: agent_exists_resumable: agent "m" already exists (status: 500)`,
+		"",
+	} {
+		if IsExistsResumable(errors.New(s)) {
+			t.Errorf("IsExistsResumable(%q) = true", s)
+		}
+	}
+	if IsExistsResumable(nil) {
+		t.Error("nil")
+	}
+}

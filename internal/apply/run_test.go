@@ -305,6 +305,9 @@ type agentLifecycleRunner struct {
 	stopCalls int
 	stopErr   error
 	stopPhase string
+	// startRevealsPhase, when set, makes a start that fails with startErr
+	// reveal the record in this phase: the observe step missed it.
+	startRevealsPhase string
 }
 
 func (r *agentLifecycleRunner) ensureInit() {
@@ -386,6 +389,9 @@ func (r *agentLifecycleRunner) RunIn(ctx context.Context, dir string, env map[st
 		r.startCalls++
 		r.record(dir, env, name, args)
 		if r.startErr != nil {
+			if r.startRevealsPhase != "" {
+				r.phase, r.containerStatus = r.startRevealsPhase, "stopped"
+			}
 			return proc.Result{Code: 1, Stderr: r.startErr.Error()}, r.startErr
 		}
 		r.goLive()
@@ -518,6 +524,39 @@ func TestStartManagerObserveFirstResumesStopped(t *testing.T) {
 	}
 	if r.startCalls != 0 {
 		t.Errorf("startCalls = %d, want 0 (stopped record must RESUME, not blind-start)", r.startCalls)
+	}
+}
+
+// TestStartManagerCreateOverAResumableRecordResumesIt: a create over a
+// record the observe step missed is refused 409 agent_exists_resumable from
+// scion d34ffbc1 on (its text also says "already exists"). lever observes
+// again and resumes the record rather than read the refusal as success.
+func TestStartManagerCreateOverAResumableRecordResumesIt(t *testing.T) {
+	for _, phase := range []string{scion.PhaseSuspended, scion.PhaseStopped, scion.PhaseHalted} {
+		t.Run(phase, func(t *testing.T) {
+			app, f := newObserveFirstApp(t)
+			r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", startRevealsPhase: phase,
+				startErr: errors.New(`failed to start agent via Hub: agent_exists_resumable: agent "hello" already exists (phase: ` + phase + `); run 'scion resume hello' to resume it, delete it, or use another name (status: 409)`)}
+			if err := runApply(app, Deps{Scion: scion.New(r, scion.Options{})}); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if r.startCalls != 1 || r.resumeCalls != 1 || r.deleteCalls != 0 {
+				t.Fatalf("start %d resume %d delete %d, want 1/1/0", r.startCalls, r.resumeCalls, r.deleteCalls)
+			}
+		})
+	}
+}
+
+// TestStartManagerCreateOverAResumableRecordThatMovesFails: when the second
+// look does not find a record to resume, lever says so and starts nothing.
+func TestStartManagerCreateOverAResumableRecordThatMovesFails(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello",
+		startErr: errors.New(`failed to start agent via Hub: agent_exists_resumable: agent "hello" already exists (phase: stopped); run 'scion resume hello' to resume it, delete it, or use another name (status: 409)`)}
+	err := runApply(app, Deps{Scion: scion.New(r, scion.Options{})})
+	testutil.WantErrContaining(t, err, "first look missed", "lever up")
+	if r.resumeCalls != 0 || r.deleteCalls != 0 {
+		t.Fatalf("resume %d delete %d, want 0/0", r.resumeCalls, r.deleteCalls)
 	}
 }
 

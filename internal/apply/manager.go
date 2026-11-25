@@ -596,6 +596,14 @@ func (r *run) ensureUp(ctx context.Context, jp string, q ManagerRequest) (Manage
 	// gate has seen claude.
 	probes := r.startPostLive(ctx, jp)
 	err = r.actUp(ctx, jp, rec, p, opts)
+	if errors.Is(err, errManagerExistsResumable) {
+		r.d.Log("%s: the hub holds manager %q, which lever's first look missed; observing it again to resume it", r.subjectName(), r.app.Name)
+		var again *scion.Agent
+		if again, p, err = r.replanResumable(ctx, jp, q); err == nil {
+			rec = again
+			err = r.actUp(ctx, jp, rec, p, opts)
+		}
+	}
 	acted := p.verb != verbNone
 	// A resume recreated the container from the record's mounts: check them as
 	// soon as it runs, and again once it is live if it was not running yet.
@@ -671,6 +679,31 @@ func (r *run) refuseUnqualifiedRecord(rec *scion.Agent) error {
 	}
 	return fmt.Errorf("%s: manager %q %s, which the hub rewrites to its image registry at every start, a setting any agent can change; nothing was changed. %s",
 		r.subjectName(), r.app.Name, what, fix)
+}
+
+// replanResumable observes the manager again after a create that the hub
+// refused with agent_exists_resumable, and plans the resume with the same
+// checks a first observation gets. Anything but a resume is refused: the
+// record moved again, and the next `lever up` sees it settled.
+func (r *run) replanResumable(ctx context.Context, jp string, q ManagerRequest) (*scion.Agent, managerPlan, error) {
+	rec, o, err := r.observeUp(ctx, jp)
+	if err != nil {
+		return nil, managerPlan{}, err
+	}
+	if err := r.refuseUnqualifiedRecord(rec); err != nil {
+		return nil, managerPlan{}, err
+	}
+	p, err := planManager(q, r.app.Name, o)
+	if err != nil {
+		return nil, managerPlan{}, err
+	}
+	if rec == nil || (p.verb != verbResume && p.verb != verbResumeForce) || p.recover {
+		return nil, managerPlan{}, errManagerExistsResumable
+	}
+	if err := r.checkStaleTreeMounts(ctx, jp, false); err != nil {
+		return nil, managerPlan{}, err
+	}
+	return rec, p, nil
 }
 
 // actUp makes the plan's change to the record; the gate after it confirms

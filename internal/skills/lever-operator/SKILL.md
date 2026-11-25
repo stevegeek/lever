@@ -429,6 +429,11 @@ template, never from you.
   running. A 409 means the template is at its limit: destroy or suspend
   one of its agents first. A 429 means you spawned too many in the last
   minute.
+- Memory: a template may offer several sizes (`agent spawned` lists them,
+  the default marked `*`). Pick one with `--memory 8GiB`. A 409
+  `memory-busy` means the running agents' memory leaves too little free:
+  suspend one or pick a smaller size. The size is fixed at spawn; a
+  different size means a new agent.
 - Drive it like a worker: `agent suspend|resume|stop <name>`,
   `msg send --to <name>`. What it sends you is worker-tier data.
 - Destroy it when its work is done:

@@ -18,16 +18,19 @@ import (
 
 func TestParseRemoteVerb(t *testing.T) {
 	ok := map[string]remoteVerb{
-		"spawn session":                 {verb: "spawn", template: "session"},
-		"spawn session PR 42: fix  it":  {verb: "spawn", template: "session", label: "PR 42: fix it"},
-		"  spawn   session  --task x  ": {verb: "spawn", template: "session", label: "--task x"},
-		"spawn session café ☕":          {verb: "spawn", template: "session", label: "café ☕"},
-		"destroy s-abc234":              {verb: "destroy", name: "s-abc234"},
-		"destroy s-abc234 --stop":       {verb: "destroy", name: "s-abc234", stop: true},
-		"suspend s-abc234":              {verb: "suspend", name: "s-abc234"},
-		"resume s-abc234":               {verb: "resume", name: "s-abc234"},
-		"list":                          {verb: "list"},
-		"list --json":                   {verb: "list"},
+		"spawn session":                       {verb: "spawn", template: "session"},
+		"spawn session PR 42: fix  it":        {verb: "spawn", template: "session", label: "PR 42: fix it"},
+		"  spawn   session  --task x  ":       {verb: "spawn", template: "session", label: "--task x"},
+		"spawn session café ☕":                {verb: "spawn", template: "session", label: "café ☕"},
+		"destroy s-abc234":                    {verb: "destroy", name: "s-abc234"},
+		"destroy s-abc234 --stop":             {verb: "destroy", name: "s-abc234", stop: true},
+		"suspend s-abc234":                    {verb: "suspend", name: "s-abc234"},
+		"resume s-abc234":                     {verb: "resume", name: "s-abc234"},
+		"list":                                {verb: "list"},
+		"list --json":                         {verb: "list"},
+		"spawn session --memory 8GiB":         {verb: "spawn", template: "session", memory: "8GiB"},
+		"spawn session --memory 1536MiB PR 7": {verb: "spawn", template: "session", memory: "1536MiB", label: "PR 7"},
+		"spawn session PR --memory 8GiB":      {verb: "spawn", template: "session", label: "PR --memory 8GiB"},
 		"spawn session " + strings.Repeat("é", broker.MaxAgentLabel): {verb: "spawn", template: "session", label: strings.Repeat("é", broker.MaxAgentLabel)},
 	}
 	for line, want := range ok {
@@ -41,6 +44,8 @@ func TestParseRemoteVerb(t *testing.T) {
 		"spawn", "spawn Session", "spawn ../x", "spawn -t", "spawn session\tlabel", "spawn session\nlist",
 		"spawn session a b", "spawn session a​b", "spawn session a‮b", "spawn session \x1b[2J",
 		"spawn session " + strings.Repeat("x", broker.MaxAgentLabel+1),
+		"spawn session --memory", "spawn session --memory 8gb", "spawn session --memory 8Gi", "spawn session --memory 8 GiB",
+		"spawn session --memory=8GiB x", "spawn session --memory -8GiB", "spawn session --memory ../8GiB", "spawn session --memory 99999999GiB",
 		"spawn session \xff",
 		"destroy", "destroy s-abc234 --force", "destroy s-abc234 --stop --stop", "destroy --stop s-abc234", "destroy S-ABC",
 		"destroy s-abc234 --no-backup",
@@ -115,8 +120,8 @@ func remoteExec(t *testing.T, command, stdin string, flags ...string) (agentResu
 
 // registryWith is the broker's registry list: one agent of the caller's,
 // one the operator spawned, one of another template and one destroyed.
-var registryWith = canned{body: `{"templates":[{"name":"session","prefix":"s","max_instances":4,"max_running":2,"instances":3,"running":1},{"name":"secret","prefix":"x","max_instances":1,"max_running":1}],"agents":[` +
-	`{"name":"s-mine01","template":"session","label":"PR 42","created_by":"ssh:factory","created_at":"2026-11-22T12:00:00Z","state":"active","phase":"running"},` +
+var registryWith = canned{body: `{"memory":{"budget_bytes":32212254720,"used_bytes":8589934592,"free_bytes":23622320128},"templates":[{"name":"session","prefix":"s","max_instances":4,"max_running":2,"instances":3,"running":1,"memory_sizes":[{"name":"4GiB","bytes":4294967296},{"name":"8GiB","bytes":8589934592},{"name":"x;rm","bytes":1}],"memory_default":"4GiB"},{"name":"secret","prefix":"x","max_instances":1,"max_running":1}],"agents":[` +
+	`{"name":"s-mine01","template":"session","label":"PR 42","created_by":"ssh:factory","created_at":"2026-11-22T12:00:00Z","state":"active","phase":"running","memory":"8GiB","memory_bytes":8589934592},` +
 	`{"name":"s-theirs","template":"session","created_by":"operator","created_at":"2026-11-22T12:00:00Z","state":"active"},` +
 	`{"name":"s-other1","template":"session","created_by":"ssh:other","created_at":"2026-11-22T12:00:00Z","state":"active"},` +
 	`{"name":"x-mine02","template":"secret","created_by":"ssh:factory","created_at":"2026-11-22T12:00:00Z","state":"active"},` +
@@ -142,6 +147,22 @@ func TestRemoteVerbSpawn(t *testing.T) {
 	}
 	if strings.Count(out, "\n") != 1 {
 		t.Fatalf("not one line: %q", out)
+	}
+}
+
+// --memory goes to the broker; the size it answers is printed.
+func TestRemoteVerbSpawnMemory(t *testing.T) {
+	dir := msgDir(t)
+	t.Chdir(dir)
+	rec := startResumeUDS(t, dir, map[string]canned{broker.PathOperatorAgentSpawn: {body: `{"name":"s-abc234","template":"session","phase":"running","memory":"8GiB"}`}})
+	res, out, err := remoteExec(t, "spawn session --memory 8GiB PR 42", "")
+	if err != nil || !res.OK || res.Memory != "8GiB" {
+		t.Fatalf("%v: %s", err, out)
+	}
+	var got map[string]any
+	reqs := rec.all()
+	if len(reqs) != 1 || json.Unmarshal([]byte(reqs[0].body), &got) != nil || got["memory"] != "8GiB" || got["label"] != "PR 42" {
+		t.Fatalf("%+v", reqs)
 	}
 }
 
@@ -325,8 +346,16 @@ func TestRemoteVerbList(t *testing.T) {
 	if !got.OK || len(got.Templates) != 1 || got.Templates[0].Name != "session" || got.Templates[0].Running != 1 {
 		t.Fatalf("templates %+v", got.Templates)
 	}
-	if len(got.Agents) != 1 || got.Agents[0].Name != "s-mine01" || got.Agents[0].Label != "PR 42" || got.Agents[0].Phase != "running" {
+	if len(got.Agents) != 1 || got.Agents[0].Name != "s-mine01" || got.Agents[0].Label != "PR 42" || got.Agents[0].Phase != "running" ||
+		got.Agents[0].Memory != "8GiB" || got.Agents[0].MemoryBytes != 8<<30 {
 		t.Fatalf("agents %+v", got.Agents)
+	}
+	// Sizes not in the fixed format are dropped, never relayed.
+	if tm := got.Templates[0]; strings.Join(tm.MemorySizes, ",") != "4GiB,8GiB" || tm.MemoryDefault != "4GiB" {
+		t.Fatalf("template sizes %+v", tm)
+	}
+	if m := got.Memory; m == nil || m.BudgetBytes != 30<<30 || m.UsedBytes != 8<<30 || m.FreeBytes != 22<<30 {
+		t.Fatalf("totals %+v", got.Memory)
 	}
 	for _, leak := range []string{"secret", "s-theirs", "s-other1", "operator", "created_by"} {
 		if strings.Contains(out, leak) {

@@ -144,6 +144,10 @@ func parseRemoteVerb(line string) (remoteVerb, error) {
 				return remoteVerb{}, fmt.Errorf("memory size %q is not a number and MiB or GiB, such as 8GiB", rest[1])
 			}
 			v.memory, rest = rest[1], rest[2:]
+		} else if len(rest) > 0 && strings.HasPrefix(rest[0], "--memory") {
+			// "--memory=8GiB" would otherwise become a label and the spawn
+			// silently get the default size.
+			return remoteVerb{}, errors.New("write --memory SIZE, with a space, right after the template")
 		}
 		v.template, v.label = w[1], strings.Join(rest, " ")
 		if utf8.RuneCountInString(v.label) > broker.MaxAgentLabel {

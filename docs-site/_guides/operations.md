@@ -138,8 +138,8 @@ templates:
 After `lever reload` (the broker reads templates at start):
 
 ```console
-$ lever agent spawn session --task-file brief.md --label "PR 412"
-agent s-k3f7qa spawned from template session; it is running.
+$ lever agent spawn session --task-file brief.md --label "PR 412" --memory 8GiB
+agent s-k3f7qa spawned from template session with 8GiB of memory; it is running.
 $ lever msg send "also check the tests" --to s-k3f7qa
 $ lever worker suspend s-k3f7qa        # and resume, stop, new-session, watch
 $ lever agent list
@@ -159,6 +159,13 @@ and tokens can never name another agent.
   the middle of a spawn or a destroy settles it when it starts again: a spawn whose agent has a hub
   record is kept, one without is undone, and a destroy is finished. Until then the agent holds no
   grants and no verb drives it.
+- **Memory sizes and the budget.** A template with `memory_sizes: [4GiB, 8GiB, 14GiB]` lets each
+  spawn pick its size (`--memory`, default `resources.memory`). The size is fixed when the agent is
+  created: to give an agent more memory, destroy it and spawn a new one. Every spawn, start and
+  resume is admitted against the memory budget (`broker.memory_budget`, by default the VM's
+  `memory` less the manager's and 1GiB): the limits of the agents running or starting, workers
+  included, plus the new one must fit, or it is refused with `memory-busy` and the sizes. Suspend
+  an agent to free its share. `lever agent list` shows the budget and every agent's size.
 - **Changing a template.** The broker builds every agent's spec from its template as configured
   when it starts, so a change reaches running agents at the next `lever reload` for grants, and at
   their next fresh start for image, model and resources (scion keeps those in the record). An agent
@@ -215,22 +222,27 @@ restrict,command="/usr/local/bin/lever agent remote-verb --config /srv/lever/lev
 The caller then sends one of these commands. The brief of a spawn goes on stdin (at most 64 KiB):
 
 ```console
-$ ssh lever-host spawn session PR 412: fix the flaky test < brief.md
-{"name":"s-k3f7qa","template":"session","label":"PR 412: fix the flaky test","ok":true,"phase":"running","exit":0}
+$ ssh lever-host spawn session --memory 8GiB PR 412: fix the flaky test < brief.md
+{"name":"s-k3f7qa","template":"session","label":"PR 412: fix the flaky test","memory":"8GiB","ok":true,"phase":"running","exit":0}
 $ ssh lever-host list
-{"templates":[{"name":"session","max_instances":8,"max_running":2,"instances":1,"running":1}],"agents":[...]}
+{"ok":true,"templates":[{"name":"session","max_instances":8,"max_running":2,"instances":1,"running":1,"memory_sizes":["4GiB","8GiB","14GiB"],"memory_default":"4GiB"}],"agents":[...],"memory":{"budget_bytes":32212254720,"used_bytes":8589934592,"free_bytes":23622320128}}
 $ ssh lever-host suspend s-k3f7qa < /dev/null     # and resume
 $ ssh lever-host destroy s-k3f7qa --stop < /dev/null
 ```
 
-The whole grammar is `spawn TEMPLATE [LABEL...]`, `destroy NAME [--stop]`, `suspend NAME`,
+The whole grammar is `spawn TEMPLATE [--memory SIZE] [LABEL...]`, `destroy NAME [--stop]`, `suspend NAME`,
 `resume NAME` and `list [--json]`. Each answer is one JSON line, with `ok`, and on a refusal
 `reason`, `error` and `exit` (the process exits with the same code, as `lever agent` does). A
 refusal's `error` is a fixed sentence per reason: the broker's own text, which can name other
 agents and host paths, stays in its audit log. Words
 are split on spaces only, the label is the words after the template, and any tab, newline, control
-or formatting character refuses the whole command. Nothing the caller sends reaches a shell or a
-flag.
+or formatting character refuses the whole command. `--memory SIZE` must come right after the
+template, as a number and `MiB` or `GiB` (`8GiB`), and be one of the template's `memory_sizes`
+(`bad-memory` otherwise); without it the spawn gets the template's default. A spawn or resume the
+memory budget has no room for is refused with `memory-busy`. `list` gives each agent's `memory`
+and `memory_bytes`, each template's `memory_sizes` and `memory_default`, and the instance's
+`memory` totals (counted over every agent, the key's or not; absent with no budget). Nothing the
+caller sends reaches a shell or a flag.
 
 What the key may do:
 

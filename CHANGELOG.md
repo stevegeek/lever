@@ -9,9 +9,40 @@ version bump moves the block under the new version heading.
 
 ### Changed
 
-- **scion is pinned to `e8160a10`, its nightly-20261112 (was `65531d7f`).** The examples, the
-  release's prebuilt scion, the Makefile's `SCION_VERSION`, the Lima e2e scripts and the docs move to
-  it. These changes on the scion side reach lever:
+- **scion is pinned to `d34ffbc1`, its nightly-20261125 (was `65531d7f`; `e8160a10`, its
+  nightly-20261112, in between).** The examples, the release's prebuilt scion, the Makefile's
+  `SCION_VERSION`, the Lima e2e scripts and the docs move to it. These changes from `d34ffbc1`
+  reach lever:
+  - **`scion hub projects --format json` is paged** (e48401ba7): an object with `projects`,
+    `total` and `truncated`, at most 500 by default, so lever's lookup of the hub's record of the
+    project failed and the re-register of a project stopped before `hub link`. lever reads both
+    shapes, and refuses a truncated list rather than register the project again.
+  - **Two new activities.** `idle` is what an agent reports when it has nothing to do (scion's
+    instructions now ask every agent to end its turn with one, and a claude started or resumed with
+    no task reports it once ready); `harness_error` is a live harness whose turn ended on a model,
+    API or auth error. lever shows both instead of `unrecognised`, counts both as waiting at the
+    prompt (so a template's `idle_suspend` and the "waiting for you" push see them), the chat page
+    reads them as idle and waiting, and doctor's manager row fails on `harness_error` with the
+    credential and DNS hints.
+  - **A restart after a completed run no longer replays the stored task** (1f4e366e8): claude gets
+    a notice to wait for instructions instead. `lever up` and the broker's re-enrol heal now hand
+    a stopped or halted manager its `manager.prompt_file` on resume, which starts a new session
+    anyway; a suspended manager continues its conversation as before.
+  - **A start no longer resumes an existing record** (3620226d4): over a suspended, stopped or
+    halted one the hub answers 409 `agent_exists_resumable`, whose text also says "already exists",
+    which lever read as success, so nothing started and `lever up` failed after its wait. lever now
+    observes the manager again and resumes it through the usual checks, or says the record moved.
+  - **An invited user's status cannot change** (b2abefe15): the hub refuses to suspend a user who
+    was invited and never signed in, so removing such a remote login failed every later apply.
+    lever no longer suspends it: it drops the login's role bindings and leaves the invite pending,
+    which grants nothing while the proxy refuses the login; adding it back binds the same hub user.
+    Doctor's *remote web role* row accepts such an unbound invite.
+  - **Building scion needs Go 1.26.11** (its `go.mod`; lever still builds with 1.26.9). An older Go
+    downloads that toolchain at the first scion build under `GOTOOLCHAIN=auto`, and fails under
+    `GOTOOLCHAIN=local`. Doctor's *go toolchain* row now says which applies. A lever release's
+    prebuilt scion needs no Go.
+
+  These changes from `e8160a10` reach lever:
   - **Chat thread groups are always on.** scion graduated `hub.chat_thread_groups` (315c0798c): the
     hub no longer registers it, refuses an override for it, and always serves
     `/api/v1/thread-groups`, so agents can create and rename project-wide chat groups that project
@@ -78,6 +109,27 @@ version bump moves the block under the new version heading.
 
 ### Security
 
+- **scion `d34ffbc1`'s new experiments are pinned off:** `hub.triggers` (webhook endpoints and
+  triggers agents can author, an unauthenticated signed ingress at `/api/v1/hooks/<id>` that
+  messages agents, and actions that start new agents outside the broker), `hub.github_triggers`,
+  `hub.exec_schedules` (commands in an agent's container from a schedule or trigger, with no LLM
+  turn, once conduit is on), `hub.exec_containers` (user-started shell containers in the jail),
+  `hub.system_one` (model-provider calls from the hub), `hub.code_span_mentions` (a backticked
+  `@name` becomes a mention), `hub.agent_secrets` (secrets an agent writes for itself, delivered
+  above lever's, and forms asking a user to type a secret in), `lifecycle.idle_suspend` (the hub
+  suspends idle agents itself and wakes a hub-suspended one for any sender, past the broker's wake
+  checks) and `hub.suspend_screen` (the last terminal screen of each hub-run suspend stored in the
+  hub database; on by scion's default, so the pin turns it off). `hub.triggers` is probed: doctor
+  fails while `GET /api/v1/hooks/<zero id>` is served. A `hub-experiments.json` written before this
+  makes doctor warn until the next apply.
+- **The remote proxy refuses scion `d34ffbc1`'s trigger and secret-request routes for every
+  login:** `/api/v1/hooks/*`, a project's `triggers`, `trigger-events`, `trigger-sources` and
+  `webhook-endpoints`, `/api/v1/trigger-presets*`, and `/api/v1/secret-requests/*`.
+- **A contact's message may carry no `@` outside a word.** The fence refused only words that start
+  with `@`, so `` `@other-agent` `` passed, which scion routes as a mention with
+  `hub.code_span_mentions` on, as it does an `@` after markdown wrapping. Every `@` (or `＠`) that
+  does not follow a letter, a digit, `-` or `@` (past any `_`) is now refused; email addresses
+  still pass.
 - **Five more scion experiments are pinned off:** `hub.attachment_artifacts` (copies chat attachments
   into agent inboxes and the project scratchpad; scion turns it on by default wherever its artifact
   service is ready, local disk included), `hub.port_view` (an agent's exposed port, WebSockets
@@ -120,7 +172,7 @@ version bump moves the block under the new version heading.
 
 ### Upgrade
 
-- **Jail ABI 17.** The agent image changed (sciontool and, in the slim image, scion from the new
+- **Jail ABI 18.** The agent image changed (sciontool and, in the slim image, scion from the new
   pin) and so did in-jail lever code: rebuild the agent image (`make lever-image` or `make
   lever-image-slim`, then any instance image built from it) and recreate the manager on it with
   `lever up --fresh --keep-conversation`. Doctor's *agent lever version* row says so. The first

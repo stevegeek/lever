@@ -55,13 +55,19 @@ type agentMessagesStamp struct {
 	FollowUpAfter time.Duration
 	MaxChars      int
 	Contacts      []string // "login=agent,agent", config order
+	// MaxOpen and ManagerMaxOpen are the configured values, 0 when unset,
+	// so an instance that never sets them keeps its stamp. A worker's
+	// override is in Workers.
+	MaxOpen        int `json:",omitempty"`
+	ManagerMaxOpen int `json:",omitempty"`
 }
 
 func agentMessagesStampOf(app *config.App) *agentMessagesStamp {
 	if !app.AgentMessagesOn() {
 		return nil
 	}
-	s := &agentMessagesStamp{FollowUpAfter: app.EffectiveAgentFollowUpAfter(), MaxChars: app.EffectiveAgentMaxChars()}
+	s := &agentMessagesStamp{FollowUpAfter: app.EffectiveAgentFollowUpAfter(), MaxChars: app.EffectiveAgentMaxChars(),
+		MaxOpen: app.Remote.AgentMessages.MaxOpen, ManagerMaxOpen: app.Manager.AgentMessages.MaxOpen}
 	for _, u := range app.Remote.AllowedUsers {
 		if u.EffectiveTier() == config.TierContact {
 			s.Contacts = append(s.Contacts, u.Login+"="+strings.Join(u.Agents, ","))

@@ -444,8 +444,8 @@ func agentMessagesRow(app *config.App, st state.State) checkResult {
 			who = append(who, u.Login+" ("+strings.Join(u.Agents, ", ")+")")
 		}
 	}
-	detail := fmt.Sprintf("on: follow_up_after %s, max_chars %d; contacts: %s; agents need an image with this release's lever-agent (contacts, contact_message)",
-		shortDuration(app.EffectiveAgentFollowUpAfter()), app.EffectiveAgentMaxChars(), strings.Join(who, "; "))
+	detail := fmt.Sprintf("on: follow_up_after %s, max_open %d, max_chars %d; contacts: %s; agents need an image with this release's lever-agent (contacts, contact_message)",
+		shortDuration(app.EffectiveAgentFollowUpAfter()), app.EffectiveAgentMaxOpen(""), app.EffectiveAgentMaxChars(), strings.Join(who, "; "))
 	p := st.AgentLedger()
 	fi, err := os.Lstat(p)
 	switch {

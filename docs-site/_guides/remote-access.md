@@ -1239,6 +1239,7 @@ remote:
   agent_messages:
     enabled: true
     follow_up_after: 24h      # default; 1h to 720h
+    max_open: 2               # default (one message, one reminder); 1 to 10
     max_chars: 4000           # default; 1 to 16000
 ```
 
@@ -1275,10 +1276,13 @@ and `lever remote serve` refuse it on a `scion.source` checkout that does not ho
   reveal the time and id of a hidden row, and the live event subjects reveal that an agent the
   contact does not list sent it a direct message, when, and that agent's hub id. No message
   text leaks either way.
-- **The limit.** Per agent and contact: one message the agent started and the contact has not
-  answered yet, then one reminder after `follow_up_after`; a message from the contact resets
-  it. Every authorization counts, sent or not. A reply to a contact message is not limited by
-  this rule: up to 3 per contact message, within 24 hours of it. Every agent has at most 30
+- **The limit.** Per agent and contact: up to `max_open` messages the agent started that the
+  contact has not answered yet, each one at least `follow_up_after` after the one before; a
+  message from the contact resets the count. The default, `2`, is one message and one
+  reminder. `manager.agent_messages.max_open` or `workers[].agent_messages.max_open` sets it
+  for one agent. The agent's `contacts` tool reports `max_open`, how many are `open`, and
+  `next_allowed_at` while it waits for the spacing. Every authorization counts, sent or not.
+  A reply to a contact message is not limited by this rule: up to 3 per contact message, within 24 hours of it. Every agent has at most 30
   authorizations an hour. Refusals are fixed words: `not-a-contact`, `limit`
   (with `next_allowed_at`), `too-long`, `empty`, `bad-text` (invalid UTF-8, a control
   character, or a word that starts with `@`, which the hub would rewrite), `bad-ref`, `rate`,
@@ -1324,7 +1328,7 @@ and `lever remote serve` refuse it on a `scion.source` checkout that does not ho
   contact only after a reload, since the events carry no text, and shows no unread marks (lever's
   chat page counts them itself). A message older than the two 4 MiB record files of that
   contact stops showing. An authorization the agent does not send
-  still uses its slot until the reminder time.
+  still counts toward `max_open` until the contact writes.
 
 ## The operator's view of contact conversations
 

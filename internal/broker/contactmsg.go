@@ -10,6 +10,7 @@ package broker
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -27,6 +28,10 @@ type AgentMessagesConfig struct {
 	Enabled       bool
 	FollowUpAfter time.Duration
 	MaxChars      int
+	// MaxOpen is how many messages an agent may start to one contact before
+	// the contact writes; MaxOpenFor overrides it per agent slug.
+	MaxOpen    int
+	MaxOpenFor map[string]int
 	// LedgerDir "" means the state directory is inside the tree: every call
 	// answers unavailable.
 	LedgerDir string
@@ -42,11 +47,12 @@ type ContactEntry struct {
 
 const (
 	defaultFollowUpAfter = 24 * time.Hour
+	defaultMaxOpen       = 2
 	defaultMaxChars      = 4000
 )
 
-// withDefaults ensures a zero limit never allows a reminder at once or
-// refuses every text.
+// withDefaults ensures a zero limit never allows a reminder at once,
+// refuses every text or refuses every message an agent starts.
 func (c AgentMessagesConfig) withDefaults() AgentMessagesConfig {
 	if c.FollowUpAfter <= 0 {
 		c.FollowUpAfter = defaultFollowUpAfter
@@ -54,7 +60,18 @@ func (c AgentMessagesConfig) withDefaults() AgentMessagesConfig {
 	if c.MaxChars <= 0 {
 		c.MaxChars = defaultMaxChars
 	}
+	if c.MaxOpen <= 0 {
+		c.MaxOpen = defaultMaxOpen
+	}
 	return c
+}
+
+// maxOpen is agent's limit on unanswered messages it starts to one contact.
+func (c AgentMessagesConfig) maxOpen(agent string) int {
+	if n := c.MaxOpenFor[agent]; n > 0 {
+		return n
+	}
+	return max(c.MaxOpen, 1)
 }
 
 const (
@@ -118,26 +135,41 @@ func (b *Broker) contactFor(login, agent string) (ContactEntry, bool) {
 	return ContactEntry{}, false
 }
 
-// initiateDecision limits messages an agent starts, per contact: one, then a
-// single reminder after followUp, then nothing until the contact writes.
-func initiateDecision(initiated []time.Time, lastFromContact time.Time, followUp time.Duration, now time.Time) (bool, time.Time) {
+// openSince is the initiated times after the contact's last post: the
+// messages the agent started that the contact has not answered.
+func openSince(initiated []time.Time, lastFromContact time.Time) []time.Time {
 	var open []time.Time
 	for _, t := range initiated {
 		if t.After(lastFromContact) {
 			open = append(open, t)
 		}
 	}
-	switch len(open) {
-	case 0:
+	return open
+}
+
+// initiateDecision limits messages an agent starts, per contact: up to
+// maxOpen unanswered ones, each after the one before by at least followUp,
+// then nothing until the contact writes. next is when the spacing next
+// allows one; zero when one is allowed now or the limit is reached.
+func initiateDecision(initiated []time.Time, lastFromContact time.Time, followUp time.Duration, maxOpen int, now time.Time) (bool, time.Time) {
+	open := openSince(initiated, lastFromContact)
+	if len(open) == 0 {
 		return true, time.Time{}
-	case 1:
-		next := open[0].Add(followUp)
-		if !now.Before(next) {
-			return true, time.Time{}
-		}
-		return false, next
 	}
-	return false, time.Time{}
+	if len(open) >= max(maxOpen, 1) {
+		return false, time.Time{}
+	}
+	latest := open[0]
+	for _, t := range open[1:] {
+		if t.After(latest) {
+			latest = t
+		}
+	}
+	next := latest.Add(followUp)
+	if !now.Before(next) {
+		return true, time.Time{}
+	}
+	return false, next
 }
 
 // contactText accepts only text the hub stores unchanged: no "@" at a word
@@ -207,8 +239,10 @@ func (b *Broker) handleContacts(w http.ResponseWriter, r *http.Request) {
 						initiated = append(initiated, a.Created)
 					}
 				}
-				can, next := initiateDecision(initiated, last, b.agentMsgs.FollowUpAfter, now)
+				maxOpen := b.agentMsgs.maxOpen(slug)
+				can, next := initiateDecision(initiated, last, b.agentMsgs.FollowUpAfter, maxOpen, now)
 				info.CanInitiate = can
+				info.MaxOpen, info.Open = maxOpen, len(openSince(initiated, last))
 				info.LastFromContact, info.NextAllowedAt = rfc(last), rfc(next)
 				if n := len(initiated); n > 0 {
 					info.LastInitiated = rfc(initiated[n-1])
@@ -333,7 +367,7 @@ func (b *Broker) handleContactMessage(w http.ResponseWriter, r *http.Request) {
 				initiated = append(initiated, p.Created)
 			}
 		}
-		if ok, next := initiateDecision(initiated, last, b.agentMsgs.FollowUpAfter, now); !ok {
+		if ok, next := initiateDecision(initiated, last, b.agentMsgs.FollowUpAfter, b.agentMsgs.maxOpen(slug), now); !ok {
 			return limitErr{next}
 		}
 		return nil
@@ -341,7 +375,11 @@ func (b *Broker) handleContactMessage(w http.ResponseWriter, r *http.Request) {
 	var le limitErr
 	switch {
 	case errors.As(err, &le):
-		refuse(refuseLimit, "you have an unanswered message to this contact; wait for their answer or next_allowed_at", "limit", le.next)
+		note := "your last message to this contact is unanswered; wait for next_allowed_at or their answer"
+		if le.next.IsZero() {
+			note = fmt.Sprintf("you have reached your limit of unanswered messages to this contact (max_open %d); wait for their answer", b.agentMsgs.maxOpen(slug))
+		}
+		refuse(refuseLimit, note, "limit", le.next)
 		return
 	case errors.Is(err, errReplyCap):
 		refuse(refuseLimit, "this contact message already has 3 replies; wait for the contact to write again", "reply cap", time.Time{})

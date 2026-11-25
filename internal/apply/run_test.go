@@ -2176,7 +2176,7 @@ func TestStartManagerPassesPrompt(t *testing.T) {
 
 // TestStartManagerResumeHandsANewSessionItsPrompt: a stopped or halted
 // record starts a new claude session, and after a run that ended completed
-// the hub no longer replays the stored task (scion d34ffbc1), so lever passes
+// the hub replays no stored task (scion d34ffbc1 on), so lever passes
 // the current boot prompt. A suspended record continues its session and gets
 // none.
 func TestStartManagerResumeHandsANewSessionItsPrompt(t *testing.T) {

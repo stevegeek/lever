@@ -17,8 +17,8 @@ import (
 )
 
 // IsExistsResumable reports the hub's refusal of a start over a record it
-// holds suspended, stopped or halted (scion d34ffbc1 on): a start no longer
-// resumes it. Its text also says "already exists", so callers check it
+// holds suspended, stopped or halted (scion d34ffbc1 on): such a start does not
+// resume it. Its text also says "already exists", so callers check it
 // before AlreadyRunning.
 func IsExistsResumable(err error) bool {
 	return hubRefusal(err, "via hub: agent_exists_resumable: ")

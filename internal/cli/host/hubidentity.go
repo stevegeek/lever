@@ -240,6 +240,13 @@ func (h *hubIdentity) run(ctx context.Context) error {
 	if err := h.admin.SetRuntime(ctx, apply.AgentRuntime); err != nil {
 		return errHubIdentity("setting the hub's container runtime to %s as lever-admin: %w", apply.AgentRuntime, err)
 	}
+	// From scion e8160a10 on, the hub refuses to remove the scratchpad shared
+	// dir (the cross-agent mount the register step strips) while its project
+	// default scratchpad is on, and stamps one on every new project. Only a
+	// hub admin can change the default.
+	if err := h.admin.SetDefaultScratchpadOff(ctx); err != nil {
+		return errHubIdentity("turning the hub's project default scratchpad off as lever-admin: %w", err)
+	}
 
 	if _, err := h.adminHygiene(ctx, admin.ID, owe); err != nil {
 		return err
@@ -291,7 +298,7 @@ func (h *hubIdentity) run(ctx context.Context) error {
 		return errHubIdentity("%w", err)
 	}
 
-	if err := h.mintPATs(ctx, mode, rec.ProjectID, controllerPATScopes(lifecycle, h.controllerInbox(ctx))); err != nil {
+	if err := h.mintPATs(ctx, mode, rec.ProjectID, controllerPATScopes(lifecycle, h.controllerInbox(ctx), h.controllerProjectList(ctx))); err != nil {
 		return err
 	}
 	if !conduitOn {
@@ -350,8 +357,11 @@ func (h *hubIdentity) run(ctx context.Context) error {
 
 // ensureAdmin asserts lever-admin and checks the row the hub resolved: an
 // admin, and neither the dev user nor the controller. A rename of the dev
-// user to lever-admin's address (any loopback caller can, through scion's
-// system identity route) is repaired with the PAT (R1).
+// user to lever-admin's address is repaired with the PAT (R1). Before scion
+// e8160a10 any loopback caller could rename it through scion's system
+// identity route; from e8160a10 on (44ef85192) that route needs
+// hub.config.update, so only a hub admin can, and the PAT's repair may be
+// refused too: the apply then fails and names the repair.
 func (h *hubIdentity) ensureAdmin(ctx context.Context, mode string, rec *state.HubIdentity) (hubapi.User, error) {
 	me, err := h.admin.Me(ctx)
 	if err != nil {
@@ -609,8 +619,9 @@ var errControllerContested = errors.New("lever-controller's address does not sta
 // assertController makes an assertion as the controller resolve to the
 // controller's row, before a call that only that assertion can make (a token
 // mint or revoke, a project registration). On a migrated hub the address is
-// contested: anything that reaches the hub's identity route can rename the
-// dev user between lever's re-pin and its assertion. So the re-pin and the
+// contested: on a scion before e8160a10, anything that reaches the hub's
+// identity route can rename the dev user between lever's re-pin and its
+// assertion (from e8160a10 on, only a hub admin can). So the re-pin and the
 // assertion are retried together a few times; once the assertion resolves to
 // the dev user, scion's email cache keeps it there for a minute, which is
 // what the calls that follow rely on.
@@ -819,6 +830,12 @@ func (h *hubIdentity) controllerInbox(ctx context.Context) bool {
 	return controllerInbox(ctx, h.scopeKnown(), rec)
 }
 
+// controllerProjectList is controllerProjectList on the stored record.
+func (h *hubIdentity) controllerProjectList(ctx context.Context) bool {
+	rec, _, _ := h.st.LoadControllerPATRecord()
+	return controllerProjectList(ctx, h.scopeKnown(), rec)
+}
+
 func (h *hubIdentity) scopeKnown() scopeKnownFunc {
 	if h.sc == nil {
 		return nil
@@ -912,7 +929,8 @@ func (h *hubIdentity) mintPATs(ctx context.Context, mode, projectID string, ctlS
 		}
 		return nil
 	}
-	return mint("lever-remote", remotePATScopes(), h.st.LoadRemotePAT, h.st.LoadRemotePATRecord,
+	rrec, _, _ := h.st.LoadRemotePATRecord()
+	return mint("lever-remote", remotePATScopes(controllerProjectList(ctx, h.scopeKnown(), rrec)), h.st.LoadRemotePAT, h.st.LoadRemotePATRecord,
 		h.st.SaveRemotePAT, h.st.SaveRemotePATRecord)
 }
 
@@ -942,7 +960,7 @@ func controllerActions(lifecycle bool) []string {
 func ungrantedScopes(requested, granted []string) []string {
 	var out []string
 	for _, s := range requested {
-		literal := s == inboxReadScope || strings.HasPrefix(s, "skill:") || strings.HasPrefix(s, "template:") || strings.HasPrefix(s, "harness_config:")
+		literal := s == inboxReadScope || s == projectListScope || strings.HasPrefix(s, "skill:") || strings.HasPrefix(s, "template:") || strings.HasPrefix(s, "harness_config:")
 		if literal && !slices.Contains(granted, s) {
 			out = append(out, s)
 		}

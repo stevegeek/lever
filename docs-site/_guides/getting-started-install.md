@@ -22,7 +22,7 @@ source build is the supported route there. lever starts broker tools with the fi
 Silicon: `/opt/homebrew/bin`) name a tool by its absolute path in `lever.yaml`, for example `command: [/opt/homebrew/bin/lever-tool-github, ...]`.
 
 A release archive from GitHub holds the same host binaries, ready to run. Its `lever` needs **no Go
-toolchain** for the scion pin of its release (`65531d7f`, the pin in the examples): `lever apply`
+toolchain** for the scion pin of its release (`e8160a10`, the pin in the examples): `lever apply`
 downloads that release's prebuilt scion, checks it against the sha256 built into `lever`, and skips
 the scion compile. With `remote.enabled` it downloads that release's prebuilt web UI the same way,
 so remote access on that pin needs **neither Go nor node**. Any other pin, and a failed download,
@@ -110,7 +110,7 @@ scion's stock Claude harness image. Build it once from a scion checkout:
 
 ```sh
 git clone https://github.com/GoogleCloudPlatform/scion
-cd scion && git checkout 65531d7f   # the same commit as scion.version in lever.yaml
+cd scion && git checkout e8160a10   # the same commit as scion.version in lever.yaml
 image-build/scripts/build-images.sh --target harnesses
 ```
 
@@ -135,7 +135,7 @@ pinned tmux, lever's binaries, the boot hook and `/etc/claude-code`). It should 
 `make image-contract` prints the built size.
 
 ```sh
-make lever-image-slim SCION_VERSION=65531d7f   # your lever.yaml's scion.version
+make lever-image-slim SCION_VERSION=e8160a10   # your lever.yaml's scion.version
 ```
 
 sciontool and scion are cross-compiled on the host from the scion source the jail runs: set

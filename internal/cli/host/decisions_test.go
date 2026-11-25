@@ -27,7 +27,7 @@ func TestConversationDecisions(t *testing.T) {
 		"absent": refuse(noRecord), "running": running, "running-exited": running,
 		"running-created": running, "running-no-status": running,
 		"suspended": {{"stop,resume-fresh", ""}, {"resume", ""}},
-		"stopped":   refuse(notReady), "error": refuse(notReady), "created": refuse(notReady),
+		"stopped":   refuse(notReady), "error": refuse(notReady), "halted": refuse(notReady), "created": refuse(notReady),
 		"provisioning": refuse(notReady), "cloning": refuse(notReady), "starting": refuse(notReady),
 		"stopping": refuse(notReady), "resumed": refuse(notReady), "unknown": refuse(notReady),
 	}

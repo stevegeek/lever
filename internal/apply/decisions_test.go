@@ -52,6 +52,7 @@ func TestStartManagerDecisions(t *testing.T) {
 		"suspended":         {startManagerOutcome{resume, false}, startManagerOutcome{recrt, false}},
 		"stopped":           {startManagerOutcome{resume, false}, startManagerOutcome{recrt, false}},
 		"error":             {startManagerOutcome{force, false}, startManagerOutcome{recrt, false}},
+		"halted":            {startManagerOutcome{resume, false}, startManagerOutcome{recrt, false}},
 		"created":           {startManagerOutcome{none, true}, startManagerOutcome{recrt, false}},
 		"provisioning":      {startManagerOutcome{none, true}, startManagerOutcome{recrt, false}},
 		"cloning":           {startManagerOutcome{none, true}, startManagerOutcome{recrt, false}},

@@ -1776,6 +1776,7 @@ func TestRunScionServerEmitsWebFlagsWhenRemoteEnabled(t *testing.T) {
 func TestRunScionServerEmitsSessionSecret(t *testing.T) {
 	f := scionOKRunner()
 	app := helloApp(t.TempDir())
+	f.Script("sh -c", proc.Result{Stdout: "ok"})
 	deps := Deps{
 		Scion:            hubScion(f, app),
 		HubSessionSecret: "sessionsecrethex",
@@ -1783,10 +1784,15 @@ func TestRunScionServerEmitsSessionSecret(t *testing.T) {
 	if err := runApply(app, deps); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	j := joinedCalls(f)
-	if want := "server start --web-port 8080 --dev-auth=false --session-secret=sessionsecrethex|"; !strings.Contains(j, want) {
-		t.Fatalf("missing scion call %q in: %q", want, j)
+	for _, c := range f.Calls {
+		if c.Name == "sh" && strings.Contains(strings.Join(c.Args, " "), "server start --web-port 8080 --dev-auth=false") {
+			if c.Stdin != "sessionsecrethex\n" || strings.Contains(strings.Join(c.Args, " "), "sessionsecrethex") {
+				t.Fatalf("server start: stdin %q, argv %q", c.Stdin, c.Args)
+			}
+			return
+		}
 	}
+	t.Fatalf("no server start through the secret shim in: %q", joinedCalls(f))
 }
 
 // TestRunScionServerPointsTheHubAtStagedAssets: a remote-enabled instance on

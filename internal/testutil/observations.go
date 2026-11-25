@@ -21,6 +21,7 @@ var ManagerObservations = []ManagerObservation{
 	{"suspended", "suspended", "stopped"},
 	{"stopped", "stopped", "stopped"},
 	{"error", "error", "Exited (137) 1 minute ago"},
+	{"halted", "halted", ""},
 	{"created", "created", "created"},
 	{"provisioning", "provisioning", ""},
 	{"cloning", "cloning", ""},

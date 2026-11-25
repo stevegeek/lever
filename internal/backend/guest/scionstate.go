@@ -112,7 +112,9 @@ func parseScionState(out string) types.ScionProjectState {
 // RepairScionHubEndpoint rewrites the hub endpoint in every project-configs
 // registration whose workspace_path == wp, when it differs from endpoint.
 // Idempotent. See backend.Backend for why it can be stale. wp and endpoint
-// are lever constants, never user input.
+// are lever constants, never user input. From scion e8160a10 the CLI reads
+// hubs from ~/.scion/context.yaml instead and this key is only imported
+// once, so the rewrite matters on older pins (apply.Deps.RepairScionHubEndpoint).
 func (g Guest) RepairScionHubEndpoint(ctx context.Context, wp, endpoint string) error {
 	if endpoint == "" {
 		return nil

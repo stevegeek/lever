@@ -447,6 +447,11 @@ type Deps struct {
 	// worse than a loud bring-up failure. The project name is the workspace
 	// basename, as ensureControllerPAT passes to hub token create.
 	StripProjectSharedDirs func(ctx context.Context, projectName string) error
+	// SetUserSecret sets a user-scope secret of the controller that scion
+	// injects into every agent (the manager's credential, the API-key
+	// placeholder). nil uses Scion.SecretSet (the controller PAT through
+	// scion's CLI).
+	SetUserSecret func(ctx context.Context, key, value string) error
 	// EnsureAgentRoleCeiling writes the project's max and default agent role so
 	// the hub refuses any create above the role lever stamps (the hub-side
 	// counterpart of --role). It runs on both register paths, and a failure is
@@ -456,8 +461,12 @@ type Deps struct {
 	// RepairScionHubEndpoint rewrites the project's recorded hub endpoint when it
 	// differs from the real hub's. A registration linked against a hub on another
 	// port keeps that endpoint, since the register step's re-init is skipped when
-	// the registration is sound. lever passes the endpoint explicitly, so a stale
-	// one only breaks where scion runs bare in the jail (lever attach).
+	// the registration is sound. lever passes the endpoint explicitly
+	// (SCION_HUB_ENDPOINT on every scion call), so a stale one only breaks a
+	// bare scion an operator runs by hand in the jail. From scion e8160a10
+	// (8225ea29e) the CLI no longer reads this key: it imports it once into
+	// ~/.scion/context.yaml and reads hubs from there, so the repair matters
+	// only on older pins.
 	RepairScionHubEndpoint func(ctx context.Context, jailWorkspacePath string) error
 	// VerifyAgentRole gates keeping an existing agent record: it errors when the
 	// hub's record stores no authorization role while the installed scion
@@ -509,6 +518,15 @@ type Deps struct {
 	// manager's container gone (confirmManagerContainerGone). Zero takes the
 	// default.
 	ContainerGoneRetry RetryBudget
+}
+
+// userSecret sets a user-scope secret through SetUserSecret, or the scion
+// CLI when that is nil.
+func (d Deps) userSecret(ctx context.Context, key, value string) error {
+	if d.SetUserSecret != nil {
+		return d.SetUserSecret(ctx, key, value)
+	}
+	return d.Scion.SecretSet(ctx, key, value)
 }
 
 func (d Deps) check() error {
@@ -1060,7 +1078,7 @@ func runCredential(ctx context.Context, s Step, d Deps) error {
 		// empty credential file too).
 		return fmt.Errorf("credential file %s is empty", s.Target)
 	}
-	return d.Scion.SecretSet(ctx, "CLAUDE_CODE_OAUTH_TOKEN", tok)
+	return d.userSecret(ctx, "CLAUDE_CODE_OAUTH_TOKEN", tok)
 }
 
 // ImageRegistry is the registry prefix scion rewrites an unqualified agent
@@ -2116,7 +2134,7 @@ func (r *run) prepareAPIKeyMode(ctx context.Context, jp string) error {
 	if err := r.d.Scion.EnvSet(ctx, jp, "LEVER_LLM_AUTH", "api-key"); err != nil {
 		return fmt.Errorf("set LEVER_LLM_AUTH for manager: %w", err)
 	}
-	if err := r.d.Scion.SecretSet(ctx, "ANTHROPIC_API_KEY", apiKeyPlaceholder); err != nil {
+	if err := r.d.userSecret(ctx, "ANTHROPIC_API_KEY", apiKeyPlaceholder); err != nil {
 		return fmt.Errorf("set placeholder ANTHROPIC_API_KEY: %w", err)
 	}
 	return nil
@@ -2157,7 +2175,7 @@ func (r *run) observeManager(ctx context.Context, jp string) (*scion.Agent, erro
 	}
 	if rec != nil && !r.fresh {
 		switch rec.Phase {
-		case scion.PhaseRunning, scion.PhaseSuspended, scion.PhaseStopped, scion.PhaseError:
+		case scion.PhaseRunning, scion.PhaseSuspended, scion.PhaseStopped, scion.PhaseError, scion.PhaseHalted:
 			if err := r.d.VerifyAgentRole(ctx, path.Base(jp), r.app.Name); err != nil {
 				return nil, fmt.Errorf("start-manager: %w", err)
 			}
@@ -2572,6 +2590,13 @@ func defaultReadCred(path string) (string, error) {
 // underscores (USERACCESSMODE, PUBLICKEYFILE); the underscored spellings are
 // silently ignored, and an ignored user-access mode admits anyone.
 // LEVER_HUB_AUTH_KEY records which key the hub read, for HubRestartReason.
+//
+// SCION_IMAGE_REGISTRY pins the agent image registry above every settings
+// value: from scion e8160a10 (4dec8b3c1) the order is node env, then the hub
+// database's active profile, then its top level, then the file. An agent can
+// write the top level through the loopback registry route, and a profile
+// value would outrank lever's reset of it; the env outranks both. The co-
+// located runtime broker inherits it. An older scion ignores it.
 func HubAuthEnv(instanceID, keyFingerprint string) map[string]string {
 	return map[string]string{
 		"SCION_SERVER_AUTH_MODE":                    "proxy",
@@ -2585,5 +2610,6 @@ func HubAuthEnv(instanceID, keyFingerprint string) map[string]string {
 		"SCION_SERVER_HUB_ADMINEMAILS":              hubauth.AdminEmail,
 		"SCION_SERVER_AUTH_DEFAULTUSERROLE":         "member",
 		"LEVER_HUB_AUTH_KEY":                        keyFingerprint,
+		"SCION_IMAGE_REGISTRY":                      ImageRegistry,
 	}
 }

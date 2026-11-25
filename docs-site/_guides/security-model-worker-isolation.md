@@ -155,8 +155,12 @@ up, the controller is scion's dev user (the row an older lever minted its tokens
 `lever-controller@lever.local` and demoted to member; it keeps the project, the PAT and every agent.
 
 **Workstation routes.** Lever runs the hub non-hosted, so scion's `/api/v1/system/*` routes accept
-any authenticated loopback caller, an agent token included. One of them renames scion's dev user.
-On a fresh instance there is no dev user, so this is a no-op. On a migrated one an agent can rename
+any authenticated loopback caller, an agent token included. Before scion `e8160a10`, one of them
+renamed scion's dev user; from `e8160a10` on that route (and `workstation-settings`, which can turn
+on gcloud credential injection) needs `hub.config.update`, which an agent token does not hold, and
+the stack e2e proves an agent's writes to both refused. The registry and runtime routes still take
+an agent token; lever sets both back as `lever-admin` at every apply. On a fresh instance there is
+no dev user, so the rename is a no-op. On a migrated one, with an older scion, an agent can rename
 the controller, between applies or in a loop. Lever therefore identifies the controller by user ID,
 through its PAT, and needs its address only to mint or revoke a controller token; then it re-pins
 the address and asserts the controller together, a bounded number of times, and fails naming the

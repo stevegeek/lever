@@ -24,7 +24,8 @@
 # archive path: reuse the archive an earlier run saved there when the key file
 # beside it matches this tree's in-jail fingerprint, pins, arch and image, else
 # build the image and save it there), LEVER (default ~/.local/bin/lever),
-# STACK_NAME (default stacke2e; must end in e2e), KEEP=1 (leave the VM for
+# STACK_NAME (default stacke2e; must end in e2e), STACK_MEMORY (the VM's memory,
+# default 6GiB), KEEP=1 (leave the VM for
 # inspection).
 set -uo pipefail
 
@@ -117,7 +118,7 @@ scion:
   version: $SCION_VERSION
 backend: lima
 cpus: 4
-memory: 6GiB
+memory: ${STACK_MEMORY:-6GiB}
 egress: open
 tree: workspace
 manager:
@@ -184,6 +185,7 @@ running() { X ps --format '{{.Names}}' | grep -qx "lever--$NAME"; }
 # hubproxyenv: the running hub carries lever's proxy-mode env (matched in the
 # guest; nothing else of its environment leaves the jail).
 hubproxyenv() { G sh -c 'pid=$(tr -cd 0-9 < ~/.scion/server.pid); tr "\000" "\n" < /proc/$pid/environ | grep -qx SCION_SERVER_AUTH_MODE=proxy'; }
+hubregenv() { G sh -c 'pid=$(tr -cd 0-9 < ~/.scion/server.pid); tr "\000" "\n" < /proc/$pid/environ | grep -qx SCION_IMAGE_REGISTRY=lever.local'; }
 # hubbody <path>: a hub GET's body with the controller PAT (over stdin).
 hubbody() { G sh -c 'read -r t; curl -sS -m 20 -H "Authorization: Bearer $t" "http://127.0.0.1:8080$1"' _ "$1" < "$INST/.lever-state/controller.pat"; }
 mgr() { X exec "lever--$NAME" lever-manager "$@" 2>&1; }
@@ -296,18 +298,24 @@ checkx "the controller PAT carries inbox:read" 'python3 -c "import json,sys; sys
 cat > "$WORK/granted.py" <<'PY'
 import json, sys
 g = json.load(open(sys.argv[1])).get("granted_scopes") or []
-want = ["skill:read", "skill:list", "template:read", "template:list", "harness_config:read", "harness_config:list", "inbox:read"]
+want = ["skill:read", "skill:list", "template:read", "template:list", "harness_config:read", "harness_config:list", "inbox:read", "project:list"]
 missing = [w for w in want if w not in g]
 print("      | granted:", ",".join(g), "missing:", ",".join(missing))
 sys.exit(1 if missing else 0)
 PY
-check "the controller PAT was granted the baseline reads and inbox:read" python3 "$WORK/granted.py" "$rec"
+check "the controller PAT was granted the baseline reads, inbox:read and project:list" python3 "$WORK/granted.py" "$rec"
 check "the hub runs in proxy auth mode" hubproxyenv
+check "the hub pins the agent image registry in its env (SCION_IMAGE_REGISTRY)" hubregenv
+# The session secret reaches the hub on stdin as SCION_SERVER_SESSION_SECRET;
+# without it scion logs this and every hub restart signs browsers out. scion
+# appends to server.log across starts; the clean slate gives this run a fresh
+# VM, so every start in it must have had the secret.
+check "the hub got lever's session secret" G sh -c '! grep -q "no session secret set" ~/.scion/server.log'
 check "the hub identity record says fresh" grep -q '"mode": *"fresh"' "$INST/.lever-state/hub-identity.json"
 PROJ=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["project_id"])' "$INST/.lever-state/hub-identity.json")
 checkx "the project lists the broker" 'hubbody "/api/v1/projects/$PROJ/providers" | grep -q brokerId'
 check "lever-admin pinned the experiments off" grep -q '"off": *\[' "$INST/.lever-state/hub-experiments.json"
-for x in hub.conduit hub.artifacts hub.chat_thread_groups federation.project_visitors; do
+for x in hub.conduit hub.artifacts federation.project_visitors hub.attachment_artifacts hub.port_view hub.conduit_deliver hub.agent_plugins hub.agent_delegation hub.async_agent_start; do
 	check "lever-admin pinned $x off" python3 -c 'import json,sys; sys.exit(sys.argv[2] not in json.load(open(sys.argv[1])).get("off", []))' "$INST/.lever-state/hub-experiments.json" "$x"
 done
 check "no dev token in the jail" G sh -c '! test -e ~/.scion/dev-token'
@@ -409,10 +417,13 @@ checkx "lever agent list --all no longer lists them" '! LA list --all | grep -q 
 
 
 say "the experiment fence on the hub"
-for p in /api/v1/conduit/grant-keys /api/v1/artifacts /api/v1/thread-groups; do
+for p in /api/v1/conduit/grant-keys /api/v1/artifacts; do
 	code=$(hub GET "$p")
 	checkx "hub answers $p with 404 (experiment off): $code" '[ "$code" = 404 ]'
 done
+# scion e8160a10 graduated thread groups: always served, never pinned; the
+# remote proxy refuses them (below).
+check "lever-admin did not pin the graduated hub.chat_thread_groups" python3 -c 'import json,sys; sys.exit(sys.argv[2] in json.load(open(sys.argv[1])).get("off", []))' "$INST/.lever-state/hub-experiments.json" hub.chat_thread_groups
 
 say "the experiment fence in the remote proxy"
 code=$(pcode "$OPERATOR" "http://127.0.0.1:$RP/api/v1/auth/me")
@@ -453,7 +464,7 @@ write_config "$IMAGE_LINE" "    - { login: contact2@example.com, tier: contact, 
 code=$(pcode contact2@example.com "http://127.0.0.1:$RP/api/v1/auth/me")
 checkx "contact2 signs in before the removal ($code)" '[ "$code" = 200 ]'
 cat > "$WORK/loop.py" <<'PY'
-import json, os, time, urllib.request
+import json, os, time, urllib.error, urllib.request
 tok = open(os.path.expanduser("~/.scion/scion-token")).read().strip()
 ep = os.environ.get("SCION_HUB_ENDPOINT") or os.environ.get("SCION_HUB_URL")
 end = time.time() + float(os.environ.get("LOOP_SECS", "600"))
@@ -466,6 +477,8 @@ while time.time() < end:
         n += 1
         if n == 1:
             open("/tmp/loop.ok", "w").write("1")
+    except urllib.error.HTTPError as e:
+        open("/tmp/loop.status", "w").write(str(e.code))
     except Exception:
         pass
     time.sleep(0.002)
@@ -474,7 +487,10 @@ limactl copy "$WORK/loop.py" "$VM:/tmp/loop.py"
 X cp /tmp/loop.py "lever--$NAME:/tmp/loop.py"
 X exec -d -e LOOP_SECS=600 "lever--$NAME" python3 /tmp/loop.py
 sleep 3
-checkx "the agent's rename loop reaches the hub" 'X exec "lever--$NAME" test -e /tmp/loop.ok'
+# From scion e8160a10 the identity route needs hub.config.update, so the
+# agent's loop is refused; the rest of this section still proves a refused
+# loop cannot hold up the contact's removal.
+checkx "the agent's rename loop is refused by the hub (403)" 'X exec "lever--$NAME" test ! -e /tmp/loop.ok && [ "$(X exec "lever--$NAME" cat /tmp/loop.status 2>/dev/null)" = 403 ]'
 # Other recorded scopes make the mint urgent: a token only in its renew window
 # would be left for a later apply with a warning.
 python3 - "$rec" <<'PY'
@@ -554,8 +570,9 @@ mgr agent stop worker | tail -1 | sed 's/^/      | /'
 checkx "the worker resumes under the agent's registry" 'mgr agent resume worker | grep -qE "running|resumed"'
 checkx "the worker runs lever's image, not the agent's registry ($(cimage lever--worker))" '[ "$(cimage lever--worker)" = "$AGENT_IMAGE" ]'
 code=$(agentcall PATCH /api/v1/system/workstation-settings '{"auto_inject_gcloud_adc":true}')
-checkx "the agent's gcloud injection write reaches the hub ($code)" '[ "$code" = 200 ]'
-check "settings.yaml carries auto_inject_gcloud_adc" gcloudset
+# From scion e8160a10 workstation-settings needs hub.config.update.
+checkx "the hub refuses the agent's gcloud injection write ($code)" '[ "$code" = 403 ]'
+checkx "settings.yaml does not carry auto_inject_gcloud_adc" '! gcloudset'
 code=$(agentcall PUT /api/v1/system/runtime '{"runtime":"docker"}')
 checkx "the agent's runtime write reaches the hub ($code)" '[ "$code" = 200 ]'
 checkx "the hub's runtime is the agent's ($(hubrt))" '[ "$(hubrt)" = docker ]'

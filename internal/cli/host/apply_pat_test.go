@@ -23,14 +23,14 @@ func seedPAT(t *testing.T, st state.State, which, token string) {
 		if err := st.SaveControllerPAT(token); err != nil {
 			t.Fatal(err)
 		}
-		if err := st.SaveControllerPATRecord(state.PATRecord{ID: "old-" + token, Requested: controllerPATScopes(false, false), MintedAt: time.Now(), ExpiresAt: far}); err != nil {
+		if err := st.SaveControllerPATRecord(state.PATRecord{ID: "old-" + token, Requested: controllerPATScopes(false, false, false), MintedAt: time.Now(), ExpiresAt: far}); err != nil {
 			t.Fatal(err)
 		}
 	case "remote":
 		if err := st.SaveRemotePAT(token); err != nil {
 			t.Fatal(err)
 		}
-		if err := st.SaveRemotePATRecord(state.PATRecord{ID: "old-" + token, Requested: remotePATScopes(), MintedAt: time.Now(), ExpiresAt: far}); err != nil {
+		if err := st.SaveRemotePATRecord(state.PATRecord{ID: "old-" + token, Requested: remotePATScopes(false), MintedAt: time.Now(), ExpiresAt: far}); err != nil {
 			t.Fatal(err)
 		}
 	default:
@@ -109,8 +109,8 @@ func TestEnsureAgentRoleCeilingIsGatedOnTheRolesProbe(t *testing.T) {
 // agent:lifecycle is not re-minted without it, nor the reverse.
 func TestControllerLifecycleFallsBackToTheRecord(t *testing.T) {
 	failing := func(context.Context, string) (bool, error) { return false, errors.New("no scion") }
-	with := state.PATRecord{Requested: controllerPATScopes(true, false)}
-	without := state.PATRecord{Requested: controllerPATScopes(false, false)}
+	with := state.PATRecord{Requested: controllerPATScopes(true, false, false)}
+	without := state.PATRecord{Requested: controllerPATScopes(false, false, false)}
 	if !controllerLifecycle(context.Background(), failing, with) || controllerLifecycle(context.Background(), failing, without) {
 		t.Fatal("controllerLifecycle ignores the record when the probe fails")
 	}
@@ -123,18 +123,18 @@ func TestControllerLifecycleFallsBackToTheRecord(t *testing.T) {
 // expands to it) is not re-minted.
 func TestControllerLifecycleHonorsTheGrantedSet(t *testing.T) {
 	known := func(context.Context, string) (bool, error) { return true, nil }
-	rec := state.PATRecord{Requested: controllerPATScopes(false, false), Granted: []string{"agent:attach", lifecycleScope}}
+	rec := state.PATRecord{Requested: controllerPATScopes(false, false, false), Granted: []string{"agent:attach", lifecycleScope}}
 	if controllerLifecycle(context.Background(), known, rec) {
 		t.Fatal("controllerLifecycle asks for agent:lifecycle although the token was granted it")
 	}
-	if patMintReason("tok", rec, true, controllerPATScopes(controllerLifecycle(context.Background(), known, rec), false), time.Now()) != "" {
+	if patMintReason("tok", rec, true, controllerPATScopes(controllerLifecycle(context.Background(), known, rec), false, false), time.Now()) != "" {
 		t.Fatal("a token granted agent:lifecycle is re-minted")
 	}
 }
 
 func TestPatUrgent(t *testing.T) {
 	now := time.Now()
-	want := controllerPATScopes(false, false)
+	want := controllerPATScopes(false, false, false)
 	rec := func(scopes []string, exp time.Time) state.PATRecord {
 		return state.PATRecord{Requested: scopes, ExpiresAt: exp}
 	}
@@ -175,9 +175,12 @@ func TestApplySignalContextCancelsOnSIGINT(t *testing.T) {
 // PAT, and it is the controller's token, so it must not attach, message or
 // change anything.
 func TestRemotePATScopesAreReadOnly(t *testing.T) {
-	got := remotePATScopes()
+	got := remotePATScopes(false)
 	if !slices.Equal(got, []string{"agent:read", "agent:list", "project:read"}) {
-		t.Fatalf("remotePATScopes() = %v", got)
+		t.Fatalf("remotePATScopes(false) = %v", got)
+	}
+	if got := remotePATScopes(true); !slices.Equal(got, []string{"agent:read", "agent:list", "project:read", projectListScope}) {
+		t.Fatalf("remotePATScopes(true) = %v", got)
 	}
 	perms := remoteRolePermissions(false)
 	for _, want := range []string{"agent.attach", "agent.message", "project.list"} {
@@ -194,8 +197,8 @@ func TestControllerInbox(t *testing.T) {
 	failing := func(context.Context, string) (bool, error) { return false, errors.New("no scion") }
 	knows := func(_ context.Context, scope string) (bool, error) { return scope == inboxReadScope, nil }
 	knowsNothing := func(context.Context, string) (bool, error) { return false, nil }
-	with := state.PATRecord{Requested: controllerPATScopes(false, true)}
-	without := state.PATRecord{Requested: controllerPATScopes(false, false)}
+	with := state.PATRecord{Requested: controllerPATScopes(false, true, false)}
+	without := state.PATRecord{Requested: controllerPATScopes(false, false, false)}
 	for _, tc := range []struct {
 		name  string
 		known scopeKnownFunc
@@ -224,7 +227,7 @@ func TestControllerPATScopes(t *testing.T) {
 	for _, tc := range []struct {
 		lifecycle, inbox bool
 	}{{false, false}, {true, false}, {false, true}, {true, true}} {
-		got := controllerPATScopes(tc.lifecycle, tc.inbox)
+		got := controllerPATScopes(tc.lifecycle, tc.inbox, false)
 		for _, s := range append([]string{"agent:manage", "agent:attach", "agent:message", "project:read", "project:update"}, reads...) {
 			if !slices.Contains(got, s) {
 				t.Errorf("(%v, %v): %v lacks %s", tc.lifecycle, tc.inbox, got, s)
@@ -234,4 +237,78 @@ func TestControllerPATScopes(t *testing.T) {
 			t.Errorf("(%v, %v): got %v", tc.lifecycle, tc.inbox, got)
 		}
 	}
+}
+
+// project:list follows the jail's scion like inbox:read, and is asked for
+// only when asked.
+func TestControllerProjectList(t *testing.T) {
+	failing := func(context.Context, string) (bool, error) { return false, errors.New("no scion") }
+	knows := func(_ context.Context, scope string) (bool, error) { return scope == projectListScope, nil }
+	knowsNothing := func(context.Context, string) (bool, error) { return false, nil }
+	with := state.PATRecord{Requested: controllerPATScopes(false, false, true)}
+	without := state.PATRecord{Requested: controllerPATScopes(false, false, false)}
+	if slices.Contains(without.Requested, projectListScope) || !slices.Contains(with.Requested, projectListScope) {
+		t.Fatalf("scope sets: with %v, without %v", with.Requested, without.Requested)
+	}
+	for _, tc := range []struct {
+		name  string
+		known scopeKnownFunc
+		rec   state.PATRecord
+		want  bool
+	}{
+		{"scion knows it", knows, without, true},
+		{"scion does not know it", knowsNothing, with, false},
+		{"probe fails, record has it", failing, with, true},
+		{"probe fails, record lacks it", failing, without, false},
+		{"no probe, no record", nil, state.PATRecord{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := controllerProjectList(context.Background(), tc.known, tc.rec); got != tc.want {
+				t.Fatalf("controllerProjectList = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	if got := ungrantedScopes(with.Requested, []string{"agent:manage"}); !slices.Contains(got, projectListScope) {
+		t.Fatalf("ungrantedScopes = %v: a mint that drops project:list must be caught", got)
+	}
+}
+
+// The fallback writes the secret only when the controller's assertion
+// resolves to the recorded controller.
+func TestSetUserSecretAsControllerChecksTheUser(t *testing.T) {
+	for _, tc := range []struct {
+		name, me string
+		wantPut  bool
+	}{{"the controller", "c1", true}, {"another user holds the address", "u9", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &secretDoer{me: tc.me}
+			err := setUserSecretAsController(context.Background(), &hubapi.Client{T: d}, "c1", "CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-value")
+			if d.put != tc.wantPut || (err == nil) != tc.wantPut {
+				t.Fatalf("put=%v err=%v", d.put, err)
+			}
+			if err != nil && strings.Contains(err.Error(), "sk-ant-oat01-value") {
+				t.Fatalf("the error carries the secret: %v", err)
+			}
+		})
+	}
+}
+
+type secretDoer struct {
+	me  string
+	put bool
+}
+
+func (d *secretDoer) Do(ctx context.Context, method, path string) (int, []byte, error) {
+	return d.DoBody(ctx, method, path, nil)
+}
+
+func (d *secretDoer) DoBody(_ context.Context, method, path string, _ []byte) (int, []byte, error) {
+	switch {
+	case method == "GET" && path == "/api/v1/auth/me":
+		return 200, []byte(`{"id":"` + d.me + `","email":"lever-controller@lever.local"}`), nil
+	case method == "PUT" && path == "/api/v1/secrets/CLAUDE_CODE_OAUTH_TOKEN":
+		d.put = true
+		return 200, []byte(`{}`), nil
+	}
+	return 404, nil, nil
 }

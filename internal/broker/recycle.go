@@ -33,7 +33,7 @@ const taskPreviewLen = 60
 // "running, container down", which can still come back.
 func recyclablePhase(phase string) bool {
 	switch phase {
-	case scion.PhaseSuspended, scion.PhaseStopped, scion.PhaseError:
+	case scion.PhaseSuspended, scion.PhaseStopped, scion.PhaseError, scion.PhaseHalted:
 		return true
 	}
 	return false
@@ -114,7 +114,7 @@ func (b *Broker) recycleWorker(ctx context.Context, w http.ResponseWriter, spec 
 		if op {
 			first = "Run `lever worker stop " + spec.Name + "` (or `suspend`), then recycle."
 		}
-		refusePhase(w, ReasonNotStopped, phase, "worker "+spec.Name+" is "+why+"; a recycle deletes only a suspended, stopped or error record whose container is down, never a live session. "+
+		refusePhase(w, ReasonNotStopped, phase, "worker "+spec.Name+" is "+why+"; a recycle deletes only a suspended, stopped, halted or error record whose container is down, never a live session. "+
 			first+" Nothing was deleted.", http.StatusConflict)
 	}
 	if phase != "" && !recyclablePhase(phase) {

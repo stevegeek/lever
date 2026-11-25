@@ -396,9 +396,12 @@ func removeJailFile(ctx context.Context, jr proc.Runner, jailPath string) error 
 // stop, suspend and resume of an existing agent by a user token; a refused
 // resume answers 409 "already exists". inbox adds inbox:read, which a hub that
 // has it requires to list notifications (the broker inbox and the manager
-// watch). An older hub rejects an unknown scope, so each is added only when
-// the jail's scion knows it.
-func controllerPATScopes(lifecycle, inbox bool) []string {
+// watch). projectList adds project:list, which a hub from scion e8160a10 on
+// requires of a token to list projects (de77b8ae9 puts the token ceiling on
+// every list): without it `scion hub projects` comes back empty and lever
+// would register the project again. An older hub rejects an unknown scope, so
+// each is added only when the jail's scion knows it.
+func controllerPATScopes(lifecycle, inbox, projectList bool) []string {
 	s := []string{"agent:manage", "agent:attach", "agent:message", "project:read", "project:update",
 		"skill:read", "skill:list", "template:read", "template:list", "harness_config:read", "harness_config:list"}
 	if lifecycle {
@@ -407,7 +410,25 @@ func controllerPATScopes(lifecycle, inbox bool) []string {
 	if inbox {
 		s = append(s, inboxReadScope)
 	}
+	if projectList {
+		s = append(s, projectListScope)
+	}
 	return s
+}
+
+// projectListScope is the UAT scope that lists projects.
+const projectListScope = "project:list"
+
+// controllerProjectList decides whether a PAT whose record is rec carries
+// project:list, as controllerInbox does for inbox:read. The remote proxy's
+// PAT is decided the same way, from its own record.
+func controllerProjectList(ctx context.Context, known scopeKnownFunc, rec state.PATRecord) bool {
+	if known != nil {
+		if has, err := known(ctx, projectListScope); err == nil {
+			return has
+		}
+	}
+	return slices.Contains(rec.Requested, projectListScope)
 }
 
 // inboxReadScope is the UAT scope that lists the caller's notifications.
@@ -446,9 +467,15 @@ func controllerLifecycle(ctx context.Context, known scopeKnownFunc, rec state.PA
 // remotePATScopes is the exact scope set of the remote proxy's PAT: the proxy
 // only lists the project's agents with it (the chat page and the contact
 // fence), so it reads and nothing else. It is the controller's token, so
-// anything sent with it would wear lever's sender label.
-func remotePATScopes() []string {
-	return []string{"agent:read", "agent:list", "project:read"}
+// anything sent with it would wear lever's sender label. projectList adds
+// project:list, which the agent list needs from scion e8160a10 on: it finds
+// the project by listing projects (controllerProjectList decides it).
+func remotePATScopes(projectList bool) []string {
+	s := []string{"agent:read", "agent:list", "project:read"}
+	if projectList {
+		s = append(s, projectListScope)
+	}
+	return s
 }
 
 // patRenewWindow is how long before expiry apply re-mints.
@@ -1062,6 +1089,7 @@ func (w *applyWiring) newDeps(bc *brokerController, rc *remoteController, sessio
 		ScionProjectRegistered: b.ScionProjectRegistered,
 
 		StripProjectSharedDirs: w.stripProjectSharedDirs,
+		SetUserSecret:          w.setUserSecret,
 		EnsureAgentRoleCeiling: w.ensureAgentRoleCeiling,
 		RepairScionHubEndpoint: w.repairScionHubEndpoint,
 		VerifyAgentRole:        w.verifyAgentRole,
@@ -1241,6 +1269,47 @@ func recordMounts(agents []hubapi.Agent, agentName string) ([]jail.Mount, error)
 // a re-mint is picked up.
 func (w *applyWiring) hub() *hubapi.Client {
 	return &hubapi.Client{T: hubJailTransport(w.jr, w.state)}
+}
+
+// setUserSecret sets a user-scope secret of the controller. It goes through
+// the hub's REST route as the controller (setUserSecretAsController), which
+// keeps the value off every command line: the scion CLI takes it only as an
+// argument, and from scion e8160a10 on the hub refuses it to the controller
+// PAT anyway (8ee1dbd2f wants an interactive login, which a hub assertion
+// is). Only a hub without that route (404, an older scion) or an instance
+// with no recorded controller falls back to the CLI.
+func (w *applyWiring) setUserSecret(ctx context.Context, key, value string) error {
+	rec, found, err := w.state.LoadHubIdentity()
+	if err != nil {
+		return fmt.Errorf("setting %s: reading the hub identity record: %w", key, err)
+	}
+	if !found || rec.ControllerID == "" {
+		return w.sc.SecretSet(ctx, key, value)
+	}
+	err = setUserSecretAsController(ctx, w.assertHub(w.signer.Controller), rec.ControllerID, key, value)
+	var ae *hubapi.APIError
+	if errors.As(err, &ae) && ae.Status == http.StatusNotFound {
+		return w.sc.SecretSet(ctx, key, value)
+	}
+	return err
+}
+
+// setUserSecretAsController writes the secret only after the controller's
+// assertion resolves to the recorded controller: the hub resolves an
+// assertion by email, and on a migrated hub another user could hold the
+// controller's address, which would then receive the credential.
+func setUserSecretAsController(ctx context.Context, hc *hubapi.Client, controllerID, key, value string) error {
+	me, err := hc.Me(ctx)
+	if err != nil {
+		return fmt.Errorf("setting %s as the controller: asserting the controller: %w", key, err)
+	}
+	if me.ID != controllerID {
+		return fmt.Errorf("setting %s as the controller: the controller's assertion resolves to hub user %s, not the controller %s; nothing was written", key, me.ID, controllerID)
+	}
+	if err := hc.SetUserSecret(ctx, key, value); err != nil {
+		return fmt.Errorf("setting %s as the controller: %w", key, err)
+	}
+	return nil
 }
 
 // stripProjectSharedDirs removes scion's default cross-agent `scratchpad` mount

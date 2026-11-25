@@ -994,6 +994,24 @@ func TestHubRoutesTheProxyNeverForwards(t *testing.T) {
 		{"POST", "/api/v1/runtime-brokers/b1/heartbeat", true},
 		{"GET", "/api/v1/runtime-brokers", false},
 		{"GET", "/api/v1/runtime-brokers/b1", false},
+		// scion d34ffbc1: triggers, webhook ingress and secret requests.
+		{"POST", "/api/v1/hooks/00000000-0000-0000-0000-000000000000", true},
+		{"GET", "/api/v1/Hooks/x", true},
+		{"GET", "/api/v1/projects/p1/triggers", true},
+		{"POST", "/api/v1/projects/p1/triggers", true},
+		{"PATCH", "/api/v1/projects/p1/triggers/t1", true},
+		{"GET", "/api/v1/projects/p1/trigger-events", true},
+		{"PUT", "/api/v1/projects/p1/trigger-sources/github", true},
+		{"POST", "/api/v1/projects/p1/webhook-endpoints", true},
+		{"POST", "/api/v1/groves/p1/webhook-endpoints/w1/rotate", true},
+		{"GET", "/api/v1/trigger-presets", true},
+		{"POST", "/api/v1/trigger-presets/compile", true},
+		{"GET", "/api/v1/secret-requests/m1", true},
+		{"POST", "/api/v1/secret-requests/m1/fulfill", true},
+		{"POST", "/api/v1/secret-requests/m1/dismiss", true},
+		{"GET", "/api/v1/pre-start-hooks", false},
+		{"GET", "/api/v1/projects/p1/pre-start-hooks", false},
+		{"GET", "/api/v1/projects/p1/schedules", false},
 	} {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
 			hub := newRecordingHub(t)

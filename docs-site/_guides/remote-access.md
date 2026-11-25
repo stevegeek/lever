@@ -335,6 +335,11 @@ decide:
 - An agent's `ports/tunnel` (the agent side's own socket) and `delegations` (they hand the
   signed-in user's authority to an agent) under `/api/v1/agents/<id>/`, and the test-identity
   routes (`/api/v1/test-identit*`, `/auth/test-identity*`), which mint credentials or sessions.
+- scion's triggers: the unauthenticated webhook ingress `/api/v1/hooks/*` (a signed request there
+  messages agents, and can start new ones), a project's `triggers`, `trigger-events`,
+  `trigger-sources` and `webhook-endpoints` under `/api/v1/projects/<id>/` (and `/api/v1/groves/`),
+  and `/api/v1/trigger-presets*`. Also `/api/v1/secret-requests/*`, where a user would type a
+  secret into a form an agent posted. lever pins the experiments behind both off.
 
 These routes are matched in lower case and by prefix, so another spelling of the same route is
 refused too.

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -423,27 +424,101 @@ func TestSeedTarStaysInsideItsRoot(t *testing.T) {
 // A restore whose seed fails after the name is drawn is undone like any
 // failed spawn: the workspace is removed and the name destroyed.
 func TestRestoreSeedFailureIsUndone(t *testing.T) {
-	saved := AgentsState{Agents: []AgentRecord{{Name: "s-seedss", Template: "session", CreatedBy: "operator", State: AgentDestroyed, Dir: "sessions/s-seedss"}}}
-	e := newSpawnEnv(t, saved)
-	withConversations(t, e)
-	// The old workspace holds .claude as a file, where spawn wrote the skill.
-	ws := makeTarGz(t, tarEnt{name: ".claude", body: "x"})
-	if err := os.MkdirAll(filepath.Join(e.archives, "s-seedss"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(e.archives, "s-seedss", archiveWorkspaceFile), ws, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	rec := callOperator(t, e.b, http.MethodPost, PathOperatorAgentRestore, `{"archive":"s-seedss"}`)
-	if rec.Code != http.StatusUnprocessableEntity || rec.Header().Get(ReasonHeader) != ReasonArchiveRefused {
-		t.Fatalf("%d %s", rec.Code, rec.Body)
+	e := newSpawnEnv(t, AgentsState{})
+	w := httptest.NewRecorder()
+	e.b.spawnAgentWith(context.Background(), w, SpawnRequest{Template: "session"}, operatorActor, spawnExtras{
+		restoredFrom: "s-seedss",
+		seed: func(_ context.Context, dir *os.Root) (*RestoreInfo, error) {
+			if err := dir.WriteFile("half.txt", []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return nil, errors.New("disk on fire")
+		},
+	})
+	if w.Code != http.StatusUnprocessableEntity || w.Header().Get(ReasonHeader) != ReasonArchiveRefused {
+		t.Fatalf("%d %s", w.Code, w.Body)
 	}
 	st := e.state()
-	if len(st.Agents) != 2 || st.Agents[1].State != AgentDestroyed || !e.b.isRevoked(st.Agents[1].Name) || len(e.rt.started) != 0 {
+	if len(st.Agents) != 1 || st.Agents[0].State != AgentDestroyed || st.Agents[0].RestoredFrom != "s-seedss" || !e.b.isRevoked(st.Agents[0].Name) || len(e.rt.started) != 0 {
 		t.Fatalf("%+v", st)
 	}
-	if _, err := os.Stat(filepath.Join(e.tree, st.Agents[1].Dir)); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(e.tree, st.Agents[0].Dir)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("workspace left: %v", err)
+	}
+}
+
+// What lever writes itself wins: an old workspace's file where the skill's
+// or the transcripts' folders go is skipped. Into another template, the
+// old agent's configuration (hooks, MCP servers, CLAUDE.md, git hooks) is
+// left out as well.
+func TestRestoreSkipsReservedAndForeignConfig(t *testing.T) {
+	for _, tc := range []struct {
+		template string
+		kept     []string
+		skipped  []string
+	}{
+		{"session", []string{"CLAUDE.md", ".claude/settings.json", "src/a.go"}, []string{".lever/conversation"}},
+		{"gone", []string{"src/a.go", "README.md"}, []string{"CLAUDE.md", ".claude/settings.json", ".mcp.json", ".git/hooks/pre-commit", ".git/config", ".lever/notes"}},
+	} {
+		saved := AgentsState{Agents: []AgentRecord{{Name: "s-seedss", Template: tc.template, CreatedBy: "operator", State: AgentDestroyed, Dir: "sessions/s-seedss"}}}
+		e := newSpawnEnv(t, saved)
+		withConversations(t, e)
+		ents := []tarEnt{{name: "src/", typ: tar.TypeDir}, {name: "src/a.go", body: "package a"}, {name: "README.md", body: "r"}}
+		if tc.template == "session" {
+			// Files where lever's folders go.
+			ents = append(ents, tarEnt{name: "CLAUDE.md", body: "c"}, tarEnt{name: ".claude/", typ: tar.TypeDir},
+				tarEnt{name: ".claude/settings.json", body: "{}"}, tarEnt{name: ".lever/", typ: tar.TypeDir}, tarEnt{name: ".lever/conversation", body: "planted"})
+		} else {
+			ents = append(ents, tarEnt{name: "CLAUDE.md", body: "c"}, tarEnt{name: ".claude/", typ: tar.TypeDir}, tarEnt{name: ".claude/settings.json", body: "{}"},
+				tarEnt{name: ".mcp.json", body: "{}"}, tarEnt{name: ".git/", typ: tar.TypeDir}, tarEnt{name: ".git/hooks/", typ: tar.TypeDir},
+				tarEnt{name: ".git/hooks/pre-commit", body: "#!/bin/sh", mode: 0o755}, tarEnt{name: ".git/config", body: "[core]"},
+				tarEnt{name: ".lever/", typ: tar.TypeDir}, tarEnt{name: ".lever/notes", body: "n"})
+		}
+		if err := os.MkdirAll(filepath.Join(e.archives, "s-seedss"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(e.archives, "s-seedss", archiveWorkspaceFile), makeTarGz(t, ents...), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.b.backupConversation(context.Background(), "s-seedss"); err != nil {
+			t.Fatal(err)
+		}
+		res := e.restore(t, `{"archive":"s-seedss","template":"session"}`)
+		nws := filepath.Join(e.tree, "sessions", res.Name)
+		for _, p := range tc.kept {
+			if _, err := os.Stat(filepath.Join(nws, p)); err != nil {
+				t.Errorf("%s: %s not restored: %v", tc.template, p, err)
+			}
+		}
+		for _, p := range tc.skipped {
+			if fi, err := os.Lstat(filepath.Join(nws, p)); err == nil && !fi.IsDir() {
+				t.Errorf("%s: %s restored", tc.template, p)
+			}
+		}
+		if b, err := os.ReadFile(filepath.Join(nws, ".claude/skills/lever-agent/SKILL.md")); err != nil || string(b) != "skill text\n" {
+			t.Errorf("%s: skill %q %v", tc.template, b, err)
+		}
+		if _, err := os.Stat(filepath.Join(nws, ".lever/conversation/s-seedss/-workspace/abc.jsonl")); err != nil {
+			t.Errorf("%s: transcript: %v", tc.template, err)
+		}
+	}
+}
+
+// A remote caller's restores are rate-limited before the archive is read,
+// even when each is refused.
+func TestRemoteRestoreIsRateLimited(t *testing.T) {
+	e := newSpawnEnv(t, AgentsState{}, func(t *TemplateSpec) { t.MaxRunning = 1 })
+	withConversations(t, e)
+	old := e.spawn(t, `{"template":"session","by":"ssh:factory"}`).Name
+	e.destroy(t, old)
+	e.spawn(t, `{"template":"session"}`) // the template is now busy
+	var reasons []string
+	for range 5 {
+		rec := callOperator(t, e.b, http.MethodPost, PathOperatorAgentRestore, `{"archive":"`+old+`","by":"ssh:factory"}`)
+		reasons = append(reasons, rec.Header().Get(ReasonHeader))
+	}
+	if strings.Join(reasons, ",") != "template-busy,template-busy,template-busy,template-busy,rate-limited" {
+		t.Fatalf("%v", reasons)
 	}
 }
 

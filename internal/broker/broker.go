@@ -499,6 +499,8 @@ type Broker struct {
 	dailyBackup         func(ctx context.Context, agent string) (string, error)
 	removeConversations func(agent string, dryRun bool) (int64, error)
 	conversationDir     string
+	restoreRateOnce     sync.Once
+	restoreRate         *rateWindow
 	// captureSem lets one conversation capture run at a time: each holds the
 	// whole compressed conversation in memory (convbackup's cap is 512 MiB).
 	captureSem chan struct{}

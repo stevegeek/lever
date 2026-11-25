@@ -42,8 +42,13 @@ type seedLimits struct {
 }
 
 // defaultSeedLimits match what destroy archives (archiveMaxBytes and
-// archiveMaxFiles), so every archive destroy wrote can be restored.
-var defaultSeedLimits = seedLimits{MaxBytes: archiveMaxBytes, MaxEntries: archiveMaxFiles, MaxDepth: archiveMaxDepth}
+// archiveMaxFiles; a file may lie one level below the deepest directory),
+// so every archive destroy wrote can be restored.
+var defaultSeedLimits = seedLimits{MaxBytes: archiveMaxBytes, MaxEntries: archiveMaxFiles, MaxDepth: archiveMaxDepth + 1}
+
+// seedMaxNameBytes bounds the names a check holds in memory (each is kept
+// to refuse duplicates).
+const seedMaxNameBytes = 128 << 20
 
 // seedMaxTrailer bounds what may follow a tar's end in the gzip stream.
 const seedMaxTrailer = 1 << 20
@@ -74,11 +79,8 @@ type seedOpts struct {
 	Prefix string
 	// Skip reports names (archive-relative) to pass over: the template's
 	// skill, which spawn already wrote, and lever's own transcript folder.
-	Skip func(name string) bool
-	// StripPrefix, when set, is a top directory every entry must lie in, and
-	// is removed from the names (old conversation archives hold "projects").
-	StripPrefix string
-	Limits      seedLimits
+	Skip   func(name string) bool
+	Limits seedLimits
 }
 
 // seedCheck reads the gzip tar src whole and refuses it as seedTar would,
@@ -104,7 +106,7 @@ func seedTar(ctx context.Context, src io.Reader, dir *os.Root, o seedOpts) (seed
 	seen := map[string]bool{}
 	files := map[string]bool{}
 	parents := map[string]bool{}
-	var skippedBytes int64
+	var skippedBytes, nameBytes int64
 	entries := 0
 	if dir != nil && o.Prefix != "" {
 		if err := dir.MkdirAll(o.Prefix, 0o755); err != nil {
@@ -125,7 +127,7 @@ func seedTar(ctx context.Context, src io.Reader, dir *os.Root, o seedOpts) (seed
 		if entries++; entries > lim.MaxEntries {
 			return st, seedRefused("more than %d entries", lim.MaxEntries)
 		}
-		name, keep, err := seedName(h.Name, o.StripPrefix, lim.MaxDepth)
+		name, keep, err := seedName(h.Name, lim.MaxDepth)
 		if err != nil {
 			return st, err
 		}
@@ -146,6 +148,9 @@ func seedTar(ctx context.Context, src io.Reader, dir *os.Root, o seedOpts) (seed
 		}
 		if seen[name] {
 			return st, seedRefused("%q appears twice", name)
+		}
+		if nameBytes += int64(len(name)); nameBytes > seedMaxNameBytes {
+			return st, seedRefused("more than %d MiB of names", seedMaxNameBytes>>20)
 		}
 		seen[name] = true
 		if h.Typeflag != tar.TypeDir && parents[name] {
@@ -232,23 +237,13 @@ func seedFile(dir *os.Root, p string, h *tar.Header, r io.Reader) error {
 	return nil
 }
 
-// seedName checks an entry's name and strips strip (when set) from it. keep
-// is false for the strip directory itself.
-func seedName(raw, strip string, maxDepth int) (string, bool, error) {
+// seedName checks an entry's name. keep is false for the top directory
+// itself.
+func seedName(raw string, maxDepth int) (string, bool, error) {
 	name := strings.TrimSuffix(raw, "/")
 	name = strings.TrimPrefix(name, "./")
 	if raw == "./" || raw == "." {
 		return "", false, nil // the top directory itself, as tar -C dir . writes it
-	}
-	if strip != "" {
-		if name == strip {
-			return "", false, nil
-		}
-		rest, ok := strings.CutPrefix(name, strip+"/")
-		if !ok {
-			return "", false, seedRefused("%q lies outside %s", raw, strip)
-		}
-		name = rest
 	}
 	switch {
 	case name == "" || name == "." || len(name) > 4096:

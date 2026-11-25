@@ -248,8 +248,6 @@ func (b *Broker) copyBackup(rec AgentRecord, dir, dst string) error {
 type archiveSource struct {
 	bytes int64
 	open  func() (io.ReadCloser, error)
-	// strip is the top directory its entries lie in ("": none).
-	strip string
 }
 
 // archiveParts are where a destroyed agent's workspace and conversation
@@ -275,7 +273,7 @@ func openRegular(p string) (io.ReadCloser, error) {
 }
 
 // regularSource is p as a source, or nil when there is no file there.
-func regularSource(p, strip string) (*archiveSource, error) {
+func regularSource(p string) (*archiveSource, error) {
 	fi, err := os.Lstat(p)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -286,7 +284,7 @@ func regularSource(p, strip string) (*archiveSource, error) {
 	if !fi.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s is not a regular file; left for the operator", p)
 	}
-	return &archiveSource{bytes: fi.Size(), strip: strip, open: func() (io.ReadCloser, error) { return openRegular(p) }}, nil
+	return &archiveSource{bytes: fi.Size(), open: func() (io.ReadCloser, error) { return openRegular(p) }}, nil
 }
 
 // partsOf finds rec's archive: the combined directory first, then the old
@@ -311,17 +309,17 @@ func (b *Broker) partsOf(rec AgentRecord) (archiveParts, error) {
 			return out, fmt.Errorf("%s is not a directory", combined)
 		}
 		out.format = "combined"
-		if out.workspace, err = regularSource(path.Join(combined, archiveWorkspaceFile), ""); err != nil {
+		if out.workspace, err = regularSource(path.Join(combined, archiveWorkspaceFile)); err != nil {
 			return out, err
 		}
-		if out.conversation, err = regularSource(path.Join(combined, archiveConversationFile), ""); err != nil {
+		if out.conversation, err = regularSource(path.Join(combined, archiveConversationFile)); err != nil {
 			return out, err
 		}
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return out, err
 	}
 	if out.workspace == nil {
-		ws, err := regularSource(path.Join(b.archiveDir, rec.Name+".tar.gz"), "")
+		ws, err := regularSource(path.Join(b.archiveDir, rec.Name+".tar.gz"))
 		if err != nil {
 			return out, err
 		}
@@ -525,6 +523,46 @@ func (b *Broker) restoreAgent(ctx context.Context, w http.ResponseWriter, req Re
 	if req.Label == "" {
 		req.Label = rec.Label
 	}
+	// The cheap refusals come before the archive is read whole: a caller
+	// cannot make the broker decompress it over and over for nothing.
+	if err := checkLabel(req.Label); err != nil {
+		b.audit("agent", actor, "deny", verb+": "+err.Error())
+		refuse(w, ReasonBadLabel, err.Error(), http.StatusBadRequest)
+		return
+	}
+	size, ok := b.spawnSize(w, actor, verb, t, req.Memory)
+	if !ok || !b.taskOK(w, actor, verb, req.Task, "") || !b.runtimeReady(w) {
+		return
+	}
+	if req.By != "" {
+		if ok, wait := b.restoreCheckRate().take(actor, time.Now()); !ok {
+			b.audit("agent", actor, "deny", verb+": rate limited")
+			refuse(w, ReasonRateLimited, fmt.Sprintf("rate limited: try again in %ds", int(wait.Seconds())+1), http.StatusTooManyRequests)
+			return
+		}
+	}
+	if busy, err := b.templateAtMaxRunning(ctx, t); err != nil {
+		b.audit("agent", actor, "error", verb+": "+err.Error())
+		refuse(w, ReasonRuntimeError, "runtime error: could not read the hub; nothing was changed", http.StatusBadGateway)
+		return
+	} else if busy != nil {
+		b.audit("agent", actor, "deny", verb+": "+busy.Error())
+		refuse(w, ReasonTemplateBusy, busy.Error(), http.StatusConflict)
+		return
+	}
+	if busy, err := b.memoryBusyFor(ctx, "from template "+t.Name, size.Bytes); err != nil {
+		b.audit("agent", actor, "error", verb+": "+err.Error())
+		refuse(w, ReasonRuntimeError, "runtime error: could not read the hub; nothing was changed", http.StatusBadGateway)
+		return
+	} else if busy != nil {
+		b.audit("agent", actor, "deny", verb+": "+busy.Error())
+		msg := busy.Error()
+		if req.By != "" {
+			msg = busy.short()
+		}
+		refuse(w, ReasonMemoryBusy, msg, http.StatusConflict)
+		return
+	}
 	parts, err := b.partsOf(rec)
 	if err != nil {
 		b.audit("agent", actor, "error", verb+": "+err.Error())
@@ -537,15 +575,22 @@ func (b *Broker) restoreAgent(ctx context.Context, w http.ResponseWriter, req Re
 		return
 	}
 	// The skill spawn writes wins over the old one, and lever's transcript
-	// folder for this restore is its own.
+	// folder for this restore is its own: both, and the folders above
+	// them, are skipped in the old workspace. Into another template, the
+	// agent configuration the old agent wrote is skipped too: its hooks
+	// and MCP servers would run with the new template's grants.
 	own := path.Join(RestoredConversationDir, rec.Name)
-	wsOpts := seedOpts{Limits: defaultSeedLimits, Skip: func(name string) bool {
-		return t.SkillRel != "" && (name == t.SkillRel || strings.HasPrefix(name, t.SkillRel+"/")) ||
-			name == own || strings.HasPrefix(name, own+"/")
-	}}
+	reserved := []string{own}
+	if t.SkillRel != "" {
+		reserved = append(reserved, t.SkillRel)
+	}
+	if t.Name != rec.Template {
+		reserved = append(reserved, foreignConfig...)
+	}
+	wsOpts := seedOpts{Limits: defaultSeedLimits, Skip: func(name string) bool { return reservedPath(name, reserved) }}
 	convOpts := seedOpts{Limits: seedLimits{MaxBytes: convbackup.DefaultLimits.MaxTotal, MaxEntries: convbackup.DefaultLimits.MaxEntries, MaxDepth: 16}}
 	if parts.conversation != nil {
-		convOpts.Prefix, convOpts.StripPrefix = own, parts.conversation.strip
+		convOpts.Prefix = own
 	}
 	// Checked whole before a name is drawn: a refused archive burns none.
 	var need int64
@@ -623,6 +668,30 @@ func (b *Broker) restoreAgent(ctx context.Context, w http.ResponseWriter, req Re
 	b.spawnAgentWith(ctx, w, SpawnRequest{Template: t.Name, Task: task, Label: req.Label, Memory: req.Memory, By: req.By}, operatorActor, spawnExtras{
 		seed: seed, restoredFrom: rec.Name,
 	})
+}
+
+// foreignConfig are the workspace paths that configure an agent (Claude
+// Code's settings, hooks, commands and MCP servers, lever's folder, git's
+// hooks and config, direnv): a restore into another template leaves them
+// out of the old workspace.
+var foreignConfig = []string{".claude", ".mcp.json", "CLAUDE.md", "CLAUDE.local.md", ".claude.json", ".lever", ".git/hooks", ".git/config", ".envrc"}
+
+// reservedPath reports whether name is one of reserved, lies beneath one,
+// or is a folder above one (which the restore makes itself).
+func reservedPath(name string, reserved []string) bool {
+	for _, r := range reserved {
+		if name == r || strings.HasPrefix(name, r+"/") || strings.HasPrefix(r, name+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// restoreCheckRate bounds a remote caller's restores that read an archive
+// whole, apart from its spawns (a refused restore draws no name).
+func (b *Broker) restoreCheckRate() *rateWindow {
+	b.restoreRateOnce.Do(func() { b.restoreRate = newRateWindow(managerSpawnRateLimit) })
+	return b.restoreRate
 }
 
 // spawnExtras are what a restore adds to a spawn.

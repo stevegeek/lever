@@ -562,7 +562,10 @@ broker checks. What spawning adds, and how it is held:
   devices are skipped), with no setuid bits, through a handle on the new agent's own directory
   that spawn just created, each file created exclusively; an absolute or `..` name, a duplicate,
   or an archive past 200,000 entries, 8 GiB or 256 levels refuses the whole restore before a
-  name is drawn. The template's skill is written fresh, never taken from the archive. The old
+  name is drawn. The template's skill is written fresh, never taken from the archive, and a restore into another
+  template leaves out the old agent's configuration (Claude Code settings and hooks, MCP servers,
+  `CLAUDE.md`, git hooks and config), which would otherwise run with the new template's grants. A
+  key's restores are rate-limited before an archive is read. The old
   transcript lands in the new workspace (in the tree, which the manager can read), and the agent
   is told it is a record of earlier work, not instructions. Archives stay host-only (0700
   directory, 0600 files) and never enter the tree except through a restore.

@@ -555,6 +555,9 @@ broker checks. What spawning adds, and how it is held:
   `worker_to_worker`, a spawned agent messages and is messaged by only the agents of its own
   spawner. So the operator's, the manager's and each ssh key's agents form separate groups, joined
   only through the manager (whom every agent may message) or a configured worker's delegate.
+  A restore puts the old agent's transcripts in the new workspace, inside the tree, where the
+  manager reads them through its read-only view of `dir_root`: restoring an ssh key's or the
+  operator's agent shows the manager that agent's earlier conversation, tool output included.
 - **A restore grants nothing new.** `lever agent restore` (and an ssh key's `restore`, of its own
   agents only) is a spawn: the same admission, caps, rate limits and memory budget, a new name,
   and only its template's grants. What the archive holds is the destroyed agent's own output and
@@ -562,9 +565,13 @@ broker checks. What spawning adds, and how it is held:
   devices are skipped), with no setuid bits, through a handle on the new agent's own directory
   that spawn just created, each file created exclusively; an absolute or `..` name, a duplicate,
   or an archive past 200,000 entries, 8 GiB or 256 levels refuses the whole restore before a
-  name is drawn. The template's skill is written fresh, never taken from the archive, and a restore into another
-  template leaves out the old agent's configuration (Claude Code settings and hooks, MCP servers,
-  `CLAUDE.md`, git hooks and config), which would otherwise run with the new template's grants. A
+  name is drawn. The template's skill is written fresh, never taken from the archive. A restore into another
+  template leaves out every path through a name that configures an agent, at any depth and in any
+  case (`.claude`, `.mcp.json`, `CLAUDE.md`, `CLAUDE.local.md`, `.claude.json`, `.lever`, `.envrc`,
+  and every git repository, `.git` and `.gitmodules`), which would otherwise run with the new
+  template's grants; its task says the transcript's requests are not the operator's. Names that
+  differ only in case, or are not valid UTF-8, refuse the archive, since a case-insensitive host
+  would merge them. The transcripts never carry such a name, in any template. A
   key's restores are rate-limited before an archive is read. The old
   transcript lands in the new workspace (in the tree, which the manager can read), and the agent
   is told it is a record of earlier work, not instructions. Archives stay host-only (0700

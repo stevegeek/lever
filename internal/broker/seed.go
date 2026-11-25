@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 // Seeding a restored agent's workspace from an archive. The archive holds
@@ -23,9 +24,13 @@ import (
 //   - every name must be a clean relative path: absolute names, ".." and
 //     "." components, empty components and over-long names refuse the whole
 //     archive;
-//   - each name appears once, and nothing lies beneath a regular file;
+//   - each name appears once, compared without case (two names a
+//     case-insensitive host would merge refuse the archive), names are valid
+//     UTF-8, and nothing lies beneath a regular file;
 //   - the whole is held to seedLimits (bytes, entries, depth), and a passed
-//     limit refuses the archive, never cuts it short;
+//     limit refuses the archive, never cuts it short; the decompressed
+//     stream, tar headers included, is bounded too, and stops when ctx
+//     ends;
 //   - modes keep the owner's execute bit only (0644 or 0755): no setuid,
 //     setgid or sticky bit, no owner;
 //   - everything is written through an os.Root on the new agent's own
@@ -102,7 +107,10 @@ func seedTar(ctx context.Context, src io.Reader, dir *os.Root, o seedOpts) (seed
 		return st, seedRefused("not a gzip stream: %v", err)
 	}
 	zr.Multistream(false)
-	tr := tar.NewReader(zr)
+	// Tar headers (PAX and long names, up to 1 MiB each) and the data of
+	// skipped entries all come out of the decompressor: bound it whole.
+	budget := lim.MaxBytes + int64(lim.MaxEntries)*(64<<10) + seedMaxTrailer
+	tr := tar.NewReader(&seedReader{ctx: ctx, r: zr, left: budget})
 	seen := map[string]bool{}
 	files := map[string]bool{}
 	parents := map[string]bool{}
@@ -146,21 +154,32 @@ func seedTar(ctx context.Context, src io.Reader, dir *os.Root, o seedOpts) (seed
 			st.Skipped++
 			continue
 		}
-		if seen[name] {
-			return st, seedRefused("%q appears twice", name)
+		if !utf8.ValidString(name) {
+			return st, seedRefused("an entry name is not valid UTF-8")
+		}
+		// Keyed without case: on a case-insensitive host (macOS) "a" and
+		// "A" are one file, and the second would fail mid-seed.
+		key := strings.ToLower(name)
+		if seen[key] {
+			return st, seedRefused("%q appears twice (names are compared without case)", name)
 		}
 		if nameBytes += int64(len(name)); nameBytes > seedMaxNameBytes {
 			return st, seedRefused("more than %d MiB of names", seedMaxNameBytes>>20)
 		}
-		seen[name] = true
-		if h.Typeflag != tar.TypeDir && parents[name] {
+		seen[key] = true
+		if h.Typeflag != tar.TypeDir && parents[key] {
 			return st, seedRefused("%q is a file, and an earlier entry lies beneath it", name)
 		}
-		for p := path.Dir(name); p != "."; p = path.Dir(p) {
+		for p := path.Dir(key); p != "."; p = path.Dir(p) {
 			if files[p] {
 				return st, seedRefused("%q lies beneath the file %q", name, p)
 			}
-			parents[p] = true
+			if !parents[p] {
+				if len(parents) >= lim.MaxEntries {
+					return st, seedRefused("more than %d folders", lim.MaxEntries)
+				}
+				parents[p] = true
+			}
 		}
 		skip := o.Skip != nil && o.Skip(name)
 		if h.Typeflag == tar.TypeDir {
@@ -175,7 +194,7 @@ func seedTar(ctx context.Context, src io.Reader, dir *os.Root, o seedOpts) (seed
 		if h.Size < 0 || st.Bytes+h.Size > lim.MaxBytes || st.Bytes+h.Size+skippedBytes > lim.MaxBytes {
 			return st, seedRefused("more than %d bytes in all", lim.MaxBytes)
 		}
-		files[name] = true
+		files[key] = true
 		st.Bytes += h.Size
 		if skip {
 			st.Skipped++
@@ -204,6 +223,28 @@ func seedTar(ctx context.Context, src io.Reader, dir *os.Root, o seedOpts) (seed
 		return st, seedRefused("more than %d bytes after the end of the archive", seedMaxTrailer)
 	}
 	return st, nil
+}
+
+// seedReader bounds and cancels the decompressed stream.
+type seedReader struct {
+	ctx  context.Context
+	r    io.Reader
+	left int64
+}
+
+func (s *seedReader) Read(p []byte) (int, error) {
+	if err := s.ctx.Err(); err != nil {
+		return 0, err
+	}
+	if s.left <= 0 {
+		return 0, seedRefused("the archive decompresses to more than its limits allow")
+	}
+	if int64(len(p)) > s.left {
+		p = p[:s.left]
+	}
+	n, err := s.r.Read(p)
+	s.left -= int64(n)
+	return n, err
 }
 
 // seedFile writes one regular file, exclusively, with no link at its leaf.

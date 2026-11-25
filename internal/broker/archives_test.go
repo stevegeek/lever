@@ -458,7 +458,8 @@ func TestRestoreSkipsReservedAndForeignConfig(t *testing.T) {
 		skipped  []string
 	}{
 		{"session", []string{"CLAUDE.md", ".claude/settings.json", "src/a.go"}, []string{".lever/conversation"}},
-		{"gone", []string{"src/a.go", "README.md"}, []string{"CLAUDE.md", ".claude/settings.json", ".mcp.json", ".git/hooks/pre-commit", ".git/config", ".lever/notes"}},
+		{"gone", []string{"src/a.go", "README.md"}, []string{"CLAUDE.md", ".claude/settings.json", ".mcp.json", ".git/hooks/pre-commit", ".git/config", ".lever/notes",
+			".git/commondir", "sub/CLAUDE.md", "sub/.git", "sub/.Claude/settings.json"}},
 	} {
 		saved := AgentsState{Agents: []AgentRecord{{Name: "s-seedss", Template: tc.template, CreatedBy: "operator", State: AgentDestroyed, Dir: "sessions/s-seedss"}}}
 		e := newSpawnEnv(t, saved)
@@ -472,7 +473,14 @@ func TestRestoreSkipsReservedAndForeignConfig(t *testing.T) {
 			ents = append(ents, tarEnt{name: "CLAUDE.md", body: "c"}, tarEnt{name: ".claude/", typ: tar.TypeDir}, tarEnt{name: ".claude/settings.json", body: "{}"},
 				tarEnt{name: ".mcp.json", body: "{}"}, tarEnt{name: ".git/", typ: tar.TypeDir}, tarEnt{name: ".git/hooks/", typ: tar.TypeDir},
 				tarEnt{name: ".git/hooks/pre-commit", body: "#!/bin/sh", mode: 0o755}, tarEnt{name: ".git/config", body: "[core]"},
-				tarEnt{name: ".lever/", typ: tar.TypeDir}, tarEnt{name: ".lever/notes", body: "n"})
+				tarEnt{name: ".lever/", typ: tar.TypeDir}, tarEnt{name: ".lever/notes", body: "n"},
+				// The ways past a list of exact top-level paths: git
+				// indirection, nested files, case (a macOS host reads
+				// .Claude as .claude; a name twice in two cases refuses the
+				// archive, TestSeedTarCaseAndBudget).
+				tarEnt{name: ".git/commondir", body: "../x"}, tarEnt{name: "sub/", typ: tar.TypeDir}, tarEnt{name: "sub/CLAUDE.md", body: "c"},
+				tarEnt{name: "sub/.git", body: "gitdir: ../.git/modules/m"},
+				tarEnt{name: "sub/.Claude/", typ: tar.TypeDir}, tarEnt{name: "sub/.Claude/settings.json", body: "{}"})
 		}
 		if err := os.MkdirAll(filepath.Join(e.archives, "s-seedss"), 0o700); err != nil {
 			t.Fatal(err)
@@ -548,5 +556,55 @@ func TestRestoreIsAdmittedLikeASpawn(t *testing.T) {
 		if rec := callOperator(t, e.b, http.MethodPost, PathOperatorAgentRestore, body); rec.Code != code {
 			t.Errorf("%s: %d", body, rec.Code)
 		}
+	}
+}
+
+// Names that configure an agent are found at any depth and in any case;
+// the reserved paths are compared without case too.
+func TestConfigComponent(t *testing.T) {
+	for name, want := range map[string]bool{
+		"CLAUDE.md": true, "a/b/claude.MD": true, ".CLAUDE/settings.json": true, "x/.git/config": true, ".git": true,
+		"sub/.Mcp.Json": true, "projects/-workspace/CLAUDE.local.md": true, ".envrc": true, ".gitmodules": true,
+		"src/a.go": false, "claude.md.bak": false, "docs/git": false, "projects/-workspace/abc.jsonl": false,
+	} {
+		if got := configComponent(name); got != want {
+			t.Errorf("configComponent(%q) = %v", name, got)
+		}
+	}
+	if !reservedPath(".Claude/Skills/lever-agent/SKILL.md", []string{".claude/skills/lever-agent/SKILL.md"}) {
+		t.Error("reservedPath is case-sensitive")
+	}
+}
+
+// Names a case-insensitive host would merge, and invalid UTF-8, refuse the
+// archive before anything is written; a stream past its budget is refused
+// however it is made up; a cancelled context stops the read.
+func TestSeedTarCaseAndBudget(t *testing.T) {
+	check := func(lim seedLimits, ents ...tarEnt) error {
+		_, err := seedCheck(context.Background(), bytes.NewReader(makeTarGz(t, ents...)), seedOpts{Limits: lim})
+		return err
+	}
+	for name, ents := range map[string][]tarEnt{
+		"case twice":    {{name: "a", body: "1"}, {name: "A", body: "2"}},
+		"case dir":      {{name: "x/", typ: tar.TypeDir}, {name: "X/f", body: "1"}, {name: "x", body: "2"}},
+		"invalid utf-8": {{name: "a\xff", body: "1"}},
+	} {
+		if err := check(defaultSeedLimits, ents...); !errors.Is(err, errSeedRefused) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	// Implied folders count against the entry limit.
+	deep := seedLimits{MaxBytes: 1 << 20, MaxEntries: 3, MaxDepth: 64}
+	if err := check(deep, tarEnt{name: "a/b/c/d/e/f", body: "1"}); !errors.Is(err, errSeedRefused) {
+		t.Errorf("folders: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := seedCheck(ctx, bytes.NewReader(makeTarGz(t, tarEnt{name: "a", body: "1"})), seedOpts{}); err == nil {
+		t.Error("a cancelled check passed")
+	}
+	sr := &seedReader{ctx: context.Background(), r: strings.NewReader(strings.Repeat("x", 100)), left: 10}
+	if n, _ := io.Copy(io.Discard, sr); n != 10 {
+		t.Errorf("budget read %d", n)
 	}
 }

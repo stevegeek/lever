@@ -121,7 +121,7 @@ func newAgentSpawnCmd() *cobra.Command {
 			}
 			res.OK, res.Name, res.Phase = true, safeToken(resp.Name), safeToken(resp.Phase)
 			if resp.Memory != "" {
-				res.Memory = safeToken(resp.Memory)
+				res.Memory = memoryToken(resp.Memory)
 			}
 			if asJSON {
 				printJSONLine(cmd, res)
@@ -256,7 +256,7 @@ func printAgentList(cmd *cobra.Command, resp broker.AgentListResponse) {
 		}
 		var sizes []string
 		for _, sz := range t.MemorySizes {
-			n := safeToken(sz.Name)
+			n := memoryToken(sz.Name)
 			if sz.Name == t.MemoryDefault {
 				n += "*"
 			}
@@ -282,7 +282,7 @@ func printAgentList(cmd *cobra.Command, resp broker.AgentListResponse) {
 			state += " (template gone or moved)"
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", safeToken(a.Name), safeToken(a.Template), state, cmp.Or(safeToken(a.Phase), "-"),
-			cmp.Or(safeToken(a.Memory), "-"), creatorOf(a.CreatedBy), a.CreatedAt.Format("2006-01-02 15:04"), strings.ReplaceAll(termsafe.Sanitize(a.Label), "\t", " "))
+			cmp.Or(memoryToken(a.Memory), "-"), creatorOf(a.CreatedBy), a.CreatedAt.Format("2006-01-02 15:04"), strings.ReplaceAll(termsafe.Sanitize(a.Label), "\t", " "))
 	}
 	tw.Flush()
 }
@@ -372,4 +372,13 @@ func fmtBytes(n int64) string {
 		return fmt.Sprintf("%dGiB", n>>30)
 	}
 	return fmt.Sprintf("%dMiB", n>>20)
+}
+
+// memoryToken is s when it is a memory size in the fixed format ("8GiB"),
+// else "": safeToken would drop it for its capitals.
+func memoryToken(s string) string {
+	if _, ok := broker.ParseMemorySize(s); ok {
+		return s
+	}
+	return ""
 }

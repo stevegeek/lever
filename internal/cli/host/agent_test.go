@@ -98,13 +98,15 @@ func TestAgentDestroy(t *testing.T) {
 func TestAgentList(t *testing.T) {
 	dir := msgDir(t)
 	t.Chdir(dir)
-	startResumeUDS(t, dir, map[string]canned{broker.PathOperatorAgentList: {body: `{"templates":[{"name":"session","prefix":"s","max_instances":4,"max_running":2,"instances":1,"running":1,"manager_may":true}],` +
-		`"agents":[{"name":"s-abc234","template":"session","label":"PR \u001b42","created_by":"operator","created_at":"2026-11-22T12:00:00Z","state":"active","dir":"sessions/s-abc234","phase":"running"}]}`}})
+	startResumeUDS(t, dir, map[string]canned{broker.PathOperatorAgentList: {body: `{"templates":[{"name":"session","prefix":"s","max_instances":4,"max_running":2,"instances":1,"running":1,"manager_may":true,` +
+		`"memory_sizes":[{"name":"4GiB","bytes":4294967296},{"name":"8GiB","bytes":8589934592}],"memory_default":"4GiB"}],"memory":{"budget_bytes":32212254720,"used_bytes":8589934592,"free_bytes":23622320128},` +
+		`"agents":[{"name":"s-abc234","template":"session","label":"PR \u001b42","created_by":"operator","created_at":"2026-11-22T12:00:00Z","state":"active","dir":"sessions/s-abc234","phase":"running","memory":"8GiB"}]}`}})
 	out, err := clitest.Exec(t, stubRoot(&stubBackend{runner: proc.NewFakeRunner()}), "agent", "list")
 	if err != nil {
 		t.Fatalf("%v (%s)", err, out)
 	}
-	for _, want := range []string{"session", "1/4", "1/2", "operator, manager", "s-abc234", "active", "running", "2026-11-22 12:00"} {
+	for _, want := range []string{"session", "1/4", "1/2", "operator, manager", "s-abc234", "active", "running", "2026-11-22 12:00",
+		"4GiB* 8GiB", "memory budget: 8GiB used of 30GiB, 22GiB free", "running  8GiB"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in\n%s", want, out)
 		}

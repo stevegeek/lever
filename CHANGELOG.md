@@ -25,7 +25,8 @@ version bump moves the block under the new version heading.
     `--force` recovers only an error one. So an OOM-killed manager no longer comes back with its
     conversation, as it did through `resume --force`; the transcript stays in the agent home
     (`lever attach`, then `/resume`). lever and doctor say so. `lever up` resumes a halted
-    manager and `lever-manager agent resume` a halted worker. The chat page shows a halted worker
+    manager, `lever-manager agent resume` a halted worker, and the ssh `resume` verb a
+    halted spawned agent, each in a new session. The chat page shows a halted worker
     as `error` and wakes it for no login; the broker's wake refuses a contact.
   - **The controller PAT, and the remote proxy's read PAT, ask for `project:list`** when the
     jail's scion knows the scope. scion now

@@ -139,6 +139,7 @@ func TestOperatorResumeForReasons(t *testing.T) {
 		reason, phse string
 	}{
 		{[]scion.Agent{{Slug: "worker", Phase: "stopped"}}, `{"worker":"worker","login":"c@x","tier":"contact"}`, ReasonStoppedByOperator, "stopped"},
+		{[]scion.Agent{{Slug: "worker", Phase: "halted"}}, `{"worker":"worker","login":"c@x","tier":"contact"}`, ReasonStoppedByOperator, "halted"},
 		{[]scion.Agent{{Slug: "worker", Phase: "error"}}, `{"worker":"worker","login":"c@x"}`, ReasonNotAsleep, "error"},
 		{nil, `{"worker":"worker","login":"c@x"}`, ReasonNoRecord, ""},
 		{nil, `{"worker":"zz","login":"c@x"}`, ReasonNotAWorker, ""},

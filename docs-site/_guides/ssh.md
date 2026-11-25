@@ -43,8 +43,9 @@ Then `lever apply`. On a scion with the controls, apply:
    on a `server` or `hub` key on that path spelled in another case or repeated, or a key there
    that is an alias, a complex key, `!!binary` or a merge key;
 2. reads the running hub's environment back and turns `hub.conduit` on as `lever-admin` only if
-   the policy is there, keeping `hub.artifacts`, `hub.chat_thread_groups` and
-   `federation.project_visitors` off;
+   the policy is there, keeping `hub.artifacts` and `federation.project_visitors` off (and
+   `hub.chat_thread_groups` on an older scion that still registers it; from `e8160a10` it is
+   always on);
 3. restarts the hub so the relay starts, reads the policy back again, and checks that the hub
    serves conduit. If any of that fails, it turns conduit off again, restarts the hub, and the
    apply fails;

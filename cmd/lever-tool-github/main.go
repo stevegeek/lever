@@ -5,9 +5,10 @@
 // branch with a short-lived GitHub App token. The jail never holds a GitHub
 // credential.
 //
-// With -ops it also offers pr_open, pr_status, pr_merge and release, each its
-// own capability and each call with a token narrowed to the repository and
-// the permissions that operation needs.
+// With -ops it also offers pr_open, pr_status, pr_merge, release, the CI and
+// issue operations and branch_delete, each its own capability and each call
+// with a token narrowed to the repository and the permissions that operation
+// needs.
 package main
 
 import (
@@ -326,6 +327,12 @@ func issueCloseBackstop(o opts) func(captool.ValidatedContext, map[string]string
 	})
 }
 
+func branchDeleteBackstop(o opts) func(captool.ValidatedContext, map[string]string) error {
+	return opBackstop(ghpush.OpBranchDelete, o.repos, func(a map[string]string) error {
+		return ghpush.ValidateBranch(a["branch"], o.prefix)
+	})
+}
+
 func prMergeBackstop(o opts) func(captool.ValidatedContext, map[string]string) error {
 	return opBackstop(ghpush.OpPRMerge, o.repos, func(a map[string]string) error {
 		if err := ghpush.ValidateNumber(a["number"]); err != nil {
@@ -545,6 +552,18 @@ func operations(o opts, p *ghpush.Pusher, g *ghpush.Ops) []captool.Operation {
 				return asResult(g.IssueClose(context.Background(), c.Caller, a["repo"], a["number"], a["reason"], a["body"]))
 			},
 		},
+		ghpush.OpBranchDelete: {
+			Name: ghpush.OpBranchDelete,
+			Description: "delete a " + o.prefix + "* branch on GitHub, only when everything on it is in the default branch: " +
+				"its head is in the default branch, or a PR into the default branch was merged at exactly that head (a squash merge). " +
+				"Refused when the branch has an open PR, is the base of one, or has unmerged commits",
+			Params:      []captool.ParamSpec{repoParam, {Name: "branch", Type: "string", Description: "branch to delete, must start with " + o.prefix}},
+			CaveatParam: caveat,
+			Backstop:    branchDeleteBackstop(o),
+			Handler: func(c captool.ValidatedContext, a map[string]string) (any, error) {
+				return asResult(g.BranchDelete(context.Background(), c.Caller, a["repo"], a["branch"]))
+			},
+		},
 	}
 	var out []captool.Operation
 	for _, op := range o.ops {
@@ -603,6 +622,7 @@ func main() {
 		TextMax: o.textMax, MergeMethods: o.mergeMethods, MergeChecks: o.mergeChecks, ReleaseTag: o.releaseTag,
 		AllowUnreviewed: !o.mergeRequireReview, AppSlug: o.appSlug, WebBase: "https://github.com",
 		Deadline: 2 * time.Minute,
+		Refs:     p,
 	}
 	srv, err := captool.New(captool.Config{
 		Name: o.name, Version: Version, Backend: o.backend, AdminURL: o.admin, Log: logger,

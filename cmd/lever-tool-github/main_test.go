@@ -439,3 +439,40 @@ func TestFetchBackstop(t *testing.T) {
 		t.Error("the fetch backstop must refuse another operation")
 	}
 }
+
+// branch_delete is opt-in, and its backstop holds the repo and the prefix.
+func TestBranchDeleteBackstop(t *testing.T) {
+	for _, op := range operations(mustParse(t), nil, nil) {
+		if op.Name == ghpush.OpBranchDelete {
+			t.Fatal("branch_delete offered by default")
+		}
+	}
+	o := mustParse(t, "-ops", "push,branch_delete")
+	var del captool.Operation
+	for _, op := range operations(o, nil, nil) {
+		if op.Name == ghpush.OpBranchDelete {
+			del = op
+		}
+	}
+	if del.Backstop == nil {
+		t.Fatal("branch_delete not offered with -ops")
+	}
+	r := "stevegeek/lever"
+	for _, c := range []struct {
+		op   string
+		args map[string]string
+		ok   bool
+	}{
+		{"branch_delete", map[string]string{"repo": r, "branch": "agent/x"}, true},
+		{"branch_delete", map[string]string{"repo": "x/y", "branch": "agent/x"}, false},
+		{"branch_delete", map[string]string{"repo": r, "branch": "main"}, false},
+		{"branch_delete", map[string]string{"repo": r, "branch": "agent/main"}, false},
+		{"branch_delete", map[string]string{"repo": r, "branch": "agent/../main"}, false},
+		{"push", map[string]string{"repo": r, "branch": "agent/x"}, false},
+	} {
+		err := del.Backstop(captool.ValidatedContext{Operation: c.op}, c.args)
+		if (err == nil) != c.ok {
+			t.Errorf("%s %v: err=%v, want ok=%v", c.op, c.args, err, c.ok)
+		}
+	}
+}

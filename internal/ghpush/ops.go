@@ -28,7 +28,7 @@ const (
 )
 
 var AllOps = []string{OpPush, OpFetch, OpPROpen, OpPRStatus, OpPRMerge, OpRelease, OpCIRuns, OpCILog,
-	OpIssueList, OpIssueRead, OpIssueComment, OpIssueClose}
+	OpIssueList, OpIssueRead, OpIssueComment, OpIssueClose, OpBranchDelete}
 
 // OpPermissions is the App permission set each operation's token is
 // narrowed to. GitHub adds metadata: read to every token. Push mints its
@@ -48,6 +48,8 @@ var OpPermissions = map[string]Permissions{
 	OpIssueRead:    {"issues": "read"},
 	OpIssueComment: {"issues": "write"},
 	OpIssueClose:   {"issues": "write"},
+
+	OpBranchDelete: {"contents": "write", "pull_requests": "read"},
 }
 
 var MergeMethods = []string{"squash", "merge", "rebase"}
@@ -127,6 +129,8 @@ type Ops struct {
 	// DefaultLogHosts); LogHTTP is a test client for that download.
 	LogHosts []string
 	LogHTTP  *http.Client
+	// Refs makes branch_delete's conditional delete.
+	Refs RefDeleter
 
 	relOnce sync.Once
 	relLock chan struct{}

@@ -9,6 +9,13 @@ version bump moves the block under the new version heading.
 
 ### Added
 
+- **github tool: `branch_delete` deletes a merged branch** (opt-in, its own capability). It deletes
+  one `-branch-prefix` branch only when its head is in the default branch, or a PR into the default
+  branch was merged at exactly that head (a squash merge). It refuses the default branch, a branch
+  with an open PR or that is the base of one, and unmerged commits. The delete is a git push with a
+  lease on the checked head, so a push that lands meanwhile is never lost. The App needs
+  **Pull requests: read** for it. Enable it with `-ops ...,branch_delete`, an `operations` entry
+  `{name: branch_delete, params: [repo, branch]}` and a grant.
 - **`resources.cpu: none` runs an agent with no CPU limit**, for the manager, a worker or a
   template. The container then shares all of the VM's vCPUs; memory stays capped by
   `resources.memory`. lever sends scion `limits.cpu: "0"`, which scion keeps instead of filling in

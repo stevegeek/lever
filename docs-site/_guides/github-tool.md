@@ -26,7 +26,8 @@ and `release` (see [6. PRs, merges and releases](#6-prs-merges-and-releases-opt-
 read-only `ci_runs` and `ci_log`, which let an agent see why CI failed (see
 [7. CI runs and logs](#7-ci-runs-and-logs-opt-in)), and `issue_list`, `issue_read`,
 `issue_comment` and `issue_close` for triaging the repository's issues (see
-[8. Issues](#8-issues-opt-in)). They are off
+[8. Issues](#8-issues-opt-in)), and `branch_delete`, which deletes a merged branch (see
+[8a. Deleting merged branches](#8a-deleting-merged-branches-branch_delete-opt-in)). They are off
 by default. `pr_open` publishes text under the App's name, `pr_merge` changes the default branch,
 and `release` creates a tag that starts your release workflow. Offer them only on repositories
 where you want this, and grant each one only to the agents that need it. The riskier settings are
@@ -51,8 +52,10 @@ tag and trigger the release workflow on unreviewed code, and an admin bypass def
    those for the operations you offer. `pr_status` and `pr_merge` need **Checks: read** and
    **Commit statuses: read** as well as Pull requests: without them every call to those operations
    fails, because GitHub refuses to mint the token (HTTP 422 "permissions requested are not
-   granted"). Never add Administration. Add Workflows only together with
-   `-push-workflows`, after reading [section 9](#9-workflow-pushes-opt-in).
+   granted"). `branch_delete` needs **Pull requests: read** (see
+   [section 8a](#8a-deleting-merged-branches-branch_delete-opt-in)). Never add Administration. Add
+   Workflows only together with `-push-workflows`, after reading
+   [section 9](#9-workflow-pushes-opt-in).
 3. Install it on one repository only.
 4. Generate a private key. Save it as a regular file with mode `0600`, owned by the user that runs
    the broker, outside the instance tree (the agent can read the tree). The tool refuses to start
@@ -131,7 +134,7 @@ broker:
       command: [/home/you/.local/bin/lever-tool-github,
                 # -tree, -state, -app-id, -installation-id, -app-key as above
                 -repos, owner/name,
-                -ops, "push,fetch,pr_open,pr_status,pr_merge,release,ci_runs,ci_log,issue_list,issue_read,issue_comment,issue_close",
+                -ops, "push,fetch,pr_open,pr_status,pr_merge,release,ci_runs,ci_log,issue_list,issue_read,issue_comment,issue_close,branch_delete",
                 -merge-methods, squash,
                 -merge-checks, "test,lint"]  # required with pr_merge: names, any or none
                 # pr_merge requires a person's approval by default
@@ -151,6 +154,7 @@ broker:
         - {name: issue_read, params: [repo, number]}
         - {name: issue_comment, params: [repo, number, body]}
         - {name: issue_close, params: [repo, number, reason, body]}
+        - {name: branch_delete, params: [repo, branch]}
       allowed_values:
         repo: [owner/name]
 manager:
@@ -166,6 +170,7 @@ manager:
     - {tool: github, op: issue_read}
     - {tool: github, op: issue_comment}
     - {tool: github, op: issue_close}
+    - {tool: github, op: branch_delete}
 ```
 
 Each operation is its own capability. An agent with only `push` and `pr_open` can open PRs but not
@@ -185,7 +190,7 @@ The broker adds `-backend` and `-admin` itself. Every other setting is a flag in
 | `-max-bundle` | no | Bundle size cap. Default 256 MiB. |
 | `-import-budget` | no | Bundle bytes that one caller can import (`push`) or receive (`fetch`) in one hour. Refused pushes and fetches count. The count is in memory and starts again when the tool restarts. Default 1 GiB. `0` turns the cap off. |
 | `-name` | no | Tool name. Default `github`. It must equal the `name` in the config. |
-| `-ops` | no | Comma list of the operations to offer: `push`, `fetch`, `pr_open`, `pr_status`, `pr_merge`, `release`, `ci_runs`, `ci_log`, `issue_list`, `issue_read`, `issue_comment`, `issue_close`. Default `push`. An operation not listed does not exist. |
+| `-ops` | no | Comma list of the operations to offer: `push`, `fetch`, `pr_open`, `pr_status`, `pr_merge`, `release`, `ci_runs`, `ci_log`, `issue_list`, `issue_read`, `issue_comment`, `issue_close`, `branch_delete`. Default `push`. An operation not listed does not exist. |
 | `-merge-methods` | no | Comma list of the merge methods `pr_merge` may use: `squash`, `merge`, `rebase`. The first is the default. Default `squash`. |
 | `-merge-checks` | with `pr_merge` | What `pr_merge` requires of the checks on the PR head. A comma list of check names: these checks must be present and successful, and all others green. `any`: at least one successful check, and all green. `none`: no check is needed, but any that exist must be green. No default: when `-ops` offers `pr_merge`, the tool refuses to start without it. |
 | `-merge-require-review` | no | `pr_merge` requires an approving review by a person on the PR's head SHA, and no outstanding request for changes. Default `true`. Turn it off only with `-merge-require-review=false`; the tool then logs a warning when it starts. |
@@ -515,6 +520,38 @@ never the text.
 
 **Risk:** comments appear on GitHub under the App's name, and closing an issue is visible to its
 author. Grant `issue_comment` and `issue_close` only to agents whose triage you accept in public.
+
+## 8a. Deleting merged branches: `branch_delete` (opt-in)
+
+`branch_delete` deletes one branch on GitHub that starts with `-branch-prefix`, but only when
+nothing on it would be lost. It exists only when `-ops` lists it and acts only on a repository in
+`-repos`. Each call gets a token narrowed to that repository and **Contents: read and write** with
+**Pull requests: read**: the App needs Pull requests: read for this operation even if you offer no
+PR operation.
+
+| Operation | Arguments | App permissions it needs |
+|---|---|---|
+| `branch_delete` | `repo`, `branch` | Contents: read and write, Pull requests: read |
+
+The branch is deleted only when one of these holds for its current head:
+
+- the default branch contains the head (GitHub's compare says `identical` or `behind`): a merge
+  commit or fast-forward merge;
+- a PR from this repository into the default branch was merged with exactly that head commit: a
+  squash or rebase merge, where the branch's own commits never reach the default branch.
+
+It is refused for the default branch, for a branch that has an open PR, for a branch that is the
+base of an open PR (GitHub would close that PR), and for a branch with any commit that is in
+neither. A branch pushed to after its PR was merged has a new head, so it is refused too. The
+delete itself is a `git push --force-with-lease` of an empty ref, conditional on the head that was
+checked: if anyone pushed to the branch in the meantime, GitHub refuses it and nothing is deleted.
+It also waits for any push of this tool to the same repository. The result names the deleted head
+SHA, so the branch can be pushed back from any clone that has the commit. Each call writes an
+audit line (`github.branch_delete`) with the caller, the repository, the branch, the checked SHA
+and how it was found merged.
+
+A ruleset that restricts deletions on `refs/heads/agent/**` still applies: GitHub refuses the
+delete for the App.
 
 ## 9. Workflow pushes (opt-in)
 

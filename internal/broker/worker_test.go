@@ -333,6 +333,10 @@ func TestWorkerStart_absent_provisionsStagesStarts(t *testing.T) {
 	if got.Env["LEVER_BOOTSTRAP"] != "/run/lever/bootstrap.json" {
 		t.Fatalf("StartOpts.Env = %v, want LEVER_BOOTSTRAP at the mounted file", got.Env)
 	}
+	// Unset, the rm confirmation stays on: "0" is sent, never left to scion.
+	if got.Env[scion.SkipPermissionsEnv] != "0" || len(got.Env) != 2 {
+		t.Fatalf("StartOpts.Env = %v, want %s=0", got.Env, scion.SkipPermissionsEnv)
+	}
 	if len(rt.envSets) != 1 || rt.envSetProj[0] != testInstanceProject {
 		t.Fatalf("EnvSet calls = %d (proj %v), want 1 at the instance project", len(rt.envSets), rt.envSetProj)
 	}

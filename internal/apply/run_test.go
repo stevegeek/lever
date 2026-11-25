@@ -212,6 +212,11 @@ func (r *flakyStartRunner) Run(ctx context.Context, env map[string]string, name 
 	return r.RunIn(ctx, "", env, name, args...)
 }
 
+// RunStdin is the manager start's path: it always carries inline config.
+func (r *flakyStartRunner) RunStdin(ctx context.Context, _ io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
 // alreadyUpRunner simulates a fully-up instance on re-apply: `scion server
 // start` and agent `start` return "already running". Its first observe List
 // reports the slug absent so Start is still called and its AlreadyRunning
@@ -244,6 +249,11 @@ func (r *alreadyUpRunner) RunIn(ctx context.Context, dir string, env map[string]
 		}
 	}
 	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
+}
+
+// RunStdin is the manager start's path: it always carries inline config.
+func (r *alreadyUpRunner) RunStdin(ctx context.Context, _ io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
 }
 
 func (r *alreadyUpRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
@@ -4391,6 +4401,16 @@ func TestManagerStartOptsResources(t *testing.T) {
 	}
 	if opts.Resources != (scion.Resources{}) {
 		t.Fatalf("unset: resources = %+v, want none", opts.Resources)
+	}
+	if opts.Env[scion.SkipPermissionsEnv] != "0" {
+		t.Fatalf("unset: env = %v, want %s=0", opts.Env, scion.SkipPermissionsEnv)
+	}
+	app.Manager.SkipRmConfirm = true
+	if opts, err = r.managerStartOpts(context.Background(), "/lever/proj", "task", ""); err != nil {
+		t.Fatal(err)
+	}
+	if opts.Env[scion.SkipPermissionsEnv] != "1" {
+		t.Fatalf("on: env = %v, want %s=1", opts.Env, scion.SkipPermissionsEnv)
 	}
 	app.Manager.Resources = config.Resources{Memory: "3GiB", CPU: "1.5"}
 	if opts, err = r.managerStartOpts(context.Background(), "/lever/proj", "task", ""); err != nil {

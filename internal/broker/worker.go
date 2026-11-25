@@ -88,6 +88,9 @@ type WorkerSpec struct {
 	// Resources is sent at a fresh start only; scion keeps it in the record
 	// for resumes. Zero = scion's defaults.
 	Resources scion.Resources
+	// SkipRmConfirm sets scion.SkipPermissionsEnv at a fresh start; false
+	// sends "0".
+	SkipRmConfirm bool
 	// spawned is set by the registry for an agent spawned from a template.
 	spawned bool
 }
@@ -370,7 +373,9 @@ func workerTicketVolumes(spec WorkerSpec) ([]scion.VolumeMount, map[string]strin
 	for _, m := range spec.Shared {
 		vols = append(vols, m.Volume)
 	}
-	return vols, map[string]string{workerTicketEnv: workerTicketPath}
+	env := scion.SkipPermissions(spec.SkipRmConfirm)
+	env[workerTicketEnv] = workerTicketPath
+	return vols, env
 }
 
 // treePath splits dir into the confinement anchor for host-side writes and

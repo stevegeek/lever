@@ -20,7 +20,7 @@ func TestWorkerSpecs(t *testing.T) {
 		Broker: config.Broker{LLMAuth: config.LLMAuthSubscription},
 		Workers: []config.Worker{
 			{Name: "worker", Dir: "workers/worker", LLMAuth: config.LLMAuthAPIKey},
-			{Name: "helper", Dir: "workers/helper", Image: "helper:img", Model: "helper-model", InstructionsFile: "helper-manual.md", Recyclable: true,
+			{Name: "helper", Dir: "workers/helper", Image: "helper:img", Model: "helper-model", InstructionsFile: "helper-manual.md", Recyclable: true, SkipRmConfirm: true,
 				ClaudeSettings: config.ClaudeSettings{AutoCompactWindow: 300000}, AfterCompactNote: "Re-read TASK.md",
 				Resources: config.Resources{Memory: "1536MiB", CPU: "500m"}},
 		},
@@ -35,6 +35,9 @@ func TestWorkerSpecs(t *testing.T) {
 		w.TicketDir != "/run/user/501/lever/tickets/worker" ||
 		w.Image != "lever.local/mgr:img" /* inherits manager, under the name scion never rewrites */ || w.Model != "mgr-model" /* ditto */ || !w.APIKey {
 		t.Fatalf("bad worker spec: %+v", w)
+	}
+	if w.SkipRmConfirm || !specs[1].SkipRmConfirm {
+		t.Fatalf("SkipRmConfirm = %v/%v, want the worker's own (false/true)", w.SkipRmConfirm, specs[1].SkipRmConfirm)
 	}
 	if w.Recyclable || !specs[1].Recyclable {
 		t.Fatalf("Recyclable = %v/%v, want workers[].recyclable (false/true)", w.Recyclable, specs[1].Recyclable)

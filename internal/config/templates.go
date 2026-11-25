@@ -36,7 +36,8 @@ type Template struct {
 	Obtain           []Grant         `yaml:"obtain" json:",omitempty"`
 	Delegate         []DelegateGrant `yaml:"delegate" json:",omitempty"`
 	// Resources must name a memory limit: the fit check below needs it.
-	Resources Resources `yaml:"resources"`
+	Resources     Resources `yaml:"resources"`
+	SkipRmConfirm bool      `yaml:"even_more_dangerously_skip_permissions" json:",omitempty"`
 	// MaxInstances bounds the instances that exist (any phase), so disk and
 	// hub records stay bounded.
 	MaxInstances int `yaml:"max_instances"`
@@ -138,10 +139,11 @@ func (t Template) Worker(name string) Worker {
 		Image: t.Image, ImageTar: t.ImageTar, Model: t.Model,
 		InstructionsFile: t.InstructionsFile,
 		ClaudeSettings:   t.ClaudeSettings, AfterCompactNote: t.AfterCompactNote,
-		LLMAuth:   t.LLMAuth,
-		Obtain:    slices.Clone(t.Obtain),
-		Delegate:  cloneDelegates(t.Delegate),
-		Resources: t.Resources,
+		LLMAuth:       t.LLMAuth,
+		Obtain:        slices.Clone(t.Obtain),
+		Delegate:      cloneDelegates(t.Delegate),
+		Resources:     t.Resources,
+		SkipRmConfirm: t.SkipRmConfirm,
 	}
 }
 

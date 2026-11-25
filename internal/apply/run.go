@@ -1271,6 +1271,14 @@ func (r *run) mintManagerBootstrap(ctx context.Context, s Step) error {
 // (EnsureManager) with what this run knows: the ticket the mint step staged
 // and whether the scion-server step saw the runtime broker online.
 func (r *run) startManager(ctx context.Context, _ Step) error {
+	// The project's hub env fills a key only where an agent's own env lacks
+	// it, so this reaches records created before lever set the key at create
+	// (scion's harness default would apply to them at every start) and never
+	// overrides an agent whose config turns it on.
+	jp := JailPath(r.app.Tree, r.app.Tree, r.d.JailMount)
+	if err := r.d.Scion.EnvSet(ctx, jp, scion.SkipPermissionsEnv, "0"); err != nil {
+		return fmt.Errorf("set %s for the project: %w", scion.SkipPermissionsEnv, err)
+	}
 	intent := ManagerKeep
 	if r.fresh {
 		intent = ManagerFresh
@@ -1442,6 +1450,9 @@ func (r *run) managerStartOpts(ctx context.Context, jp, task, instructions strin
 		APIKey: apiKey,
 		// manager.resources, as inline config. Create-time only.
 		Resources: ScionResources(r.app.Manager.Resources),
+		// Always set, so scion's harness default of 1 never applies.
+		// Create-time only.
+		Env: scion.SkipPermissions(r.app.Manager.SkipRmConfirm),
 	}, nil
 }
 

@@ -316,7 +316,7 @@ PROJ=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["project_
 checkx "the project lists the broker" 'hubbody "/api/v1/projects/$PROJ/providers" | grep -q brokerId'
 check "lever-admin pinned the experiments off" grep -q '"off": *\[' "$INST/.lever-state/hub-experiments.json"
 for x in hub.conduit hub.artifacts federation.project_visitors hub.attachment_artifacts hub.port_view hub.conduit_deliver hub.agent_plugins hub.agent_delegation hub.async_agent_start \
-	hub.triggers hub.github_triggers hub.exec_schedules hub.exec_containers hub.system_one hub.code_span_mentions hub.agent_secrets lifecycle.idle_suspend hub.suspend_screen; do
+	hub.triggers hub.github_triggers hub.exec_schedules hub.exec_containers hub.system_one hub.code_span_mentions hub.agent_secrets lifecycle.idle_suspend hub.suspend_screen hub.message_policies web.decisions hub.runtime_orphan_reconcile hub.reincarnate_harness_switch hub.custom_default_user_role; do
 	check "lever-admin pinned $x off" python3 -c 'import json,sys; sys.exit(sys.argv[2] not in json.load(open(sys.argv[1])).get("off", []))' "$INST/.lever-state/hub-experiments.json" "$x"
 done
 check "no dev token in the jail" G sh -c '! test -e ~/.scion/dev-token'

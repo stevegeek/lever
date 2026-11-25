@@ -286,7 +286,10 @@ Two things need more than the controller's authority, and `lever-admin` does the
   hub suspends idle agents on its own schedule and wakes a hub-suspended one for any sender, past
   the broker's wake checks) and `hub.suspend_screen` (the agent's last terminal screen stored in the
   hub database at every hub-run suspend; this one is on by scion's default, so lever's pin turns it
-  off). The remote proxy also refuses the trigger and secret-request routes.
+  off). It also pins off `hub.message_policies`, `web.decisions`, `hub.runtime_orphan_reconcile`
+  (the hub removing containers it takes for orphans), `hub.reincarnate_harness_switch` and
+  `hub.custom_default_user_role`. The remote proxy also refuses the trigger and secret-request routes
+  and the other new routes behind these experiments.
 
 `lever doctor`'s `hub authentication` row tests the effective configuration by behaviour, since
 file contents cannot prove it: an assertion signed by another key and one for another instance get

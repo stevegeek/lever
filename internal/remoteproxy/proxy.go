@@ -308,7 +308,8 @@ func refusedRoute(method, p string) bool {
 		if sub == "clone" || strings.HasPrefix(sub, "clone/") {
 			return true
 		}
-		if strings.HasPrefix(sub, "visitor") || strings.HasPrefix(sub, "trigger") || strings.HasPrefix(sub, "webhook-endpoint") {
+		if strings.HasPrefix(sub, "visitor") || strings.HasPrefix(sub, "trigger") || strings.HasPrefix(sub, "webhook-endpoint") ||
+			strings.HasPrefix(sub, "message-polic") || strings.HasPrefix(sub, "decision") {
 			return true
 		}
 	}
@@ -335,6 +336,10 @@ var refusedPrefixes = []string{
 	"/api/v1/hooks",
 	"/api/v1/trigger-preset",
 	"/api/v1/secret-request",
+	"/api/v1/users/me/exec-container",
+	"/api/v1/github-app/repo-routing",
+	"/api/v1/webhooks/github",
+	"/api/v1/decision-prompt",
 }
 
 // brokerWritePrefixes are lower case, with no trailing slash on purpose: the

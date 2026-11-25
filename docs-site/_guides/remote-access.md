@@ -340,6 +340,9 @@ decide:
   `trigger-sources` and `webhook-endpoints` under `/api/v1/projects/<id>/` (and `/api/v1/groves/`),
   and `/api/v1/trigger-presets*`. Also `/api/v1/secret-requests/*`, where a user would type a
   secret into a form an agent posted. lever pins the experiments behind both off.
+- Other routes behind experiments lever pins off: `/api/v1/users/me/exec-container` (a shell
+  container in the jail), `/api/v1/github-app/repo-routing*`, `/api/v1/webhooks/github`,
+  `/api/v1/decision-prompts*`, and a project's `message-policies` and `decisions`.
 
 These routes are matched in lower case and by prefix, so another spelling of the same route is
 refused too.

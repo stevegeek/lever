@@ -586,7 +586,8 @@ func TestEnsureHubExperimentsOnGraduatedThreadGroups(t *testing.T) {
 
 // d34ffbcPinned are the pinned experiments scion d34ffbc1 registers.
 var d34ffbcPinned = append(slices.Clone(newScionPinned), "hub.triggers", "hub.github_triggers", "hub.exec_schedules",
-	"hub.exec_containers", "hub.system_one", "hub.code_span_mentions", "hub.agent_secrets", "lifecycle.idle_suspend", "hub.suspend_screen")
+	"hub.exec_containers", "hub.system_one", "hub.code_span_mentions", "hub.agent_secrets", "lifecycle.idle_suspend", "hub.suspend_screen",
+	"hub.message_policies", "web.decisions", "hub.runtime_orphan_reconcile", "hub.reincarnate_harness_switch", "hub.custom_default_user_role")
 
 // On scion d34ffbc1 every new experiment is pinned off, hub.suspend_screen
 // against its default on; only a probed one that was on restarts the hub.
@@ -603,7 +604,7 @@ func TestEnsureHubExperimentsOnD34ffbc1(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newFakeExperimentsHub()
 			newScionExperiments(h)
-			h.registered = append(slices.Clone(d34ffbcPinned), "web.agent_edit", "web.decisions")
+			h.registered = append(slices.Clone(d34ffbcPinned), "web.agent_edit")
 			h.defaultOn["hub.suspend_screen"] = true
 			maps.Copy(h.overrides, tc.on)
 			st := state.ForConfig(t.TempDir())
@@ -622,7 +623,7 @@ func TestEnsureHubExperimentsOnD34ffbc1(t *testing.T) {
 					t.Fatalf("%s override = %v, %v; want pinned off", n, v, ok)
 				}
 			}
-			if _, ok := h.overrides["web.decisions"]; ok {
+			if _, ok := h.overrides["web.agent_edit"]; ok {
 				t.Fatal("lever pinned an experiment it does not list")
 			}
 			if !slices.Contains(h.calls, "GET /api/v1/hooks/00000000-0000-0000-0000-000000000000") {

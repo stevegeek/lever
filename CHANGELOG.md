@@ -119,12 +119,17 @@ version bump moves the block under the new version heading.
   above lever's, and forms asking a user to type a secret in), `lifecycle.idle_suspend` (the hub
   suspends idle agents itself and wakes a hub-suspended one for any sender, past the broker's wake
   checks) and `hub.suspend_screen` (the last terminal screen of each hub-run suspend stored in the
-  hub database; on by scion's default, so the pin turns it off). `hub.triggers` is probed: doctor
+  hub database; on by scion's default, so the pin turns it off), plus `hub.message_policies`,
+  `web.decisions`, `hub.runtime_orphan_reconcile` (the hub removes containers it takes for orphans in
+  the jail's podman), `hub.reincarnate_harness_switch` and `hub.custom_default_user_role`. `hub.triggers` is probed: doctor
   fails while `GET /api/v1/hooks/<zero id>` is served. A `hub-experiments.json` written before this
   makes doctor warn until the next apply.
 - **The remote proxy refuses scion `d34ffbc1`'s trigger and secret-request routes for every
   login:** `/api/v1/hooks/*`, a project's `triggers`, `trigger-events`, `trigger-sources` and
-  `webhook-endpoints`, `/api/v1/trigger-presets*`, and `/api/v1/secret-requests/*`.
+  `webhook-endpoints`, `/api/v1/trigger-presets*`, and `/api/v1/secret-requests/*`. It also refuses
+  the other new routes behind experiments lever pins off: `/api/v1/users/me/exec-container`,
+  `/api/v1/github-app/repo-routing*`, `/api/v1/webhooks/github`, `/api/v1/decision-prompts*`, and a
+  project's `message-policies` and `decisions`.
 - **A contact's message may carry no `@` outside a word.** The fence refused only words that start
   with `@`, so `` `@other-agent` `` passed, which scion routes as a mention with
   `hub.code_span_mentions` on, as it does an `@` after markdown wrapping. Every `@` (or `＠`) that

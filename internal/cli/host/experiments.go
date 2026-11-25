@@ -91,6 +91,11 @@ var pinnedOffExperiments = []pinnedExperiment{
 	{name: "hub.agent_secrets"},
 	{name: "lifecycle.idle_suspend"},
 	{name: "hub.suspend_screen"},
+	{name: "hub.message_policies"},
+	{name: "web.decisions"},
+	{name: "hub.runtime_orphan_reconcile"},
+	{name: "hub.reincarnate_harness_switch"},
+	{name: "hub.custom_default_user_role"},
 }
 
 // asyncAgentStartExperiment (scion e8160a10 on, default on) starts, resumes

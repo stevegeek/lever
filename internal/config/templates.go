@@ -372,8 +372,8 @@ func (a *App) checkDelegationsToManagerTemplates() error {
 	return nil
 }
 
-// validateTemplateFit refuses templates whose running instances could not
-// all run at once past scion's running cap.
+// validateTemplateFit refuses templates whose running instances, with the
+// manager and the workers, would exceed scion's running cap.
 func (a *App) validateTemplateFit() error {
 	if len(a.Templates) == 0 {
 		return nil
@@ -427,8 +427,12 @@ func (a *App) validateMemoryFit() error {
 		total += n
 	}
 	if total > vm {
-		return fmt.Errorf("config: the resources.memory of the manager and of the workers and template instances that can run at once%s, plus 1GiB for the guest, come to %dMiB, more than the VM's memory %q; lower max_running, broker.max_running_workers or the memory limits, or raise memory",
-			capped, total>>20, a.Memory)
+		fix := "lower broker.max_running_workers or the memory limits, or raise memory"
+		if len(a.Templates) > 0 {
+			fix = "lower max_running, " + fix
+		}
+		return fmt.Errorf("config: the resources.memory of the manager and of the workers and template instances that can run at once%s, plus 1GiB for the guest, come to %dMiB, more than the VM's memory %q; %s",
+			capped, total>>20, a.Memory, fix)
 	}
 	return nil
 }

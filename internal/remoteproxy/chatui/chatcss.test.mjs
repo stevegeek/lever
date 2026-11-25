@@ -111,10 +111,15 @@ function layout(width, chatting) {
   const chat = { tag: 'section', id: 'pane-chat', classes: ['pane'] };
   const header = { tag: 'header', id: '', classes: [] };
   const back = { tag: 'button', id: 'back', classes: [] };
+  const more = { tag: 'button', id: 'more', classes: ['iconbtn'] };
+  const tools = (open) => ({ tag: 'nav', id: 'tools', classes: open ? ['tools', 'open'] : ['tools'] });
   return {
     list: display(all, list, [app, body], width),
     chat: display(all, chat, [app, body], width),
     back: display(all, back, [header, chat, app, body], width),
+    more: display(all, more, [header, chat, app, body], width),
+    tools: display(all, tools(false), [header, chat, app, body], width),
+    toolsOpen: display(all, tools(true), [header, chat, app, body], width),
   };
 }
 
@@ -149,6 +154,25 @@ test('a phone shows one pane, and Back whenever the list is hidden', () => {
   }
 });
 
+// The top bar never squeezes the agent's name: on a phone the actions are a
+// menu behind More, shown only when open; from 720px they are a row and
+// More is gone.
+test('a phone folds the chat actions into the More menu', () => {
+  for (const width of [320, 375, 719]) {
+    const l = layout(width, true);
+    assert.notEqual(l.more, 'none', `More at ${width}px`);
+    assert.equal(l.tools, 'none', `the actions are folded at ${width}px`);
+    assert.equal(l.toolsOpen, 'flex', `an open menu shows them at ${width}px`);
+  }
+  for (const width of [720, 1280]) {
+    const l = layout(width, true);
+    assert.equal(l.more, 'none', `no More at ${width}px`);
+    assert.notEqual(l.tools, 'none', `the actions are a row at ${width}px`);
+    assert.notEqual(l.toolsOpen, 'none', `a menu left open is a row at ${width}px`);
+  }
+  assert.match(css, /nav\.tools \.iconbtn::after \{ content: attr\(aria-label\);/, 'each row shows its name');
+});
+
 // The chat header is icons, so it fits on a phone: each control is named by
 // aria-label and title, its SVG is hidden from assistive technology, and no
 // visible text label comes back to push the controls off the screen.
@@ -167,6 +191,8 @@ test('the chat header controls are named icons', () => {
   assert.match(header, /<button id="files"[^>]*aria-controls="filespanel" aria-expanded="false"/);
   assert.match(header, /<button id="activity"[^>]*aria-controls="activitypanel" aria-expanded="false"/);
   assert.match(header, /<button id="settings"[^>]*aria-controls="settingspanel" aria-expanded="false"/);
+  assert.match(header, /<button id="more" class="iconbtn" type="button" aria-label="More" title="More" aria-controls="tools" aria-expanded="false" hidden><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false">(<path d="[^"<>]+"\/>)+<\/svg><\/button>\n {4}<nav id="tools" class="tools"/,
+    'More, hidden at first, comes just before the menu it opens');
   assert.match(css, /nav\.tools \{ flex: none;/, 'the controls never shrink; the name gives way');
 });
 

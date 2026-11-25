@@ -7,6 +7,13 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Changed
+
+- **The chat page's top bar no longer crowds the agent's name on a phone.** Below 720px the bar
+  holds Back, the name and a More button. Refresh, New conversation, Recent activity, Files,
+  Settings and Terminal are in the menu More opens, each with its name. A choice, Escape or a tap
+  outside closes the menu. From 720px the actions stay a row of icons as before.
+
 ## [1.0.0-beta.11] - 2026-11-25
 
 ### Added

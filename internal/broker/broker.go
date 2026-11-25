@@ -320,6 +320,11 @@ type DispatchConfig struct {
 	// (`lever agent gc`) and returns their size; dryRun only counts. nil:
 	// none are kept.
 	RemoveConversations func(agent string, dryRun bool) (int64, error)
+	// ConversationDir is the host directory (outside the tree) of the
+	// spawned agents' conversation backups, one convbackup.Store per agent:
+	// destroy moves its backup into the agent's archive, and restore reads
+	// the backups of agents destroyed before that. Empty: none are read.
+	ConversationDir string
 }
 
 // TimeoutConfig bounds request handling on the jail listener per route class.
@@ -493,6 +498,7 @@ type Broker struct {
 	backupConversation  func(ctx context.Context, agent string) (string, error)
 	dailyBackup         func(ctx context.Context, agent string) (string, error)
 	removeConversations func(agent string, dryRun bool) (int64, error)
+	conversationDir     string
 	// captureSem lets one conversation capture run at a time: each holds the
 	// whole compressed conversation in memory (convbackup's cap is 512 MiB).
 	captureSem chan struct{}
@@ -618,7 +624,7 @@ func New(c Config) *Broker {
 		contactRate: newRateWindow(contactCallLimit),
 		files:       c.Files.withDefaults(), fileLedger: &fileRecord{dir: c.Files.LedgerDir},
 		filesRate:  newRateWindow(filesCallLimit),
-		archiveDir: d.ArchiveDir, backupConversation: d.BackupConversation, dailyBackup: d.DailyBackup, removeConversations: d.RemoveConversations, agentLoopEvery: time.Minute,
+		archiveDir: d.ArchiveDir, backupConversation: d.BackupConversation, dailyBackup: d.DailyBackup, removeConversations: d.RemoveConversations, conversationDir: d.ConversationDir, agentLoopEvery: time.Minute,
 		captureSem: make(chan struct{}, 1),
 		spawnRate:  newRateWindow(managerSpawnRateLimit), inheritedUnsettled: inherited,
 	}

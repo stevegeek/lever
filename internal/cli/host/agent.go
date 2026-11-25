@@ -20,7 +20,8 @@ import (
 // lever.yaml. Every verb goes through the broker's operator socket.
 func newAgentCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "agent", Short: "Spawn and destroy agents from templates"}
-	cmd.AddCommand(newAgentSpawnCmd(), newAgentDestroyCmd(), newAgentListCmd(), newAgentGCCmd(), newAgentRemoteVerbCmd())
+	cmd.AddCommand(newAgentSpawnCmd(), newAgentDestroyCmd(), newAgentListCmd(), newAgentGCCmd(), newAgentRemoteVerbCmd(),
+		newAgentArchivesCmd(), newAgentRestoreCmd(), newAgentArchiveDeleteCmd())
 	return cmd
 }
 
@@ -36,9 +37,13 @@ type agentResult struct {
 	Transcript string   `json:"transcript,omitempty"`
 	Workspace  string   `json:"workspace,omitempty"`
 	Warnings   []string `json:"warnings,omitempty"`
-	Reason     string   `json:"reason,omitempty"`
-	Error      string   `json:"error,omitempty"`
-	Exit       int      `json:"exit"`
+	// RestoredFrom (restore) names the archive; Freed (archive-delete) is
+	// the bytes deleted.
+	RestoredFrom string `json:"restored_from,omitempty"`
+	Freed        int64  `json:"freed_bytes,omitempty"`
+	Reason       string `json:"reason,omitempty"`
+	Error        string `json:"error,omitempty"`
+	Exit         int    `json:"exit"`
 }
 
 // agentExit maps a broker refusal to an exit code: the worker verbs' codes,
@@ -49,7 +54,8 @@ func agentExit(reason string) int {
 		return exitWorkerBusy
 	case broker.ReasonRunning:
 		return exitWorkerNotStopped
-	case broker.ReasonNoTemplate, broker.ReasonBadLabel, broker.ReasonBadMemory, broker.ReasonNotSpawned, broker.ReasonNotYours, broker.ReasonBadRequest:
+	case broker.ReasonNoTemplate, broker.ReasonBadLabel, broker.ReasonBadMemory, broker.ReasonNotSpawned, broker.ReasonNotYours, broker.ReasonBadRequest,
+		broker.ReasonNoArchive, broker.ReasonArchiveRefused:
 		return exitWorkerRefused
 	case broker.ReasonBackupFailed:
 		return exitWorkerResumeFailed
@@ -303,10 +309,11 @@ func newAgentGCCmd() *cobra.Command {
 		Use:   "gc",
 		Args:  cobra.NoArgs,
 		Short: "Delete the archives and conversation backups of agents destroyed long ago",
-		Long: "For every agent destroyed at least --older ago (default 30d), delete its workspace archive and its\n" +
-			"conversation backups from the state directory, and drop its record, keeping only its name so it is\n" +
-			"never used again. A workspace kept in the tree (on_destroy: keep) is not touched. Destructive, so it\n" +
-			"requires --force; --dry-run lists what would go.",
+		Long: "For every agent destroyed at least --older ago (default 30d), delete its archive (workspace and\n" +
+			"conversation, or the older separate workspace archive and conversation backups) from the state\n" +
+			"directory, and drop its record, keeping only its name so it is never used again. A workspace kept in\n" +
+			"the tree (on_destroy: keep) is not touched. Destructive, so it requires --force; --dry-run lists what\n" +
+			"would go. `lever agent archive-delete NAME` deletes one archive now.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			fail := func(err error, reason string, code int) error {
 				if asJSON {

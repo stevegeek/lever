@@ -18,16 +18,23 @@ import (
 
 func TestParseRemoteVerb(t *testing.T) {
 	ok := map[string]remoteVerb{
-		"spawn session":                 {verb: "spawn", template: "session"},
-		"spawn session PR 42: fix  it":  {verb: "spawn", template: "session", label: "PR 42: fix it"},
-		"  spawn   session  --task x  ": {verb: "spawn", template: "session", label: "--task x"},
-		"spawn session café ☕":          {verb: "spawn", template: "session", label: "café ☕"},
-		"destroy s-abc234":              {verb: "destroy", name: "s-abc234"},
-		"destroy s-abc234 --stop":       {verb: "destroy", name: "s-abc234", stop: true},
-		"suspend s-abc234":              {verb: "suspend", name: "s-abc234"},
-		"resume s-abc234":               {verb: "resume", name: "s-abc234"},
-		"list":                          {verb: "list"},
-		"list --json":                   {verb: "list"},
+		"spawn session":                          {verb: "spawn", template: "session"},
+		"spawn session PR 42: fix  it":           {verb: "spawn", template: "session", label: "PR 42: fix it"},
+		"  spawn   session  --task x  ":          {verb: "spawn", template: "session", label: "--task x"},
+		"spawn session café ☕":                   {verb: "spawn", template: "session", label: "café ☕"},
+		"destroy s-abc234":                       {verb: "destroy", name: "s-abc234"},
+		"destroy s-abc234 --stop":                {verb: "destroy", name: "s-abc234", stop: true},
+		"suspend s-abc234":                       {verb: "suspend", name: "s-abc234"},
+		"resume s-abc234":                        {verb: "resume", name: "s-abc234"},
+		"list":                                   {verb: "list"},
+		"list --json":                            {verb: "list"},
+		"archives":                               {verb: "archives"},
+		"archives --json":                        {verb: "archives"},
+		"restore s-abc234":                       {verb: "restore", name: "s-abc234"},
+		"restore s-abc234 again":                 {verb: "restore", name: "s-abc234", label: "again"},
+		"restore s-abc234 --memory 8GiB":         {verb: "restore", name: "s-abc234", memory: "8GiB"},
+		"restore s-abc234 --memory 512MiB PR 42": {verb: "restore", name: "s-abc234", memory: "512MiB", label: "PR 42"},
+		"archive-delete s-abc234":                {verb: "archive-delete", name: "s-abc234"},
 		"spawn session " + strings.Repeat("é", broker.MaxAgentLabel): {verb: "spawn", template: "session", label: strings.Repeat("é", broker.MaxAgentLabel)},
 	}
 	for line, want := range ok {
@@ -45,6 +52,11 @@ func TestParseRemoteVerb(t *testing.T) {
 		"destroy", "destroy s-abc234 --force", "destroy s-abc234 --stop --stop", "destroy --stop s-abc234", "destroy S-ABC",
 		"destroy s-abc234 --no-backup",
 		"suspend", "suspend a b", "resume -x", "stop s-abc234", "list --all", "list x",
+		"archives x", "archives --all", "archives --json --json",
+		"restore", "restore ../x", "restore S-ABC", "restore /etc/passwd", "restore s-abc234 --memory", "restore s-abc234 --memory 8G",
+		"restore s-abc234 --memory 0GiB", "restore s-abc234\tx", "restore s-abc234 a‮b",
+		"restore s-abc234 " + strings.Repeat("x", broker.MaxAgentLabel+1),
+		"archive-delete", "archive-delete s-abc234 --force", "archive-delete ../x", "archive-delete s-abc234 x",
 		"purge s-abc234", "sh -c id", "scp -t .", "rsync --server", "git-upload-pack x",
 		"spawn session " + strings.Repeat("a ", maxRemoteCommand),
 	} {
@@ -87,8 +99,24 @@ func FuzzParseRemoteVerb(f *testing.F) {
 			if !name.MatchString(v.name) || v.template != "" || v.label != "" || v.stop && v.verb != "destroy" {
 				t.Fatalf("%+v", v)
 			}
-		case "list":
-			if v != (remoteVerb{verb: "list"}) {
+		case "list", "archives":
+			if v != (remoteVerb{verb: v.verb}) {
+				t.Fatalf("%+v", v)
+			}
+		case "restore":
+			if !name.MatchString(v.name) || v.template != "" || v.stop || utf8.RuneCountInString(v.label) > broker.MaxAgentLabel {
+				t.Fatalf("%+v", v)
+			}
+			if _, ok := broker.ParseMemorySize(v.memory); v.memory != "" && !ok {
+				t.Fatalf("%+v", v)
+			}
+			for _, r := range v.label {
+				if r != ' ' && (!unicode.IsPrint(r) || unicode.Is(unicode.Cf, r)) {
+					t.Fatalf("label %q has %U", v.label, r)
+				}
+			}
+		case "archive-delete":
+			if v != (remoteVerb{verb: v.verb, name: v.name}) || !name.MatchString(v.name) {
 				t.Fatalf("%+v", v)
 			}
 		default:

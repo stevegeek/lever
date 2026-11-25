@@ -9,7 +9,8 @@
 # image, and the next apply undoes them), `lever stop` and a resume, `lever
 # up` applying a config change, a warm `lever up`, `lever up --wait` under a
 # held lock, `lever up` over a stale hub pid file (a live decoy and a dead
-# pid), `lever conversation new` on the running manager, and doctor. `make test-lima-e2e` covers the jail and the broker
+# pid), `lever conversation new` on the running manager, a halted manager
+# brought back with its conversation, and doctor. `make test-lima-e2e` covers the jail and the broker
 # without scion; this covers what a scion pin bump can break.
 #
 # Needs: Lima >= 2.0, Go, perl, python3. The agent image comes from IMAGE_TAR (a
@@ -805,6 +806,26 @@ doctor_run
 printf '%s\n' "$doctor_out" | grep -E '^(✗|!) ' | mask_secrets | sed 's/^/      | /'
 check "doctor: manager agent after the new conversation" manager_ok
 check "doctor: no failed row after the new conversation" no_failed_row
+
+say "a halted manager comes back with its conversation (T0544)"
+# A transcript only this conversation holds; `lever conversation new` above
+# moved the older ones into a backup.
+HMARK="stack-e2e-halted-$$"
+P exec --user scion "lever--$NAME" sh -c "mkdir -p /home/scion/.claude/projects/-workspace && echo '{\"marker\":\"$HMARK\"}' > /home/scion/.claude/projects/-workspace/$HMARK.jsonl"
+checkx "the marker transcript is in the manager's home" 'P exec --user scion "lever--$NAME" test -s "/home/scion/.claude/projects/-workspace/$HMARK.jsonl"'
+# A missing container is one of the ways the platform ends a run: the hub
+# records the manager halted, as after an OOM kill.
+P rm -f "lever--$NAME" > /dev/null 2>&1
+for _ in $(seq 1 90); do [ "$(mgrrec phase)" = halted ] && break; sleep 2; done
+checkx "the hub reads the manager halted ($(mgrrec phase))" '[ "$(mgrrec phase)" = halted ]'
+(cd "$INST" && GOPROXY=off timeout 900 "$LEVER" up --no-attach > "$WORK/up-halted.log" 2>&1); rc=$?
+tail -4 "$WORK/up-halted.log" | mask_secrets | sed 's/^/      | /'
+checkx "lever up over the halted manager succeeds ($rc)" '[ "$rc" = 0 ]'
+checkx "it says it restores the conversation" 'grep -q "lever then restores its conversation" "$WORK/up-halted.log"'
+check "the manager runs after it" running
+checkx "the hub reads the manager running ($(mgrrec phase))" '[ "$(mgrrec phase)" = running ]'
+checkx "the halted conversation's transcript is back in place" 'P exec --user scion "lever--$NAME" grep -q "$HMARK" "/home/scion/.claude/projects/-workspace/$HMARK.jsonl"'
+checkx "a backup of it is listed" '(cd "$INST" && "$LEVER" conversation list 2>&1) | grep -q "halted"'
 
 say "teardown"
 (cd "$INST" && "$LEVER" destroy 2>&1 | tail -1)

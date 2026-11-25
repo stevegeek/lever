@@ -252,6 +252,12 @@ func mintsCredential(method, p string) bool {
 //     links to attachments, pinned off with hub.attachment_artifacts), and
 //     the runtime broker's own /api/v1/broker/ routes, which no browser calls
 //     (they take the broker's HMAC; refused as defense in depth).
+//   - Routes new in scion d34ffbc1 behind experiments lever pins off:
+//     triggers (a project's triggers, trigger events, trigger sources and
+//     webhook endpoints, the GitHub trigger presets, and the unauthenticated
+//     /api/v1/hooks/{id} ingress, which messages agents and can dispatch
+//     new ones), and secret requests (a card an agent posts that asks the
+//     user to type a secret in).
 //
 // p is the decoded path. It is compared in lower case, and the feature
 // prefixes without a segment boundary, so no spelling the hub might route
@@ -302,7 +308,8 @@ func refusedRoute(method, p string) bool {
 		if sub == "clone" || strings.HasPrefix(sub, "clone/") {
 			return true
 		}
-		if strings.HasPrefix(sub, "visitor") {
+		if strings.HasPrefix(sub, "visitor") || strings.HasPrefix(sub, "trigger") || strings.HasPrefix(sub, "webhook-endpoint") ||
+			strings.HasPrefix(sub, "message-polic") || strings.HasPrefix(sub, "decision") {
 			return true
 		}
 	}
@@ -326,6 +333,13 @@ var refusedPrefixes = []string{
 	"/api/v1/users/me/visitor",
 	"/api/v1/attachment-deliver",
 	"/api/v1/broker/",
+	"/api/v1/hooks",
+	"/api/v1/trigger-preset",
+	"/api/v1/secret-request",
+	"/api/v1/users/me/exec-container",
+	"/api/v1/github-app/repo-routing",
+	"/api/v1/webhooks/github",
+	"/api/v1/decision-prompt",
 }
 
 // brokerWritePrefixes are lower case, with no trailing slash on purpose: the

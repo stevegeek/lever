@@ -272,7 +272,7 @@ func checkHubIdentities(ctx context.Context, d doctorHubAuth) checkResult {
 
 // checkRemoteWebRole reads the hub, not lever's record: every configured
 // login's hub user is the recorded one, bound to its tier's role and capped,
-// and every removed login is suspended.
+// and every removed login is suspended, or still invited and unbound.
 func checkRemoteWebRole(ctx context.Context, app *config.App, d doctorHubAuth) checkResult {
 	const name = "remote web role"
 	users := remoteUsersFor(app)
@@ -366,15 +366,32 @@ func checkRemoteWebRole(ctx context.Context, app *config.App, d doctorHubAuth) c
 		if configured[email] {
 			continue
 		}
-		if hu, found, err := admin.GetUser(ctx, id); err == nil && found && hu.Status != "suspended" {
+		hu, found, err := admin.GetUser(ctx, id)
+		if err != nil || !found || hu.Status == "suspended" {
+			continue
+		}
+		if hu.Status != "invited" {
 			problems = append(problems, email+" is not a configured login (or remote access is off) but its hub user is "+hu.Status)
+			continue
+		}
+		// Never signed in: the hub refuses to suspend an invited user, so the
+		// invite stays and the row asks only that lever's roles are gone.
+		bs, err := admin.UserRoleBindings(ctx, id)
+		if err != nil {
+			problems = append(problems, email+": "+err.Error())
+			continue
+		}
+		if slices.ContainsFunc(bs, func(b hubapi.RoleBinding) bool {
+			return b.ScopeID == rec.ProjectID && b.RoleDefinitionID != "" && (b.RoleDefinitionID == roleID[false] || b.RoleDefinitionID == roleID[true])
+		}) {
+			problems = append(problems, email+" is not a configured login (or remote access is off) but its pending invite is still bound to a lever role")
 		}
 	}
 	if len(problems) > 0 {
 		return checkResult{name, false, strings.Join(problems, "; "), "run `lever apply` (or `lever reload`): it invites, caps and binds every login, and suspends removed ones, while agents run"}
 	}
 	if len(ok) == 0 {
-		return checkResult{name, true, "no configured remote login; every earlier one is suspended", ""}
+		return checkResult{name, true, "no configured remote login; every earlier one is suspended or an unbound pending invite", ""}
 	}
 	return checkResult{name, true, "bound and capped before sign-in: " + strings.Join(ok, ", "), ""}
 }

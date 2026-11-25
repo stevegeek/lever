@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"os"
 	"slices"
@@ -580,5 +581,61 @@ func TestEnsureHubExperimentsOnGraduatedThreadGroups(t *testing.T) {
 	r := checkHubExperiments(context.Background(), st, false, knowsExperiments(true), &hubapi.Client{T: h})
 	if !r.ok || r.fix != "" || !strings.Contains(r.detail, "chat thread groups are always on in this scion") {
 		t.Fatalf("doctor row = %+v", r)
+	}
+}
+
+// d34ffbcPinned are the pinned experiments scion d34ffbc1 registers.
+var d34ffbcPinned = append(slices.Clone(newScionPinned), "hub.triggers", "hub.github_triggers", "hub.exec_schedules",
+	"hub.exec_containers", "hub.system_one", "hub.code_span_mentions", "hub.agent_secrets", "lifecycle.idle_suspend", "hub.suspend_screen",
+	"hub.message_policies", "web.decisions", "hub.runtime_orphan_reconcile", "hub.reincarnate_harness_switch", "hub.custom_default_user_role")
+
+// On scion d34ffbc1 every new experiment is pinned off, hub.suspend_screen
+// against its default on; only a probed one that was on restarts the hub.
+func TestEnsureHubExperimentsOnD34ffbc1(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		on           map[string]bool
+		wantRestarts int
+	}{
+		{"defaults", nil, 0},
+		{"triggers on", map[string]bool{"hub.triggers": true}, 1},
+		{"unprobed ones on", map[string]bool{"lifecycle.idle_suspend": true, "hub.agent_secrets": true}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newFakeExperimentsHub()
+			newScionExperiments(h)
+			h.registered = append(slices.Clone(d34ffbcPinned), "web.agent_edit")
+			h.defaultOn["hub.suspend_screen"] = true
+			maps.Copy(h.overrides, tc.on)
+			st := state.ForConfig(t.TempDir())
+			restarts := 0
+			on, err := ensureHubExperiments(context.Background(), experimentsPin{
+				admin: &hubapi.Client{T: h}, st: st, known: knowsExperiments(true),
+				now:        func() time.Time { return time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC) },
+				restartHub: func(context.Context) error { restarts++; return nil },
+				log:        func(string, ...any) {}, warn: func(f string, a ...any) { t.Errorf("warn: "+f, a...) },
+			})
+			if err != nil || on || restarts != tc.wantRestarts {
+				t.Fatalf("on=%v err=%v restarts=%d (%v)", on, err, restarts, h.calls)
+			}
+			for _, n := range d34ffbcPinned {
+				if v, ok := h.overrides[n]; !ok || v || h.enabled(n) {
+					t.Fatalf("%s override = %v, %v; want pinned off", n, v, ok)
+				}
+			}
+			if _, ok := h.overrides["web.agent_edit"]; ok {
+				t.Fatal("lever pinned an experiment it does not list")
+			}
+			if !slices.Contains(h.calls, "GET /api/v1/hooks/00000000-0000-0000-0000-000000000000") {
+				t.Fatalf("hub.triggers was not probed: %v", h.calls)
+			}
+			rec, found, _ := st.LoadHubExperimentsRecord()
+			if !found || !slices.Equal(rec.Off, d34ffbcPinned) {
+				t.Fatalf("record = %+v (found %v)", rec, found)
+			}
+			if r := checkHubExperiments(context.Background(), st, false, knowsExperiments(true), &hubapi.Client{T: h}); !r.ok || r.fix != "" {
+				t.Fatalf("doctor row = %+v", r)
+			}
+		})
 	}
 }

@@ -22,11 +22,17 @@ source build is the supported route there. lever starts broker tools with the fi
 Silicon: `/opt/homebrew/bin`) name a tool by its absolute path in `lever.yaml`, for example `command: [/opt/homebrew/bin/lever-tool-github, ...]`.
 
 A release archive from GitHub holds the same host binaries, ready to run. Its `lever` needs **no Go
-toolchain** for the scion pin of its release (`e8160a10`, the pin in the examples): `lever apply`
+toolchain** for the scion pin of its release (`d34ffbc1`, the pin in the examples): `lever apply`
 downloads that release's prebuilt scion, checks it against the sha256 built into `lever`, and skips
 the scion compile. With `remote.enabled` it downloads that release's prebuilt web UI the same way,
 so remote access on that pin needs **neither Go nor node**. Any other pin, and a failed download,
 still need Go (and node for the web UI). See [prebuilt scion](/reference/config/#prebuilt-scion).
+
+Building scion `d34ffbc1` needs **Go 1.26.11 or later** (its `go.mod` says `go 1.26.11`). lever
+itself builds with Go 1.26.9. With an older Go and `GOTOOLCHAIN=auto` (Go's default), the first
+scion build downloads go1.26.11 from the Go module proxy (about 70 MB, the same egress as the
+module download; it fails under `GOPROXY=off`). With `GOTOOLCHAIN=local` it fails. `lever doctor`'s
+`go toolchain` row says which applies.
 
 To build from a checkout instead:
 
@@ -110,7 +116,7 @@ scion's stock Claude harness image. Build it once from a scion checkout:
 
 ```sh
 git clone https://github.com/GoogleCloudPlatform/scion
-cd scion && git checkout e8160a10   # the same commit as scion.version in lever.yaml
+cd scion && git checkout d34ffbc1   # the same commit as scion.version in lever.yaml
 image-build/scripts/build-images.sh --target harnesses
 ```
 
@@ -135,7 +141,7 @@ pinned tmux, lever's binaries, the boot hook and `/etc/claude-code`). It should 
 `make image-contract` prints the built size.
 
 ```sh
-make lever-image-slim SCION_VERSION=e8160a10   # your lever.yaml's scion.version
+make lever-image-slim SCION_VERSION=d34ffbc1   # your lever.yaml's scion.version
 ```
 
 sciontool and scion are cross-compiled on the host from the scion source the jail runs: set

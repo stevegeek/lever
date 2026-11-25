@@ -305,6 +305,9 @@ type agentLifecycleRunner struct {
 	stopCalls int
 	stopErr   error
 	stopPhase string
+	// startRevealsPhase, when set, makes a start that fails with startErr
+	// reveal the record in this phase: the observe step missed it.
+	startRevealsPhase string
 }
 
 func (r *agentLifecycleRunner) ensureInit() {
@@ -386,6 +389,9 @@ func (r *agentLifecycleRunner) RunIn(ctx context.Context, dir string, env map[st
 		r.startCalls++
 		r.record(dir, env, name, args)
 		if r.startErr != nil {
+			if r.startRevealsPhase != "" {
+				r.phase, r.containerStatus = r.startRevealsPhase, "stopped"
+			}
 			return proc.Result{Code: 1, Stderr: r.startErr.Error()}, r.startErr
 		}
 		r.goLive()
@@ -518,6 +524,39 @@ func TestStartManagerObserveFirstResumesStopped(t *testing.T) {
 	}
 	if r.startCalls != 0 {
 		t.Errorf("startCalls = %d, want 0 (stopped record must RESUME, not blind-start)", r.startCalls)
+	}
+}
+
+// TestStartManagerCreateOverAResumableRecordResumesIt: a create over a
+// record the observe step missed is refused 409 agent_exists_resumable from
+// scion d34ffbc1 on (its text also says "already exists"). lever observes
+// again and resumes the record rather than read the refusal as success.
+func TestStartManagerCreateOverAResumableRecordResumesIt(t *testing.T) {
+	for _, phase := range []string{scion.PhaseSuspended, scion.PhaseStopped, scion.PhaseHalted} {
+		t.Run(phase, func(t *testing.T) {
+			app, f := newObserveFirstApp(t)
+			r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", startRevealsPhase: phase,
+				startErr: errors.New(`failed to start agent via Hub: agent_exists_resumable: agent "hello" already exists (phase: ` + phase + `); run 'scion resume hello' to resume it, delete it, or use another name (status: 409)`)}
+			if err := runApply(app, Deps{Scion: scion.New(r, scion.Options{})}); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if r.startCalls != 1 || r.resumeCalls != 1 || r.deleteCalls != 0 {
+				t.Fatalf("start %d resume %d delete %d, want 1/1/0", r.startCalls, r.resumeCalls, r.deleteCalls)
+			}
+		})
+	}
+}
+
+// TestStartManagerCreateOverAResumableRecordThatMovesFails: when the second
+// look does not find a record to resume, lever says so and starts nothing.
+func TestStartManagerCreateOverAResumableRecordThatMovesFails(t *testing.T) {
+	app, f := newObserveFirstApp(t)
+	r := &agentLifecycleRunner{FakeRunner: f, slug: "hello",
+		startErr: errors.New(`failed to start agent via Hub: agent_exists_resumable: agent "hello" already exists (phase: stopped); run 'scion resume hello' to resume it, delete it, or use another name (status: 409)`)}
+	err := runApply(app, Deps{Scion: scion.New(r, scion.Options{})})
+	testutil.WantErrContaining(t, err, "first look missed", "lever up")
+	if r.resumeCalls != 0 || r.deleteCalls != 0 {
+		t.Fatalf("resume %d delete %d, want 0/0", r.resumeCalls, r.deleteCalls)
 	}
 }
 
@@ -2132,6 +2171,55 @@ func TestStartManagerPassesPrompt(t *testing.T) {
 	}
 	if !sawPrompt {
 		t.Fatalf("manager prompt not passed to start; calls=%+v", f.Calls)
+	}
+}
+
+// TestStartManagerResumeHandsANewSessionItsPrompt: a stopped or halted
+// record starts a new claude session, and after a run that ended completed
+// the hub replays no stored task (scion d34ffbc1 on), so lever passes
+// the current boot prompt. A suspended record continues its session and gets
+// none.
+func TestStartManagerResumeHandsANewSessionItsPrompt(t *testing.T) {
+	for _, tc := range []struct {
+		phase    string
+		wantTask bool
+	}{
+		{scion.PhaseStopped, true},
+		{scion.PhaseHalted, true},
+		{scion.PhaseSuspended, false},
+	} {
+		t.Run(tc.phase, func(t *testing.T) {
+			dir := t.TempDir()
+			_ = os.MkdirAll(filepath.Join(dir, "workspace"), 0o755)
+			if err := os.WriteFile(filepath.Join(dir, "manager.md"), []byte("Dispatch the worker to create HELLO."), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg := filepath.Join(dir, config.CanonicalName)
+			if err := os.WriteFile(cfg, []byte("name: hello\nbackend: orbstack\ntree: workspace\nbroker:\n  llm_auth: subscription\nmanager:\n  image: img\n  prompt_file: manager.md\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			app, err := config.Load(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f := scionOKRunner()
+			r := &agentLifecycleRunner{FakeRunner: f, slug: app.Name, initPhase: tc.phase, initContainerStatus: "stopped"}
+			if err := runApply(app, Deps{Scion: scion.New(r, scion.Options{})}); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if r.resumeCalls != 1 || r.startCalls != 0 {
+				t.Fatalf("resumeCalls=%d startCalls=%d, want 1/0", r.resumeCalls, r.startCalls)
+			}
+			var resume string
+			for _, c := range f.Calls {
+				if len(c.Args) > 0 && c.Args[0] == "resume" {
+					resume = strings.Join(c.Args, " ")
+				}
+			}
+			if got := strings.HasSuffix(resume, "-- hello Dispatch the worker to create HELLO."); got != tc.wantTask {
+				t.Fatalf("resume argv %q: carries the prompt = %v, want %v", resume, got, tc.wantTask)
+			}
+		})
 	}
 }
 

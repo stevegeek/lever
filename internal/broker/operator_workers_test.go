@@ -76,6 +76,10 @@ func TestIdleAtPrompt(t *testing.T) {
 	}{
 		{"running", "waiting_for_input", &yes},
 		{"running", "completed", &yes},
+		{"running", "idle", &yes},
+		{"running", "harness_error", &yes},
+		{"running", "initializing", nil},
+		{"suspended", "idle", &no},
 		{"running", "working", &no},
 		{"running", "thinking", &no},
 		{"running", "executing", &no},

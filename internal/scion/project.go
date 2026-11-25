@@ -2,6 +2,8 @@ package scion
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -33,11 +35,8 @@ func (c *Client) HubProjectID(ctx context.Context, name string) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	var projects []struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-	}
-	if err := parseJSON(out, &projects); err != nil {
+	projects, err := parseHubProjects(out)
+	if err != nil {
 		return "", fmt.Errorf("scion hub projects: %w", err)
 	}
 	var ids []string
@@ -61,4 +60,49 @@ func (c *Client) HubProjectID(ctx context.Context, name string) (string, error) 
 // instead of by the new local ID a fresh init generates.
 func (c *Client) PinHubProject(ctx context.Context, dir, id string) error {
 	return c.ConfigSetProject(ctx, dir, "hub.projectId", id)
+}
+
+type hubProject struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// errHubProjectsTruncated: scion lists one page of projects (500 by default).
+// A name missing from a partial list may still be on the hub, and registering
+// it again would make a second record for the same tree.
+var errHubProjectsTruncated = errors.New("the hub's project list is truncated; lever will not decide from a partial list whether this project is registered")
+
+// parseHubProjects reads `scion hub projects --format json`: an object
+// {"projects": [...], "total": N, "truncated": bool} from scion d34ffbc1 on, a
+// bare array before.
+func parseHubProjects(out string) ([]hubProject, error) {
+	var raw json.RawMessage
+	if err := parseJSON(out, &raw); err != nil {
+		return nil, err
+	}
+	body := strings.TrimSpace(string(raw))
+	if body == "" {
+		return nil, nil
+	}
+	if body[0] == '[' {
+		var projects []hubProject
+		if err := json.Unmarshal(raw, &projects); err != nil {
+			return nil, fmt.Errorf("could not parse scion JSON output: %w", err)
+		}
+		return projects, nil
+	}
+	var page struct {
+		Projects  *[]hubProject `json:"projects"`
+		Truncated bool          `json:"truncated"`
+	}
+	if err := json.Unmarshal(raw, &page); err != nil {
+		return nil, fmt.Errorf("could not parse scion JSON output: %w", err)
+	}
+	if page.Projects == nil {
+		return nil, errors.New("could not parse scion JSON output: no projects list")
+	}
+	if page.Truncated {
+		return nil, errHubProjectsTruncated
+	}
+	return *page.Projects, nil
 }

@@ -596,6 +596,14 @@ func (r *run) ensureUp(ctx context.Context, jp string, q ManagerRequest) (Manage
 	// gate has seen claude.
 	probes := r.startPostLive(ctx, jp)
 	err = r.actUp(ctx, jp, rec, p, opts)
+	if errors.Is(err, errManagerExistsResumable) {
+		r.d.Log("%s: the hub holds manager %q, which lever's first look missed; observing it again to resume it", r.subjectName(), r.app.Name)
+		var again *scion.Agent
+		if again, p, err = r.replanResumable(ctx, jp, q); err == nil {
+			rec = again
+			err = r.actUp(ctx, jp, rec, p, opts)
+		}
+	}
 	acted := p.verb != verbNone
 	// A resume recreated the container from the record's mounts: check them as
 	// soon as it runs, and again once it is live if it was not running yet.
@@ -673,6 +681,31 @@ func (r *run) refuseUnqualifiedRecord(rec *scion.Agent) error {
 		r.subjectName(), r.app.Name, what, fix)
 }
 
+// replanResumable observes the manager again after a create that the hub
+// refused with agent_exists_resumable, and plans the resume with the same
+// checks a first observation gets. Anything but a resume is refused: the
+// record moved again, and the next `lever up` sees it settled.
+func (r *run) replanResumable(ctx context.Context, jp string, q ManagerRequest) (*scion.Agent, managerPlan, error) {
+	rec, o, err := r.observeUp(ctx, jp)
+	if err != nil {
+		return nil, managerPlan{}, err
+	}
+	if err := r.refuseUnqualifiedRecord(rec); err != nil {
+		return nil, managerPlan{}, err
+	}
+	p, err := planManager(q, r.app.Name, o)
+	if err != nil {
+		return nil, managerPlan{}, err
+	}
+	if rec == nil || (p.verb != verbResume && p.verb != verbResumeForce) || p.recover {
+		return nil, managerPlan{}, errManagerExistsResumable
+	}
+	if err := r.checkStaleTreeMounts(ctx, jp, false); err != nil {
+		return nil, managerPlan{}, err
+	}
+	return rec, p, nil
+}
+
 // actUp makes the plan's change to the record; the gate after it confirms
 // the container is up, so a kept running record over a dead container fails
 // loudly there.
@@ -707,9 +740,7 @@ func (r *run) actUp(ctx context.Context, jp string, rec *scion.Agent, p managerP
 			// conversation is still in the agent home.
 			r.d.Log("%s: manager %q is in phase %s; scion resumes it in a new claude session (no --continue) — the old conversation stays in the agent home (`lever attach`, then `/resume`)", r.subjectName(), r.app.Name, rec.Phase)
 		}
-		return r.resumeOrRecover(ctx, jp, resumeVerbPlain(func() error {
-			return r.d.managerScion().Resume(ctx, r.app.Name, jp)
-		}))
+		return r.resumeOrRecover(ctx, jp, resumeVerbPlain(r.managerResume(ctx, jp, rec.Phase, opts.Task)))
 	case verbResumeForce:
 		// A fresh ticket is staged, as for a suspended record, since the leaf may
 		// have lapsed while wedged. A forced resume that fails keeps the record,
@@ -1016,8 +1047,9 @@ func (r *run) newSession(ctx context.Context, jp string, q ManagerRequest) (res 
 	res.Verb = p.verb.String()
 	// The task is the current manager.prompt_file, which the hub also stores
 	// as the record's task. With none the hub falls back to the task it
-	// stored at the last fresh create or new conversation; it offers no way to
-	// clear that.
+	// stored at the last fresh create or new conversation, unless the last run
+	// ended completed (then claude gets scion's wait-for-instructions notice);
+	// it offers no way to clear the stored task.
 	resume := func() error { return sc.ResumeTask(ctx, r.app.Name, jp, q.Task) }
 	if q.Task == "" {
 		resume = func() error { return sc.Resume(ctx, r.app.Name, jp) }
@@ -1133,8 +1165,15 @@ func (r *run) reenrol(ctx context.Context, jp string, q ManagerRequest, release 
 		}
 	}
 	resume := func() error { return sc.Resume(ctx, r.app.Name, jp) }
-	if p.verb == verbResumeForce {
+	switch {
+	case p.verb == verbResumeForce:
 		resume = func() error { return sc.ResumeForce(ctx, r.app.Name, jp) }
+	case !p.suspend && freshSessionPhase(rec.Phase):
+		task, err := ManagerTask(r.app)
+		if err != nil {
+			return res, guard.AfterFailure(ctx, err)
+		}
+		resume = r.managerResume(ctx, jp, rec.Phase, task)
 	}
 	if err := r.resumeClearing(ctx, jp, resume); err != nil {
 		return res, guard.AfterFailure(ctx, fmt.Errorf("%s failed: %w", res.Verb, err))
@@ -1163,6 +1202,27 @@ func (r *run) reenrol(ctx context.Context, jp string, q ManagerRequest, release 
 	}
 	res.MountsUnverified = !guard.Verified()
 	return res, nil
+}
+
+// freshSessionPhase reports a phase whose resume starts a new claude session
+// (the hub passes --continue only for a suspended record).
+func freshSessionPhase(phase string) bool {
+	return phase == scion.PhaseStopped || phase == scion.PhaseHalted
+}
+
+// managerResume is the resume of a manager record last seen in phase. A
+// record that starts a new session is handed task, the current boot prompt:
+// with no task the hub replays the task it stored only when the last run did
+// not end completed, and after a completed one the broker hands claude a
+// notice to wait for instructions instead. A suspended record continues its
+// session, where a task would be typed into the conversation, so it gets
+// none. The caller holds the lifecycle lock from the reading of phase on.
+func (r *run) managerResume(ctx context.Context, jp, phase, task string) func() error {
+	sc := r.d.managerScion()
+	if task != "" && freshSessionPhase(phase) {
+		return func() error { return sc.ResumeTask(ctx, r.app.Name, jp, task) }
+	}
+	return func() error { return sc.Resume(ctx, r.app.Name, jp) }
 }
 
 // containerID is podman's id of the container ref, or "" when podman cannot

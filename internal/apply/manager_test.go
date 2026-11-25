@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/stevegeek/lever/internal/config"
 	"github.com/stevegeek/lever/internal/jail"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/scion"
@@ -361,6 +364,58 @@ func TestReenrolBouncesByPhase(t *testing.T) {
 			}
 			if r.startCalls+r.deleteCalls != 0 || len(gb.records) != 1 {
 				t.Fatalf("start %d delete %d boots %v", r.startCalls, r.deleteCalls, gb.records)
+			}
+		})
+	}
+}
+
+// TestReenrolHandsANewSessionItsPrompt: the broker's bounce of a stopped or
+// halted manager starts a new session, which gets the current boot prompt
+// (after a completed run the hub replays no stored task); a suspended one
+// continues and gets none.
+func TestReenrolHandsANewSessionItsPrompt(t *testing.T) {
+	for _, c := range []struct {
+		phase    string
+		wantTask bool
+	}{
+		{"stopped", true},
+		{"halted", true},
+		{"suspended", false},
+		{"running", false},
+	} {
+		t.Run(c.phase, func(t *testing.T) {
+			dir := t.TempDir()
+			_ = os.MkdirAll(filepath.Join(dir, "workspace"), 0o755)
+			if err := os.WriteFile(filepath.Join(dir, "manager.md"), []byte("Watch the workers."), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg := filepath.Join(dir, config.CanonicalName)
+			if err := os.WriteFile(cfg, []byte("name: hello\nbackend: orbstack\ntree: workspace\nbroker:\n  llm_auth: subscription\nmanager:\n  image: img\n  prompt_file: manager.md\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			app, err := config.Load(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f := scionOKRunner()
+			container := "stopped"
+			if c.phase == "running" {
+				container = "Up 5 minutes"
+			}
+			r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: c.phase, initContainerStatus: container}
+			staged := 0
+			d, q := reenrolDeps(r, &staged)
+			if _, err := EnsureManager(context.Background(), app, d, q); err != nil || r.resumeCalls != 1 {
+				t.Fatalf("err %v resume %d", err, r.resumeCalls)
+			}
+			var resume string
+			for _, call := range f.Calls {
+				if len(call.Args) > 0 && call.Args[0] == "resume" {
+					resume = strings.Join(call.Args, " ")
+				}
+			}
+			if got := strings.HasSuffix(resume, "-- hello Watch the workers."); got != c.wantTask {
+				t.Fatalf("resume argv %q: carries the prompt = %v, want %v", resume, got, c.wantTask)
 			}
 		})
 	}

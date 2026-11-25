@@ -58,8 +58,8 @@ Linux/Lima path is validated end-to-end. `lever stop` -> `lever up` resumes the 
 
 Prebuilt `lever`, `lever-tool-github`, `lever-tool-whisper` and `lever-tool-tts` binaries ship per release
 (darwin/linux, amd64/arm64). A Go
-1.26+ toolchain is required at runtime with `scion.version`/`scion.source` (Scion
-is compiled at `lever apply`); `scion.binary` needs none. The agent image is built
+1.26.11+ toolchain (or one that may download it) is required at runtime with
+`scion.version`/`scion.source` (Scion is compiled at `lever apply`); `scion.binary` needs none. The agent image is built
 with Docker, on the host or on a build machine that ships it as a `docker save`
 archive (`image_tar`), in which case the deploy host needs no Docker. See
 [install](/getting-started/install/).

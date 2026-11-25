@@ -273,6 +273,23 @@ Two things need more than the controller's authority, and `lever-admin` does the
   while they are off only by scion's default or when an older lever wrote the record and never
   looked for one lever pins now. The remote proxy refuses the thread-group routes for every login,
   and the federation token route as a credential mint.
+- **Scion `d34ffbc1`'s new experiments are kept off the same way.** `hub.triggers` (webhook
+  endpoints and triggers agents can author, an unauthenticated signed ingress at
+  `/api/v1/hooks/<id>` that messages agents, and actions that start new agents outside the broker;
+  `GET /api/v1/hooks/<zero id>` answers 404 exactly while it is off), `hub.github_triggers`,
+  `hub.exec_schedules` (commands run in an agent's container from a schedule or trigger, with no
+  LLM turn, once conduit is on), `hub.exec_containers` (user-started shell containers in the
+  jail), `hub.system_one` (model-provider calls from the hub process), `hub.code_span_mentions` (an
+  inline code span such as `` `@name` `` becomes a mention, which would route a contact's message to
+  another agent), `hub.agent_secrets` (secrets an agent writes for itself, delivered above every
+  secret lever sets, and forms that ask a user to type a secret in), `lifecycle.idle_suspend` (the
+  hub suspends idle agents on its own schedule and wakes a hub-suspended one for any sender, past
+  the broker's wake checks) and `hub.suspend_screen` (the agent's last terminal screen stored in the
+  hub database at every hub-run suspend; this one is on by scion's default, so lever's pin turns it
+  off). It also pins off `hub.message_policies`, `web.decisions`, `hub.runtime_orphan_reconcile`
+  (the hub removing containers it takes for orphans), `hub.reincarnate_harness_switch` and
+  `hub.custom_default_user_role`. The remote proxy also refuses the trigger and secret-request routes
+  and the other new routes behind these experiments.
 
 `lever doctor`'s `hub authentication` row tests the effective configuration by behaviour, since
 file contents cannot prove it: an assertion signed by another key and one for another instance get

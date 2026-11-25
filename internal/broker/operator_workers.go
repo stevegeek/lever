@@ -130,14 +130,15 @@ func workerListEntry(name string, a scion.Agent, found bool, stranded func() boo
 // idleAtPrompt settles only what the record shows plainly. A worker that is
 // not running has no prompt. stalled is set by the hub's sweeper both for a
 // harness idle at its prompt and for one that cannot reach the model, so it
-// and every other activity stay unknown.
+// and every other activity stay unknown. harness_error counts as idle: the
+// harness waits at its prompt for the next message, which retries the turn.
 func idleAtPrompt(phase, activity string) *bool {
 	v := func(b bool) *bool { return &b }
 	if phase != scion.PhaseRunning {
 		return v(false)
 	}
 	switch activity {
-	case scion.ActivityWaitingForInput, scion.ActivityCompleted:
+	case scion.ActivityWaitingForInput, scion.ActivityCompleted, scion.ActivityIdle, scion.ActivityHarnessError:
 		return v(true)
 	case scion.ActivityWorking, "thinking", "executing":
 		return v(false)

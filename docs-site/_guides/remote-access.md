@@ -335,6 +335,14 @@ decide:
 - An agent's `ports/tunnel` (the agent side's own socket) and `delegations` (they hand the
   signed-in user's authority to an agent) under `/api/v1/agents/<id>/`, and the test-identity
   routes (`/api/v1/test-identit*`, `/auth/test-identity*`), which mint credentials or sessions.
+- scion's triggers: the unauthenticated webhook ingress `/api/v1/hooks/*` (a signed request there
+  messages agents, and can start new ones), a project's `triggers`, `trigger-events`,
+  `trigger-sources` and `webhook-endpoints` under `/api/v1/projects/<id>/` (and `/api/v1/groves/`),
+  and `/api/v1/trigger-presets*`. Also `/api/v1/secret-requests/*`, where a user would type a
+  secret into a form an agent posted. lever pins the experiments behind both off.
+- Other routes behind experiments lever pins off: `/api/v1/users/me/exec-container` (a shell
+  container in the jail), `/api/v1/github-app/repo-routing*`, `/api/v1/webhooks/github`,
+  `/api/v1/decision-prompts*`, and a project's `message-policies` and `decisions`.
 
 These routes are matched in lower case and by prefix, so another spelling of the same route is
 refused too.
@@ -749,13 +757,16 @@ suspended applies nothing else, so it neither suspends at the hub nor restarts t
 suspends the removed login's hub user and drops its role bindings (the ceiling stays). The hub
 refuses a suspended user's web session at once, and its API access within the hub's 60-second user
 cache. Nothing an agent can do to the hub, nor a later step failing, delays either. Adding the
-login back reactivates the same hub user and binds it again. Turning remote access off stops the
+login back reactivates the same hub user and binds it again. A login that was invited and never
+signed in is not suspended (scion refuses to change an invited user's status): its role bindings
+are dropped and the pending invite stays, which grants nothing while the proxy refuses the login;
+adding the login back binds the same hub user again. Turning remote access off stops the
 proxy before any other step and suspends every login (none can sign in then); turning it back on
 reactivates and binds them before the proxy starts.
 
 `lever doctor`'s `remote web role` row reads the hub, not the record: each configured login's hub
 user is the one lever recorded, bound to its tier's role, capped and not suspended, and each removed
-login's hub user is suspended.
+login's hub user is suspended, or still invited and bound to neither of lever's roles.
 
 ## Verified web chat
 
@@ -1158,8 +1169,9 @@ grants no hub route: the fence below admits nothing for a see-only agent.
   a lever page with links to the contact's conversations; with `landing: chat`, they redirect
   to the [chat page](#the-chat-page) instead, and the contact gets neither that landing page nor
   the hub's web UI shell. Everything else is refused (audit `deny-contact`).
-- **What a contact may not send.** A word that starts with `@` (scion would route the message to
-  another agent), a reply to a message by id, an attachment, or any field other than the text, its
+- **What a contact may not send.** An `@` (or `＠`) anywhere but inside a word, as in an email
+  address: at the start of a word, or after punctuation, markdown or a backtick (`` `@name` ``).
+  scion would route the message to another agent. A reply to a message by id, an attachment, or any field other than the text, its
   idempotency key and `offer_wake` (the hub's web chat sends it on every message; it only changes
   how the hub answers when the agent is not running). `wake` is refused: a contact wakes a worker
   only through the chat page's wake, which checks the session and limits the rate.

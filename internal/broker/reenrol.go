@@ -160,9 +160,7 @@ func (b *Broker) healLapse(ctx context.Context, cn string) {
 // healLapsedManager bounces the manager through its lifecycle
 // (DispatchConfig.EnsureManager), which takes lever's lifecycle lock: the
 // heal would otherwise resume a record a new conversation or a restore has
-// suspended or stopped on purpose (and a resume of a stopped one runs the
-// hub's stored task, not the operator's current prompt). Busy skips the
-// heal without counting it.
+// suspended or stopped on purpose. Busy skips the heal without counting it.
 func (b *Broker) healLapsedManager(ctx context.Context, cn, slug string, stage func(context.Context) error) {
 	if b.ensureManager == nil {
 		b.audit("reenrol", cn, "deny", "natural lapse: refusing to bounce "+slug+": no lifecycle of the manager is wired; run `lever up`")

@@ -250,9 +250,23 @@ func TestDoctorHubAuthRowsOverTheJail(t *testing.T) {
 		h.bindings = slices.DeleteFunc(h.bindings, func(b hubapi.RoleBinding) bool { return b.PrincipalID == c.ID })
 		app := hiRemoteApp(true, hiOperator(op), hiOperator("new@example.com"))
 		defer func() { h.bindings = kept }()
-		hiWantRow(t, checkRemoteWebRole(ctx, app, d.auth()), false,
-			"new@example.com has no hub user", contact+" is not a configured login (or remote access is off) but its hub user is invited")
+		// An unbound pending invite of a removed login passes: the hub refuses
+		// to suspend an invited user.
+		r := checkRemoteWebRole(ctx, app, d.auth())
+		hiWantRow(t, r, false, "new@example.com has no hub user")
+		if strings.Contains(r.detail, contact) {
+			t.Fatalf("an unbound pending invite is a problem: %q", r.detail)
+		}
 		hiWantRow(t, checkRemoteWebRole(ctx, d.app, d.auth()), false, contact+" is not bound to "+contactRoleName)
+	})
+	t.Run("removed login still bound or active", func(t *testing.T) {
+		h := d.hub
+		c := h.byEmail(contact)
+		app := hiRemoteApp(true, hiOperator(op))
+		hiWantRow(t, checkRemoteWebRole(ctx, app, d.auth()), false, contact+" is not a configured login (or remote access is off) but its pending invite is still bound to a lever role")
+		c.Status = "active"
+		defer func() { c.Status = "invited" }()
+		hiWantRow(t, checkRemoteWebRole(ctx, app, d.auth()), false, contact+" is not a configured login (or remote access is off) but its hub user is active")
 	})
 	t.Run("record names another key", func(t *testing.T) {
 		rec := d.record()

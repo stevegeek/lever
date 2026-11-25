@@ -1430,8 +1430,9 @@ login first signs in; the first sign-in activates that same user with its role a
 Only then is the proxy restarted with the new list. No agent is stopped.
 
 Removing a login suspends its hub user and drops its bindings. A suspended user is refused at once
-on the web and within 60 s on the API (the hub caches users by email for that long). Adding the
-login back reactivates the same user and binds it again.
+on the web and within 60 s on the API (the hub caches users by email for that long). A login that
+was invited and never signed in keeps its pending invite, unbound, since the hub refuses to suspend
+an invited user. Adding the login back reactivates the same user and binds it again.
 
 ### Token rotation
 

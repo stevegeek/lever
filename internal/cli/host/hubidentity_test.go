@@ -416,6 +416,10 @@ func (h *hiHub) handle(c hiCaller, method, raw string, body []byte) (int, []byte
 			if role != "" && x.Status == "invited" {
 				return hiErr(409, "role is assigned at first sign-in")
 			}
+			if status != "" && x.Status == "invited" {
+				// scion d34ffbc1 refuses any status change of an invited user.
+				return hiErr(409, "invited users cannot be suspended; remove the pending invite instead")
+			}
 			if role != "" && !h.keepRole[id] {
 				x.Role = role
 				if role != "admin" {
@@ -1517,11 +1521,49 @@ func TestHubIdentityRemoteLoginWithANewRowIsRefused(t *testing.T) {
 	}
 }
 
+// A removed login that was invited and never signed in is not patched (scion
+// refuses any status change of an invited user): its roles are removed and
+// the invite stays, so a re-add binds the same user again.
+func TestHubIdentityRemovedInvitedLoginIsUnboundNotPatched(t *testing.T) {
+	op, contact := "op@example.com", "c1@example.com"
+	e := newHIEnv(t, hiRemoteApp(true, hiOperator(op), hiContact(contact)))
+	e.mustRun()
+	c := e.hub.byEmail(contact)
+	if c == nil || c.Status != "invited" {
+		t.Fatalf("setup: contact %+v", c)
+	}
+
+	e.app.Remote.AllowedUsers = []config.RemoteUser{hiOperator(op)}
+	n := len(e.hub.events)
+	e.mustRun()
+	if got := hiEventsWith(e.hub.eventsFrom(n), "patch "+c.ID); len(got) > 0 {
+		t.Fatalf("an invited login was patched: %q", got)
+	}
+	if c.Status != "invited" || len(e.hub.boundTo(c.ID)) != 0 {
+		t.Fatalf("removed invited contact: %+v bound %q", c, e.hub.boundTo(c.ID))
+	}
+	if rr := e.remoteRole(); rr.Bound[contact] != "" {
+		t.Fatalf("remote-role.json still binds the removed login: %v", rr.Bound)
+	}
+	e.mustRun()
+
+	e.app.Remote.AllowedUsers = []config.RemoteUser{hiOperator(op), hiContact(contact)}
+	n = len(e.hub.events)
+	e.mustRun()
+	if got := hiEventsWith(e.hub.eventsFrom(n), "patch "+c.ID); len(got) > 0 {
+		t.Fatalf("the re-added invited login was patched: %q", got)
+	}
+	if e.record().Users[contact] != c.ID || !slices.Equal(e.hub.boundTo(c.ID), []string{contactRoleName}) {
+		t.Fatalf("re-added contact: users %v bound %q", e.record().Users, e.hub.boundTo(c.ID))
+	}
+}
+
 func TestHubIdentityRemovedLoginIsSuspendedThenReactivated(t *testing.T) {
 	op, contact := "op@example.com", "c1@example.com"
 	e := newHIEnv(t, hiRemoteApp(true, hiOperator(op), hiContact(contact)))
 	e.mustRun()
 	c := e.hub.byEmail(contact)
+	c.Status = "active" // signed in
 
 	e.app.Remote.AllowedUsers = []config.RemoteUser{hiOperator(op)}
 	e.mustRun()
@@ -2024,7 +2066,7 @@ func (d expSplitDoer) DoBody(ctx context.Context, method, path string, body []by
 		return 0, nil, err
 	}
 	if strings.HasPrefix(path, "/api/v1/admin/experiments") || strings.HasPrefix(path, "/api/v1/conduit/") || strings.HasPrefix(path, "/api/v1/artifacts") ||
-		strings.HasPrefix(path, "/api/v1/thread-groups") {
+		strings.HasPrefix(path, "/api/v1/thread-groups") || strings.HasPrefix(path, "/api/v1/hooks/") {
 		return d.exp.DoBody(ctx, method, path, body)
 	}
 	return d.rest.DoBody(ctx, method, path, body)

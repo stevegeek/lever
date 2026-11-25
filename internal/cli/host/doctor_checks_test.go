@@ -489,6 +489,52 @@ func TestCheckGoToolchainNotNeededForAPrebuiltScion(t *testing.T) {
 	}
 }
 
+// TestCheckGoToolchainOlderThanThePinNeeds: scion's go.mod names the oldest
+// Go that builds it. An older local Go downloads that toolchain, which the
+// row explains, or refuses the build under GOTOOLCHAIN=local, which fails it.
+func TestCheckGoToolchainOlderThanThePinNeeds(t *testing.T) {
+	probes := func(goVer, toolchain string) doctorProbes {
+		return doctorProbes{
+			goVersion:   func() (string, error) { return "go version " + goVer + " linux/amd64\n", nil },
+			goToolchain: func() (string, error) { return toolchain + "\n", nil },
+		}
+	}
+	pin := config.ScionConfig{Version: scionbin.ReleasePin}
+	need := "go" + scionbin.ReleasePinGo
+
+	r := checkGoToolchain(pin, false, probes("go1.26.9", "auto"))
+	if !r.ok || !strings.Contains(r.detail, "downloads "+need) || !strings.Contains(r.detail, "GOPROXY=off") {
+		t.Fatalf("an older Go under GOTOOLCHAIN=auto passes and explains the download; got %+v", r)
+	}
+	for _, tc := range []string{"local", "path", "go1.26.0+path"} {
+		r = checkGoToolchain(pin, false, probes("go1.26.9", tc))
+		if r.ok || !strings.Contains(r.detail, "GOTOOLCHAIN="+tc) || !strings.Contains(r.fix, "GOTOOLCHAIN=auto") {
+			t.Fatalf("%s: an older Go that may not download a toolchain fails; got %+v", tc, r)
+		}
+	}
+	r = checkGoToolchain(pin, true, probes("go1.26.9", "local"))
+	if !r.ok || !strings.Contains(r.detail, "prebuilt") {
+		t.Fatalf("a prebuilt scion needs no Go; got %+v", r)
+	}
+	for _, v := range []string{need, "go1.27.0"} {
+		if r = checkGoToolchain(pin, false, probes(v, "local")); !r.ok || r.detail != "go version "+v+" linux/amd64" {
+			t.Fatalf("%s is new enough; got %+v", v, r)
+		}
+	}
+	// A pin lever knows nothing about is not judged.
+	if r = checkGoToolchain(config.ScionConfig{Version: "666333f9"}, false, probes("go1.20.1", "local")); !r.ok {
+		t.Fatalf("an unknown pin's requirement is not guessed; got %+v", r)
+	}
+	// A source tree's go.mod decides for itself.
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "go.mod"), []byte("module github.com/GoogleCloudPlatform/scion\n\ngo 1.30.2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if r = checkGoToolchain(config.ScionConfig{Source: src}, false, probes(need, "local")); r.ok || !strings.Contains(r.detail, "needs Go 1.30.2") {
+		t.Fatalf("the source tree's go line decides; got %+v", r)
+	}
+}
+
 func TestScionPrebuiltFalseWithoutAMatchingRelease(t *testing.T) {
 	app := &config.App{Scion: config.ScionConfig{Version: "666333f9"}}
 	if scionPrebuilt(app) {
@@ -1330,6 +1376,10 @@ func TestCheckManagerLive(t *testing.T) {
 		{"running, stalled for days", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days", Activity: "stalled", LastActivityEvent: now.Add(-47 * time.Hour)}), true, "activity stalled, 47h0m0s ago", ""},
 		{"running, offline", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days", Activity: "offline"}), false, "offline", "lever attach"},
 		{"running, crashed", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days", Activity: "crashed"}), false, "crashed", "lever attach"},
+		// idle is the manager waiting for work; harness_error is a live harness
+		// whose turns fail on a model, API or auth error.
+		{"running, idle", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days", Activity: "idle", LastActivityEvent: now.Add(-2 * time.Hour)}), true, "activity idle, 2h0m0s ago", ""},
+		{"running, harness error", listing(scion.Agent{Slug: "assistant", Phase: "running", ContainerStatus: "Up 4 days", Activity: "harness_error", LastActivityEvent: now.Add(-5 * time.Minute)}), false, "model, API or auth error", "credential row"},
 		{"absent", listing(scion.Agent{Slug: "scratch", Phase: "running", ContainerStatus: "Up 1 second"}), false, "no record", "lever up"},
 		{"crashed", listing(scion.Agent{Slug: "assistant", Phase: "error", ContainerStatus: "Exited (1) 3 seconds ago"}), false, `phase "error"`, "--force"},
 		{"suspended", listing(scion.Agent{Slug: "assistant", Phase: "suspended", ContainerStatus: "stopped"}), false, `phase "suspended"`, "resume"},

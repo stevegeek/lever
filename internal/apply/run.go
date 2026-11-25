@@ -2144,10 +2144,10 @@ func (r *run) prepareAPIKeyMode(ctx context.Context, jp string) error {
 // (nil when absent), after refusing to keep a record whose stored role the
 // installed scion would read as full (see Deps.VerifyAgentRole).
 //
-// scion's verbs are state-specific, hence observe then act: start creates (over
-// a stopped record its 409 "already exists" text matches AlreadyRunning, so a
-// blind start false-succeeds), and resume covers suspended and stopped records
-// with claude --continue.
+// scion's verbs are state-specific, hence observe then act: start creates
+// (over a suspended, stopped or halted record the hub answers 409
+// agent_exists_resumable, see errManagerExistsResumable), and resume covers
+// those records, with claude --continue for a suspended one.
 //
 // The runtime broker registers asynchronously after the Hub API, so this first
 // hub call can still hit that window (on a cold VM as "deadline exceeded"); it
@@ -2345,6 +2345,9 @@ func (r *run) startManagerCreate(ctx context.Context, opts scion.StartOpts, must
 	created := false
 	err := r.retryOnBrokerUnavailable(ctx, func() error {
 		startErr := r.d.managerScion().Start(ctx, opts)
+		if startErr != nil && scion.IsExistsResumable(startErr) && !mustCreate {
+			return fmt.Errorf("%w: %s", errManagerExistsResumable, termsafe.Sanitize(scion.ErrSummary(startErr)))
+		}
 		// A manager already running or existing is success, not error, but it is not a
 		// fresh session, so it is not recorded as one.
 		if startErr != nil && scion.AlreadyRunning(startErr) {
@@ -2375,6 +2378,12 @@ func (r *run) startManagerCreate(ctx context.Context, opts scion.StartOpts, must
 	}
 	return err
 }
+
+// errManagerExistsResumable: the create found a manager record the observe
+// step missed (scion's lazy hub sync can briefly read one as absent), in a
+// phase the hub resumes only on an explicit resume. ensureUp observes again
+// and resumes it through the usual checks.
+var errManagerExistsResumable = errors.New("start-manager: the hub holds a suspended, stopped or halted manager record that lever's first look missed, so it created nothing; run `lever up` again to resume it")
 
 // recoverDeleteAndCreate logs the loud discard notice, deletes the manager
 // record, and creates a fresh manager only once the record is gone. Every
@@ -2512,9 +2521,9 @@ func (r *run) confirmManagerContainerGone(ctx context.Context) error {
 
 // waitManagerLive polls until the manager's record shows phase running and a
 // live container (scion.ContainerLive). It backstops both false successes: a
-// blind scion start's 409 text matches AlreadyRunning, and scion resume and
-// start report success for a container that dies moments later (scion's
-// liveness check is a single immediate poll). Trusting the observed record, not
+// start's 409 over a record that is starting or running matches
+// AlreadyRunning, and scion resume and start report success for a container
+// that dies moments later (scion's liveness check is a single immediate poll). Trusting the observed record, not
 // exit codes or error wording, is what makes start-manager's success mean
 // something.
 func (r *run) waitManagerLive(ctx context.Context, jp string, acted bool, onHarness func()) error {

@@ -9,15 +9,25 @@ import (
 
 // Resources is the memory and CPU limits of one agent container, passed to
 // scion as resources.limits (podman's --memory and --cpus). Unset fields get
-// scion's defaults. Create-time only: scion stores them in the agent record
-// and a resume reuses them.
+// scion's defaults: a 2-CPU limit and no memory limit. Create-time only:
+// scion stores them in the agent record and a resume reuses them.
 type Resources struct {
 	// Memory is the hard limit past which the container is OOM-killed, which
 	// keeps one agent from taking the VM down.
 	Memory string `yaml:"memory" json:",omitempty"`
-	// CPU is in cores ("1.5") or millicores ("500m").
+	// CPU is in cores ("1.5") or millicores ("500m"), or CPUNone.
 	CPU string `yaml:"cpu" json:",omitempty"`
 }
+
+// CPUNone as resources.cpu runs the container with no CPU limit, sharing
+// all of the VM's vCPUs. An unset cpu is not the same: it gets scion's
+// 2-CPU default.
+const CPUNone = "none"
+
+// scionNoCPULimit is how CPUNone reaches scion. scion fills in its default
+// at every start only when limits.cpu is empty, and passes this on as
+// "--cpus 0", which podman and docker read as no limit.
+const scionNoCPULimit = "0"
 
 func (r Resources) IsZero() bool { return r.Memory == "" && r.CPU == "" }
 
@@ -75,7 +85,11 @@ func (r Resources) ScionLimits() (memory, cpu string) {
 	if strings.HasSuffix(memory, "iB") {
 		memory = strings.TrimSuffix(memory, "B")
 	}
-	return memory, r.CPU
+	cpu = r.CPU
+	if cpu == CPUNone {
+		cpu = scionNoCPULimit
+	}
+	return memory, cpu
 }
 
 // validateResources: a limit larger than the VM is no limit, and almost
@@ -95,10 +109,10 @@ func (a *App) validateResources(who string, r Resources) error {
 			}
 		}
 	}
-	if r.CPU != "" {
+	if r.CPU != "" && r.CPU != CPUNone {
 		m, ok := agentCPUMillis(r.CPU)
 		if !ok {
-			return fmt.Errorf("config: %s resources.cpu %q invalid (want cores such as 1 or 1.5, or millicores such as 500m)", who, r.CPU)
+			return fmt.Errorf("config: %s resources.cpu %q invalid (want cores such as 1 or 1.5, millicores such as 500m, or %q for no limit)", who, r.CPU, CPUNone)
 		}
 		if m <= 0 {
 			return fmt.Errorf("config: %s resources.cpu %q must be more than 0", who, r.CPU)

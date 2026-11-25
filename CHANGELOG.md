@@ -7,7 +7,20 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Added
+
+- **`resources.cpu: none` runs an agent with no CPU limit**, for the manager, a worker or a
+  template. The container then shares all of the VM's vCPUs; memory stays capped by
+  `resources.memory`. lever sends scion `limits.cpu: "0"`, which scion keeps instead of filling in
+  its default, and podman reads `--cpus 0` as no limit. An unset `cpu` still gets scion's 2-CPU
+  limit. Create-time only, like the other limits.
+
 ### Changed
+
+- **The memory check covers every config, not only one with templates.** Config load refuses a
+  config whose manager, workers and template instances could not all run at once in the VM's
+  `memory` (with 1GiB for the guest). With `broker.max_running_workers` set, only that many of the
+  largest workers and instances count, so a capped config is no longer over-counted.
 
 - **scion is pinned to `e8160a10`, its nightly-20261112 (was `65531d7f`).** The examples, the
   release's prebuilt scion, the Makefile's `SCION_VERSION`, the Lima e2e scripts and the docs move to
@@ -120,6 +133,9 @@ version bump moves the block under the new version heading.
 
 ### Upgrade
 
+- **A config without templates can now fail the memory check** when its workers' `resources.memory`
+  add up to more than the VM's `memory`. Lower the limits, set `broker.max_running_workers`, or
+  raise `memory`.
 - **Jail ABI 17.** The agent image changed (sciontool and, in the slim image, scion from the new
   pin) and so did in-jail lever code: rebuild the agent image (`make lever-image` or `make
   lever-image-slim`, then any instance image built from it) and recreate the manager on it with

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"cmp"
 	"fmt"
 	"path"
 	"path/filepath"
@@ -372,7 +373,7 @@ func (a *App) checkDelegationsToManagerTemplates() error {
 }
 
 // validateTemplateFit refuses templates whose running instances could not
-// all run: past scion's running cap, or past the VM's memory.
+// all run at once past scion's running cap.
 func (a *App) validateTemplateFit() error {
 	if len(a.Templates) == 0 {
 		return nil
@@ -388,26 +389,46 @@ func (a *App) validateTemplateFit() error {
 		return fmt.Errorf("config: the manager, the workers and every template's max_running come to %d agents running at once, past scion's cap of %d; lower max_running or set broker.max_running_workers to at most %d",
 			running+1, scionRunningCap, scionRunningCap-1)
 	}
+	return nil
+}
+
+// validateMemoryFit refuses a config whose agents could not all run at once
+// within the VM's memory. It counts the manager, every worker and every
+// template instance up to max_running; with broker.max_running_workers set,
+// only that many of the largest workers and instances. An agent with no
+// memory limit counts as 0, since nothing bounds it.
+func (a *App) validateMemoryFit() error {
 	vm, ok := sizeBytes(a.Memory)
 	if a.Memory == "" || !ok {
 		return nil
+	}
+	var slots []int64
+	for _, g := range a.Workers {
+		n, _ := agentMemoryBytes(g.Resources.Memory)
+		slots = append(slots, n)
+	}
+	for _, t := range a.Templates {
+		n, _ := agentMemoryBytes(t.Resources.Memory)
+		for range t.MaxRunning {
+			slots = append(slots, n)
+		}
+	}
+	capped := ""
+	if c := a.Broker.MaxRunningWorkers; c > 0 && c < len(slots) {
+		slices.SortFunc(slots, func(x, y int64) int { return cmp.Compare(y, x) })
+		slots = slots[:c]
+		capped = fmt.Sprintf(" (the largest %d, broker.max_running_workers)", c)
 	}
 	total := int64(agentOverheadMemory)
 	if n, ok := agentMemoryBytes(a.Manager.Resources.Memory); ok {
 		total += n
 	}
-	for _, g := range a.Workers {
-		if n, ok := agentMemoryBytes(g.Resources.Memory); ok {
-			total += n
-		}
-	}
-	for _, t := range a.Templates {
-		n, _ := agentMemoryBytes(t.Resources.Memory)
-		total += int64(t.MaxRunning) * n
+	for _, n := range slots {
+		total += n
 	}
 	if total > vm {
-		return fmt.Errorf("config: the manager's and workers' resources.memory, every template's max_running times its resources.memory, and 1GiB for the guest come to %dMiB, more than the VM's memory %q; lower max_running or the memory limits, or raise memory",
-			total>>20, a.Memory)
+		return fmt.Errorf("config: the resources.memory of the manager and of the workers and template instances that can run at once%s, plus 1GiB for the guest, come to %dMiB, more than the VM's memory %q; lower max_running, broker.max_running_workers or the memory limits, or raise memory",
+			capped, total>>20, a.Memory)
 	}
 	return nil
 }

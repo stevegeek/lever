@@ -85,6 +85,10 @@ func TestValidateResources(t *testing.T) {
 		{"cpu over VM", App{CPUs: 2}, Resources{CPU: "2.5"}, "more than the VM's cpus (2)"},
 		{"cpu millis over VM", App{CPUs: 2}, Resources{CPU: "2001m"}, "more than the VM's cpus (2)"},
 		{"cpu equal VM", App{CPUs: 2}, Resources{CPU: "2"}, ""},
+		{"cpu none", App{CPUs: 2}, Resources{CPU: "none"}, ""},
+		{"cpu none with memory", App{}, Resources{Memory: "2GiB", CPU: "none"}, ""},
+		{"cpu None", App{}, Resources{CPU: "None"}, "invalid"},
+		{"cpu unlimited", App{}, Resources{CPU: "unlimited"}, `or "none" for no limit`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -111,6 +115,8 @@ func TestScionLimits(t *testing.T) {
 		{Resources{Memory: "1536MiB", CPU: "1.5"}, "1536Mi", "1.5"},
 		{Resources{Memory: "2GiB"}, "2Gi", ""},
 		{Resources{Memory: "2Gi", CPU: "500m"}, "2Gi", "500m"},
+		{Resources{Memory: "2GiB", CPU: "none"}, "2Gi", "0"},
+		{Resources{CPU: "none"}, "", "0"},
 	}
 	for _, c := range cases {
 		mem, cpu := c.in.ScionLimits()
@@ -146,5 +152,78 @@ func TestEffectiveGuestProfile(t *testing.T) {
 		if got := a.EffectiveGuestProfile(); got != c.want {
 			t.Errorf("%s set=%q: got %q, want %q", c.backend, c.set, got, c.want)
 		}
+	}
+}
+
+func TestLoadCPUNone(t *testing.T) {
+	p := writeConfig(t, `name: demo
+backend: lima
+tree: ./tree
+cpus: 16
+memory: 12GiB
+manager:
+  image: lever.local/lever-claude:latest
+  resources: {memory: 3GiB, cpu: none}
+workers:
+  - name: appa
+    dir: workers/appa
+    resources: {memory: 2GiB, cpu: none}
+  - name: appb
+    dir: workers/appb
+broker:
+  llm_auth: subscription
+`)
+	app, err := LoadNoHostChecks(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, cpu := app.Manager.Resources.ScionLimits(); cpu != "0" {
+		t.Errorf("manager cpu = %q, want \"0\"", cpu)
+	}
+	if _, cpu := app.Workers[0].Resources.ScionLimits(); cpu != "0" {
+		t.Errorf("worker appa cpu = %q, want \"0\"", cpu)
+	}
+	// Unset keeps scion's default: nothing is sent.
+	if _, cpu := app.Workers[1].Resources.ScionLimits(); cpu != "" {
+		t.Errorf("worker appb cpu = %q, want unset", cpu)
+	}
+}
+
+func TestValidateMemoryFit(t *testing.T) {
+	w := func(mem string) Worker { return Worker{Resources: Resources{Memory: mem}} }
+	tmpl := func(mem string, running int) Template {
+		return Template{Resources: Resources{Memory: mem}, MaxRunning: running}
+	}
+	cases := []struct {
+		name    string
+		app     App
+		wantErr string
+	}{
+		{"no VM memory", App{Workers: []Worker{w("8GiB"), w("8GiB")}}, ""},
+		{"fits", App{Memory: "8GiB", Manager: Manager{Resources: Resources{Memory: "3GiB"}}, Workers: []Worker{w("2GiB"), w("2GiB")}}, ""},
+		{"workers past the VM", App{Memory: "8GiB", Manager: Manager{Resources: Resources{Memory: "3GiB"}}, Workers: []Worker{w("2GiB"), w("2GiB"), w("2GiB")}},
+			`come to 10240MiB, more than the VM's memory "8GiB"`},
+		{"uncapped workers count 0", App{Memory: "4GiB", Workers: []Worker{w(""), w(""), w("3GiB")}}, ""},
+		// Only the largest max_running_workers count: 1 + 3 + 2 + 2 = 8.
+		{"cap counts the largest", App{Memory: "8GiB", Manager: Manager{Resources: Resources{Memory: "3GiB"}}, Broker: Broker{MaxRunningWorkers: 2},
+			Workers: []Worker{w("2GiB"), w("1GiB"), w("2GiB"), w("2GiB")}}, ""},
+		{"cap still past the VM", App{Memory: "8GiB", Manager: Manager{Resources: Resources{Memory: "3GiB"}}, Broker: Broker{MaxRunningWorkers: 2},
+			Workers: []Worker{w("3GiB"), w("1GiB"), w("3GiB")}}, "the largest 2, broker.max_running_workers"},
+		{"template instances", App{Memory: "8GiB", Templates: []Template{tmpl("2GiB", 4)}}, "come to 9216MiB"},
+		{"template instances under the cap", App{Memory: "8GiB", Broker: Broker{MaxRunningWorkers: 3}, Templates: []Template{tmpl("2GiB", 4)}}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := c.app.validateMemoryFit()
+			if c.wantErr == "" {
+				if err != nil {
+					t.Fatalf("want valid, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Fatalf("want error containing %q, got %v", c.wantErr, err)
+			}
+		})
 	}
 }

@@ -29,6 +29,14 @@ func TestTemplateSpecs(t *testing.T) {
 		!strings.HasSuffix(w.TicketDir, "/s-abc234") || !strings.Contains(w.Image, "s:1") || w.Resources.Memory == "" || w.Shared != nil || w.Recyclable {
 		t.Fatalf("%+v", w)
 	}
+	if w.MemoryBytes != 2<<30 || len(ts.Sizes) != 1 || ts.DefaultMemory.Name != "2GiB" || ts.DefaultMemory.Scion != "2Gi" {
+		t.Fatalf("memory: spec %d sizes %+v default %+v", w.MemoryBytes, ts.Sizes, ts.DefaultMemory)
+	}
+	app.Templates[0].MemorySizes = []string{"8GiB", "2GiB", "4GiB"}
+	ts = TemplateSpecs(app, "/lever", "1000", "v1")[0]
+	if len(ts.Sizes) != 3 || ts.Sizes[0].Name != "2GiB" || ts.Sizes[2].Bytes != 8<<30 || ts.DefaultMemory.Name != "2GiB" {
+		t.Fatalf("sizes %+v default %+v", ts.Sizes, ts.DefaultMemory)
+	}
 }
 
 // A configured name that a spawned agent in the registry used refuses the

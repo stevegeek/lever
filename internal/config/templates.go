@@ -36,8 +36,12 @@ type Template struct {
 	Obtain           []Grant         `yaml:"obtain" json:",omitempty"`
 	Delegate         []DelegateGrant `yaml:"delegate" json:",omitempty"`
 	// Resources must name a memory limit: the fit check below needs it.
-	Resources     Resources `yaml:"resources"`
-	SkipRmConfirm bool      `yaml:"even_more_dangerously_skip_permissions" json:",omitempty"`
+	// With MemorySizes, resources.memory is the default size.
+	Resources Resources `yaml:"resources"`
+	// MemorySizes are the memory limits a spawn may choose from (`spawn
+	// --memory`); unset: resources.memory only.
+	MemorySizes   []string `yaml:"memory_sizes" json:",omitempty"`
+	SkipRmConfirm bool     `yaml:"even_more_dangerously_skip_permissions" json:",omitempty"`
 	// MaxInstances bounds the instances that exist (any phase), so disk and
 	// hub records stay bounded.
 	MaxInstances int `yaml:"max_instances"`
@@ -288,9 +292,12 @@ func (a *App) validateTemplate(t Template) error {
 		return fmt.Errorf("config: %s llm_auth %q invalid (want subscription|api-key)", who, t.LLMAuth)
 	}
 	if t.Resources.Memory == "" {
-		return fmt.Errorf("config: %s needs resources.memory: lever checks that max_running of them fit in the VM", who)
+		return fmt.Errorf("config: %s needs resources.memory: lever admits its agents by their memory", who)
 	}
 	if err := a.validateResources(who, t.Resources); err != nil {
+		return err
+	}
+	if err := a.validateMemorySizes(who, t); err != nil {
 		return err
 	}
 	if t.MaxRunning < 1 {
@@ -394,47 +401,141 @@ func (a *App) validateTemplateFit() error {
 	return nil
 }
 
-// validateMemoryFit refuses a config whose agents could not all run at once
-// within the VM's memory. It counts the manager, every worker and every
-// template instance up to max_running; with broker.max_running_workers set,
-// only that many of the largest workers and instances. An agent with no
-// memory limit counts as 0, since nothing bounds it.
-func (a *App) validateMemoryFit() error {
-	vm, ok := sizeBytes(a.Memory)
-	if a.Memory == "" || !ok {
+// MaxMemorySizes bounds a template's memory_sizes.
+const MaxMemorySizes = 8
+
+// validateMemorySizes: each size is a valid limit, none is listed twice
+// (by value), and resources.memory, the default, is one of them.
+func (a *App) validateMemorySizes(who string, t Template) error {
+	if len(t.MemorySizes) == 0 {
 		return nil
 	}
-	var slots []int64
+	if len(t.MemorySizes) > MaxMemorySizes {
+		return fmt.Errorf("config: %s memory_sizes lists %d sizes; at most %d", who, len(t.MemorySizes), MaxMemorySizes)
+	}
+	seen := map[int64]string{}
+	for _, m := range t.MemorySizes {
+		if err := a.validateResources(who+" memory_sizes", Resources{Memory: m}); err != nil {
+			return err
+		}
+		n, _ := agentMemoryBytes(m)
+		if prev, ok := seen[n]; ok {
+			return fmt.Errorf("config: %s memory_sizes lists %q and %q, the same size", who, prev, m)
+		}
+		seen[n] = m
+	}
+	def, _ := agentMemoryBytes(t.Resources.Memory)
+	if _, ok := seen[def]; !ok {
+		return fmt.Errorf("config: %s resources.memory %q is the default size and must be one of memory_sizes %v", who, t.Resources.Memory, t.MemorySizes)
+	}
+	return nil
+}
+
+// TemplateMemorySize is one memory size an instance may be spawned with.
+type TemplateMemorySize struct {
+	// Name is the size as the config spells it ("8GiB").
+	Name  string
+	Bytes int64
+	// Scion is the limit in scion's spelling ("8Gi").
+	Scion string
+}
+
+// Sizes are the memory sizes t's instances may be spawned with, smallest
+// first: memory_sizes, or resources.memory alone.
+func (t Template) Sizes() []TemplateMemorySize {
+	names := t.MemorySizes
+	if len(names) == 0 {
+		names = []string{t.Resources.Memory}
+	}
+	var out []TemplateMemorySize
+	for _, m := range names {
+		n, ok := agentMemoryBytes(m)
+		if !ok {
+			continue
+		}
+		sc, _ := Resources{Memory: m}.ScionLimits()
+		// One spelling whatever the config wrote ("8Gi", "8192MiB"): the
+		// name is what a spawn, the record and every list carry.
+		out = append(out, TemplateMemorySize{Name: CanonicalMemory(n), Bytes: n, Scion: sc})
+	}
+	slices.SortFunc(out, func(x, y TemplateMemorySize) int { return cmp.Compare(x.Bytes, y.Bytes) })
+	return out
+}
+
+// CanonicalMemory spells n bytes as whole GiB, else MiB ("8GiB",
+// "1536MiB").
+func CanonicalMemory(n int64) string {
+	if n%(1<<30) == 0 {
+		return fmt.Sprintf("%dGiB", n>>30)
+	}
+	return fmt.Sprintf("%dMiB", n>>20)
+}
+
+// AgentMemoryBytes is an agent's resources.memory in bytes; 0 when unset
+// (nothing bounds it, so it counts as nothing against the budget).
+func AgentMemoryBytes(r Resources) int64 {
+	n, _ := agentMemoryBytes(r.Memory)
+	return n
+}
+
+// MemoryBudgetBytes is the memory the running agents' caps may add up to:
+// broker.memory_budget, else the VM's memory less the manager's limit and
+// 1GiB for the guest. false: no budget (no memory on either).
+func (a *App) MemoryBudgetBytes() (int64, bool) {
+	if a.Broker.MemoryBudget != "" {
+		return sizeBytes(a.Broker.MemoryBudget)
+	}
+	vm, ok := sizeBytes(a.Memory)
+	if a.Memory == "" || !ok {
+		return 0, false
+	}
+	n := vm - agentOverheadMemory - AgentMemoryBytes(a.Manager.Resources)
+	if n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// validateMemoryFit refuses a config with an agent that could never start:
+// one larger than the budget, or one that with the manager and the guest
+// would not fit in the VM. How many run at once is the budget's to decide,
+// at each start.
+func (a *App) validateMemoryFit() error {
+	if a.Broker.MemoryBudget != "" {
+		n, ok := sizeBytes(a.Broker.MemoryBudget)
+		if !ok || n <= 0 {
+			return fmt.Errorf("config: broker.memory_budget %q invalid (want e.g. 30GiB or 20480MiB)", a.Broker.MemoryBudget)
+		}
+		if vm, ok := sizeBytes(a.Memory); a.Memory != "" && ok && n > vm {
+			return fmt.Errorf("config: broker.memory_budget %q is more than the VM's memory %q", a.Broker.MemoryBudget, a.Memory)
+		}
+	}
+	type agent struct {
+		who string
+		n   int64
+	}
+	var agents []agent
 	for _, g := range a.Workers {
-		n, _ := agentMemoryBytes(g.Resources.Memory)
-		slots = append(slots, n)
+		agents = append(agents, agent{fmt.Sprintf("worker %q", g.Name), AgentMemoryBytes(g.Resources)})
 	}
 	for _, t := range a.Templates {
-		n, _ := agentMemoryBytes(t.Resources.Memory)
-		for range t.MaxRunning {
-			slots = append(slots, n)
+		if sz := t.Sizes(); len(sz) > 0 {
+			agents = append(agents, agent{fmt.Sprintf("template %q (size %s)", t.Name, sz[len(sz)-1].Name), sz[len(sz)-1].Bytes})
 		}
 	}
-	capped := ""
-	if c := a.Broker.MaxRunningWorkers; c > 0 && c < len(slots) {
-		slices.SortFunc(slots, func(x, y int64) int { return cmp.Compare(y, x) })
-		slots = slots[:c]
-		capped = fmt.Sprintf(" (the largest %d, broker.max_running_workers)", c)
-	}
-	total := int64(agentOverheadMemory)
-	if n, ok := agentMemoryBytes(a.Manager.Resources.Memory); ok {
-		total += n
-	}
-	for _, n := range slots {
-		total += n
-	}
-	if total > vm {
-		fix := "lower broker.max_running_workers or the memory limits, or raise memory"
-		if len(a.Templates) > 0 {
-			fix = "lower max_running, " + fix
+	vm, vmOK := sizeBytes(a.Memory)
+	vmOK = vmOK && a.Memory != ""
+	mgr := AgentMemoryBytes(a.Manager.Resources)
+	budget, budgetOK := a.MemoryBudgetBytes()
+	for _, g := range agents {
+		if vmOK && g.n+mgr+agentOverheadMemory > vm {
+			return fmt.Errorf("config: %s needs %dMiB; with the manager's %dMiB and 1GiB for the guest that is more than the VM's memory %q; lower its memory or raise memory",
+				g.who, g.n>>20, mgr>>20, a.Memory)
 		}
-		return fmt.Errorf("config: the resources.memory of the manager and of the workers and template instances that can run at once%s, plus 1GiB for the guest, come to %dMiB, more than the VM's memory %q; %s",
-			capped, total>>20, a.Memory, fix)
+		if budgetOK && g.n > budget {
+			return fmt.Errorf("config: %s needs %dMiB, more than the memory budget for agents (%dMiB); it could never start. Lower its memory or raise broker.memory_budget",
+				g.who, g.n>>20, budget>>20)
+		}
 	}
 	return nil
 }

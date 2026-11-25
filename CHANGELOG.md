@@ -45,6 +45,34 @@ version bump moves the block under the new version heading.
   logs a warning and the manager starts a new session on the boot prompt, as before. Workers, and
   the broker's re-enrol bounce of a halted manager, still start a new session.
 
+### Added
+
+- **Memory sizes at spawn, admitted by a memory budget** (T0657).
+  - A template may list `memory_sizes` (for example `[4GiB, 8GiB, 14GiB]`); `resources.memory` is
+    the default and must be one of them.
+  - `lever agent spawn TEMPLATE --memory 8GiB`, `lever-manager agent spawn ... --memory 8GiB` and
+    remote-verb `spawn TEMPLATE --memory 8GiB [LABEL...]` pick one. The size is kept in the agent's
+    record and sent to scion when the agent is created. A size the template does not offer is
+    refused (`bad-memory`).
+  - New `broker.memory_budget`: the memory the running agents' limits may add up to, workers and
+    spawned agents but not the manager. By default it is the VM's `memory` less the manager's limit
+    and 1GiB; with no `memory` there is no budget.
+  - Every spawn, start, resume, recycle, wake and re-enrol resume is admitted against it. A refusal
+    is `memory-busy` (409, exit 75) and gives the sizes, for example "it asks 8GiB of memory and
+    5GiB of the 30GiB memory budget is free". Suspended, stopped, halted and error agents count
+    nothing.
+  - `lever agent list`, `lever-manager agent spawned` and remote-verb `list --json` show each
+    agent's size, each template's sizes and default, and the budget's total, used and free bytes.
+    `lever doctor` has a *memory budget* row.
+
+### Changed
+
+- **The memory fit check no longer reserves `max_running` × `resources.memory` per template.** It
+  now refuses only an agent that could never start: a worker, or a template's largest size, that
+  with the manager's limit and 1GiB does not fit in the VM's `memory`, or that is larger than the
+  memory budget. How many run at once is the budget's to decide at each start. A config that passed
+  before still passes, and its default budget admits everything it did before.
+
 ## [1.0.0-beta.11] - 2026-11-25
 
 ### Added

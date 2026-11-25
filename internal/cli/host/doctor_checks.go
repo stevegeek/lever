@@ -2443,3 +2443,35 @@ func checkHubExperiments(ctx context.Context, st state.State, sshOn bool, known 
 	}
 	return checkResult{name, true, detail, ""}
 }
+
+// checkMemoryBudget reports the memory budget the broker admits running
+// agents by. It never fails: the config check refuses an agent that could
+// never fit.
+func checkMemoryBudget(app *config.App) checkResult {
+	const name = "memory budget"
+	n, ok := app.MemoryBudgetBytes()
+	if !ok {
+		return checkResult{name, true, "none (memory is unset): agents are not admitted by their memory limits", ""}
+	}
+	from := "broker.memory_budget"
+	if app.Broker.MemoryBudget == "" {
+		from = "memory " + app.Memory + " less the manager's limit and 1GiB for the guest"
+	}
+	detail := fmt.Sprintf("%s for running agents (%s)", fmtBytes(n), from)
+	// What every worker and every template's max_running at its largest
+	// size would take: more than the budget is fine, the budget refuses
+	// the start that does not fit.
+	var all int64
+	for _, g := range app.Workers {
+		all += config.AgentMemoryBytes(g.Resources)
+	}
+	for _, t := range app.Templates {
+		if sz := t.Sizes(); len(sz) > 0 {
+			all += sz[len(sz)-1].Bytes * int64(t.MaxRunning)
+		}
+	}
+	if all > n {
+		detail += fmt.Sprintf("; all workers and template instances at their largest size would need %s, so some starts will be refused while others run", fmtBytes(all))
+	}
+	return checkResult{name, true, detail, ""}
+}

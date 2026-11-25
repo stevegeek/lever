@@ -46,8 +46,11 @@ func ConfigHash(app *config.App) string {
 		SharedFolders   []config.SharedFolder `json:",omitempty"`
 		ManagerReadOnly []string              `json:",omitempty"`
 		DailyReset      string                `json:",omitempty"`
+		// MemoryBudget derives from memory and the manager's limit, which
+		// are not hashed otherwise: a change must reach the broker.
+		MemoryBudget int64 `json:",omitempty"`
 	}{app.Broker, app.Workers, app.Templates, app.Scion, ChatConfigured(app), WebSenders(app), agentMessagesStampOf(app), filesStampOf(app), app.ManagerClaude(),
-		app.SharedFolders, app.Manager.ReadOnly, app.Manager.DailyReset})
+		app.SharedFolders, app.Manager.ReadOnly, app.Manager.DailyReset, memoryBudget(app)})
 }
 
 // agentMessagesStamp is the part of remote.agent_messages the broker acts on.

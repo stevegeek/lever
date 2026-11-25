@@ -83,7 +83,9 @@ func TestTemplateRefusals(t *testing.T) {
 			"both use the prefix"},
 		"past scion's cap": {strings.Replace(strings.Replace(sessionTmpl, "max_running: 2", "max_running: 11", 1), "max_instances: 4", "max_instances: 11", 1),
 			"scion's cap"},
-		"past the VM's memory": {"memory: 4GiB\n" + sessionTmpl, "more than the VM's memory"},
+		"past the VM's memory": {"memory: 2560MiB\n" + sessionTmpl, "more than the VM's memory"},
+		"default not a size": {strings.Replace(sessionTmpl, "resources: {memory: 2GiB}", "resources: {memory: 2GiB}\n    memory_sizes: [4GiB, 8GiB]", 1),
+			"must be one of memory_sizes"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			base := templateBase

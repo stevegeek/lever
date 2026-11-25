@@ -51,6 +51,7 @@ func workerSpecOf(app *config.App, jailMount, jailUID string, g config.Worker, s
 		Claude:           g.Claude(),
 		// Own resources only — never the manager's.
 		Resources:     apply.ScionResources(g.Resources),
+		MemoryBytes:   config.AgentMemoryBytes(g.Resources),
 		SkipRmConfirm: g.SkipRmConfirm,
 	}
 	if shared {
@@ -78,6 +79,14 @@ func TemplateSpecs(app *config.App, jailMount, jailUID, version string) []broker
 			SkillRel:    agentSkillRel,
 			Skill:       skill,
 			IdleSuspend: t.IdleSuspend,
+		}
+		def := config.AgentMemoryBytes(t.Resources)
+		for _, sz := range t.Sizes() {
+			ms := broker.MemorySize{Name: sz.Name, Bytes: sz.Bytes, Scion: sz.Scion}
+			ts.Sizes = append(ts.Sizes, ms)
+			if sz.Bytes == def {
+				ts.DefaultMemory = ms
+			}
 		}
 		for _, g := range t.Obtain {
 			ts.Obtain = append(ts.Obtain, rules.Grant{Tool: g.Tool, Op: g.Op})

@@ -60,7 +60,7 @@ const remoteSlots = 4
 var remoteNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 // remoteGrammar is the whole grammar, for refusals.
-const remoteGrammar = "spawn TEMPLATE [LABEL...] (brief on stdin) | destroy NAME [--stop] | suspend NAME | resume NAME | list [--json]"
+const remoteGrammar = "spawn TEMPLATE [--memory SIZE] [LABEL...] (brief on stdin) | destroy NAME [--stop] | suspend NAME | resume NAME | list [--json]"
 
 // remoteRefusal is what the caller is told for a broker refusal: a fixed
 // text per reason, since the broker's own text is written for the operator
@@ -73,6 +73,10 @@ func remoteRefusal(reason string) string {
 		return "no agent of yours by that name"
 	case broker.ReasonTemplateFull:
 		return "the template has as many agents as it may: destroy one first"
+	case broker.ReasonMemoryBusy:
+		return "busy: the memory budget has too little free for that size; suspend one of your agents or pick a smaller size"
+	case broker.ReasonBadMemory:
+		return "the template has no such memory size: list --json shows its memory_sizes"
 	case broker.ReasonTemplateBusy, broker.ReasonWorkerCap, broker.ReasonBusy:
 		return "busy: too many agents are running, or another verb is acting on this one; try again later"
 	case broker.ReasonRateLimited:
@@ -94,6 +98,7 @@ type remoteVerb struct {
 	verb     string // spawn, destroy, suspend, resume, list
 	template string // spawn
 	label    string // spawn
+	memory   string // spawn, "" for the template's default
 	name     string // destroy, suspend, resume
 	stop     bool   // destroy
 }
@@ -130,7 +135,21 @@ func parseRemoteVerb(line string) (remoteVerb, error) {
 		if err := name("template", w[1]); err != nil {
 			return remoteVerb{}, err
 		}
-		v.template, v.label = w[1], strings.Join(w[2:], " ")
+		rest := w[2:]
+		if len(rest) > 0 && rest[0] == "--memory" {
+			if len(rest) < 2 {
+				return remoteVerb{}, errors.New("--memory needs a size, such as 8GiB")
+			}
+			if _, ok := broker.ParseMemorySize(rest[1]); !ok {
+				return remoteVerb{}, fmt.Errorf("memory size %q is not a number and MiB or GiB, such as 8GiB", rest[1])
+			}
+			v.memory, rest = rest[1], rest[2:]
+		} else if len(rest) > 0 && strings.HasPrefix(rest[0], "--memory") {
+			// "--memory=8GiB" would otherwise become a label and the spawn
+			// silently get the default size.
+			return remoteVerb{}, errors.New("write --memory SIZE, with a space, right after the template")
+		}
+		v.template, v.label = w[1], strings.Join(rest, " ")
 		if utf8.RuneCountInString(v.label) > broker.MaxAgentLabel {
 			return remoteVerb{}, fmt.Errorf("the label is longer than %d characters", broker.MaxAgentLabel)
 		}
@@ -183,6 +202,10 @@ type remoteList struct {
 	OK        bool             `json:"ok"`
 	Templates []remoteTemplate `json:"templates"`
 	Agents    []remoteAgent    `json:"agents"`
+	// Memory is the instance's memory budget for running agents and its
+	// use by every agent, the caller's or not: what a spawn or resume is
+	// checked against. Absent with no budget.
+	Memory *wire.MemoryTotals `json:"memory,omitempty"`
 }
 
 // remoteTemplate's counts are of every agent of the template, the caller's
@@ -193,6 +216,10 @@ type remoteTemplate struct {
 	MaxRunning   int    `json:"max_running"`
 	Instances    int    `json:"instances"`
 	Running      int    `json:"running"`
+	// MemorySizes are the sizes spawn --memory may name, smallest first;
+	// MemoryDefault is used without --memory.
+	MemorySizes   []string `json:"memory_sizes,omitempty"`
+	MemoryDefault string   `json:"memory_default,omitempty"`
 }
 
 type remoteAgent struct {
@@ -202,6 +229,10 @@ type remoteAgent struct {
 	State     string    `json:"state"`
 	Phase     string    `json:"phase,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
+	// Memory is its memory limit ("8GiB"), and MemoryBytes the same in
+	// bytes.
+	Memory      string `json:"memory,omitempty"`
+	MemoryBytes int64  `json:"memory_bytes,omitempty"`
 }
 
 func newAgentRemoteVerbCmd() *cobra.Command {
@@ -329,10 +360,13 @@ func runRemoteVerb(cmd *cobra.Command, templates []string, as, configPath string
 			return fail(err, broker.ReasonBadRequest, exitWorkerRefused)
 		}
 		var resp broker.SpawnResponse
-		if err := post(broker.PathOperatorAgentSpawn, broker.SpawnRequest{Template: v.template, Task: brief, Label: v.label, By: by}, &resp); err != nil {
+		if err := post(broker.PathOperatorAgentSpawn, broker.SpawnRequest{Template: v.template, Task: brief, Label: v.label, Memory: v.memory, By: by}, &resp); err != nil {
 			return err
 		}
 		res.OK, res.Name, res.Phase = true, safeToken(resp.Name), safeToken(resp.Phase)
+		if _, ok := broker.ParseMemorySize(resp.Memory); ok {
+			res.Memory = resp.Memory
+		}
 	case "destroy":
 		if err := own(); err != nil {
 			return err
@@ -371,14 +405,30 @@ func runRemoteVerb(cmd *cobra.Command, templates []string, as, configPath string
 			return err
 		}
 		out := remoteList{OK: true, Templates: []remoteTemplate{}, Agents: []remoteAgent{}}
+		if m := list.Memory; m != nil {
+			out.Memory = &wire.MemoryTotals{BudgetBytes: m.BudgetBytes, UsedBytes: m.UsedBytes, FreeBytes: m.FreeBytes}
+		}
 		for _, t := range list.Templates {
 			if slices.Contains(templates, t.Name) {
-				out.Templates = append(out.Templates, remoteTemplate{Name: t.Name, MaxInstances: t.MaxInstances, MaxRunning: t.MaxRunning, Instances: t.Instances, Running: t.Running})
+				rt := remoteTemplate{Name: t.Name, MaxInstances: t.MaxInstances, MaxRunning: t.MaxRunning, Instances: t.Instances, Running: t.Running}
+				for _, sz := range t.MemorySizes {
+					if _, ok := broker.ParseMemorySize(sz.Name); ok {
+						rt.MemorySizes = append(rt.MemorySizes, sz.Name)
+					}
+				}
+				if _, ok := broker.ParseMemorySize(t.MemoryDefault); ok {
+					rt.MemoryDefault = t.MemoryDefault
+				}
+				out.Templates = append(out.Templates, rt)
 			}
 		}
 		for _, a := range list.Agents {
 			if a.CreatedBy == by && a.State != broker.AgentDestroyed && slices.Contains(templates, a.Template) {
-				out.Agents = append(out.Agents, remoteAgent{Name: a.Name, Template: a.Template, Label: a.Label, State: a.State, Phase: safeToken(a.Phase), CreatedAt: a.CreatedAt})
+				ra := remoteAgent{Name: a.Name, Template: a.Template, Label: a.Label, State: a.State, Phase: safeToken(a.Phase), CreatedAt: a.CreatedAt}
+				if _, ok := broker.ParseMemorySize(a.Memory); ok {
+					ra.Memory, ra.MemoryBytes = a.Memory, a.MemoryBytes
+				}
+				out.Agents = append(out.Agents, ra)
 			}
 		}
 		printJSONLine(cmd, out)

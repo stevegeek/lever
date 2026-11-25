@@ -65,7 +65,12 @@ type fakeGH struct {
 	tagRace       bool             // the tag appears before the ref is created
 	merges        []map[string]any
 	reviews       map[int][]map[string]any
-	retargetTo    string // the PR's base after a merge (it was retargeted)
+	retargetTo    string            // the PR's base after a merge (it was retargeted)
+	compare       map[string]string // head sha -> compare status against the default branch
+	compareStatus int               // forces the compare answer's status
+	deleted       []string          // DELETE /git/refs/heads/ branches
+	moveOnRead    map[string]string // branch -> sha its head reads as from the second read on
+	headReads     map[string]int
 	reqs          []string
 	srv           *httptest.Server
 }
@@ -158,6 +163,13 @@ func (f *fakeGH) serve(w http.ResponseWriter, r *http.Request) {
 			f.json(w, 404, map[string]string{"message": "Not Found"})
 			return
 		}
+		if f.headReads == nil {
+			f.headReads = map[string]int{}
+		}
+		f.headReads[b]++
+		if m, ok := f.moveOnRead[b]; ok && f.headReads[b] > 1 {
+			sha = m
+		}
 		f.json(w, 200, map[string]any{"ref": "refs/heads/" + b, "object": map[string]any{"sha": sha, "type": "commit"}})
 	case strings.HasPrefix(p, "/git/ref/tags/") && r.Method == "GET":
 		tg := strings.TrimPrefix(p, "/git/ref/tags/")
@@ -176,6 +188,10 @@ func (f *fakeGH) serve(w http.ResponseWriter, r *http.Request) {
 			}
 			h := pl["head"].(map[string]any)
 			if q.Get("state") == "open" && pl["state"] == "open" && q.Get("head") == strings.Split(f.repo, "/")[0]+":"+h["ref"].(string) {
+				out = append(out, pl)
+			}
+			if q.Get("state") == "closed" && pl["state"] == "closed" && q.Get("head") == strings.Split(f.repo, "/")[0]+":"+h["ref"].(string) &&
+				q.Get("base") == pl["base"].(map[string]any)["ref"] {
 				out = append(out, pl)
 			}
 		}
@@ -287,6 +303,29 @@ func (f *fakeGH) serve(w http.ResponseWriter, r *http.Request) {
 		f.refs = append(f.refs, body)
 		f.tags = append(f.tags, tg)
 		f.json(w, 201, map[string]any{"ref": ref, "object": map[string]any{"sha": body["sha"], "type": "commit"}})
+	case strings.HasPrefix(p, "/compare/") && r.Method == "GET":
+		if f.compareStatus != 0 {
+			f.json(w, f.compareStatus, map[string]string{"message": "Server Error"})
+			return
+		}
+		base, head, _ := strings.Cut(strings.TrimPrefix(p, "/compare/"), "...")
+		if base != f.defaultBranch {
+			f.t.Errorf("compare base %q", base)
+		}
+		st, ok := f.compare[head]
+		if !ok {
+			st = "diverged"
+		}
+		f.json(w, 200, map[string]any{"status": st})
+	case strings.HasPrefix(p, "/git/refs/heads/") && r.Method == "DELETE":
+		b := strings.TrimPrefix(p, "/git/refs/heads/")
+		if _, ok := f.heads[b]; !ok {
+			f.json(w, 422, map[string]string{"message": "Reference does not exist"})
+			return
+		}
+		delete(f.heads, b)
+		f.deleted = append(f.deleted, b)
+		w.WriteHeader(204)
 	case p == "/releases" && r.Method == "POST":
 		f.t.Errorf("release must create only the tag; a GitHub release was requested: %v", body)
 		f.json(w, 201, map[string]any{})

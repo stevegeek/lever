@@ -5,9 +5,10 @@
 // branch with a short-lived GitHub App token. The jail never holds a GitHub
 // credential.
 //
-// With -ops it also offers pr_open, pr_status, pr_merge and release, each its
-// own capability and each call with a token narrowed to the repository and
-// the permissions that operation needs.
+// With -ops it also offers pr_open, pr_status, pr_merge, release, the CI and
+// issue operations and branch_delete, each its own capability and each call
+// with a token narrowed to the repository and the permissions that operation
+// needs.
 package main
 
 import (
@@ -326,6 +327,12 @@ func issueCloseBackstop(o opts) func(captool.ValidatedContext, map[string]string
 	})
 }
 
+func branchDeleteBackstop(o opts) func(captool.ValidatedContext, map[string]string) error {
+	return opBackstop(ghpush.OpBranchDelete, o.repos, func(a map[string]string) error {
+		return ghpush.ValidateBranch(a["branch"], o.prefix)
+	})
+}
+
 func prMergeBackstop(o opts) func(captool.ValidatedContext, map[string]string) error {
 	return opBackstop(ghpush.OpPRMerge, o.repos, func(a map[string]string) error {
 		if err := ghpush.ValidateNumber(a["number"]); err != nil {
@@ -543,6 +550,18 @@ func operations(o opts, p *ghpush.Pusher, g *ghpush.Ops) []captool.Operation {
 			Backstop:    issueCloseBackstop(o),
 			Handler: func(c captool.ValidatedContext, a map[string]string) (any, error) {
 				return asResult(g.IssueClose(context.Background(), c.Caller, a["repo"], a["number"], a["reason"], a["body"]))
+			},
+		},
+		ghpush.OpBranchDelete: {
+			Name: ghpush.OpBranchDelete,
+			Description: "delete a " + o.prefix + "* branch on GitHub, only when everything on it is in the default branch: " +
+				"its head is in the default branch, or a PR into the default branch was merged at exactly that head (a squash merge). " +
+				"Refused when the branch has an open PR or unmerged commits",
+			Params:      []captool.ParamSpec{repoParam, {Name: "branch", Type: "string", Description: "branch to delete, must start with " + o.prefix}},
+			CaveatParam: caveat,
+			Backstop:    branchDeleteBackstop(o),
+			Handler: func(c captool.ValidatedContext, a map[string]string) (any, error) {
+				return asResult(g.BranchDelete(context.Background(), c.Caller, a["repo"], a["branch"]))
 			},
 		},
 	}

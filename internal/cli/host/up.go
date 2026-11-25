@@ -85,9 +85,13 @@ func newUpCmd(bf BackendFactory) *cobra.Command {
 				deps.BackupManagerConversation = conv.backupBeforeNoConversationFresh(&saved)
 			}
 			deps.ManagerConversationEmpty = conv.conversationEmpty
+			// A halted manager (the platform ended its run) is resumed by the hub in
+			// a new claude session: its conversation is backed up before the resume
+			// and restored once it is up.
+			afterRun := conv.haltedRestore(&deps, rep)
 			// The whole plan, as apply runs it: each step converges on the config as
 			// it is now, and skips only what its own check finds done.
-			if err := apply.Run(ctx, app, deps, apply.PlanOpts{Fresh: fresh, Attach: attachTTY, FreshWithoutConversation: !fresh}); err != nil {
+			if err := afterRun(ctx, apply.Run(ctx, app, deps, apply.PlanOpts{Fresh: fresh, Attach: attachTTY, FreshWithoutConversation: !fresh})); err != nil {
 				if saved != nil {
 					rep.Log(fmt.Sprintf("lever: the previous conversation is backed up as %s; once the manager is up, `lever conversation restore %s` brings it back", saved.ID, saved.ID))
 				}

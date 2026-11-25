@@ -321,6 +321,13 @@ type Deps struct {
 	// nothing up. It also runs, as a second guard, before the fresh start that
 	// replaces a resume with no conversation (PlanOpts.FreshWithoutConversation).
 	BackupManagerConversation func(ctx context.Context, rec *scion.Agent) error
+	// BackupHaltedConversation, when set, runs just before a halted manager
+	// record rec is resumed. scion's hub restarts a halted record in a new
+	// claude session (no --continue), so the caller backs the conversation up
+	// here and restores it once the manager is up. saved is false when there
+	// was no conversation to back up. An error is logged and the resume goes
+	// on in the new session, as it would with nil.
+	BackupHaltedConversation func(ctx context.Context, rec *scion.Agent) (saved bool, err error)
 	// ManagerConversationEmpty proves, from the guest, that the manager's agent
 	// home holds no conversation: no transcript with content in .claude/projects,
 	// no link or special file there, and no other projects directory beside it

@@ -631,7 +631,8 @@ func newApplyCmd(bf BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := apply.Run(ctx, app, w.deps, apply.PlanOpts{}); err != nil {
+			afterRun := newConvOps(w, app, stateFor(path)).haltedRestore(&w.deps, run.rep)
+			if err := afterRun(ctx, apply.Run(ctx, app, w.deps, apply.PlanOpts{})); err != nil {
 				return err
 			}
 			recordConverge(app, stateFor(path), "apply", w.log)

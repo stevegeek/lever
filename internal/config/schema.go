@@ -211,7 +211,11 @@ type Manager struct {
 	// on a new conversation once a day then. Empty is off.
 	DailyReset string `yaml:"daily_reset"`
 	// Resources is create-time only.
-	Resources      Resources       `yaml:"resources"`
+	Resources Resources `yaml:"resources"`
+	// SkipRmConfirm lets Claude Code delete critical paths with no
+	// confirmation (scion.SkipPermissionsEnv). Off unless set. Create-time
+	// only, like Resources.
+	SkipRmConfirm  bool            `yaml:"even_more_dangerously_skip_permissions"`
 	AllowPorts     []int           `yaml:"allow_ports"`
 	CredentialFile string          `yaml:"credential_file"`
 	LLMAuth        LLMAuthMode     `yaml:"llm_auth"`
@@ -252,6 +256,8 @@ type Worker struct {
 	// Resources is not inherited from the manager and is create-time only.
 	// The json tag keeps it out of brokerctl.ConfigHash while unset.
 	Resources Resources `yaml:"resources" json:",omitzero"`
+	// SkipRmConfirm is as for the manager, and not inherited from it.
+	SkipRmConfirm bool `yaml:"even_more_dangerously_skip_permissions" json:",omitempty"`
 }
 
 type ScionConfig struct {

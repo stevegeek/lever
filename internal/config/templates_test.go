@@ -41,8 +41,12 @@ func TestTemplateLoads(t *testing.T) {
 		}
 	}
 	w := tm.Worker("s-abc234")
-	if w.Dir != "sessions/s-abc234" || w.Resources.Memory != "2GiB" || len(w.Obtain) != 1 {
+	if w.Dir != "sessions/s-abc234" || w.Resources.Memory != "2GiB" || len(w.Obtain) != 1 || w.SkipRmConfirm {
 		t.Fatalf("%+v", w)
+	}
+	on := loadTemplates(t, templateBase+sessionTmpl+"    even_more_dangerously_skip_permissions: true\n")
+	if tm2, _ := on.TemplateByName("session"); !tm2.Worker("s-abc234").SkipRmConfirm {
+		t.Fatal("a template's even_more_dangerously_skip_permissions does not reach its instances")
 	}
 	w.Obtain[0].Op = "write" // the instance's lists are its own
 	if tm.Obtain[0].Op != "read" {

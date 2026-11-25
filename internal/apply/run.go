@@ -1442,6 +1442,9 @@ func (r *run) managerStartOpts(ctx context.Context, jp, task, instructions strin
 		APIKey: apiKey,
 		// manager.resources, as inline config. Create-time only.
 		Resources: ScionResources(r.app.Manager.Resources),
+		// Always set, so scion's default of 1 applies only when the config
+		// asks for it. Create-time only.
+		Env: scion.SkipPermissions(r.app.Manager.SkipRmConfirm),
 	}, nil
 }
 

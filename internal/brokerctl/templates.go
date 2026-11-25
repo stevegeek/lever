@@ -50,7 +50,8 @@ func workerSpecOf(app *config.App, jailMount, jailUID string, g config.Worker, s
 		Recyclable:       g.Recyclable,
 		Claude:           g.Claude(),
 		// Own resources only — never the manager's.
-		Resources: apply.ScionResources(g.Resources),
+		Resources:     apply.ScionResources(g.Resources),
+		SkipRmConfirm: g.SkipRmConfirm,
 	}
 	if shared {
 		spec.Shared = sharedMounts(app, jailMount, g.Name)

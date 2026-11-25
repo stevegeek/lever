@@ -679,6 +679,24 @@ func (r Resources) spec() *resourceSpec {
 	return &resourceSpec{Limits: resourceList{CPU: r.CPU, Memory: r.Memory}}
 }
 
+// SkipPermissionsEnv is Claude Code's switch that drops the confirmation it
+// still asks under --dangerously-skip-permissions before rm or rmdir of a
+// critical path (~, /workspace, a mount). scion's Claude harness sets it to 1
+// unless the container env already has it, and Claude Code reads it only from
+// the process env, never settings.json.
+const SkipPermissionsEnv = "CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS"
+
+// SkipPermissions is the inline env that sets SkipPermissionsEnv either way.
+// "0", not empty: scion reads an empty value as a host-env passthrough and
+// leaves its default of 1 in place.
+func SkipPermissions(on bool) map[string]string {
+	v := "0"
+	if on {
+		v = "1"
+	}
+	return map[string]string{SkipPermissionsEnv: v}
+}
+
 // ContainerWorkspace is where scion mounts an agent's workspace (the
 // --workspace path) inside its container, and the container's CWD.
 const ContainerWorkspace = "/workspace"

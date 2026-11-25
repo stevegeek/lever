@@ -227,3 +227,28 @@ func TestValidateMemoryFit(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadSkipRmConfirm(t *testing.T) {
+	p := writeConfig(t, `name: demo
+backend: lima
+tree: ./tree
+manager:
+  image: lever.local/lever-claude:latest
+  even_more_dangerously_skip_permissions: true
+workers:
+  - name: appa
+    dir: workers/appa
+    even_more_dangerously_skip_permissions: true
+  - name: appb
+    dir: workers/appb
+broker:
+  llm_auth: subscription
+`)
+	app, err := LoadNoHostChecks(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !app.Manager.SkipRmConfirm || !app.Workers[0].SkipRmConfirm || app.Workers[1].SkipRmConfirm {
+		t.Fatalf("manager %v, appa %v, appb %v", app.Manager.SkipRmConfirm, app.Workers[0].SkipRmConfirm, app.Workers[1].SkipRmConfirm)
+	}
+}

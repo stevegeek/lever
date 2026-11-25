@@ -129,6 +129,12 @@ version bump moves the block under the new version heading.
 
 ### Security
 
+- **Claude Code's rm confirmation stays on unless an agent's config turns it off.** scion
+  `d34ffbc1`'s Claude harness sets `CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS=1` for every
+  agent, which drops Claude Code's last confirmation before `rm` or `rmdir` of `~`, `/workspace` or
+  a mounted folder. lever now sets it to `0` in every agent's container, and to `1` only for a
+  manager, worker or template with the new `even_more_dangerously_skip_permissions: true`. Like
+  `resources`, it is set when the agent is created.
 - **scion `d34ffbc1`'s new experiments are pinned off:** `hub.triggers` (webhook endpoints and
   triggers agents can author, an unauthenticated signed ingress at `/api/v1/hooks/<id>` that
   messages agents, and actions that start new agents outside the broker), `hub.github_triggers`,
@@ -197,6 +203,10 @@ version bump moves the block under the new version heading.
 
 ### Upgrade
 
+- **The rm confirmation reaches existing agents at their next fresh create.** The manager gets it
+  with the `lever up --fresh --keep-conversation` that Jail ABI 18 needs anyway; a worker at its next
+  `lever worker purge` or recycle. Until then a worker created on the new scion pin keeps scion's
+  `1`.
 - **A config without templates can now fail the memory check** when its workers' `resources.memory`
   add up to more than the VM's `memory`. Lower the limits, set `broker.max_running_workers`, or
   raise `memory`.

@@ -2413,7 +2413,7 @@ func checkHubExperiments(ctx context.Context, st state.State, sshOn bool, known 
 	if missing := unaskedExperiments(rec); len(missing) > 0 {
 		return warnResult(name,
 			"an older lever pinned the experiments on this hub and never looked for "+strings.Join(missing, ", ")+
-				", so a changed default or an admin's override would turn it on",
+				", so scion's default (on for hub.suspend_screen), a changed default or an admin's override decides it",
 			"run `lever apply`: it pins them off as lever-admin")
 	}
 	if len(rec.Off) == 0 {

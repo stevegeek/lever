@@ -115,6 +115,10 @@ var assertionRoutes = []assertionRoute{
 	{http.MethodGet, "/api/v1/conduit/grant-keys", false},
 	{http.MethodGet, "/api/v1/artifacts", true},
 	{http.MethodGet, "/api/v1/thread-groups", false},
+	// The hub.triggers probe: only the zero ID, which no endpoint has. While
+	// the experiment is on, the hub answers a GET with 405 before the ingress
+	// reads the request.
+	{http.MethodGet, "/api/v1/hooks/00000000-0000-0000-0000-000000000000", false},
 	{http.MethodPut, "/api/v1/admin/project-defaults", false},
 	{http.MethodPut, "/api/v1/secrets/{id}", false},
 	{http.MethodPut, "/api/v1/system/identity", false},

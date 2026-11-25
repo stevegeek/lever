@@ -2066,7 +2066,7 @@ func (d expSplitDoer) DoBody(ctx context.Context, method, path string, body []by
 		return 0, nil, err
 	}
 	if strings.HasPrefix(path, "/api/v1/admin/experiments") || strings.HasPrefix(path, "/api/v1/conduit/") || strings.HasPrefix(path, "/api/v1/artifacts") ||
-		strings.HasPrefix(path, "/api/v1/thread-groups") {
+		strings.HasPrefix(path, "/api/v1/thread-groups") || strings.HasPrefix(path, "/api/v1/hooks/") {
 		return d.exp.DoBody(ctx, method, path, body)
 	}
 	return d.rest.DoBody(ctx, method, path, body)

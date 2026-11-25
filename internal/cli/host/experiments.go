@@ -40,6 +40,23 @@ type pinnedExperiment struct {
 // hub.async_agent_start is pinned for correctness, not reach
 // (asyncAgentStartExperiment).
 //
+// From scion d34ffbc1: hub.triggers adds webhook endpoints and triggers that
+// agents can author, an unauthenticated signed ingress (/api/v1/hooks/{id})
+// that messages agents, and actions that dispatch new agents outside the
+// broker; hub.github_triggers feeds GitHub App deliveries into them.
+// hub.exec_schedules runs commands in an agent's container from a schedule or
+// trigger, with no LLM turn, whenever conduit is on. hub.exec_containers lets
+// users start shell containers in the jail outside lever's agent model.
+// hub.system_one makes model-provider calls from the hub process itself.
+// hub.code_span_mentions turns an inline code span such as `@name` into a
+// mention, which would route a contact's message to another agent.
+// hub.agent_secrets lets an agent write its own secrets, delivered at start
+// above every secret lever sets, and ask a user to type a secret into a form.
+// lifecycle.idle_suspend lets the hub suspend idle agents on its own schedule
+// and wake a hub-suspended agent for any sender, past the broker's wake
+// checks. hub.suspend_screen (on by default) stores the agent's last terminal
+// screen in the hub database at every hub-run suspend.
+//
 // hub.chat_thread_groups (project-wide chat groups that agents can create and
 // rename) is graduated from e8160a10 on: always on, never registered, and
 // scion refuses an override for it. It stays here for older pins, where the
@@ -47,12 +64,13 @@ type pinnedExperiment struct {
 // because its route is served on every newer hub. The remote proxy refuses
 // its routes either way.
 //
-// Only conduit and artifacts have a probe: a read-only route the hub answers
-// 404 exactly while the experiment is off. (federation gained GET routes in
-// e8160a10, but an older pin has none, so it stays unprobed.) The others are proved off by the
-// admin view alone (pinExperiments re-reads it after the write). scion reads
-// all of them per request from the hub database, except conduit's relay,
-// which starts only with the hub.
+// Only conduit, artifacts and triggers have a probe: a read-only route the
+// hub answers 404 exactly while the experiment is off (the triggers ingress
+// takes no credential, and answers 405 to a GET while on). (federation gained
+// GET routes in e8160a10, but an older pin has none, so it stays unprobed.)
+// The others are proved off by the admin view alone (pinExperiments re-reads
+// it after the write). scion reads all of them per request from the hub
+// database, except conduit's relay, which starts only with the hub.
 var pinnedOffExperiments = []pinnedExperiment{
 	{name: "hub.conduit", probe: "/api/v1/conduit/grant-keys"},
 	{name: "hub.artifacts", probe: "/api/v1/artifacts?mine=1"},
@@ -64,6 +82,15 @@ var pinnedOffExperiments = []pinnedExperiment{
 	{name: "hub.agent_plugins"},
 	{name: "hub.agent_delegation"},
 	{name: asyncAgentStartExperiment},
+	{name: "hub.triggers", probe: "/api/v1/hooks/00000000-0000-0000-0000-000000000000"},
+	{name: "hub.github_triggers"},
+	{name: "hub.exec_schedules"},
+	{name: "hub.exec_containers"},
+	{name: "hub.system_one"},
+	{name: "hub.code_span_mentions"},
+	{name: "hub.agent_secrets"},
+	{name: "lifecycle.idle_suspend"},
+	{name: "hub.suspend_screen"},
 }
 
 // asyncAgentStartExperiment (scion e8160a10 on, default on) starts, resumes

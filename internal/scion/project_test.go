@@ -54,6 +54,11 @@ func TestHubProjectID(t *testing.T) {
 		{"nothing listed", "[]", "", false},
 		{"two matches", `[{"id": "a", "name": "lever"}, {"id": "b", "name": "lever"}]`, "", true},
 		{"not JSON", `[{"id": `, "", true},
+		{"paged object", `{"projects": ` + hubProjectsJSON + `, "total": 2, "truncated": false}`, "8b28ef17-fe1e-4a94-ba47-d8d4cb690fcd", false},
+		{"paged object, none listed", `{"projects": [], "total": 0, "truncated": false}`, "", false},
+		{"paged object, truncated", `{"projects": [{"id": "x", "name": "other"}], "total": 900, "truncated": true}`, "", true},
+		{"truncated even with a match", `{"projects": ` + hubProjectsJSON + `, "total": 900, "truncated": true}`, "", true},
+		{"object without projects", `{"error": "nope"}`, "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := proc.NewFakeRunner()

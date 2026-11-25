@@ -251,6 +251,11 @@ func (r *alreadyUpRunner) RunIn(ctx context.Context, dir string, env map[string]
 	return r.FakeRunner.RunIn(ctx, dir, env, name, args...)
 }
 
+// RunStdin is the manager start's path: it always carries inline config.
+func (r *alreadyUpRunner) RunStdin(ctx context.Context, _ io.Reader, env map[string]string, name string, args ...string) (proc.Result, error) {
+	return r.RunIn(ctx, "", env, name, args...)
+}
+
 func (r *alreadyUpRunner) Run(ctx context.Context, env map[string]string, name string, args ...string) (proc.Result, error) {
 	return r.RunIn(ctx, "", env, name, args...)
 }

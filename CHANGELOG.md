@@ -133,8 +133,10 @@ version bump moves the block under the new version heading.
   `d34ffbc1`'s Claude harness sets `CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS=1` for every
   agent, which drops Claude Code's last confirmation before `rm` or `rmdir` of `~`, `/workspace` or
   a mounted folder. lever now sets it to `0` in every agent's container, and to `1` only for a
-  manager, worker or template with the new `even_more_dangerously_skip_permissions: true`. Like
-  `resources`, it is set when the agent is created.
+  manager, worker or template with the new `even_more_dangerously_skip_permissions: true`. An
+  agent's own value is set when it is created, like `resources`; `lever apply` and `lever up` also
+  set `0` in the project's hub env, which scion applies to every agent whose own env does not set
+  it, so agents created before this get `0` at their next start too.
 - **scion `d34ffbc1`'s new experiments are pinned off:** `hub.triggers` (webhook endpoints and
   triggers agents can author, an unauthenticated signed ingress at `/api/v1/hooks/<id>` that
   messages agents, and actions that start new agents outside the broker), `hub.github_triggers`,
@@ -203,10 +205,11 @@ version bump moves the block under the new version heading.
 
 ### Upgrade
 
-- **The rm confirmation reaches existing agents at their next fresh create.** The manager gets it
-  with the `lever up --fresh --keep-conversation` that Jail ABI 19 needs anyway; a worker at its next
-  `lever worker purge` or recycle. Until then a worker created on the new scion pin keeps scion's
-  `1`.
+- **Turning the rm confirmation off takes a fresh create.** Existing agents get `0` from the
+  project's hub env after the first `lever apply` or `lever up`, from their next start. A manager,
+  worker or template agent set to `true` gets `1` only when it is created: the manager at
+  `lever up --fresh --keep-conversation`, a worker at `lever worker purge` or a recycle, a template
+  agent at its next spawn.
 - **A config without templates can now fail the memory check** when its workers' `resources.memory`
   add up to more than the VM's `memory`. Lower the limits, set `broker.max_running_workers`, or
   raise `memory`.

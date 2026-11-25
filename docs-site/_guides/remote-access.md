@@ -1166,8 +1166,9 @@ grants no hub route: the fence below admits nothing for a see-only agent.
   a lever page with links to the contact's conversations; with `landing: chat`, they redirect
   to the [chat page](#the-chat-page) instead, and the contact gets neither that landing page nor
   the hub's web UI shell. Everything else is refused (audit `deny-contact`).
-- **What a contact may not send.** A word that starts with `@` (scion would route the message to
-  another agent), a reply to a message by id, an attachment, or any field other than the text, its
+- **What a contact may not send.** An `@` (or `＠`) anywhere but inside a word, as in an email
+  address: at the start of a word, or after punctuation, markdown or a backtick (`` `@name` ``).
+  scion would route the message to another agent. A reply to a message by id, an attachment, or any field other than the text, its
   idempotency key and `offer_wake` (the hub's web chat sends it on every message; it only changes
   how the hub answers when the agent is not running). `wake` is refused: a contact wakes a worker
   only through the chat page's wake, which checks the session and limits the rate.

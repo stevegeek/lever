@@ -331,7 +331,7 @@ func (g *gate) checkContactMessage(w http.ResponseWriter, r *http.Request, line 
 	// "web, tier contact" whatever it says. Only a mention is refused, because
 	// the hub routes it to another agent.
 	if hasMention(msg.Content) {
-		return deny(`a contact's message may not contain a word starting with "@" (it would route to another agent); write "at" or leave it out`)
+		return deny(`a contact's message may not contain an "@" outside a word, such as one starting a word or after punctuation or a backtick (it would route to another agent); write "at" or leave it out`)
 	}
 	r2 := r.Clone(r.Context())
 	r2.Body = io.NopCloser(bytes.NewReader(body))
@@ -346,14 +346,35 @@ func jsonString(raw json.RawMessage) bool {
 	return len(raw) > 0 && raw[0] == '"' && json.Unmarshal(raw, &s) == nil
 }
 
-// hasMention matches the tokens scion's mention extraction looks at.
+// hasMention reports an "@" (or "＠") that scion could read as the start of
+// a mention: one that is not inside a word. An "@" counts as inside a word
+// only after a letter, a digit, "-" or another "@", or after a run of "_"
+// that itself follows one of those, as in an email address. Every other
+// "@" is refused: scion reads one at the start of a word, after punctuation
+// or markdown wrapping ("(@a", "*@a*", "_@a_"), and, with
+// hub.code_span_mentions on, inside an inline code span ("`@a`"). This is
+// broader than scion's extraction on purpose, so a new spelling of a
+// mention there does not reopen the fence.
 func hasMention(s string) bool {
-	for _, w := range strings.FieldsFunc(s, unicode.IsSpace) {
-		if strings.HasPrefix(w, "@") || strings.HasPrefix(w, "＠") {
+	rs := []rune(s)
+	for i, r := range rs {
+		if r != '@' && r != '＠' {
+			continue
+		}
+		j := i - 1
+		for j >= 0 && rs[j] == '_' {
+			j--
+		}
+		if j < 0 || !mentionWordRune(rs[j]) {
 			return true
 		}
 	}
 	return false
+}
+
+// mentionWordRune is a rune an "@" inside a word may follow.
+func mentionWordRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '@'
 }
 
 // contactRootFiles are the web UI's own root files; any other root path would

@@ -261,7 +261,17 @@ func TestContactFenceFailsClosed(t *testing.T) {
 }
 
 func TestHasMention(t *testing.T) {
-	for s, want := range map[string]bool{"@a hi": true, "hi\t@a": true, "mail a@b.c": false, "x ＠a": true, "no": false} {
+	for s, want := range map[string]bool{
+		"@a hi": true, "hi\t@a": true, "mail a@b.c": false, "x ＠a": true, "no": false,
+		// Wrapped in a code span (scion's hub.code_span_mentions), punctuation
+		// or markdown.
+		"ask `@other` now": true, "`@other`": true, "(@a)": true, "\"@a\"": true, "*@a*": true,
+		"_@a_": true, "__@a": true, "x.@a": true, "x+@a": true, "x/@a": true, "x:＠a": true, "[＠a]": true,
+		"\u200b@a": true, "@": true,
+		// Inside a word: email addresses and the like.
+		"first.last@example.com": false, "a-b@c": false, "user_@x": false, "a__@b": false,
+		"a@@b": false, "x9@y": false, "été@x": false, "ab＠cd": false,
+	} {
 		if hasMention(s) != want {
 			t.Errorf("hasMention(%q) = %v", s, !want)
 		}

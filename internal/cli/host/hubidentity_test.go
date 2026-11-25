@@ -51,6 +51,9 @@ type hiHub struct {
 	// runtime is the active profile's container runtime, which the
 	// system/runtime route sets for any loopback caller too.
 	runtime string
+	// scratchpadDefault is the hub's project default scratchpad, nil until
+	// lever-admin writes it.
+	scratchpadDefault *bool
 
 	// cache models the hub's email-to-user cache: an email keeps resolving to
 	// a row for N more assertions.
@@ -602,6 +605,15 @@ func (h *hiHub) handle(c hiCaller, method, raw string, body []byte) (int, []byte
 		h.event("runtime %s by %s", h.runtime, me.ID)
 		return hiJSON(200, map[string]any{"detected": h.runtime, "configured": h.runtime, "available": true})
 
+	case method == http.MethodPut && p == "/api/v1/admin/project-defaults":
+		if me.ID == devUserID || h.user(me.ID) == nil || h.user(me.ID).Role != "admin" {
+			return hiErr(403, "hub admin only")
+		}
+		v, _ := in["default_scratchpad"].(bool)
+		h.scratchpadDefault = &v
+		h.event("project default scratchpad %v by %s", v, me.ID)
+		return hiJSON(200, map[string]any{"default_scratchpad": v})
+
 	case method == http.MethodPut && p == "/api/v1/system/identity":
 		email := str("email")
 		dev := h.user(devUserID)
@@ -966,7 +978,7 @@ func (e *hiEnv) seedMigrated(devEmail string, lifecycle bool) {
 		ScopeType: hubapi.RoleScopeProject, Permissions: controllerRolePermissions(lifecycle)})
 	h.addBinding("role-ctl-old", devUserID, hubapi.RoleScopeProject, "proj-1", devUserID)
 	h.tokens = append(h.tokens, &hiToken{ID: "tok-old", Owner: devUserID, Name: "lever-controller", ProjectID: "proj-1",
-		Secret: "scion_pat_old-0123456789abcdef", Scopes: controllerPATScopes(lifecycle, false), Expires: e.now.Add(300 * 24 * time.Hour)})
+		Secret: "scion_pat_old-0123456789abcdef", Scopes: controllerPATScopes(lifecycle, false, false), Expires: e.now.Add(300 * 24 * time.Hour)})
 	acts := controllerActions(lifecycle)
 	h.agents = []hiAgent{{Slug: "manager", Actions: acts}, {Slug: "worker", Actions: acts}}
 	e.sc.lifecycle = lifecycle
@@ -975,7 +987,7 @@ func (e *hiEnv) seedMigrated(devEmail string, lifecycle bool) {
 	if err := e.st.SaveControllerPAT("scion_pat_old-0123456789abcdef"); err != nil {
 		e.t.Fatal(err)
 	}
-	if err := e.st.SaveControllerPATRecord(state.PATRecord{ID: "tok-old", Requested: controllerPATScopes(lifecycle, false),
+	if err := e.st.SaveControllerPATRecord(state.PATRecord{ID: "tok-old", Requested: controllerPATScopes(lifecycle, false, false),
 		MintedAt: e.now.Add(-10 * 24 * time.Hour), ExpiresAt: e.now.Add(300 * 24 * time.Hour)}); err != nil {
 		e.t.Fatal(err)
 	}
@@ -1070,7 +1082,7 @@ func TestHubIdentityFreshBootstrap(t *testing.T) {
 	}
 	ctlTok, remTok := hiTokenNamed(h, "lever-controller", ctl.ID), hiTokenNamed(h, "lever-remote", ctl.ID)
 	if ctlTok == nil || remTok == nil || ctlTok.ProjectID != hiMarkerID ||
-		!hubapi.SamePermissions(ctlTok.Scopes, controllerPATScopes(false, false)) || !hubapi.SamePermissions(remTok.Scopes, remotePATScopes()) {
+		!hubapi.SamePermissions(ctlTok.Scopes, controllerPATScopes(false, false, false)) || !hubapi.SamePermissions(remTok.Scopes, remotePATScopes(false)) {
 		t.Fatalf("tokens = %+v", h.tokens)
 	}
 	if !e.diskPATIs(e.st.LoadControllerPAT, ctlTok.ID) || !e.diskPATIs(e.st.LoadRemotePAT, remTok.ID) {
@@ -1927,7 +1939,7 @@ func TestHubIdentityProbeChecksInboxAndGrants(t *testing.T) {
 }
 
 func TestUngrantedScopes(t *testing.T) {
-	req := controllerPATScopes(true, true)
+	req := controllerPATScopes(true, true, false)
 	if got := ungrantedScopes(req, []string{"agent:create", "agent:attach", "project:read", "skill:read", "skill:list",
 		"template:read", "template:list", "harness_config:read", "harness_config:list", inboxReadScope}); len(got) != 0 {
 		t.Fatalf("aliases or lifecycle counted as ungranted: %v", got)
@@ -2051,7 +2063,7 @@ func TestHubIdentityPinsExperimentsAndLinksTheBrokerFirst(t *testing.T) {
 		if v, ok := exp.overrides["hub.conduit"]; !ok || v {
 			t.Fatalf("overrides = %v", exp.overrides)
 		}
-		if rec, found, _ := e.st.LoadHubExperimentsRecord(); !found || !sameScopeSet(rec.Off, pinnedOffNames()) {
+		if rec, found, _ := e.st.LoadHubExperimentsRecord(); !found || !sameScopeSet(rec.Off, []string{"hub.conduit", "hub.artifacts", "hub.chat_thread_groups", "federation.project_visitors"}) {
 			t.Fatalf("pin record = %+v found=%v", rec, found)
 		}
 		hiWantOrder(t, e.hub, "broker link "+hiJailMount, "scion link "+hiJailMount)
@@ -2136,4 +2148,25 @@ func TestHubIdentityFreshRemovesAnUnreadableMarker(t *testing.T) {
 		e.jr.marker = marker
 	}
 	e.mustRun()
+}
+
+// scion e8160a10 refuses the scratchpad strip while the hub's project default
+// scratchpad is on; every apply turns it off as lever-admin, and a hub that
+// refuses the write fails the step.
+func TestHubIdentityTurnsTheDefaultScratchpadOff(t *testing.T) {
+	e := newHIEnv(t, hiRemoteApp(false))
+	e.mustRun()
+	if e.hub.scratchpadDefault == nil || *e.hub.scratchpadDefault {
+		t.Fatalf("project default scratchpad = %v after apply, want off", e.hub.scratchpadDefault)
+	}
+	admin := e.hub.byEmail(hubauth.AdminEmail)
+	if admin == nil || !slices.Contains(e.hub.events, "project default scratchpad false by "+admin.ID) {
+		t.Fatalf("default not turned off as lever-admin; events: %q", e.hub.events)
+	}
+
+	refused := newHIEnv(t, hiRemoteApp(false))
+	refused.hub.down["PUT /api/v1/admin/project-defaults"] = http.StatusForbidden
+	if err := refused.step().run(context.Background()); err == nil || !strings.Contains(err.Error(), "project default scratchpad") {
+		t.Fatalf("refused write: err = %v", err)
+	}
 }

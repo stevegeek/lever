@@ -307,7 +307,7 @@ func (b *Broker) bounceForReenrol(ctx context.Context, cn, slug string) (verb st
 	}
 	// Resuming a non-running worker takes a slot; a running one holds its
 	// own.
-	resumes := phase == scion.PhaseSuspended || phase == scion.PhaseStopped || phase == scion.PhaseError
+	resumes := phase == scion.PhaseSuspended || phase == scion.PhaseStopped || phase == scion.PhaseError || phase == scion.PhaseHalted
 	if _, isWorker := b.workerSpec(slug); isWorker && resumes {
 		release, err := b.admitWorker(ctx, slug)
 		if err != nil {
@@ -326,7 +326,7 @@ func (b *Broker) bounceForReenrol(ctx context.Context, cn, slug string) (verb st
 		if err = b.runtime.Suspend(ctx, slug, b.instanceProject); err == nil {
 			err = b.runtime.Resume(ctx, slug, b.instanceProject)
 		}
-	case scion.PhaseSuspended, scion.PhaseStopped:
+	case scion.PhaseSuspended, scion.PhaseStopped, scion.PhaseHalted:
 		verb = "resume"
 		err = b.runtime.Resume(ctx, slug, b.instanceProject)
 	case scion.PhaseError:

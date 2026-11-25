@@ -179,7 +179,15 @@ func (b *Broker) wakeFor(w http.ResponseWriter, r *http.Request, who ResumeFor) 
 		refusePhase(w, ReasonStoppedByOperator, phase, "stopped by the operator", http.StatusConflict)
 		return
 	}
-	if phase != scion.PhaseSuspended && phase != scion.PhaseStopped {
+	if phase == scion.PhaseHalted && who.Tier != "operator" {
+		// Halted: the platform ended the run. It restarts in a new session,
+		// as a stopped worker does, so it is the operator's to bring back.
+		// The reason code stays the stopped one, which clients know.
+		b.audit("worker", actor, "deny", "wake "+spec.Name+": halted, and the login is not the operator's")
+		refusePhase(w, ReasonStoppedByOperator, phase, "ended by the platform; the operator brings it back", http.StatusConflict)
+		return
+	}
+	if phase != scion.PhaseSuspended && phase != scion.PhaseStopped && phase != scion.PhaseHalted {
 		b.audit("worker", actor, "deny", "wake "+spec.Name+": not asleep (phase "+cmp.Or(phase, "none")+")")
 		reason := ReasonNotAsleep
 		if phase == "" {

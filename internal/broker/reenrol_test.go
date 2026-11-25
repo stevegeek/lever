@@ -83,17 +83,21 @@ func TestHealUnbounceablePhaseAuditsOnly(t *testing.T) {
 	}
 }
 
-// A lapsed suspended/stopped worker: plain Resume.
+// A lapsed suspended, stopped or halted worker: plain Resume.
 func TestHealLapsedSuspendedWorkerPlainResume(t *testing.T) {
-	rt := &fakeRuntime{staticPhases: true, agents: map[string][]scion.Agent{
-		testInstanceProject: {{Slug: "scratch", Phase: "suspended"}},
-	}}
-	b, _, _ := reenrolBroker(t, rt, "all")
-	b.healLapse(context.Background(), "scratch")
+	for _, phase := range []string{scion.PhaseSuspended, scion.PhaseStopped, scion.PhaseHalted} {
+		t.Run(phase, func(t *testing.T) {
+			rt := &fakeRuntime{staticPhases: true, agents: map[string][]scion.Agent{
+				testInstanceProject: {{Slug: "scratch", Phase: phase}},
+			}}
+			b, _, _ := reenrolBroker(t, rt, "all")
+			b.healLapse(context.Background(), "scratch")
 
-	if len(rt.suspend) != 0 || len(rt.resumeForced) != 0 || len(rt.resumed) != 1 {
-		t.Fatalf("verbs = suspend %v force %v resume %v, want plain resume only",
-			rt.suspend, rt.resumeForced, rt.resumed)
+			if len(rt.suspend) != 0 || len(rt.resumeForced) != 0 || len(rt.resumed) != 1 {
+				t.Fatalf("verbs = suspend %v force %v resume %v, want plain resume only",
+					rt.suspend, rt.resumeForced, rt.resumed)
+			}
+		})
 	}
 }
 

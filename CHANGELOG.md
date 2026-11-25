@@ -7,6 +7,54 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Changed
+
+- **scion is pinned to `e8160a10`, its nightly-20261112 (was `65531d7f`).** The examples, the
+  release's prebuilt scion, the Makefile's `SCION_VERSION`, the Lima e2e scripts and the docs move to
+  it. These changes on the scion side reach lever:
+  - **Chat thread groups are always on.** scion graduated `hub.chat_thread_groups` (315c0798c): the
+    hub no longer registers it, refuses an override for it, and always serves
+    `/api/v1/thread-groups`, so agents can create and rename project-wide chat groups that project
+    members with read access see. lever can no longer turn this off. The remote proxy still
+    refuses those routes for every login, and doctor's *scion conduit and artifacts* row says the
+    feature is always on. lever still pins it off on an older scion that registers it.
+  - **A new agent phase, `halted`** (35189dd77): the platform ended a run that should still run (an
+    OOM kill, an eviction, a VM reboot, a container that went missing). scion wrote `error` for
+    these before. lever resumes a halted manager or worker like a stopped one. scion resumes it in
+    a **new claude session**: the hub passes `--continue` only for a suspended record, and
+    `--force` recovers only an error one. So an OOM-killed manager no longer comes back with its
+    conversation, as it did through `resume --force`; the transcript stays in the agent home
+    (`lever attach`, then `/resume`). lever and doctor say so. `lever up` resumes a halted
+    manager, `lever-manager agent resume` a halted worker, and the ssh `resume` verb a
+    halted spawned agent, each in a new session. The chat page shows a halted worker
+    as `error` and wakes it for no login; the broker's wake refuses a contact.
+  - **The controller PAT, and the remote proxy's read PAT, ask for `project:list`** when the
+    jail's scion knows the scope. scion now
+    puts the token ceiling on every list (de77b8ae9), and without it `scion hub projects` comes back
+    empty, so lever would register the project again and the chat page could not find the project's
+    agents. The changed scope sets re-mint both tokens at the next apply.
+  - **Renaming the dev user needs hub admin** (44ef85192): scion's `PUT /api/v1/system/identity`
+    and `PATCH /api/v1/system/workstation-settings` now require `hub.config.update`, so a jailed
+    agent can no longer rename the controller or turn on gcloud credential injection through the
+    loopback (the stack e2e proves both refused with 403). This closes the known issue earlier
+    releases describe; lever keeps its repairs.
+  - Notifications gain `kind`, `resourceType`, `resourceId` and `excerpt` (text another principal
+    wrote). lever's manager now gets `excerpt` sanitized, bounded and marked `excerpt-reported:`, the
+    other fields and every key sanitized and bounded, and nested objects and arrays dropped.
+  - **The hub's project default scratchpad is turned off.** scion now refuses to remove a
+    project's `scratchpad` shared dir while its `project_defaults.default_scratchpad` is on (its
+    default), so lever's strip of that cross-agent read-write mount failed and `lever apply`
+    stopped at *register-project*. Every apply now sets the default off as `lever-admin` before
+    the strip (`PUT /api/v1/admin/project-defaults`, hub admin only, so an agent cannot turn it
+    back on); new projects then get no scratchpad either.
+  - **User-level secrets need an interactive login** (8ee1dbd2f): the hub refuses
+    `scion hub env set --secret` at user scope to the controller PAT, so the manager's credential
+    and the API-key placeholder could not be set and `lever up` stopped at *start-manager*. When
+    the hub refuses it that way, lever now sets the same user-scope secret through
+    `PUT /api/v1/secrets/{key}` as the controller with a hub assertion, which the hub counts as a
+    login, once the assertion resolves to the recorded controller (else it writes nothing). An
+    older scion takes the PAT as before.
+
 ### Fixed
 
 - **github tool: repositories whose default branch is not `main`.** `push` and `fetch` refreshed
@@ -16,6 +64,68 @@ version bump moves the block under the new version heading.
   that branch, into one fixed mirror ref (so a renamed default branch never wedges the mirror).
   The compare URL a push returns names that branch, and a push to the default branch is refused
   whatever its name.
+
+- **Browser sessions survive a hub restart.** lever passed the hub's session-cookie key as
+  `--session-secret`, which scion's daemon never forwards to the hub it starts (it would land in that
+  process's argv and `server-args.json`), so the hub made a new key at every start and every restart
+  signed every browser out. The key now reaches the hub as `SCION_SERVER_SESSION_SECRET`, read from
+  stdin by a shell that execs scion, and scion scrubs it once read; the stack e2e checks the hub
+  never warns that it has none. It is also off the jail's and the host's command lines.
+- **lever's edits of the jail's scion `settings.yaml` no longer race scion's.** From `e8160a10`
+  scion's writers lock `~/.scion/.settings.lock`; lever now takes the same lock and replaces the
+  file only while it still holds what lever read, so a write scion made meanwhile is never lost. A
+  changed file fails the step, naming it, and the next apply edits the new content.
+
+### Security
+
+- **Five more scion experiments are pinned off:** `hub.attachment_artifacts` (copies chat attachments
+  into agent inboxes and the project scratchpad; scion turns it on by default wherever its artifact
+  service is ready, local disk included), `hub.port_view` (an agent's exposed port, WebSockets
+  included, for anyone holding the page link), `hub.conduit_deliver` (message delivery over
+  conduit), `hub.agent_plugins` (installs plugin bundles a template declares into the harness at
+  every start) and `hub.agent_delegation` (lets a user grant an agent hub calls under the user's
+  name, through the delegation socket sciontool now serves in every agent). lever also pins
+  `hub.async_agent_start` off, for correctness: on scion's asynchronous start path a resume's task
+  is not stored in the agent record, so after `lever conversation new` the hub kept the old boot
+  prompt, which a later resume of a stopped manager would start with. Every apply pins them
+  off as `lever-admin`, and the hub's admin view must show each one off after the write; none has a
+  read-only route that tells, so doctor reads them from lever's record. `hub-experiments.json`
+  written by an older lever makes doctor warn until the next apply.
+- **The remote proxy refuses scion's new reach-widening routes for every login:**
+  `/api/v1/portview/`, `/api/v1/pending-secrets*` (approving one makes a value an agent chose a
+  secret of the user's, which the user's other agents then receive; reveal shows it),
+  `/api/v1/projects/{id}/visitors*` and `/api/v1/users/me/visitor-*`,
+  `/api/v1/attachment-deliveries/*`, and the runtime broker's own `/api/v1/broker/*` routes, which
+  no browser calls. So no remote login can approve a pending secret. Maintenance writes
+  (`/api/v1/admin/maintenance/*`) are refused as well: scion's new hub self-update can start
+  `update-binary` there, which would replace lever's pinned scion with an upstream release. It is
+  hub-admin only, and lever's unversioned scion build never finds a release, so this is defense in
+  depth.
+
+- **The agent image registry is pinned in the hub's environment.** Every hub start carries
+  `SCION_IMAGE_REGISTRY=lever.local`, which from `e8160a10` outranks every settings value: an agent
+  could write the top-level registry through the loopback route (lever resets it at every apply), and
+  a profile-level value would have outranked that reset. A running hub without it is restarted.
+- **Secrets stay off every command line.** An assertion-signed hub request now sends its body on
+  stdin after the assertion line, not in an environment variable that reached curl's argv in the jail
+  and the host's argv. The manager's credential and the API-key placeholder now go through the hub's
+  REST route as the verified controller first; the scion CLI, which takes the value only as an
+  argument, is the fallback only for a hub without that route or an instance with no recorded
+  controller.
+- **scion's scheduled release check and automatic update are off.** Every apply writes
+  `server.maintenance.update_policy: disabled` into the jail's `settings.yaml` (left out on an
+  instance whose server settings are still in a legacy `server.yaml`). A hub admin starting
+  `update-binary` by hand does not read that policy; the remote proxy's refusal of maintenance
+  writes is what blocks it remotely.
+
+### Upgrade
+
+- **Jail ABI 17.** The agent image changed (sciontool and, in the slim image, scion from the new
+  pin) and so did in-jail lever code: rebuild the agent image (`make lever-image` or `make
+  lever-image-slim`, then any instance image built from it) and recreate the manager on it with
+  `lever up --fresh --keep-conversation`. Doctor's *agent lever version* row says so. The first
+  `lever apply` installs the new scion pin in the jail and re-mints the controller and remote PATs
+  with `project:list`.
 
 ## [1.0.0-beta.10] - 2026-11-24
 

@@ -139,6 +139,7 @@ func TestPlannerTable(t *testing.T) {
 		"suspended":         {"resume", "resume", fresh, keepCnv, "stop,stop+resume", "stop,stop+resume", "not-running", "resume", "suspend", "resume", "keep"},
 		"stopped":           {"resume", "resume", fresh, keepCnv, "refuse", "refuse", "not-running", "refuse", "heal,suspend", "resume", "keep"},
 		"error":             {"resume --force", "resume --force", fresh, keepCnv, "refuse", "refuse", "not-running", "refuse", "suspend", "resume --force", "keep"},
+		"halted":            {"resume", "resume", fresh, keepCnv, "refuse", "refuse", "not-running", "refuse", "suspend", "resume", "keep"},
 		"created":           {"refuse", "refuse", fresh, keepCnv, "refuse", "refuse", "not-running", "refuse", "suspend", "refuse", "keep"},
 		"provisioning":      {"refuse", "refuse", fresh, keepCnv, "refuse", "refuse", "not-running", "refuse", "suspend", "refuse", "keep"},
 		"cloning":           {"refuse", "refuse", fresh, keepCnv, "refuse", "refuse", "not-running", "refuse", "suspend", "refuse", "keep"},

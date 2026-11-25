@@ -83,7 +83,7 @@ func newHIDoctor(t *testing.T, app *config.App) *hiDoctor {
 	pub := parsed.(*ecdsa.PublicKey)
 	d := &hiDoctor{hiEnv: e, key: key, providers: `{"providers":null,"authMode":"proxy"}`}
 	e.jr.curl = func(env map[string]string, stdin, name string, args []string) (proc.Result, bool) {
-		assertion, _, _ := strings.Cut(stdin, "\n")
+		assertion, rest, _ := strings.Cut(stdin, "\n")
 		switch {
 		case name == "date":
 			return proc.Result{Stdout: strconv.FormatInt(e.now.Unix(), 10) + "\n"}, true
@@ -107,8 +107,8 @@ func newHIDoctor(t *testing.T, app *config.App) *hiDoctor {
 				st, b = hiErr(401, "invalid assertion")
 			} else {
 				var body []byte
-				if v, ok := env["LEVER_HUB_BODY"]; ok {
-					body = []byte(v)
+				if rest != "" {
+					body = []byte(rest)
 				}
 				st, b = e.hub.handle(hiCaller{email: email}, args[3], path, body)
 			}

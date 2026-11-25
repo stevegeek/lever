@@ -39,7 +39,7 @@ func recycleBroker(t *testing.T, phase string, recyclable bool) (*Broker, *fakeR
 const recycleBody = `{"worker":"worker","task":"close deal 42"}`
 
 func TestWorkerRecycle_suspendedDeletesRecordAndStartsFresh(t *testing.T) {
-	for _, phase := range []string{scion.PhaseSuspended, scion.PhaseStopped, scion.PhaseError} {
+	for _, phase := range []string{scion.PhaseSuspended, scion.PhaseStopped, scion.PhaseHalted, scion.PhaseError} {
 		t.Run(phase, func(t *testing.T) {
 			b, rt, audit, spec := recycleBroker(t, phase, true)
 			rt.staged = map[string][][]byte{"worker": {[]byte("old ticket")}}
@@ -346,7 +346,7 @@ func assertNothingRecycled(t *testing.T, rt *fakeRuntime) {
 // so a recyclable phase is not enough: the hub's container status must not
 // be live either.
 func TestWorkerRecycle_refusesARecordWhoseContainerIsLive(t *testing.T) {
-	for _, phase := range []string{scion.PhaseSuspended, scion.PhaseStopped, scion.PhaseError} {
+	for _, phase := range []string{scion.PhaseSuspended, scion.PhaseStopped, scion.PhaseHalted, scion.PhaseError} {
 		for _, status := range []string{"Up 3 minutes", "running"} {
 			t.Run(phase+"/"+status, func(t *testing.T) {
 				b, rt, audit, _ := recycleBroker(t, "", true)

@@ -25,7 +25,8 @@ import (
 // up; lever does not restart the manager on its own.
 
 // EnsureScionTelemetry reports whether it changed the telemetry block. The
-// same write removes auto_inject_gcloud_adc (see withoutGcloudADC).
+// same write removes auto_inject_gcloud_adc (see withoutGcloudADC) and turns
+// the hub's self-update off (see withUpdatesDisabled).
 func (g Guest) EnsureScionTelemetry(ctx context.Context, off bool) (bool, error) {
 	res, err := g.UserRun(ctx, "/bin/bash", "-c", readScionSettingsScript)
 	if err != nil {
@@ -33,7 +34,7 @@ func (g Guest) EnsureScionTelemetry(ctx context.Context, off bool) (bool, error)
 		// absent would rewrite scion's machine configuration from nothing.
 		return false, fmt.Errorf("guest: read %s: %w", layout.SettingsRel, err)
 	}
-	existing, _, err := parseScionSettingsRead(res.Stdout)
+	existing, hasServerYAML, err := parseScionSettingsRead(res.Stdout)
 	if err != nil {
 		return false, err
 	}
@@ -42,13 +43,82 @@ func (g Guest) EnsureScionTelemetry(ctx context.Context, off bool) (bool, error)
 		return false, err
 	}
 	updated, removed, err := withoutGcloudADC(updated)
-	if err != nil || !changed && !removed {
+	if err != nil {
 		return false, err
 	}
-	if err := g.writeScionSettings(ctx, updated); err != nil {
+	updated, pinned, err := withUpdatesDisabled(updated, hasServerYAML)
+	if err != nil || !changed && !removed && !pinned {
+		return false, err
+	}
+	if err := g.writeScionSettings(ctx, existing, updated); err != nil {
 		return false, err
 	}
 	return changed, nil
+}
+
+// updatePolicyDisabled is scion's server.maintenance.update_policy that turns
+// off the hub's scheduled release check and its automatic update. From scion
+// e8160a10 on, a version-stamped hub checks GitHub for releases (notify by
+// default). It does not stop a hub admin starting update-binary by hand: the
+// remote proxy refuses maintenance writes for that. The hub reads it at start.
+const updatePolicyDisabled = "disabled"
+
+// withUpdatesDisabled sets server.maintenance.update_policy to disabled,
+// keeping every other key. It reports whether it changed anything. An older
+// scion ignores the key. With a legacy server.yaml and no `server:` key it
+// changes nothing: scion reads server settings from settings.yaml once it
+// has that key, so adding one would silently drop server.yaml (the hub-auth
+// step refuses that case and names the fix).
+func withUpdatesDisabled(existing []byte, hasServerYAML bool) ([]byte, bool, error) {
+	if len(bytes.TrimSpace(existing)) == 0 {
+		if hasServerYAML {
+			return existing, false, nil
+		}
+		return []byte("server:\n  maintenance:\n    update_policy: " + updatePolicyDisabled + "\n"), true, nil
+	}
+	doc, err := parseJailSettings(existing)
+	if err != nil {
+		return nil, false, fmt.Errorf("guest: parse the jail's %s: %w", layout.SettingsRel, err)
+	}
+	root := layout.DocumentRoot(doc)
+	if root == nil {
+		return nil, false, fmt.Errorf("guest: the jail's %s is not a YAML mapping", layout.SettingsRel)
+	}
+	if hasServerYAML && layout.MapGet(root, "server") == nil {
+		return existing, false, nil
+	}
+	server, err := childMapping(root, "server")
+	if err != nil {
+		return nil, false, err
+	}
+	maint, err := childMapping(server, "maintenance")
+	if err != nil {
+		return nil, false, err
+	}
+	if cur := layout.MapGet(maint, "update_policy"); cur != nil && cur.Kind == yaml.ScalarNode && cur.Value == updatePolicyDisabled {
+		return existing, false, nil
+	}
+	layout.MapSet(maint, "update_policy", layout.StringNode(updatePolicyDisabled))
+	out, err := encodeSettings(doc)
+	if err != nil {
+		return nil, false, err
+	}
+	return out, true, nil
+}
+
+// childMapping returns m's mapping under key, adding an empty one when the
+// key is absent. A key that holds something else is an error to fix by hand.
+func childMapping(m *yaml.Node, key string) (*yaml.Node, error) {
+	n := layout.MapGet(m, key)
+	if n == nil {
+		n = layout.NewMapping()
+		layout.MapSet(m, key, n)
+		return n, nil
+	}
+	if n.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("guest: `%s:` in the jail's %s is not a mapping — fix it by hand", key, layout.SettingsRel)
+	}
+	return n, nil
 }
 
 // keyGcloudADC is the settings key that makes scion's broker copy the jail

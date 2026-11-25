@@ -934,7 +934,7 @@ func checkManagerLive(ctx context.Context, project, name string, list agentListe
 		}
 	}
 	if strings.EqualFold(a.ContainerStatus, "created") &&
-		(a.Phase == scionpkg.PhaseStopped || a.Phase == scionpkg.PhaseSuspended || a.Phase == scionpkg.PhaseError) {
+		(a.Phase == scionpkg.PhaseStopped || a.Phase == scionpkg.PhaseSuspended || a.Phase == scionpkg.PhaseError || a.Phase == scionpkg.PhaseHalted) {
 		return checkResult{check, false,
 			fmt.Sprintf("manager %q is not live: phase %s over a container podman lists as created (a start the VM's power-off interrupted leaves one) — the hub counts a created container as running, so a stop claim it holds on the manager is released only once that container is removed, and every resume is refused with `start_in_progress: A stop is in progress`",
 				name, scionpkg.BoundedQuote(a.Phase)),
@@ -952,6 +952,9 @@ func checkManagerLive(ctx context.Context, project, name string, list agentListe
 	fix := "run `lever up` to resume it"
 	if a.Phase == scionpkg.PhaseStopped {
 		fix = stoppedResumeFix
+	}
+	if a.Phase == scionpkg.PhaseHalted {
+		fix = haltedResumeFix
 	}
 	if a.Phase == "error" {
 		fix = "run `lever up` (an error-phase record is resumed with --force; if that fails the record and its conversation are kept, and `lever up --fresh` is the way to discard them) — its container log in the guest holds the harness's last output"
@@ -978,6 +981,11 @@ const noConversationFix = "run `lever up`: it starts the manager fresh on its ow
 
 // stoppedResumeFix: scion's hub resumes a stopped record with a fresh harness
 // session (only a suspended one gets --continue).
+// haltedResumeFix is the fix for a halted record: the platform ended the run
+// (an OOM kill, a VM reboot, a container that went missing), and scion
+// resumes it like a stopped one.
+const haltedResumeFix = "run `lever up` — the platform ended the manager's run (an OOM kill, a VM reboot or a container that went missing; scion's phase halted), and scion resumes it in a new claude session (no --continue); the old conversation stays in the agent home: `lever attach`, then `/resume`"
+
 const stoppedResumeFix = "run `lever up` — scion resumes a stopped record in a new claude session (no --continue); the old conversation stays in the agent home: `lever attach`, then `/resume`"
 
 func hubTokenFix(name, project string) string {
@@ -2078,9 +2086,10 @@ func checkPATTokens(ctx context.Context, st state.State, remoteEnabled bool, kno
 	}
 	crec, _, _ := st.LoadControllerPATRecord()
 	checks := []tokenCheck{{"controller", st.LoadControllerPAT, st.LoadControllerPATRecord,
-		controllerPATScopes(controllerLifecycle(ctx, known, crec), controllerInbox(ctx, known, crec))}}
+		controllerPATScopes(controllerLifecycle(ctx, known, crec), controllerInbox(ctx, known, crec), controllerProjectList(ctx, known, crec))}}
 	if remoteEnabled {
-		checks = append(checks, tokenCheck{"remote", st.LoadRemotePAT, st.LoadRemotePATRecord, remotePATScopes()})
+		rrec, _, _ := st.LoadRemotePATRecord()
+		checks = append(checks, tokenCheck{"remote", st.LoadRemotePAT, st.LoadRemotePATRecord, remotePATScopes(controllerProjectList(ctx, known, rrec))})
 	}
 	var details []string
 	for _, c := range checks {
@@ -2299,7 +2308,7 @@ func checkHubExperiments(ctx context.Context, st state.State, sshOn bool, known 
 	if len(on) > 0 {
 		return checkResult{name, false,
 			strings.Join(on, ", ") + " on at the hub: scion experiments not reviewed for the jail (conduit: an inbound shell and port path into agents; " +
-				"artifacts: hub-held publishing with unauthenticated share links; chat thread groups: project-wide chat groups agents can create)",
+				"artifacts: hub-held publishing with unauthenticated share links; port view: an agent's ports for anyone with the URL; the rest widen what agents or hub users can reach)",
 			"run `lever apply`: it pins it off as lever-admin and restarts the hub"}
 	}
 	if !hubHasExperiments(ctx, known, rec, found) {
@@ -2336,6 +2345,9 @@ func checkHubExperiments(ctx context.Context, st state.State, sshOn bool, known 
 	}
 	if conduitOn {
 		detail += "; " + conduitExperiment + " on for `lever ssh` (its own row)"
+	}
+	if slices.Contains(rec.Asked, threadGroupsExperiment) && !slices.Contains(rec.Off, threadGroupsExperiment) {
+		detail += "; chat thread groups are always on in this scion (graduated), and the remote proxy refuses their routes"
 	}
 	return checkResult{name, true, detail, ""}
 }

@@ -3,6 +3,7 @@ package broker
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -300,5 +301,30 @@ func TestMemoryBudgetCountsOrphanedAgents(t *testing.T) {
 	rec := callOperator(t, e.b, http.MethodPost, PathOperatorAgentSpawn, string(body))
 	if rec.Code != http.StatusConflict || rec.Header().Get(ReasonHeader) != ReasonMemoryBusy {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+}
+
+// The manager is told the names of the agents it may reach only; the
+// operator's spawned agents are counted, unnamed. A remote caller gets the
+// sizes alone; the operator every name.
+func TestMemoryBusyTextPerCaller(t *testing.T) {
+	saved := AgentsState{Agents: []AgentRecord{
+		{Name: "s-aaaaaa", Template: "session", CreatedBy: operatorActor, State: AgentActive, Dir: "sessions/s-aaaaaa", Memory: "4GiB", MemoryBytes: 4 * gib},
+	}}
+	e := newSpawnEnv(t, saved, withSizes)
+	e.b.memoryBudget = 5 * gib
+	err := e.b.memoryFits("s-new", 2*gib, map[string]bool{"s-aaaaaa": true})
+	var mb *memoryBusyError
+	if !errors.As(err, &mb) {
+		t.Fatalf("%v", err)
+	}
+	if got := e.b.memoryBusyText(mb, operatorActor); !strings.Contains(got, "s-aaaaaa 4GiB") {
+		t.Errorf("operator: %q", got)
+	}
+	if got := e.b.memoryBusyText(mb, "test-manager"); strings.Contains(got, "s-aaaaaa") || !strings.Contains(got, "1 other agent(s)") {
+		t.Errorf("manager: %q", got)
+	}
+	if got := e.b.memoryBusyText(mb, "ssh:factory"); strings.Contains(got, "s-aaaaaa") || strings.Contains(got, "other agent") {
+		t.Errorf("remote: %q", got)
 	}
 }

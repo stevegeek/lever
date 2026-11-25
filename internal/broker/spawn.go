@@ -419,11 +419,7 @@ func (b *Broker) spawnAgent(ctx context.Context, w http.ResponseWriter, req Spaw
 		return
 	} else if busy != nil {
 		b.audit("agent", actor, "deny", verb+": "+busy.Error())
-		msg := busy.Error()
-		if actor != b.manager && actor != operatorActor {
-			msg = busy.short()
-		}
-		refuse(w, ReasonMemoryBusy, msg, http.StatusConflict)
+		refuse(w, ReasonMemoryBusy, b.memoryBusyText(busy, actor), http.StatusConflict)
 		return
 	}
 	// Counted last, so only a spawn that passed every other check uses up

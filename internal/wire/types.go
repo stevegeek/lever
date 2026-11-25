@@ -318,7 +318,10 @@ type ContactsResponse struct {
 // reference a send goes to ("@" + the contact's hub email). Times are RFC
 // 3339 UTC, "" when none: the contact's last post to the caller, the
 // caller's last initiated authorization to it, and when the initiate rule
-// next allows one (with CanInitiate false).
+// next allows one (with CanInitiate false; "" with Open at MaxOpen means
+// only the contact's answer allows one). MaxOpen is the caller's limit on
+// unanswered messages it starts to this contact and Open how many it has
+// (both 0 when the host record cannot be read).
 type ContactInfo struct {
 	Login           string `json:"login"`
 	To              string `json:"to"`
@@ -326,6 +329,8 @@ type ContactInfo struct {
 	LastInitiated   string `json:"last_initiated,omitempty"`
 	CanInitiate     bool   `json:"can_initiate"`
 	NextAllowedAt   string `json:"next_allowed_at,omitempty"`
+	MaxOpen         int    `json:"max_open,omitempty"`
+	Open            int    `json:"open"`
 }
 
 // ContactMessageRequest asks PathContactMessage to authorize Text to the

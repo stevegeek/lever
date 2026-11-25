@@ -151,7 +151,7 @@ func TestCheckAgentMessages(t *testing.T) {
 	app.Remote.AgentMessages.Enabled = true
 	r := checkAgentMessages(app, st, agentMsgsLive{})
 	if !r.ok || !strings.Contains(r.detail, "c@x (x)") || !strings.Contains(r.detail, "follow_up_after 24h,") ||
-		!strings.Contains(r.detail, "max_chars 4000") || !strings.Contains(r.detail, "image") {
+		!strings.Contains(r.detail, "max_open 2,") || !strings.Contains(r.detail, "max_chars 4000") || !strings.Contains(r.detail, "image") {
 		t.Fatalf("on: %+v", r)
 	}
 	if strings.Contains(r.detail, "op@x") {

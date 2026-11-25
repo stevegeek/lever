@@ -120,6 +120,10 @@ func TestRemoteAgentMessagesValidation(t *testing.T) {
 		"max chars 16000":    {func(a *App) { a.Remote.AgentMessages.MaxChars = 16000 }, ""},
 		"max chars 16001":    {func(a *App) { a.Remote.AgentMessages.MaxChars = 16001 }, "max_chars"},
 		"max chars negative": {func(a *App) { a.Remote.AgentMessages.MaxChars = -1 }, "max_chars"},
+		"max open 1":         {func(a *App) { a.Remote.AgentMessages.MaxOpen = 1 }, ""},
+		"max open 10":        {func(a *App) { a.Remote.AgentMessages.MaxOpen = 10 }, ""},
+		"max open 11":        {func(a *App) { a.Remote.AgentMessages.MaxOpen = 11 }, "agent_messages.max_open 11"},
+		"max open negative":  {func(a *App) { a.Remote.AgentMessages.MaxOpen = -1 }, "agent_messages.max_open -1"},
 		"on, scion before the sender fix": {func(a *App) {
 			a.Remote.AgentMessages.Enabled = true
 			a.Scion.Version = "v0.0.0-20260827090000-0123456789ab"
@@ -230,5 +234,71 @@ func TestRemotePushYAML(t *testing.T) {
 	a.Remote.Enabled = false
 	if a.PushOn() {
 		t.Fatal("push needs remote access on")
+	}
+}
+
+func TestAgentMaxOpenYAMLAndOverrides(t *testing.T) {
+	a, err := LoadNoHostChecks(writeConfig(t, remoteWithWorkers+"  allowed_users:\n    - op@example.com\n"+
+		"    - {login: c@example.com, tier: contact, agents: [w1]}\n  agent_messages:\n    enabled: true\n    max_open: 3\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := a.EffectiveAgentMaxOpen(""); got != 3 {
+		t.Fatalf("instance max_open = %d, want 3", got)
+	}
+	if got := a.EffectiveAgentMaxOpen(a.Name); got != 3 {
+		t.Fatalf("manager max_open = %d, want the instance's 3", got)
+	}
+	a.Manager.AgentMessages.MaxOpen = 5
+	a.Workers[0].AgentMessages.MaxOpen = 1
+	for agent, want := range map[string]int{"": 3, a.Name: 5, a.Workers[0].Name: 1, "nobody": 3} {
+		if got := a.EffectiveAgentMaxOpen(agent); got != want {
+			t.Errorf("EffectiveAgentMaxOpen(%q) = %d, want %d", agent, got, want)
+		}
+	}
+	a.Remote.AgentMessages.MaxOpen = 0
+	if got := a.EffectiveAgentMaxOpen("nobody"); got != DefaultAgentMaxOpen || DefaultAgentMaxOpen != 2 {
+		t.Fatalf("default max_open = %d, want 2", got)
+	}
+}
+
+func TestAgentMaxOpenOverrideValidation(t *testing.T) {
+	for name, tc := range map[string]struct {
+		mut  func(a *App)
+		want string
+	}{
+		"manager 1":   {func(a *App) { a.Manager.AgentMessages.MaxOpen = 1 }, ""},
+		"manager 11":  {func(a *App) { a.Manager.AgentMessages.MaxOpen = 11 }, "manager.agent_messages.max_open 11"},
+		"worker 10":   {func(a *App) { a.Workers[0].AgentMessages.MaxOpen = 10 }, ""},
+		"worker -1":   {func(a *App) { a.Workers[0].AgentMessages.MaxOpen = -1 }, "workers[w1].agent_messages.max_open -1"},
+		"worker none": {func(a *App) {}, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, err := LoadNoHostChecks(writeConfig(t, remoteWithWorkers+"  allowed_users:\n    - op@example.com\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.mut(a)
+			err = a.Validate()
+			if tc.want == "" && err != nil || tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestAgentMaxOpenPerAgentYAML(t *testing.T) {
+	cfg := strings.Replace(remoteWithWorkers, "manager: {}", "manager: {agent_messages: {max_open: 4}}", 1)
+	cfg = strings.Replace(cfg, "{name: w1, dir: workers/w1}", "{name: w1, dir: workers/w1, agent_messages: {max_open: 1}}", 1)
+	a, err := LoadNoHostChecks(writeConfig(t, cfg+"  allowed_users:\n    - op@example.com\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.EffectiveAgentMaxOpen(a.Name) != 4 || a.EffectiveAgentMaxOpen("w1") != 1 || a.EffectiveAgentMaxOpen("w2") != DefaultAgentMaxOpen {
+		t.Fatalf("manager %d w1 %d w2 %d", a.EffectiveAgentMaxOpen(a.Name), a.EffectiveAgentMaxOpen("w1"), a.EffectiveAgentMaxOpen("w2"))
+	}
+	if _, err := LoadNoHostChecks(writeConfig(t, strings.Replace(cfg, "max_open: 1}", "max_open: 20}", 1)+"  allowed_users:\n    - op@example.com\n")); err == nil ||
+		!strings.Contains(err.Error(), "workers[w1].agent_messages.max_open 20") {
+		t.Fatalf("max_open 20: %v", err)
 	}
 }

@@ -20,7 +20,8 @@ import (
 // itself, so the bytes the hub stores are the bytes the broker hashed.
 
 const contactsDescription = "List the contacts you may message (the logins whose lever config lists you), " +
-	"with when they last wrote to you and whether you may start a message now (can_initiate, next_allowed_at)."
+	"with when they last wrote to you, whether you may start a message now (can_initiate, next_allowed_at), " +
+	"and how many unanswered messages you have started to each (open) of the most allowed (max_open)."
 
 const contactMessageDescription = "Authorize one message to a contact; lever records it and writes its exact text to body_file. " +
 	"Then run the returned command once, unchanged. A message sent any other way is not shown to the contact. " +

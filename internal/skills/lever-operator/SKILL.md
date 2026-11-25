@@ -242,8 +242,9 @@ or one you start — goes in two steps:
 A message sent any other way does not reach the contact. Start a message
 only to a login `contacts()` lists, only when the task needs to tell them
 something (a result is ready, you need a document), as one message with
-everything in it. Lever allows one message you start until the contact
-answers, and one reminder after `next_allowed_at`; up to
+everything in it. Until the contact answers, lever allows `max_open`
+messages you start: the first at once, each further one after
+`next_allowed_at` (`contacts()` shows both and how many are `open`); up to
 3 replies to one contact message. Refusals are fixed
 words: `not-a-contact`, `limit` (wait for `next_allowed_at` or their
 answer), `too-long`, `empty`, `bad-text` (control characters, or an `@` at the

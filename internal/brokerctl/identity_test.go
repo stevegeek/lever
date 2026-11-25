@@ -142,6 +142,30 @@ func TestConfigHashUnchangedWhileAgentMessagesOff(t *testing.T) {
 	if ConfigHash(app) == on {
 		t.Fatal("a contact's agents must be in the stamp while on")
 	}
+	app.Remote.AllowedUsers[1].Agents = []string{"w1"}
+	app.Remote.AgentMessages.MaxOpen = 3
+	if ConfigHash(app) == on {
+		t.Fatal("max_open must be in the stamp while on")
+	}
+	app.Remote.AgentMessages.MaxOpen = 0
+	app.Manager.AgentMessages.MaxOpen = 3
+	if ConfigHash(app) == on {
+		t.Fatal("the manager's max_open must be in the stamp while on")
+	}
+	app.Manager.AgentMessages.MaxOpen = 0
+	if ConfigHash(app) != on {
+		t.Fatal("unset max_open must keep the stamp")
+	}
+	app.Workers = []config.Worker{{Name: "w1", Dir: "w/w1"}}
+	withWorker := ConfigHash(app)
+	app.Workers[0].AgentMessages = config.AgentMessageLimits{}
+	if ConfigHash(app) != withWorker {
+		t.Fatal("an unset worker agent_messages must keep the stamp")
+	}
+	app.Workers[0].AgentMessages.MaxOpen = 3
+	if ConfigHash(app) == withWorker {
+		t.Fatal("a worker's max_open must be in the stamp")
+	}
 }
 
 func TestConfigHashFilesOnlyWhileOn(t *testing.T) {

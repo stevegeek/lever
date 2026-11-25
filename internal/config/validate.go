@@ -418,6 +418,9 @@ func (a *App) Validate() error {
 	if err := a.validateResources("manager", a.Manager.Resources); err != nil {
 		return err
 	}
+	if err := validAgentMaxOpen("manager.agent_messages", a.Manager.AgentMessages.MaxOpen); err != nil {
+		return err
+	}
 	if err := a.validateWorkerCap(); err != nil {
 		return err
 	}
@@ -537,6 +540,9 @@ func (a *App) validateWorker(g Worker) error {
 	}
 	if !nameRE.MatchString(g.Name) {
 		return fmt.Errorf("config: worker name %q must match %s", g.Name, nameRE)
+	}
+	if err := validAgentMaxOpen(fmt.Sprintf("workers[%s].agent_messages", g.Name), g.AgentMessages.MaxOpen); err != nil {
+		return err
 	}
 	if g.Name == a.ManagerCN() {
 		return fmt.Errorf("config: worker name %q collides with the manager identity — a worker must not share the manager's CN", g.Name)
@@ -707,6 +713,9 @@ func (a *App) validateRemote() error {
 	am := a.Remote.AgentMessages
 	if am.FollowUpAfter != 0 && (am.FollowUpAfter < time.Hour || am.FollowUpAfter > 720*time.Hour) {
 		return fmt.Errorf("config: remote: agent_messages.follow_up_after %v; use 1h to 720h (or leave it out for %v)", am.FollowUpAfter, DefaultAgentFollowUpAfter)
+	}
+	if err := validAgentMaxOpen("remote: agent_messages", am.MaxOpen); err != nil {
+		return err
 	}
 	if am.MaxChars < 0 || am.MaxChars > MaxAgentMaxChars {
 		return fmt.Errorf("config: remote: agent_messages.max_chars %d; use 1 to %d (or leave it out for %d)", am.MaxChars, MaxAgentMaxChars, DefaultAgentMaxChars)
@@ -885,6 +894,15 @@ var filesExtRE = regexp.MustCompile(`^[a-z0-9]{1,10}$`)
 // attachments with nosniff and a sandbox CSP; refusing these too keeps one
 // mistake in those headers from serving a page on lever's origin.
 var filesActiveExts = []string{"html", "htm", "xhtml", "shtml", "svg", "js", "mjs", "xml"}
+
+// validAgentMaxOpen refuses a max_open outside 1 to MaxAgentMaxOpen (0 is
+// unset).
+func validAgentMaxOpen(where string, n int) error {
+	if n < 0 || n > MaxAgentMaxOpen {
+		return fmt.Errorf("config: %s.max_open %d; use 1 to %d (or leave it out for the default, %d: one message and one reminder)", where, n, MaxAgentMaxOpen, DefaultAgentMaxOpen)
+	}
+	return nil
+}
 
 func (a *App) validRemoteUserTier(u RemoteUser) error {
 	switch u.EffectiveTier() {

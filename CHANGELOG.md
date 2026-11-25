@@ -14,6 +14,25 @@ version bump moves the block under the new version heading.
   Settings and Terminal are in the menu More opens, each with its name. A choice, Escape or a tap
   outside closes the menu. From 720px the actions stay a row of icons as before.
 
+### Added
+
+- **`remote.agent_messages.max_open` sets how many unanswered messages an agent may start to one
+  contact.** The default, 2, is one message and one reminder, as before. Each further message
+  still waits `follow_up_after` after the one before, and a message from the contact resets the
+  count. Allowed values are 1 to 10.
+- **`manager.agent_messages.max_open` and `workers[].agent_messages.max_open` override it for one
+  agent.**
+- **The `contacts` tool reports `max_open` and `open`** (how many unanswered messages the agent has
+  started to that contact) beside `next_allowed_at`, so an agent can say why it cannot send. A
+  `limit` refusal at the cap now says so.
+
+### Changed
+
+- **The agent-messages part of the manager's and workers' skill text changed,** on every instance
+  with `remote.agent_messages.enabled`, even one that never sets `max_open`. Contacts' posts to
+  an agent are refused until it next starts in a new session: run `lever conversation new` (or
+  `lever up --fresh` without `--keep-conversation`) after upgrading.
+
 ## [1.0.0-beta.11] - 2026-11-25
 
 ### Added

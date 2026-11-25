@@ -2135,6 +2135,55 @@ func TestStartManagerPassesPrompt(t *testing.T) {
 	}
 }
 
+// TestStartManagerResumeHandsANewSessionItsPrompt: a stopped or halted
+// record starts a new claude session, and after a run that ended completed
+// the hub no longer replays the stored task (scion d34ffbc1), so lever passes
+// the current boot prompt. A suspended record continues its session and gets
+// none.
+func TestStartManagerResumeHandsANewSessionItsPrompt(t *testing.T) {
+	for _, tc := range []struct {
+		phase    string
+		wantTask bool
+	}{
+		{scion.PhaseStopped, true},
+		{scion.PhaseHalted, true},
+		{scion.PhaseSuspended, false},
+	} {
+		t.Run(tc.phase, func(t *testing.T) {
+			dir := t.TempDir()
+			_ = os.MkdirAll(filepath.Join(dir, "workspace"), 0o755)
+			if err := os.WriteFile(filepath.Join(dir, "manager.md"), []byte("Dispatch the worker to create HELLO."), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg := filepath.Join(dir, config.CanonicalName)
+			if err := os.WriteFile(cfg, []byte("name: hello\nbackend: orbstack\ntree: workspace\nbroker:\n  llm_auth: subscription\nmanager:\n  image: img\n  prompt_file: manager.md\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			app, err := config.Load(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f := scionOKRunner()
+			r := &agentLifecycleRunner{FakeRunner: f, slug: app.Name, initPhase: tc.phase, initContainerStatus: "stopped"}
+			if err := runApply(app, Deps{Scion: scion.New(r, scion.Options{})}); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if r.resumeCalls != 1 || r.startCalls != 0 {
+				t.Fatalf("resumeCalls=%d startCalls=%d, want 1/0", r.resumeCalls, r.startCalls)
+			}
+			var resume string
+			for _, c := range f.Calls {
+				if len(c.Args) > 0 && c.Args[0] == "resume" {
+					resume = strings.Join(c.Args, " ")
+				}
+			}
+			if got := strings.HasSuffix(resume, "-- hello Dispatch the worker to create HELLO."); got != tc.wantTask {
+				t.Fatalf("resume argv %q: carries the prompt = %v, want %v", resume, got, tc.wantTask)
+			}
+		})
+	}
+}
+
 func TestStartManagerSetsLLMAuthEnvForAPIKey(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(dir, "workspace"), 0o755)

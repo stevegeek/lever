@@ -147,10 +147,16 @@ func (p *Pusher) Push(ctx context.Context, caller, repo, branch, bundle string) 
 		return Result{}, err
 	}
 	auth := &Auth{BaseURL: p.BaseURL, Token: token}
-	if _, err := p.Git.Run(ctx, mirror, RunOpts{GitDir: mirror, Auth: auth}, "fetch", "--no-tags", "--no-write-fetch-head", remote, "+refs/heads/main:refs/remotes/origin/main"); err != nil {
-		return Result{}, fmt.Errorf("refresh mirror: %w", err)
+	base, err := p.refreshMirror(ctx, mirror, remote, auth)
+	if err != nil {
+		return Result{}, err
 	}
-	// The mirror only receives main from GitHub. The bundle goes into a
+	// ValidateBranch protects main and master by name; the default branch is
+	// protected whatever it is called.
+	if branch == base {
+		return Result{}, fmt.Errorf("branch %q is %s's default branch: push to a new branch and open a pull request", branch, repo)
+	}
+	// The mirror only receives the default branch from GitHub. The bundle goes into a
 	// per-call repo borrowing the mirror's objects (alternates), so a refused
 	// bundle never lands in the shared mirror and one caller's objects are
 	// never another's prerequisites.
@@ -159,7 +165,7 @@ func (p *Pusher) Push(ctx context.Context, caller, repo, branch, bundle string) 
 		return Result{}, err
 	}
 	if _, err := p.Git.Run(ctx, work, RunOpts{GitDir: work}, "bundle", "verify", "--quiet", copyPath); err != nil {
-		return Result{}, fmt.Errorf("bundle does not verify against %s main (missing prerequisites?): %w", repo, err)
+		return Result{}, fmt.Errorf("bundle does not verify against %s %s (missing prerequisites?): %w", repo, base, err)
 	}
 	heads, err := p.Git.Run(ctx, work, RunOpts{GitDir: work}, "bundle", "list-heads", copyPath)
 	if err != nil {
@@ -188,7 +194,7 @@ func (p *Pusher) Push(ctx context.Context, caller, repo, branch, bundle string) 
 		return Result{}, fmt.Errorf("bundle head is not a commit (an annotated tag or another object): refused")
 	}
 	res = Result{Repo: repo, Branch: branch, NewSHA: strings.TrimSpace(newSHA),
-		CompareURL: p.BaseURL + "/" + repo + "/compare/main..." + branch}
+		CompareURL: p.BaseURL + "/" + repo + "/compare/" + base + "..." + branch}
 
 	if out, err := p.Git.Run(ctx, work, RunOpts{GitDir: work, Auth: auth}, "ls-remote", remote, "refs/heads/"+branch); err != nil {
 		return res, fmt.Errorf("read remote branch: %w", err)
@@ -240,6 +246,66 @@ func (p *Pusher) copyBundle(name, dst string) (string, int64, error) {
 		return "", 0, fmt.Errorf("bundle %s: too big (max %d bytes)", name, p.MaxBundle)
 	}
 	return hex.EncodeToString(h.Sum(nil)), n, nil
+}
+
+// mirrorRef is where the mirror keeps the default branch. The name is fixed,
+// whatever GitHub calls the branch: a renamed default branch (release to
+// release/v2, say) then just moves this ref, never leaving a stale ref or a
+// directory/file conflict that would wedge every later refresh.
+const mirrorRef = "refs/lever/default"
+
+// refreshMirror reads the repo's default branch from GitHub (the target of
+// its HEAD) and fetches only that branch into the mirror, at mirrorRef. It
+// returns the name. Repos default to main or master (or anything else):
+// nothing here assumes which. If the default branch is renamed between the
+// ls-remote and the fetch, that one call fails and a retry succeeds.
+func (p *Pusher) refreshMirror(ctx context.Context, mirror, remote string, auth *Auth) (string, error) {
+	out, err := p.Git.Run(ctx, mirror, RunOpts{GitDir: mirror, Auth: auth}, "ls-remote", "--symref", remote, "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("refresh mirror: read default branch: %w", err)
+	}
+	base, err := parseDefaultBranch(out)
+	if err != nil {
+		return "", fmt.Errorf("refresh mirror: %w", err)
+	}
+	ref := "refs/heads/" + base
+	if _, err := p.Git.Run(ctx, mirror, RunOpts{GitDir: mirror, Auth: auth}, "fetch", "--no-tags", "--no-write-fetch-head", remote, "+"+ref+":"+mirrorRef); err != nil {
+		return "", fmt.Errorf("refresh mirror: %w", err)
+	}
+	return base, nil
+}
+
+// parseDefaultBranch reads the output of git ls-remote --symref HEAD:
+// "ref: refs/heads/<name>\tHEAD", then "<sha>\tHEAD". Both lines must be
+// there: a symref with no sha is an unborn HEAD (an empty repository), which
+// has nothing to fetch. The name comes from the remote, so it must pass the
+// same check as a branch an agent asks for before it goes into a refspec.
+func parseDefaultBranch(out string) (string, error) {
+	target, born := "", false
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Split(line, "\t")
+		if len(f) != 2 || f[1] != "HEAD" {
+			continue
+		}
+		if t, ok := strings.CutPrefix(f[0], "ref: "); ok {
+			if target == "" {
+				target = t
+			}
+		} else if shaRE.MatchString(f[0]) {
+			born = true
+		}
+	}
+	if target == "" || !born {
+		return "", errors.New("the repository has no default branch (is it empty?)")
+	}
+	name, ok := strings.CutPrefix(target, "refs/heads/")
+	if !ok {
+		return "", fmt.Errorf("default branch: HEAD points at %q, not a branch", target)
+	}
+	if err := ValidateFetchBranch(name); err != nil {
+		return "", fmt.Errorf("default branch: %w", err)
+	}
+	return name, nil
 }
 
 // ensureMirror returns the repo's bare, hook-less mirror, creating it once.

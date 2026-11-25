@@ -624,8 +624,8 @@ func TestFetchMainAndBranch(t *testing.T) {
 		}
 	}
 	out := gitT(t, filepath.Join(p.State, "mirrors", repo+".git"), "for-each-ref", "--format=%(refname)")
-	if out != "refs/remotes/origin/main" {
-		t.Fatalf("mirror holds more than main: %q", out)
+	if out != mirrorRef {
+		t.Fatalf("mirror holds more than the default branch: %q", out)
 	}
 }
 

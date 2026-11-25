@@ -195,7 +195,9 @@ The broker adds `-backend` and `-admin` itself. Every other setting is a flag in
 | `-push-workflows` | no | Push tokens also ask for `workflows: write`, so a push may add or change files under `.github/workflows/`. The App must have the Workflows permission. Default off. A pushed workflow runs before any review, with the repository's Actions secrets: read [section 9](#9-workflow-pushes-opt-in) first. The tool logs a warning when it starts with this flag. |
 
 The tool keeps a bare mirror of each repository under `-state`. The mirror has no hooks and no
-checkout, so no code from a bundle runs on the host. The mirror receives only `main` from GitHub.
+checkout, so no code from a bundle runs on the host. The mirror receives only the repository's
+default branch from GitHub (`main`, `master` or any other name: the tool reads it from the
+remote's `HEAD` on each call). The compare URL a push returns is against that branch.
 Each push imports the bundle into a new temporary repository under `-state/tmp`, which borrows the
 mirror objects. The tool deletes this repository after each call, also after a refusal. Thus a
 refused bundle uses no disk space after the call, and one caller cannot use the objects of another
@@ -210,6 +212,9 @@ bundle of the new commits into `/workspace/.lever-files/github/`:
 git bundle create /workspace/.lever-files/github/<name>.bundle origin/main..<branch>
 ```
 
+Use the repository's default branch in place of `main` when it has another name (`origin/master`,
+for example). A push is refused when `branch` is the default branch, whatever its name.
+
 The agent then calls `push` with `repo`, `branch` and `bundle`. The `bundle` argument is the file
 name only, for example `fix-1.bundle`. It is not a path. The name must match
 `^[A-Za-z0-9_-][A-Za-z0-9._-]{0,92}\.bundle$` (it cannot start with a dot). The bundle must contain exactly one ref, `refs/heads/<branch>`,
@@ -222,7 +227,7 @@ rejected. The agent must use a new branch name.
 
 Without `fetch` the jail cannot see GitHub at all: when the default branch moves (a merge commit, an
 edit on GitHub, another agent's PR), the agent's PRs conflict and it cannot see why. `fetch` reads
-one branch, `main` included (no prefix needed), and writes it as a full bundle with one ref,
+one branch, the default branch included (no prefix needed), and writes it as a full bundle with one ref,
 `refs/heads/<branch>`, to `/workspace/.lever-files/github/<bundle>`, replacing any file of that
 name. The token carries only Contents: read. The result holds `sha`, `bundle`, `bytes`, and the
 command that imports it:
@@ -232,10 +237,12 @@ git fetch /workspace/.lever-files/github/origin-main.bundle +refs/heads/main:ref
 git merge origin/main   # resolve conflicts, then push as usual
 ```
 
+For a repository whose default branch is `master`, fetch `master` and use `master` in both places.
+
 The GitHub objects go into a temporary repository that borrows the mirror's objects; the shared
-mirror still receives only `main`. The branch's size is estimated before the bundle is built: one over
+mirror still receives only the default branch. The branch's size is estimated before the bundle is built: one over
 `-max-bundle` is refused, so a repository whose history is bigger than `-max-bundle` cannot be
-fetched at all, `main` included. Each fetch is charged to the caller's `-import-budget`, as pushes
+fetched at all, the default branch included. Each fetch is charged to the caller's `-import-budget`, as pushes
 are, refused ones too, which limits how fast fetching under many names can fill the disk. The audit line is `github.fetch`.
 
 **Risk:** the agent reads everything on the branch it names, including work other people pushed.
@@ -253,6 +260,7 @@ A refusal returns to the agent as `{"ok": false, "error": "..."}`. The tool writ
 | Caller over `-import-budget` | Named refusal before any git call on the bundle. |
 | Pack over a size limit (see below) | Named refusal before any git call on the bundle. |
 | Bad branch charset or prefix, or a protected name (`main`, `master`, `HEAD`) | Named refusal before any git call. |
+| `branch` is the repository's default branch (any name) | Named refusal after the mirror refresh, before the push. |
 | Repository not in `-repos` | Named refusal. |
 | Another push to the same repository holds the mirror for more than 30 seconds | Refusal: retry shortly. |
 | Non-fast-forward | GitHub rejects the push. The tool reports that the branch moved and to use a new branch name. |
@@ -581,6 +589,6 @@ host.
 
 The tool itself never touches these repositories. It uses its own mirror under `-state`.
 
-The mirrors under `-state` grow with the history of `main`, because the tool sets `gc.auto=0`. Run
+The mirrors under `-state` grow with the history of the default branch, because the tool sets `gc.auto=0`. Run
 `git --git-dir=<mirror> gc` now and then, or delete the mirror directory. The tool creates it again
 on the next push.

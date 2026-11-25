@@ -454,10 +454,21 @@ func (t Template) Sizes() []TemplateMemorySize {
 			continue
 		}
 		sc, _ := Resources{Memory: m}.ScionLimits()
-		out = append(out, TemplateMemorySize{Name: m, Bytes: n, Scion: sc})
+		// One spelling whatever the config wrote ("8Gi", "8192MiB"): the
+		// name is what a spawn, the record and every list carry.
+		out = append(out, TemplateMemorySize{Name: CanonicalMemory(n), Bytes: n, Scion: sc})
 	}
 	slices.SortFunc(out, func(x, y TemplateMemorySize) int { return cmp.Compare(x.Bytes, y.Bytes) })
 	return out
+}
+
+// CanonicalMemory spells n bytes as whole GiB, else MiB ("8GiB",
+// "1536MiB").
+func CanonicalMemory(n int64) string {
+	if n%(1<<30) == 0 {
+		return fmt.Sprintf("%dGiB", n>>30)
+	}
+	return fmt.Sprintf("%dMiB", n>>20)
 }
 
 // AgentMemoryBytes is an agent's resources.memory in bytes; 0 when unset

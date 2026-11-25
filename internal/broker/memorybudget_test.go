@@ -252,3 +252,53 @@ func TestParseMemorySize(t *testing.T) {
 		}
 	}
 }
+
+// The ticket's sequence in one broker: a resume is refused while the budget
+// is full, the other agent is suspended through the broker, and the same
+// resume is then admitted.
+func TestMemoryBudgetSuspendThenResume(t *testing.T) {
+	b, rt, _ := memBroker(t, 10*gib,
+		scion.Agent{Slug: "a", Phase: "running", ContainerStatus: "Up 1 minute"},
+		scion.Agent{Slug: "b", Phase: "suspended"})
+	if rec := callWorker(t, b, "/worker/resume", `{"worker":"b"}`, "test-manager"); rec.Code != http.StatusConflict {
+		t.Fatalf("full: %d %s", rec.Code, rec.Body)
+	}
+	if rec := callWorker(t, b, "/worker/suspend", `{"worker":"a"}`, "test-manager"); rec.Code != http.StatusOK || len(rt.suspend) != 1 {
+		t.Fatalf("suspend: %d %s", rec.Code, rec.Body)
+	}
+	// The hub now reads a suspended (the fake does not move phases itself).
+	rt.mu.Lock()
+	rt.agents[testInstanceProject] = []scion.Agent{{Slug: "a", Phase: "suspended"}, {Slug: "b", Phase: "suspended"}}
+	rt.mu.Unlock()
+	if rec := callWorker(t, b, "/worker/resume", `{"worker":"b"}`, "test-manager"); rec.Code != http.StatusOK || len(rt.resumed) != 1 {
+		t.Fatalf("after the suspend: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// An agent with no memory limit counts as nothing, even over a full budget;
+// one larger than the whole budget is told it can never start.
+func TestMemoryBudgetEdgeRefusals(t *testing.T) {
+	b, _, _ := memBroker(t, 4*gib, scion.Agent{Slug: "c", Phase: "running", ContainerStatus: "Up 1 minute"})
+	if err := b.memoryFits("x", 0, map[string]bool{"c": true}); err != nil {
+		t.Fatalf("an agent with no limit: %v", err)
+	}
+	_, err := b.admitWorker(t.Context(), "a")
+	if err == nil || !strings.Contains(err.Error(), "more than the whole 4GiB memory budget, so it can never start") {
+		t.Fatalf("larger than the budget: %v", err)
+	}
+}
+
+// A running agent whose template is gone still counts its memory.
+func TestMemoryBudgetCountsOrphanedAgents(t *testing.T) {
+	saved := AgentsState{Agents: []AgentRecord{
+		{Name: "s-cccccc", Template: "gone", State: AgentActive, Dir: "old/s-cccccc", Memory: "4GiB", MemoryBytes: 4 * gib},
+	}}
+	e := newSpawnEnv(t, saved, withSizes)
+	e.b.memoryBudget = 5 * gib
+	e.rt.agents[testInstanceProject] = []scion.Agent{{Slug: "s-cccccc", Phase: "running", ContainerStatus: "Up 1 minute"}}
+	body, _ := json.Marshal(SpawnRequest{Template: "session", Task: "go", Memory: "2GiB"})
+	rec := callOperator(t, e.b, http.MethodPost, PathOperatorAgentSpawn, string(body))
+	if rec.Code != http.StatusConflict || rec.Header().Get(ReasonHeader) != ReasonMemoryBusy {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+}

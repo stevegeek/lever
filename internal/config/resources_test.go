@@ -262,6 +262,15 @@ func TestTemplateMemorySizes(t *testing.T) {
 	if len(sz) != 3 || sz[0].Name != "4GiB" || sz[2].Name != "14GiB" || sz[1].Scion != "8Gi" || sz[1].Bytes != 8<<30 {
 		t.Fatalf("Sizes = %+v", sz)
 	}
+	// Every spelling the config takes comes out in one, which spawn and the
+	// lists accept.
+	gi := Template{Resources: Resources{Memory: "4Gi"}, MemorySizes: []string{"4Gi", "8192Mi", "1536MiB"}}
+	if err := a.validateMemorySizes("t", gi); err != nil {
+		t.Fatal(err)
+	}
+	if sz := gi.Sizes(); len(sz) != 3 || sz[0].Name != "1536MiB" || sz[1].Name != "4GiB" || sz[1].Scion != "4Gi" || sz[2].Name != "8GiB" || sz[2].Scion != "8192Mi" {
+		t.Fatalf("Gi sizes = %+v", sz)
+	}
 	if sz := (Template{Resources: Resources{Memory: "2GiB"}}).Sizes(); len(sz) != 1 || sz[0].Name != "2GiB" {
 		t.Fatalf("default Sizes = %+v", sz)
 	}

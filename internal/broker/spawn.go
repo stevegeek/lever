@@ -1093,12 +1093,14 @@ func (b *Broker) memoryBusyFor(ctx context.Context, agent string, asked int64) (
 	if b.memoryBudget <= 0 {
 		return nil, nil
 	}
+	// Read under the lock, as admitWorker reads, so a start admitted
+	// meanwhile is either in the records or in admitting.
+	b.admitMu.Lock()
+	defer b.admitMu.Unlock()
 	agents, err := b.runtime.List(ctx, b.instanceProject)
 	if err != nil {
 		return nil, err
 	}
-	b.admitMu.Lock()
-	defer b.admitMu.Unlock()
 	err = b.memoryFits(agent, asked, b.runningSet(agents, ""))
 	var mb *memoryBusyError
 	if errors.As(err, &mb) {

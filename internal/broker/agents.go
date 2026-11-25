@@ -210,7 +210,8 @@ func bareSpec(rec AgentRecord, tree string) WorkerSpec {
 	if tree != "" && rec.Dir != "" {
 		ws = tree + "/" + rec.Dir
 	}
-	return WorkerSpec{Name: rec.Name, WorkspaceSubdir: rec.Dir, HostWorkspace: ws, spawned: true}
+	// Its memory still counts against the budget while it runs.
+	return WorkerSpec{Name: rec.Name, WorkspaceSubdir: rec.Dir, HostWorkspace: ws, MemoryBytes: rec.MemoryBytes, spawned: true}
 }
 
 // spawnedSpec is rec's spec from its template, with the memory it was

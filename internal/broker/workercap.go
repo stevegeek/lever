@@ -79,7 +79,7 @@ func (b *Broker) admitWorker(ctx context.Context, name string) (release func(), 
 	defer b.admitMu.Unlock()
 	agents, err := b.runtime.List(ctx, b.instanceProject)
 	if err != nil {
-		return nil, fmt.Errorf("reading the running workers for broker.max_running_workers: %w", err)
+		return nil, fmt.Errorf("reading the running agents for the running caps and the memory budget: %w", err)
 	}
 	counted := b.runningSet(agents, name)
 	if perTemplate {
@@ -131,10 +131,14 @@ var ErrMemoryBusy = errors.New("memory budget reached")
 type memoryBusyError struct {
 	agent              string
 	asked, free, total int64
-	active             []string // "name (size)", largest first
+	active             []string // "name size", largest first
 }
 
 func (e *memoryBusyError) Error() string {
+	if e.asked > e.total {
+		return fmt.Sprintf("agent %s was not started: it asks %s of memory, more than the whole %s memory budget, so it can never start; it was made before the budget or its sizes changed. Spawn a new agent of a size that fits, or raise broker.memory_budget. Nothing was changed.",
+			e.agent, fmtMemory(e.asked), fmtMemory(e.total))
+	}
 	who := ""
 	if len(e.active) > 0 {
 		who = " (running or starting: " + strings.Join(e.active, ", ") + ")"
@@ -147,6 +151,9 @@ func (e *memoryBusyError) Unwrap() error { return ErrMemoryBusy }
 
 // short is the refusal without the other agents' names.
 func (e *memoryBusyError) short() string {
+	if e.asked > e.total {
+		return fmt.Sprintf("memory busy: %s asked, more than the whole %s budget; spawn a smaller one", fmtMemory(e.asked), fmtMemory(e.total))
+	}
 	return fmt.Sprintf("memory busy: %s asked, %s free of %s; suspend one or pick a smaller size",
 		fmtMemory(e.asked), fmtMemory(e.free), fmtMemory(e.total))
 }
@@ -181,6 +188,10 @@ func (b *Broker) memoryUsed(counted map[string]bool) int64 {
 // memoryFits refuses asked bytes for agent when counted's limits leave less
 // than that free in the budget.
 func (b *Broker) memoryFits(agent string, asked int64, counted map[string]bool) error {
+	// An agent with no limit counts as nothing, whatever the others use.
+	if asked == 0 {
+		return nil
+	}
 	used := b.memoryUsed(counted)
 	if used+asked <= b.memoryBudget {
 		return nil

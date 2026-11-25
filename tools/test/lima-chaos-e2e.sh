@@ -390,7 +390,9 @@ done
 say "doctor"
 doctor_out=$(cd "$INST" && timeout 900 "$LEVER" doctor 2>&1)
 printf '%s\n' "$doctor_out" | grep -E '^(✗|!) ' | mask_secrets | sed 's/^/      | /'
-checkx "doctor: no failed row" '! printf "%s\n" "$doctor_out" | grep -q "^✗ "'
+# The manager runs on a fake API key, so scion reports its turn as activity
+# harness_error and doctor fails that row; any other failed row counts.
+checkx "doctor: no failed row" '! printf "%s\n" "$doctor_out" | grep "^✗ " | grep -vq "^✗ manager agent .*activity harness_error"'
 
 say "teardown"
 (cd "$INST" && timeout 900 "$LEVER" destroy 2>&1 | mask_secrets | tail -1)

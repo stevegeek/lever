@@ -217,6 +217,12 @@ doctor_out=""
 doctor_run() { doctor_out=$(cd "$INST" && timeout 900 "$LEVER" doctor 2>&1); }
 doctor_row() { printf '%s\n' "$doctor_out" | grep -E "^(✓|✗|!|-) $1" | head -1; }
 row_ok() { local r; r=$(doctor_row "$1"); echo "      | ${r:-(no row)}" | cut -c1-300; [[ "$r" == ✓* ]]; }
+# The manager runs on a fake API key, so its first turn ends on an auth error,
+# which scion reports as activity harness_error and doctor fails on. That one
+# failure is expected here; any other manager failure is not.
+fake_key_row() { [[ "$1" == "✗ manager agent "* && "$1" == *"activity harness_error"* ]]; }
+manager_ok() { local r; r=$(doctor_row "manager agent"); echo "      | ${r:-(no row)}" | cut -c1-300; [[ "$r" == ✓* ]] || fake_key_row "$r"; }
+no_failed_row() { local l; while IFS= read -r l; do [[ "$l" == "✗ "* ]] && ! fake_key_row "$l" && return 1; done <<<"$doctor_out"; return 0; }
 # up runs `lever apply`: `lever up` ends by attaching, which needs a terminal.
 up() { (cd "$INST" && timeout 3600 "$LEVER" apply 2>&1 | tee "$WORK/up.log" | mask_secrets | tail -${1:-25}); }
 
@@ -451,7 +457,7 @@ check "doctor: remote access" row_ok "remote access"
 check "doctor: hub authentication" row_ok "hub authentication"
 check "doctor: hub identities" row_ok "hub identities"
 check "doctor: remote web role (bound before any sign-in)" row_ok "remote web role"
-checkx "doctor: no failed row" '! printf "%s\n" "$doctor_out" | grep -q "^✗ "'
+check "doctor: no failed row" no_failed_row
 
 say "a contact removed while an agent loops the controller rename, with a token due"
 # Any agent can call the hub's workstation identity route, which renames scion's
@@ -603,7 +609,7 @@ doctor_run
 printf '%s\n' "$doctor_out" | grep -E '^(✗|!) ' | mask_secrets | sed 's/^/      | /'
 check "doctor: remote web role bound after the sign-ins" row_ok "remote web role"
 check "doctor: scion conduit and artifacts after the resume" row_ok "scion conduit and artifacts"
-checkx "doctor: no failed row after the resume" '! printf "%s\n" "$doctor_out" | grep -q "^✗ "'
+check "doctor: no failed row after the resume" no_failed_row
 
 say "lever up applies a config change, with no lever apply"
 # upna <log> [args...]: `lever up --no-attach`, which runs the whole plan.
@@ -797,8 +803,8 @@ checkx "the new session got the current boot prompt" 'P exec "lever--$NAME" sh -
 checkx "the hub stores the current boot prompt as the record's task" 'mgrrec task | grep -q "$MARK"'
 doctor_run
 printf '%s\n' "$doctor_out" | grep -E '^(✗|!) ' | mask_secrets | sed 's/^/      | /'
-check "doctor: manager agent after the new conversation" row_ok "manager agent"
-checkx "doctor: no failed row after the new conversation" '! printf "%s\n" "$doctor_out" | grep -q "^✗ "'
+check "doctor: manager agent after the new conversation" manager_ok
+check "doctor: no failed row after the new conversation" no_failed_row
 
 say "teardown"
 (cd "$INST" && "$LEVER" destroy 2>&1 | tail -1)

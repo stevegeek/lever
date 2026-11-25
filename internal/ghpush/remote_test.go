@@ -41,6 +41,13 @@ func gitT(t *testing.T, dir string, args ...string) string {
 // the remote plus a work clone the test builds bundles from.
 func newTestRemote(t *testing.T, repo string) (*testRemote, string) {
 	t.Helper()
+	return newTestRemoteBranch(t, repo, "main")
+}
+
+// newTestRemoteBranch is newTestRemote with def as the default branch (the
+// bare repo's HEAD and the work clone's branch).
+func newTestRemoteBranch(t *testing.T, repo, def string) (*testRemote, string) {
+	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
@@ -51,16 +58,16 @@ func newTestRemote(t *testing.T, repo string) (*testRemote, string) {
 	}
 	root := t.TempDir()
 	bare := filepath.Join(root, repo+".git")
-	gitT(t, root, "init", "--bare", "-b", "main", bare)
+	gitT(t, root, "init", "--bare", "-b", def, bare)
 	gitT(t, bare, "config", "http.receivepack", "true")
 	gitT(t, bare, "config", "receive.fsckObjects", "true")
 	gitT(t, bare, "config", "receive.denyNonFastForwards", "true")
 	work := t.TempDir()
-	gitT(t, work, "init", "-b", "main")
+	gitT(t, work, "init", "-b", def)
 	os.WriteFile(filepath.Join(work, "a.txt"), []byte("a\n"), 0o644)
 	gitT(t, work, "add", ".")
 	gitT(t, work, "commit", "-m", "init")
-	gitT(t, work, "push", bare, "main")
+	gitT(t, work, "push", bare, def)
 	gitT(t, work, "remote", "add", "origin", bare)
 	gitT(t, work, "fetch", "origin")
 	r := &testRemote{root: root}

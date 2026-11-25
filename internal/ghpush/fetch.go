@@ -14,7 +14,7 @@ import (
 )
 
 // OpFetch hands the agent a branch from GitHub as a git bundle: the read side
-// of push. The agent can then merge GitHub's main (or a branch someone else
+// of push. The agent can then merge GitHub's default branch (or a branch someone else
 // pushed) and resolve conflicts itself, without ever holding a credential.
 const OpFetch = "fetch"
 
@@ -32,7 +32,7 @@ type FetchResult struct {
 // and writes it as a full bundle (one ref, refs/heads/<branch>) to
 // BundleDir/<bundle> in the tree, replacing any file of that name. The
 // GitHub objects land only in a per-call repo borrowing the mirror's objects;
-// the shared mirror still receives only main.
+// the shared mirror still receives only the default branch.
 func (p *Pusher) Fetch(ctx context.Context, caller, repo, branch, bundle string) (res FetchResult, err error) {
 	defer func() {
 		decision, detail := "allow", ""
@@ -84,8 +84,8 @@ func (p *Pusher) Fetch(ctx context.Context, caller, repo, branch, bundle string)
 	}
 	remote := p.BaseURL + "/" + repo
 	auth := &Auth{BaseURL: p.BaseURL, Token: token}
-	if _, err := p.Git.Run(ctx, mirror, RunOpts{GitDir: mirror, Auth: auth}, "fetch", "--no-tags", "--no-write-fetch-head", remote, "+refs/heads/main:refs/remotes/origin/main"); err != nil {
-		return FetchResult{}, fmt.Errorf("refresh mirror: %w", err)
+	if _, err := p.refreshMirror(ctx, mirror, remote, auth); err != nil {
+		return FetchResult{}, err
 	}
 	work, err := p.newWorkRepo(ctx, tmp, mirror)
 	if err != nil {

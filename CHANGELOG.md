@@ -7,6 +7,16 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Fixed
+
+- **github tool: repositories whose default branch is not `main`.** `push` and `fetch` refreshed
+  the mirror with a hard-coded `refs/heads/main`, so on a repository that defaults to `master`
+  every call failed with `couldn't find remote ref refs/heads/main`. The tool now reads the default
+  branch from the remote's `HEAD` (`git ls-remote --symref`), checks the name, and refreshes only
+  that branch, into one fixed mirror ref (so a renamed default branch never wedges the mirror).
+  The compare URL a push returns names that branch, and a push to the default branch is refused
+  whatever its name.
+
 ## [1.0.0-beta.10] - 2026-11-24
 
 ### Added

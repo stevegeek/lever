@@ -357,6 +357,41 @@ func (s Store) Prune(keep int, protect ...string) ([]string, error) {
 	return removed, nil
 }
 
+// PruneReason removes all but the keep newest backups saved for reason,
+// never one named in protect, and touches no backup saved for another
+// reason. A backup an agent can cause (a halted manager's, one per `lever
+// up` after it halts itself) is rotated among its own kind, so it can never
+// push the operator's backups out of the store.
+func (s Store) PruneReason(reason string, keep int, protect ...string) ([]string, error) {
+	r, err := s.open(false)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer r.Close()
+	all, err := s.List()
+	if err != nil {
+		return nil, err
+	}
+	var removed []string
+	n := 0
+	for _, m := range all {
+		if m.Reason != reason {
+			continue
+		}
+		if n++; n <= keep || !ValidID(m.ID) || slices.Contains(protect, m.ID) {
+			continue
+		}
+		if err := r.RemoveAll(m.ID); err != nil {
+			return removed, fmt.Errorf("conversation backups: removing %s: %w", m.ID, err)
+		}
+		removed = append(removed, m.ID)
+	}
+	return removed, nil
+}
+
 // saveLockName is the lock file a running Save holds in its temporary
 // directory.
 const saveLockName = ".lock"

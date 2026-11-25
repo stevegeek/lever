@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -265,5 +266,39 @@ func TestStoreSaveLeavesNoLockFile(t *testing.T) {
 	m := save(t, s, time.Now().UTC())
 	if _, err := os.Lstat(filepath.Join(s.Dir, m.ID, saveLockName)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the saved backup holds the lock file: %v", err)
+	}
+}
+
+// TestStorePruneReasonTouchesOnlyItsKind: a burst of halted backups rotates
+// among itself and never removes the operator's.
+func TestStorePruneReasonTouchesOnlyItsKind(t *testing.T) {
+	s := newStore(t)
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	manual := save(t, s, t0).ID
+	src := mkTar(t, entry{name: "projects/-workspace/a.jsonl", typ: tar.TypeReg, body: "hi\n"})
+	var halted []string
+	for i := range 5 {
+		m, err := s.Save(Meta{Agent: "mgr", Created: t0.Add(time.Duration(i+1) * time.Hour), Reason: "up (halted)"}, func(w io.Writer) (Stats, error) {
+			return Copy(w, bytes.NewReader(src), "projects", DefaultLimits)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		halted = append(halted, m.ID)
+	}
+	removed, err := s.PruneReason("up (halted)", 2, halted[4])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 3 {
+		t.Fatalf("removed %v", removed)
+	}
+	all, _ := s.List()
+	var ids []string
+	for _, m := range all {
+		ids = append(ids, m.ID)
+	}
+	if len(all) != 3 || !slices.Contains(ids, manual) || !slices.Contains(ids, halted[4]) || !slices.Contains(ids, halted[3]) {
+		t.Fatalf("left %v (manual %s, halted %v)", ids, manual, halted)
 	}
 }

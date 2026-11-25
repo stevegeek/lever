@@ -488,7 +488,8 @@ An agent spawned from a template is a worker in every check above: it mounts onl
 `<dir_root>/<name>`, holds only its template's grants, and is started and resumed through the same
 broker checks. What spawning adds, and how it is held:
 
-- **The spawner chooses only the task and a label.** The broker refuses a spawn body with any other
+- **The spawner chooses only the task, a label and a memory size.** The size must be one of the
+  template's `memory_sizes`, matched by value; the broker refuses a spawn body with any other
   field, picks the name itself and builds the spec from the template alone. A template the manager
   may spawn from may obtain and delegate only what the manager obtains (config load enforces it),
   so the manager cannot mint an agent wider than itself.
@@ -555,6 +556,14 @@ broker checks. What spawning adds, and how it is held:
   `worker_to_worker`, a spawned agent messages and is messaged by only the agents of its own
   spawner. So the operator's, the manager's and each ssh key's agents form separate groups, joined
   only through the manager (whom every agent may message) or a configured worker's delegate.
+- **The memory budget is a resource guard.** Every spawn, start and resume is admitted against
+  `broker.memory_budget` by the memory limits the broker recorded (never a size an agent reports),
+  but which agents count is read from the hub's phases, which an agent can report about itself.
+  An agent that lies its way out of the count can let more start than the VM holds; each
+  container's own `resources.memory` still bounds it. A refusal names only agents its reader may
+  reach: the manager sees declared workers and its own spawned agents and a count of the rest; a
+  chat login, an ssh key and a spawned agent see the sizes alone. The totals (`budget`, `used`,
+  `free`) are summed over every agent and shown to the manager and to ssh keys.
 - **Archives and backups are bounded.** Conversation backups and archives stay in the host-only state
   directory: daily backups keep the newest 10 per agent, and `lever agent gc` deletes the archives
   and backups of agents destroyed long enough ago, keeping only their names (still revoked, never
@@ -570,3 +579,9 @@ broker checks. What spawning adds, and how it is held:
   whoever spawned it: that is the operator's word in config.
 - Until `lever agent gc` runs, destroyed agents' archives and backups stay; the spawn quotas and
   the disk floors above bound how fast they grow.
+- All spawners share one memory budget with no reservation. A spawner (the manager, or an ssh
+  key) that keeps its agents running at their largest sizes can leave too little for others, so
+  the operator's workers and agents, and other keys', are refused `memory-busy` until it suspends
+  some; only the operator can suspend another's agents. Bound each template with `max_running`
+  and its `memory_sizes`, so that what the manager's and each key's templates can hold at once
+  leaves room for the rest, or set `broker.memory_budget` with that in mind.

@@ -131,7 +131,28 @@ var ErrMemoryBusy = errors.New("memory budget reached")
 type memoryBusyError struct {
 	agent              string
 	asked, free, total int64
-	active             []string // "name size", largest first
+	active             []memAgent // largest first
+	others             int        // agents left unnamed for this caller
+}
+
+// memAgent is one agent holding memory, for a refusal.
+type memAgent struct {
+	name string
+	n    int64
+}
+
+// visibleTo is e naming only the agents keep allows; the rest are counted.
+func (e *memoryBusyError) visibleTo(keep func(string) bool) *memoryBusyError {
+	out := *e
+	out.active = nil
+	for _, a := range e.active {
+		if keep(a.name) {
+			out.active = append(out.active, a)
+		} else {
+			out.others++
+		}
+	}
+	return &out
 }
 
 func (e *memoryBusyError) Error() string {
@@ -139,9 +160,16 @@ func (e *memoryBusyError) Error() string {
 		return fmt.Sprintf("agent %s was not started: it asks %s of memory, more than the whole %s memory budget, so it can never start; it was made before the budget or its sizes changed. Spawn a new agent of a size that fits, or raise broker.memory_budget. Nothing was changed.",
 			e.agent, fmtMemory(e.asked), fmtMemory(e.total))
 	}
+	var names []string
+	for _, a := range e.active {
+		names = append(names, a.name+" "+fmtMemory(a.n))
+	}
+	if e.others > 0 {
+		names = append(names, fmt.Sprintf("%d other agent(s)", e.others))
+	}
 	who := ""
-	if len(e.active) > 0 {
-		who = " (running or starting: " + strings.Join(e.active, ", ") + ")"
+	if len(names) > 0 {
+		who = " (running or starting: " + strings.Join(names, ", ") + ")"
 	}
 	return fmt.Sprintf("agent %s was not started: it asks %s of memory and %s of the %s memory budget is free%s. Suspend one or pick a smaller size. Nothing was changed.",
 		e.agent, fmtMemory(e.asked), fmtMemory(e.free), fmtMemory(e.total), who)
@@ -197,22 +225,14 @@ func (b *Broker) memoryFits(agent string, asked int64, counted map[string]bool) 
 		return nil
 	}
 	e := &memoryBusyError{agent: agent, asked: asked, free: max(b.memoryBudget-used, 0), total: b.memoryBudget}
-	type sized struct {
-		name string
-		n    int64
-	}
-	var all []sized
 	for slug := range counted {
 		if n := b.memoryOf(slug); n > 0 {
-			all = append(all, sized{slug, n})
+			e.active = append(e.active, memAgent{slug, n})
 		}
 	}
-	slices.SortFunc(all, func(x, y sized) int {
+	slices.SortFunc(e.active, func(x, y memAgent) int {
 		return cmp.Or(cmp.Compare(y.n, x.n), strings.Compare(x.name, y.name))
 	})
-	for _, a := range all {
-		e.active = append(e.active, a.name+" "+fmtMemory(a.n))
-	}
 	return e
 }
 
@@ -235,6 +255,20 @@ func (b *Broker) runningSet(agents []scion.Agent, except string) map[string]bool
 		}
 	}
 	return counted
+}
+
+// memoryBusyText is a memory-busy refusal as actor may read it: the operator
+// gets every name; the manager only the agents it may reach (declared
+// workers and its own spawned agents), the rest counted; anyone else (a
+// chat login, a remote caller, a spawned agent) the sizes alone.
+func (b *Broker) memoryBusyText(mb *memoryBusyError, actor string) string {
+	switch actor {
+	case operatorActor:
+		return mb.Error()
+	case b.manager:
+		return mb.visibleTo(func(n string) bool { return b.workers.has(n) && b.managerMayReach(n) }).Error()
+	}
+	return mb.short()
 }
 
 // ErrTemplateCap is the refusal when a template's max_running is reached.
@@ -267,11 +301,7 @@ func (b *Broker) admitOrRefuse(ctx context.Context, w http.ResponseWriter, actor
 	}
 	if mb := (*memoryBusyError)(nil); errors.As(err, &mb) {
 		b.audit("worker", actor, "deny", verb+" "+name+": "+err.Error())
-		msg := err.Error()
-		if actor != b.manager && actor != operatorActor {
-			msg = mb.short()
-		}
-		refuse(w, ReasonMemoryBusy, msg, http.StatusConflict)
+		refuse(w, ReasonMemoryBusy, b.memoryBusyText(mb, actor), http.StatusConflict)
 		return nil, false
 	}
 	if errors.Is(err, ErrWorkerCap) {

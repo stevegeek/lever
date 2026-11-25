@@ -93,6 +93,13 @@ func (o convOps) backup(ctx context.Context, reason string) (m convbackup.Meta, 
 	return o.backupIf(ctx, reason, false)
 }
 
+// haltedBackupReason marks the backup taken before a halted manager's
+// resume; haltedBackupKeep of those are kept, apart from the store's Keep.
+const (
+	haltedBackupReason = "up (halted)"
+	haltedBackupKeep   = 3
+)
+
 // backupIf with skipEmpty saves and prunes nothing when the transcripts hold no
 // bytes, so an agent that empties its transcripts cannot push the real backups
 // out of the store one `lever up` at a time.
@@ -134,7 +141,15 @@ func (o convOps) backupIf(ctx context.Context, reason string, skipEmpty bool) (m
 		o.log("conversation: note: %d links or special files in the manager's .claude/projects were not backed up", m.Skipped)
 	}
 	o.log("conversation: backed up manager %q's conversation (%d files, %s) to %s", o.app.Name, m.Files, humanBytes(m.Bytes), store.Path(m.ID))
-	if removed, perr := store.Prune(convbackup.Keep, m.ID); perr != nil {
+	if reason == haltedBackupReason {
+		// The manager can halt itself (exceed its memory) as often as it
+		// likes: its halted backups rotate among themselves only.
+		if removed, perr := store.PruneReason(reason, haltedBackupKeep, m.ID); perr != nil {
+			o.log("conversation: warning: removing old halted backups: %v", perr)
+		} else if len(removed) > 0 {
+			o.log("conversation: removed %d older halted backup(s); lever keeps the last %d of those", len(removed), haltedBackupKeep)
+		}
+	} else if removed, perr := store.Prune(convbackup.Keep, m.ID); perr != nil {
 		o.log("conversation: warning: removing old backups: %v", perr)
 	} else if len(removed) > 0 {
 		o.log("conversation: removed %d older backup(s); lever keeps the last %d", len(removed), convbackup.Keep)
@@ -183,7 +198,7 @@ func (o convOps) backupBeforeDeleteAs(saved **convbackup.Meta, reason string, sk
 // restore once the manager is up. Empty transcripts are not saved.
 func (o convOps) backupBeforeHaltedResume(saved **convbackup.Meta) func(ctx context.Context, rec *scion.Agent) (bool, error) {
 	return func(ctx context.Context, _ *scion.Agent) (bool, error) {
-		m, found, err := o.backupIf(ctx, "up (halted)", true)
+		m, found, err := o.backupIf(ctx, haltedBackupReason, true)
 		if err != nil {
 			return false, err
 		}

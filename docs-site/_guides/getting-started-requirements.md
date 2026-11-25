@@ -50,7 +50,9 @@ A starting point for the jail VM's `memory`:
 
 `memory` below 2 GiB is refused. CPU matters less than memory: agents mostly wait on the model.
 Their bursts are builds and tests; scion limits each container to 2 CPUs unless you set
-`resources.cpu`.
+`resources.cpu`. A CPU limit only slows a busy container and never stops a job, so on a host that
+runs nothing else you can give the VM all of the host's threads (`cpus`) and set `cpu: none` on
+each agent: they then share every vCPU, and only `resources.memory` stays a hard limit.
 
 ## Disk
 

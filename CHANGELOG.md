@@ -204,13 +204,13 @@ version bump moves the block under the new version heading.
 ### Upgrade
 
 - **The rm confirmation reaches existing agents at their next fresh create.** The manager gets it
-  with the `lever up --fresh --keep-conversation` that Jail ABI 18 needs anyway; a worker at its next
+  with the `lever up --fresh --keep-conversation` that Jail ABI 19 needs anyway; a worker at its next
   `lever worker purge` or recycle. Until then a worker created on the new scion pin keeps scion's
   `1`.
 - **A config without templates can now fail the memory check** when its workers' `resources.memory`
   add up to more than the VM's `memory`. Lower the limits, set `broker.max_running_workers`, or
   raise `memory`.
-- **Jail ABI 18.** The agent image changed (sciontool and, in the slim image, scion from the new
+- **Jail ABI 19.** The agent image changed (sciontool and, in the slim image, scion from the new
   pin) and so did in-jail lever code: rebuild the agent image (`make lever-image` or `make
   lever-image-slim`, then any instance image built from it) and recreate the manager on it with
   `lever up --fresh --keep-conversation`. Doctor's *agent lever version* row says so. The first

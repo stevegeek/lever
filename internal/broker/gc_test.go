@@ -77,7 +77,7 @@ func TestAgentGC(t *testing.T) {
 	if !again.b.isRevoked(old) {
 		t.Fatal("a retired name is not revoked after a restart")
 	}
-	if _, err := again.b.workers.reserve(sessionTemplate(again.tree), "operator", "", time.Now(), func(string) bool { return false },
+	if _, err := again.b.workers.reserve(sessionTemplate(again.tree), MemorySize{}, "operator", "", time.Now(), func(string) bool { return false },
 		func() (string, error) { return old[2:], nil }); err == nil {
 		t.Fatal("a retired name was drawn again")
 	}

@@ -159,6 +159,11 @@ type Broker struct {
 	// broker.admitWorker); 0 is no cap, and the manager does not count. The
 	// json tag keeps it out of brokerctl.ConfigHash while unset.
 	MaxRunningWorkers int `yaml:"max_running_workers" json:",omitempty"`
+	// MemoryBudget is the memory the running agents' caps (workers and
+	// template instances, not the manager) may add up to; a start, resume
+	// or spawn past it is refused. Unset: the VM's memory less the
+	// manager's and 1GiB for the guest, or no budget when memory is unset.
+	MemoryBudget string `yaml:"memory_budget" json:",omitempty"`
 }
 
 // AutoReenrolMode selects which agents the broker's natural-lapse healer

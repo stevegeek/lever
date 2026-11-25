@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -41,6 +42,9 @@ type SpawnRequest struct {
 	Template string `json:"template"`
 	Task     string `json:"task,omitempty"`
 	Label    string `json:"label,omitempty"`
+	// Memory is the memory limit to create it with, one of the template's
+	// sizes ("8GiB"); empty: the template's default.
+	Memory string `json:"memory,omitempty"`
 	// By names a remote caller the operator socket speaks for (see
 	// ValidRemoteCaller): it is recorded as the agent's creator and is the
 	// key of its rate limits. Operator socket only.
@@ -53,6 +57,7 @@ type SpawnResponse struct {
 	Template string `json:"template"`
 	Label    string `json:"label,omitempty"`
 	Phase    string `json:"phase"`
+	Memory   string `json:"memory,omitempty"`
 }
 
 // DestroyRequest is the body of a destroy.
@@ -104,6 +109,18 @@ type DestroyResponse struct {
 type AgentListResponse struct {
 	Templates []TemplateEntry `json:"templates"`
 	Agents    []AgentEntry    `json:"agents"`
+	// Memory is the memory budget and its use; absent with no budget or
+	// when the hub was not read.
+	Memory *MemoryTotals `json:"memory,omitempty"`
+}
+
+// MemoryTotals is the memory budget for running agents (the manager not
+// counted), and how much of it the running and starting agents' limits
+// take.
+type MemoryTotals struct {
+	BudgetBytes int64 `json:"budget_bytes"`
+	UsedBytes   int64 `json:"used_bytes"`
+	FreeBytes   int64 `json:"free_bytes"`
 }
 
 // TemplateEntry is one template with its counts.
@@ -115,6 +132,10 @@ type TemplateEntry struct {
 	Instances    int    `json:"instances"`
 	Running      int    `json:"running"`
 	ManagerMay   bool   `json:"manager_may"`
+	// MemorySizes are the sizes a spawn may choose, smallest first, and
+	// MemoryDefault the one it gets when it names none.
+	MemorySizes   []MemorySize `json:"memory_sizes,omitempty"`
+	MemoryDefault string       `json:"memory_default,omitempty"`
 }
 
 // AgentEntry is one spawned agent. Phase is a known label from the hub, or
@@ -230,9 +251,10 @@ func firstLineOf(s string) string {
 func (b *Broker) agentList(ctx context.Context, all bool, createdBy string, hub bool) AgentListResponse {
 	phases := map[string]string{}
 	listed := false
+	var hubAgents []scion.Agent
 	if b.runtime != nil && hub {
 		if agents, err := b.runtime.List(ctx, b.instanceProject); err == nil {
-			listed = true
+			listed, hubAgents = true, agents
 			for _, a := range agents {
 				p := scion.PhaseLabel(a.Phase)
 				if scion.RunningContainerDown(p, a.ContainerStatus) {
@@ -243,9 +265,13 @@ func (b *Broker) agentList(ctx context.Context, all bool, createdBy string, hub 
 		}
 	}
 	out := AgentListResponse{Templates: []TemplateEntry{}, Agents: []AgentEntry{}}
+	if listed {
+		out.Memory = b.memoryTotals(hubAgents)
+	}
 	counts := map[string]*TemplateEntry{}
 	for _, t := range b.workers.templateList() {
-		out.Templates = append(out.Templates, TemplateEntry{Name: t.Name, Prefix: t.Prefix, MaxInstances: t.MaxInstances, MaxRunning: t.MaxRunning, ManagerMay: t.ManagerMay})
+		out.Templates = append(out.Templates, TemplateEntry{Name: t.Name, Prefix: t.Prefix, MaxInstances: t.MaxInstances, MaxRunning: t.MaxRunning, ManagerMay: t.ManagerMay,
+			MemorySizes: slices.Clone(t.Sizes), MemoryDefault: t.DefaultMemory.Name})
 	}
 	for i := range out.Templates {
 		counts[out.Templates[i].Name] = &out.Templates[i]
@@ -254,6 +280,13 @@ func (b *Broker) agentList(ctx context.Context, all bool, createdBy string, hub 
 	for _, rec := range b.workers.recordList() {
 		e := AgentEntry{AgentRecord: rec}
 		t := counts[rec.Template]
+		if e.Memory == "" && rec.State != AgentDestroyed {
+			// A record from before sizes runs with its spec's limit.
+			if spec, ok := b.workers.get(rec.Name); ok && spec.MemoryBytes > 0 {
+				e.MemoryBytes = spec.MemoryBytes
+				e.Memory = fmtMemory(spec.MemoryBytes)
+			}
+		}
 		if rec.State == AgentActive {
 			e.WaitingSince = b.agentWatch.waiting(rec.Name)
 		}
@@ -346,6 +379,10 @@ func (b *Broker) spawnAgent(ctx context.Context, w http.ResponseWriter, req Spaw
 		refuse(w, ReasonBadLabel, err.Error(), http.StatusBadRequest)
 		return
 	}
+	size, ok := b.spawnSize(w, actor, verb, t, req.Memory)
+	if !ok {
+		return
+	}
 	if !b.taskOK(w, actor, verb, req.Task, "") {
 		return
 	}
@@ -375,6 +412,20 @@ func (b *Broker) spawnAgent(ctx context.Context, w http.ResponseWriter, req Spaw
 		refuse(w, ReasonTemplateBusy, busy.Error(), http.StatusConflict)
 		return
 	}
+	// So is one whose size the budget has no room for.
+	if busy, err := b.memoryBusyFor(ctx, "from template "+t.Name, size.Bytes); err != nil {
+		b.audit("agent", actor, "error", verb+": "+err.Error())
+		refuse(w, ReasonRuntimeError, "runtime error: could not read the hub; nothing was changed", http.StatusBadGateway)
+		return
+	} else if busy != nil {
+		b.audit("agent", actor, "deny", verb+": "+busy.Error())
+		msg := busy.Error()
+		if actor != b.manager && actor != operatorActor {
+			msg = busy.short()
+		}
+		refuse(w, ReasonMemoryBusy, msg, http.StatusConflict)
+		return
+	}
 	// Counted last, so only a spawn that passed every other check uses up
 	// the day's quota.
 	if limited && !b.takeDailySpawn(actor, time.Now()) {
@@ -383,7 +434,7 @@ func (b *Broker) spawnAgent(ctx context.Context, w http.ResponseWriter, req Spaw
 		return
 	}
 	// taken runs under the registry's lock: it must not read the registry.
-	rec, err := b.workers.reserve(t, actor, req.Label, b.now(), func(name string) bool {
+	rec, err := b.workers.reserve(t, size, actor, req.Label, b.now(), func(name string) bool {
 		b.mu.Lock()
 		defer b.mu.Unlock()
 		_, sup := b.superseded[name]
@@ -400,7 +451,7 @@ func (b *Broker) spawnAgent(ctx context.Context, w http.ResponseWriter, req Spaw
 		return
 	}
 	name := rec.Name
-	b.audit("agent", actor, "allow", verb+": reserved "+name, "label", req.Label, "task_bytes", len(req.Task))
+	b.audit("agent", actor, "allow", verb+": reserved "+name, "label", req.Label, "memory", size.Name, "task_bytes", len(req.Task))
 	unlock, ok := b.tryLockWorker(name)
 	if !ok {
 		// An operator destroy took it first: the record is its to settle.
@@ -491,7 +542,7 @@ func (b *Broker) spawnAgent(ctx context.Context, w http.ResponseWriter, req Spaw
 		b.audit("agent", actor, "error", verb+": "+name+": recording it active: "+err.Error())
 	}
 	b.audit("agent", actor, "allow", verb+": "+name+" running")
-	writeJSON(w, SpawnResponse{Name: name, Template: t.Name, Label: req.Label, Phase: scion.PhaseRunning})
+	writeJSON(w, SpawnResponse{Name: name, Template: t.Name, Label: req.Label, Phase: scion.PhaseRunning, Memory: size.Name})
 }
 
 // rollbackSpawn undoes a spawn that did not come up, its caller holding
@@ -944,7 +995,7 @@ func (b *Broker) handleAgentSpawn(w http.ResponseWriter, r *http.Request) {
 		refuse(w, ReasonBadRequest, "bad request: "+firstLineOf(err.Error()), http.StatusBadRequest)
 		return
 	}
-	b.spawnAgent(r.Context(), w, SpawnRequest{Template: req.Template, Task: req.Task, Label: req.Label}, caller)
+	b.spawnAgent(r.Context(), w, SpawnRequest{Template: req.Template, Task: req.Task, Label: req.Label, Memory: req.Memory}, caller)
 }
 
 // handleAgentDestroy is the manager's destroy, of an agent it spawned. The
@@ -972,9 +1023,16 @@ func (b *Broker) handleAgentList(w http.ResponseWriter, r *http.Request) {
 	}
 	full := b.agentList(r.Context(), false, caller, true)
 	out := wire.AgentListResponse{Templates: []wire.AgentTemplate{}, Agents: []wire.SpawnedAgent{}}
+	if m := full.Memory; m != nil {
+		out.Memory = &wire.MemoryTotals{BudgetBytes: m.BudgetBytes, UsedBytes: m.UsedBytes, FreeBytes: m.FreeBytes}
+	}
 	for _, t := range full.Templates {
 		if t.ManagerMay {
-			out.Templates = append(out.Templates, wire.AgentTemplate{Name: t.Name, MaxInstances: t.MaxInstances, MaxRunning: t.MaxRunning, Instances: t.Instances, Running: t.Running})
+			at := wire.AgentTemplate{Name: t.Name, MaxInstances: t.MaxInstances, MaxRunning: t.MaxRunning, Instances: t.Instances, Running: t.Running, MemoryDefault: t.MemoryDefault}
+			for _, sz := range t.MemorySizes {
+				at.MemorySizes = append(at.MemorySizes, sz.Name)
+			}
+			out.Templates = append(out.Templates, at)
 		}
 	}
 	for _, a := range full.Agents {
@@ -983,9 +1041,81 @@ func (b *Broker) handleAgentList(w http.ResponseWriter, r *http.Request) {
 		if !b.managerMayReach(a.Name) {
 			continue
 		}
-		out.Agents = append(out.Agents, wire.SpawnedAgent{Name: a.Name, Template: a.Template, Label: a.Label, State: a.State, Phase: a.Phase})
+		out.Agents = append(out.Agents, wire.SpawnedAgent{Name: a.Name, Template: a.Template, Label: a.Label, State: a.State, Phase: a.Phase, Memory: a.Memory})
 	}
 	writeJSON(w, out)
+}
+
+// memorySizeRE is the shape of a size a spawner names: checked before it is
+// compared with the template's sizes or put in a message.
+var memorySizeRE = regexp.MustCompile(`^([0-9]{1,7})(MiB|GiB)$`)
+
+// ParseMemorySize reads a spawn's memory size ("8GiB", "1536MiB").
+func ParseMemorySize(s string) (int64, bool) {
+	m := memorySizeRE.FindStringSubmatch(s)
+	if m == nil {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	if m[2] == "GiB" {
+		return n << 30, true
+	}
+	return n << 20, true
+}
+
+// spawnSize is the size a spawn asked for: one of t's sizes, matched by
+// value, or t's default when it names none.
+func (b *Broker) spawnSize(w http.ResponseWriter, actor, verb string, t TemplateSpec, asked string) (MemorySize, bool) {
+	if asked == "" {
+		return t.DefaultMemory, true
+	}
+	n, ok := ParseMemorySize(asked)
+	if !ok {
+		b.audit("agent", actor, "deny", verb+": bad memory size")
+		refuse(w, ReasonBadMemory, "bad memory size: want a number and MiB or GiB, such as 8GiB", http.StatusBadRequest)
+		return MemorySize{}, false
+	}
+	size, ok := t.size(n)
+	if !ok {
+		b.audit("agent", actor, "deny", verb+": memory "+asked+" is not one of its sizes")
+		refuse(w, ReasonBadMemory, "template "+t.Name+" has no memory size "+asked+"; its sizes are "+t.sizeNames(), http.StatusBadRequest)
+		return MemorySize{}, false
+	}
+	return size, true
+}
+
+// memoryBusyFor reports a memoryBusyError when asked bytes do not fit in
+// what the memory budget has free.
+func (b *Broker) memoryBusyFor(ctx context.Context, agent string, asked int64) (*memoryBusyError, error) {
+	if b.memoryBudget <= 0 {
+		return nil, nil
+	}
+	agents, err := b.runtime.List(ctx, b.instanceProject)
+	if err != nil {
+		return nil, err
+	}
+	b.admitMu.Lock()
+	defer b.admitMu.Unlock()
+	err = b.memoryFits(agent, asked, b.runningSet(agents, ""))
+	var mb *memoryBusyError
+	if errors.As(err, &mb) {
+		return mb, nil
+	}
+	return nil, err
+}
+
+// memoryTotals is the budget and its use, from the hub's records.
+func (b *Broker) memoryTotals(agents []scion.Agent) *MemoryTotals {
+	if b.memoryBudget <= 0 {
+		return nil
+	}
+	b.admitMu.Lock()
+	used := b.memoryUsed(b.runningSet(agents, ""))
+	b.admitMu.Unlock()
+	return &MemoryTotals{BudgetBytes: b.memoryBudget, UsedBytes: used, FreeBytes: max(b.memoryBudget-used, 0)}
 }
 
 // templateAtMaxRunning reports a templateCapError when t's agents running

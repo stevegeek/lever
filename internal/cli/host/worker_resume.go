@@ -45,7 +45,7 @@ const (
 // workerVerbExit maps a broker refusal reason to the command's exit code.
 func workerVerbExit(reason string) int {
 	switch reason {
-	case broker.ReasonBusy, broker.ReasonWorkerCap, broker.ReasonRateLimited:
+	case broker.ReasonBusy, broker.ReasonWorkerCap, broker.ReasonMemoryBusy, broker.ReasonTemplateBusy, broker.ReasonRateLimited:
 		return exitWorkerBusy
 	case broker.ReasonNoRecord:
 		return exitWorkerNoRecord

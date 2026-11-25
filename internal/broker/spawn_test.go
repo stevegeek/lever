@@ -495,7 +495,7 @@ func TestReserveNeverReusesAName(t *testing.T) {
 	r.load([]TemplateSpec{tmpl}, AgentsState{Agents: []AgentRecord{{Name: "s-bbbbbb", Template: "session", State: AgentDestroyed}}}, "/tree")
 	ids := []string{"aaaaaa", "bbbbbb", "cccccc", "dddddd"}
 	draw := func() (string, error) { id := ids[0]; ids = ids[1:]; return id, nil }
-	rec, err := r.reserve(tmpl, operatorActor, "", time.Time{}, func(n string) bool { return n == "s-cccccc" }, draw)
+	rec, err := r.reserve(tmpl, MemorySize{}, operatorActor, "", time.Time{}, func(n string) bool { return n == "s-cccccc" }, draw)
 	if err != nil || rec.Name != "s-dddddd" {
 		t.Fatalf("%+v %v", rec, err)
 	}
@@ -657,7 +657,7 @@ func TestSpawnRefusesAPlantedWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	tmpl, _ := e.b.workers.template("session")
-	rec, err := e.b.workers.reserve(tmpl, operatorActor, "", time.Time{}, func(string) bool { return false }, func() (string, error) { id := ids[0]; return id, nil })
+	rec, err := e.b.workers.reserve(tmpl, MemorySize{}, operatorActor, "", time.Time{}, func(string) bool { return false }, func() (string, error) { id := ids[0]; return id, nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -858,7 +858,7 @@ func TestCreateAgentDirCleansUpAFailedWrite(t *testing.T) {
 func TestReconcileLeavesThisBrokersSpawns(t *testing.T) {
 	e := newSpawnEnv(t, AgentsState{})
 	tmpl, _ := e.b.workers.template("session")
-	if _, err := e.b.workers.reserve(tmpl, operatorActor, "", time.Now(), func(string) bool { return false }, newInstanceID); err != nil {
+	if _, err := e.b.workers.reserve(tmpl, MemorySize{}, operatorActor, "", time.Now(), func(string) bool { return false }, newInstanceID); err != nil {
 		t.Fatal(err)
 	}
 	e.rt.staticPhases = true

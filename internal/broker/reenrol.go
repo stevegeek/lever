@@ -310,7 +310,7 @@ func (b *Broker) bounceForReenrol(ctx context.Context, cn, slug string) (verb st
 		release, err := b.admitWorker(ctx, slug)
 		if err != nil {
 			outcome := "error"
-			if errors.Is(err, ErrWorkerCap) {
+			if errors.Is(err, ErrWorkerCap) || errors.Is(err, ErrMemoryBusy) || errors.Is(err, ErrTemplateCap) {
 				outcome = "deny"
 			}
 			b.audit("reenrol", cn, outcome, "natural lapse: not resuming "+slug+": "+err.Error())

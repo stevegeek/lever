@@ -2,11 +2,13 @@ package ghpush
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"maps"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeRefs is a RefDeleter on fakeGH: it deletes only at the expected head.
@@ -195,16 +197,16 @@ func TestBranchDeleteNotConfigured(t *testing.T) {
 }
 
 // The lease against a real git remote: the delete happens only at the
-// expected head.
+// expected head, authenticated by header, never with the token in argv.
 func TestPusherDeleteBranchLease(t *testing.T) {
 	r, work := newTestRemote(t, repo)
-	p, _, _ := newPusher(t, r)
+	p, _, argvs := newPusher(t, r)
 	commitOn(t, work, "agent/x", "a.txt")
 	gitT(t, work, "push", r.srv.URL+"/"+repo, "agent/x")
 	head := gitT(t, work, "rev-parse", "agent/x")
-	remoteHead := func() string {
-		return gitT(t, work, "ls-remote", r.srv.URL+"/"+repo, "refs/heads/agent/x")
-	}
+	r.mu.Lock()
+	r.private, r.auths = true, nil
+	r.mu.Unlock()
 	ctx := context.Background()
 
 	stale := strings.Repeat("1", 40)
@@ -212,15 +214,29 @@ func TestPusherDeleteBranchLease(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "moved on GitHub") {
 		t.Fatalf("stale lease: %v", err)
 	}
-	if !strings.HasPrefix(remoteHead(), head) {
-		t.Fatalf("branch gone after a stale lease: %q", remoteHead())
+	if r.headSHA(t, repo, "agent/x") != head {
+		t.Fatal("branch gone after a stale lease")
 	}
 
 	if err := p.DeleteBranch(ctx, repo, "agent/x", head, "ghs_TESTTOKEN"); err != nil {
 		t.Fatal(err)
 	}
-	if got := remoteHead(); got != "" {
+	if got := r.headSHA(t, repo, "agent/x"); got != "" {
 		t.Fatalf("branch still there: %q", got)
+	}
+	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:ghs_TESTTOKEN"))
+	if !slices.Contains(r.auths, want) || slices.Contains(r.auths, "") {
+		t.Fatalf("delete did not authenticate on every request: %q", r.auths)
+	}
+	for _, a := range *argvs {
+		if strings.Contains(strings.Join(a, " "), "ghs_TESTTOKEN") {
+			t.Fatalf("token in argv: %v", a)
+		}
+	}
+
+	// Already gone: refused, not reported as deleted.
+	if err := p.DeleteBranch(ctx, repo, "agent/x", head, "ghs_TESTTOKEN"); err == nil {
+		t.Fatal("deleting a missing branch succeeded")
 	}
 
 	for _, c := range []struct{ repo, branch, sha, want string }{
@@ -231,5 +247,20 @@ func TestPusherDeleteBranchLease(t *testing.T) {
 		if err := p.DeleteBranch(ctx, c.repo, c.branch, c.sha, "t"); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%+v: %v", c, err)
 		}
+	}
+}
+
+// A push holding the repo's lock makes a delete wait, then give up busy.
+func TestPusherDeleteBranchWaitsForPush(t *testing.T) {
+	r, _ := newTestRemote(t, repo)
+	p, _, _ := newPusher(t, r)
+	p.LockWait = 50 * time.Millisecond
+	unlock, err := p.lock(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	if err := p.DeleteBranch(context.Background(), repo, "agent/x", strings.Repeat("1", 40), "t"); !errors.Is(err, ErrBusy) {
+		t.Fatalf("want ErrBusy, got %v", err)
 	}
 }

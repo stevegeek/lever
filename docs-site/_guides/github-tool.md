@@ -546,8 +546,9 @@ neither. A branch pushed to after its PR was merged has a new head, so it is ref
 delete itself is a `git push --force-with-lease` of an empty ref, conditional on the head that was
 checked: if anyone pushed to the branch in the meantime, GitHub refuses it and nothing is deleted.
 It also waits for any push of this tool to the same repository. The result names the deleted head
-SHA, so the branch can be pushed back from any clone that has the commit. Each call writes an audit line (`github.branch_delete`) with the
-caller, the repository, the branch, the SHA and how it was found merged.
+SHA, so the branch can be pushed back from any clone that has the commit. Each call writes an
+audit line (`github.branch_delete`) with the caller, the repository, the branch, the checked SHA
+and how it was found merged.
 
 A ruleset that restricts deletions on `refs/heads/agent/**` still applies: GitHub refuses the
 delete for the App.

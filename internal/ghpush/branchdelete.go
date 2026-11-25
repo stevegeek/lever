@@ -45,8 +45,9 @@ type ghClosedPull struct {
 // from it or into it (GitHub closes a PR whose base is deleted). The delete
 // is conditional on the head that was checked (RefDeleter).
 func (o *Ops) BranchDelete(ctx context.Context, caller, repo, branch string) (res BranchDeleteResult, err error) {
+	var sha, mergedBy string
 	defer func() {
-		o.audit(OpBranchDelete, err, "caller", caller, "repo", repo, "branch", branch, "sha", res.SHA, "merged_by", res.MergedBy)
+		o.audit(OpBranchDelete, err, "caller", caller, "repo", repo, "branch", branch, "sha", sha, "merged_by", mergedBy)
 	}()
 	if err := ValidateRepo(repo, o.Repos); err != nil {
 		return res, err
@@ -83,7 +84,7 @@ func (o *Ops) BranchDelete(ctx context.Context, caller, repo, branch string) (re
 	} else if found {
 		return res, fmt.Errorf("branch %q is the base of open PR #%d; deleting it would close that PR", branch, n)
 	}
-	mergedBy, err := o.mergedBy(ctx, tok, repo, branch, sha, info.DefaultBranch)
+	mergedBy, err = o.mergedBy(ctx, tok, repo, branch, sha, info.DefaultBranch)
 	if err != nil {
 		return res, err
 	}

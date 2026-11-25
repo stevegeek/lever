@@ -428,7 +428,7 @@ func (p *Pusher) charge(caller string, n int64) error {
 // git push's lease makes the delete conditional on the server side, so a
 // push that lands after the caller's checks is never lost. It holds the
 // repo's push lock, so it never races this tool's own push. token is the
-// caller's, narrowed to contents: write.
+// caller's, narrowed to branch_delete's permissions.
 func (p *Pusher) DeleteBranch(ctx context.Context, repo, branch, sha, token string) error {
 	if err := ValidateRepo(repo, p.Repos); err != nil {
 		return err
@@ -457,7 +457,10 @@ func (p *Pusher) DeleteBranch(ctx context.Context, repo, branch, sha, token stri
 	auth := &Auth{BaseURL: p.BaseURL, Token: token}
 	if _, err := p.Git.Run(ctx, mirror, RunOpts{GitDir: mirror, Auth: auth},
 		"push", "--force-with-lease="+ref+":"+sha, p.BaseURL+"/"+repo, ":"+ref); err != nil {
-		if s := err.Error(); strings.Contains(s, "stale info") || strings.Contains(s, "[rejected]") {
+		// "stale info": the lease failed before the push; "failed to update
+		// ref" or "cannot lock ref": GitHub's own compare-and-swap lost a race.
+		if s := err.Error(); strings.Contains(s, "stale info") || strings.Contains(s, "[rejected]") ||
+			strings.Contains(s, "failed to update ref") || strings.Contains(s, "cannot lock ref") {
 			return fmt.Errorf("branch %q moved on GitHub since it was checked; nothing deleted", branch)
 		}
 		return p.hidePaths(fmt.Errorf("delete branch %s: %w", branch, err))

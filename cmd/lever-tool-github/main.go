@@ -556,7 +556,7 @@ func operations(o opts, p *ghpush.Pusher, g *ghpush.Ops) []captool.Operation {
 			Name: ghpush.OpBranchDelete,
 			Description: "delete a " + o.prefix + "* branch on GitHub, only when everything on it is in the default branch: " +
 				"its head is in the default branch, or a PR into the default branch was merged at exactly that head (a squash merge). " +
-				"Refused when the branch has an open PR or unmerged commits",
+				"Refused when the branch has an open PR, is the base of one, or has unmerged commits",
 			Params:      []captool.ParamSpec{repoParam, {Name: "branch", Type: "string", Description: "branch to delete, must start with " + o.prefix}},
 			CaveatParam: caveat,
 			Backstop:    branchDeleteBackstop(o),

@@ -183,8 +183,8 @@ func (f *fakeGH) serve(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 			h := pl["head"].(map[string]any)
-			// The closed list does not filter on base, so the code's own base
-			// check is what a test sees.
+			// The fake ignores base on the closed list on purpose, so the code's
+			// own base check is what a test exercises.
 			headOK := q.Get("head") == "" || q.Get("head") == strings.Split(f.repo, "/")[0]+":"+h["ref"].(string) ||
 				(f.closedIgnoresHead && q.Get("state") == "closed")
 			baseOK := q.Get("state") == "closed" || q.Get("base") == "" || q.Get("base") == pl["base"].(map[string]any)["ref"]

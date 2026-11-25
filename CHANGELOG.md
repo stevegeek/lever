@@ -33,6 +33,18 @@ version bump moves the block under the new version heading.
   an agent are refused until it next starts in a new session: run `lever conversation new` (or
   `lever up --fresh` without `--keep-conversation`) after upgrading.
 
+### Fixed
+
+- **A halted manager comes back with its conversation.** From scion e8160a10 an OOM kill, an
+  eviction, a VM reboot or a missing container leaves the manager in phase `halted`, and scion
+  resumes it in a new claude session (no `--continue`). `lever up`, `lever apply` and
+  `lever reload` now back the conversation up before that resume. Once the manager is up, they
+  restore the backup as `lever conversation restore` does, so claude continues the old
+  conversation. The new session in between gets a short task that tells claude to wait, not the
+  boot prompt. Its transcripts are moved aside in the agent home. If the backup fails, lever
+  logs a warning and the manager starts a new session on the boot prompt, as before. Workers, and
+  the broker's re-enrol bounce of a halted manager, still start a new session.
+
 ## [1.0.0-beta.11] - 2026-11-25
 
 ### Added

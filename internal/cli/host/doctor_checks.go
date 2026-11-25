@@ -997,8 +997,9 @@ const noConversationFix = "run `lever up`: it starts the manager fresh on its ow
 // session (only a suspended one gets --continue).
 // haltedResumeFix is the fix for a halted record: the platform ended the run
 // (an OOM kill, a VM reboot, a container that went missing), and scion
-// resumes it like a stopped one.
-const haltedResumeFix = "run `lever up` — the platform ended the manager's run (an OOM kill, a VM reboot or a container that went missing; scion's phase halted), and scion resumes it in a new claude session (no --continue); the old conversation stays in the agent home: `lever attach`, then `/resume`"
+// resumes it like a stopped one; lever up backs the conversation up first and
+// restores it once the manager is up.
+const haltedResumeFix = "run `lever up` — the platform ended the manager's run (an OOM kill, a VM reboot or a container that went missing; scion's phase halted). scion resumes it in a new claude session (no --continue), so lever up backs its conversation up first and restores it once the manager is up"
 
 const stoppedResumeFix = "run `lever up` — scion resumes a stopped record in a new claude session (no --continue); the old conversation stays in the agent home: `lever attach`, then `/resume`"
 

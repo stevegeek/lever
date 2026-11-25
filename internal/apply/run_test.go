@@ -2233,6 +2233,69 @@ func TestStartManagerResumeHandsANewSessionItsPrompt(t *testing.T) {
 	}
 }
 
+// TestStartManagerBacksUpAHaltedConversationBeforeTheResume: the hub
+// restarts a halted record in a new claude session, so lever runs
+// Deps.BackupHaltedConversation before the resume, and only for a halted
+// record. A failed backup is logged and the manager still comes up.
+func TestStartManagerBacksUpAHaltedConversationBeforeTheResume(t *testing.T) {
+	for _, tc := range []struct {
+		phase      string
+		backupErr  error
+		wantBackup bool
+		wantLog    string
+		// wantWait: the new session gets HaltedRestoreTask, not the boot prompt.
+		wantWait bool
+	}{
+		{phase: scion.PhaseHalted, wantBackup: true, wantLog: "lever then restores its conversation", wantWait: true},
+		{phase: scion.PhaseHalted, backupErr: errors.New("disk full"), wantBackup: true, wantLog: "`lever attach`, then `/resume`"},
+		{phase: scion.PhaseStopped},
+		{phase: scion.PhaseSuspended},
+	} {
+		t.Run(fmt.Sprintf("%s/%v", tc.phase, tc.backupErr), func(t *testing.T) {
+			app, f := newObserveFirstApp(t)
+			r := &agentLifecycleRunner{FakeRunner: f, slug: "hello", initPhase: tc.phase, initContainerStatus: "stopped"}
+			backups, resumesBefore := 0, -1
+			var logs []string
+			d := Deps{
+				Scion: scion.New(r, scion.Options{}),
+				Log:   func(format string, a ...any) { logs = append(logs, fmt.Sprintf(format, a...)) },
+				BackupHaltedConversation: func(_ context.Context, rec *scion.Agent) (bool, error) {
+					backups++
+					resumesBefore = r.resumeCalls
+					if rec == nil || rec.Phase != scion.PhaseHalted {
+						t.Errorf("backup of record %+v, want the halted one", rec)
+					}
+					return tc.backupErr == nil, tc.backupErr
+				},
+			}
+			if err := runApply(app, d); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if r.resumeCalls != 1 {
+				t.Fatalf("resumeCalls = %d, want 1", r.resumeCalls)
+			}
+			if got := backups == 1; got != tc.wantBackup {
+				t.Fatalf("backups = %d, want backup %v", backups, tc.wantBackup)
+			}
+			if tc.wantBackup && resumesBefore != 0 {
+				t.Fatalf("the backup ran after %d resumes, want before the resume", resumesBefore)
+			}
+			if tc.wantLog != "" && !strings.Contains(strings.Join(logs, "\n"), tc.wantLog) {
+				t.Fatalf("logs %q lack %q", logs, tc.wantLog)
+			}
+			var resume string
+			for _, c := range f.Calls {
+				if len(c.Args) > 0 && c.Args[0] == "resume" {
+					resume = strings.Join(c.Args, " ")
+				}
+			}
+			if got := strings.HasSuffix(resume, "-- hello "+HaltedRestoreTask); got != tc.wantWait {
+				t.Fatalf("resume argv %q: carries the wait task = %v, want %v", resume, got, tc.wantWait)
+			}
+		})
+	}
+}
+
 func TestStartManagerSetsLLMAuthEnvForAPIKey(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(dir, "workspace"), 0o755)

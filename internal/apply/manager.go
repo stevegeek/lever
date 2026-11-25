@@ -733,7 +733,14 @@ func (r *run) actUp(ctx context.Context, jp string, rec *scion.Agent, p managerP
 			fmt.Sprintf("%s: --fresh — deleting manager %q (phase %s) and starting FRESH (previous session discarded)", r.subjectName(), r.app.Name, phase),
 			"--fresh delete")
 	case verbResume:
-		if rec.Phase == scion.PhaseStopped || rec.Phase == scion.PhaseHalted {
+		if rec.Phase == scion.PhaseHalted && r.backupHalted(ctx, rec) {
+			// The new session only bridges to the restore, so it gets a task
+			// that does nothing rather than the boot prompt, whose work the
+			// restored conversation would never see.
+			r.d.Log("%s: manager %q is in phase halted (the platform ended its run: an OOM kill, a VM reboot or a missing container); scion resumes it in a new claude session (no --continue), and lever then restores its conversation from the backup", r.subjectName(), r.app.Name)
+			sc := r.d.managerScion()
+			return r.resumeOrRecover(ctx, jp, resumeVerbPlain(func() error { return sc.ResumeTask(ctx, r.app.Name, jp, HaltedRestoreTask) }))
+		} else if rec.Phase == scion.PhaseStopped || rec.Phase == scion.PhaseHalted {
 			// scion's hub resumes a stopped or halted record with a fresh
 			// harness session (it passes --continue for a suspended one only,
 			// and --force recovers only an error record), so say so: the old
@@ -751,6 +758,26 @@ func (r *run) actUp(ctx context.Context, jp string, rec *scion.Agent, p managerP
 		}))
 	}
 	return nil
+}
+
+// HaltedRestoreTask is the task of the new session the hub starts for a
+// halted manager whose conversation lever restores right after.
+const HaltedRestoreTask = "Lever is restoring your previous conversation: the platform ended your container (an OOM kill, a VM reboot or a missing container). Do nothing and run no tools. Reply only: waiting."
+
+// backupHalted runs Deps.BackupHaltedConversation before the resume of a
+// halted record and reports whether it saved a conversation to restore. A
+// failure is only logged: the manager still comes up, in a new session, as
+// it did before.
+func (r *run) backupHalted(ctx context.Context, rec *scion.Agent) bool {
+	if r.d.BackupHaltedConversation == nil {
+		return false
+	}
+	saved, err := r.d.BackupHaltedConversation(ctx, rec)
+	if err != nil {
+		r.d.Log("%s: warning: backing up halted manager %q's conversation failed (%s), so lever cannot restore it after the resume", r.subjectName(), r.app.Name, termsafe.Sanitize(err.Error()))
+		return false
+	}
+	return saved
 }
 
 // swapConversation is ManagerRestore: the record is suspended if it runs,

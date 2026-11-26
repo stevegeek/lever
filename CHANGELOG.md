@@ -23,11 +23,12 @@ version bump moves the block under the new version heading.
     operator any declared worker, the manager the workers it drives) and the running caps and
     memory budget allow; otherwise the message stays queued and the answer's `note` says why.
   - New `broker.messaging.queue`: `max_messages` (20), `max_bytes` (256 KiB) per recipient and
-    `expiry` (7 days). One sender may hold at most half of a recipient's queue. A full queue
+    `expiry` (7 days). One agent may hold at most half of a recipient's queue; the operator's notes
+    have caps of their own. A full queue
     refuses the new message with 409 `queue-full` (`lever msg send` exit 9) and queues nothing.
   - A message is dropped, never delivered, when it expires, when its sender may no longer reach the
-    recipient at delivery, when the recipient was destroyed, purged or recycled since, or when a
-    send was interrupted by a broker stop. The sender gets a `queue-notice` (a new sent-ledger kind)
+    recipient at delivery, when the recipient was destroyed, purged or recycled since, or when its
+    send failed after it began or was interrupted by a broker stop (never sent twice). The sender gets a `queue-notice` (a new sent-ledger kind)
     when it runs; otherwise the audit log has it. A destroy drops the agent's queue.
   - New `lever msg list [--to NAME] [--json]` shows the queue; `queued_messages` is in
     `lever worker list`, `lever agent list --json` and remote-verb `list --json`.

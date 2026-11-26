@@ -371,14 +371,17 @@ refused: start it first.
   the running caps and memory budget let it start now. Otherwise the message stays queued and the
   answer says why. A wake that fails later leaves the message queued and tells the sender why.
 - **Limits.** `broker.messaging.queue` sets `max_messages` (20), `max_bytes` (256 KiB of text) per
-  recipient and `expiry` (7 days). One sender may hold at most half of a recipient's queue. A full
+  recipient and `expiry` (7 days). One agent may hold at most half of a recipient's queue, and the
+  operator's notes have caps of their own, so agents never fill a queue against the operator. A
+  worker is told how many of its own messages wait, never the others'. A full
   queue refuses the new message (`queue-full`) and queues nothing: refusing the new one keeps the
   older ones in order and never drops what a sender was told is queued.
 - **What is dropped, and who is told.** A message is dropped, never delivered, when it expires,
-  when its sender may no longer reach the recipient at delivery (revoked, removed, or a config
+  when its sender may no longer reach the recipient at delivery (revoked, removed, purged or recycled since, or a config
   change such as `worker_to_worker: false`), when the recipient was destroyed, purged or recycled
-  since (its queue is bound to that life of the name, not to the name), or when a send was under
-  way while the broker stopped (it may have arrived, so it is not sent twice). The sender gets a
+  since (its queue is bound to that life of the name, not to the name), or when its send failed
+  after it began, or was under way while the broker stopped (it may have arrived, so it is not sent
+  twice; the messages behind it wait in order). The sender gets a
   `queue-notice` message saying which and why when it is running; the operator's notes, and notices
   to a sender that is not running, are in the broker's audit log only. A destroy drops the agent's
   queue; it is not kept in the agent's archive.

@@ -476,34 +476,81 @@ func (f *failingMsgRuntime) Message(ctx context.Context, o scion.MsgOpts) error 
 	return f.fakeMsgRuntime.Message(ctx, o)
 }
 
-// A send the hub refused because the agent stopped running waits again in
-// its place; one that failed while the agent still runs is not sent twice.
+// A send that failed after it began is never sent again, whether or not
+// the agent still runs (a timeout can follow a send the hub took), and the
+// messages behind it wait in order.
 func TestQueueSendFailure(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		suspend   bool
-		wantQueue int
-	}{{"agent went away", true, 2}, {"agent still runs", false, 1}} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := queueBroker(t, "suspended")
-			for _, body := range []string{"a", "b"} {
-				resp, _ := f.send(t, "manager", `{"to":"scratch","body":"`+body+`"}`)
-				mustOK(t, resp, body)
+	for _, suspend := range []bool{false, true} {
+		f := queueBroker(t, "suspended")
+		for _, body := range []string{"a", "b"} {
+			resp, _ := f.send(t, "manager", `{"to":"scratch","body":"`+body+`"}`)
+			mustOK(t, resp, body)
+		}
+		f.setPhase("scratch", "running")
+		frt := &failingMsgRuntime{fakeMsgRuntime: f.rt, failTo: "agent:scratch"}
+		if suspend {
+			frt.after = func() { f.setPhase("scratch", "suspended") }
+		}
+		f.b.runtime = frt
+		f.b.deliverQueued(context.Background(), "scratch")
+		got := f.queued(t, "scratch")
+		if len(got) != 1 || got[0].Body != "b" {
+			t.Fatalf("suspend=%v: queued %+v, want only b", suspend, got)
+		}
+		tries := 0
+		for _, m := range f.rt.sent {
+			if m.To == "agent:scratch" {
+				tries++
 			}
-			f.setPhase("scratch", "running")
-			frt := &failingMsgRuntime{fakeMsgRuntime: f.rt, failTo: "agent:scratch"}
-			if tc.suspend {
-				frt.after = func() { f.setPhase("scratch", "suspended") }
-			}
-			f.b.runtime = frt
-			f.b.deliverQueued(context.Background(), "scratch")
-			if n := f.b.queue.count("scratch"); n != tc.wantQueue {
-				t.Fatalf("%d queued, want %d", n, tc.wantQueue)
-			}
-			if got := f.queued(t, "scratch"); got[len(got)-1].Body != "b" || (tc.wantQueue == 2 && got[0].Body != "a") {
-				t.Fatalf("order lost: %+v", got)
-			}
-		})
+		}
+		if tries != 1 {
+			t.Fatalf("suspend=%v: %d sends to scratch, want 1", suspend, tries)
+		}
+	}
+}
+
+// A message from an earlier life of its sender's name (purged or recycled
+// since) is not delivered.
+func TestQueueSenderRecreated(t *testing.T) {
+	f := queueBroker(t, "suspended")
+	resp, _ := f.send(t, "worker", `{"to":"scratch","body":"x"}`)
+	mustOK(t, resp, "send")
+	if err := f.b.Supersede("worker"); err != nil {
+		t.Fatal(err)
+	}
+	f.setPhase("scratch", "running")
+	f.b.deliverQueued(context.Background(), "scratch")
+	for _, m := range f.rt.sent {
+		if m.To == "agent:scratch" {
+			t.Fatalf("delivered from the old life of worker: %q", m.Body)
+		}
+	}
+	if f.b.queue.count("scratch") != 0 {
+		t.Fatal("still queued")
+	}
+}
+
+// Agents cannot fill a queue against the operator, and a worker is told
+// only how many of its own messages wait.
+func TestQueueOperatorRoomAndWorkerCount(t *testing.T) {
+	f := queueBroker(t, "suspended", func(c *Config) { c.MessageQueue.MaxMessages = 2 })
+	resp, res := f.send(t, "manager", `{"to":"scratch","body":"m"}`)
+	mustOK(t, resp, "manager")
+	resp, res = f.send(t, "worker", `{"to":"scratch","body":"w"}`)
+	mustOK(t, resp, "worker")
+	if res.Waiting != 1 {
+		t.Fatalf("worker told %d wait, want its own 1", res.Waiting)
+	}
+	if rec := callWorker(t, f.b, wire.PathMsgSend, `{"to":"scratch","body":"m2"}`, "manager"); rec.Code != http.StatusConflict {
+		t.Fatalf("agents past the cap: %d", rec.Code)
+	}
+	for range 2 {
+		if rec := postNote(t, f.b, `{"to":"scratch","body":"op"}`); rec.Code != http.StatusOK {
+			t.Fatalf("operator locked out: %d %s", rec.Code, rec.Body)
+		}
+	}
+	if rec := postNote(t, f.b, `{"to":"scratch","body":"op"}`); rec.Code != http.StatusConflict {
+		t.Fatalf("operator past its own cap: %d", rec.Code)
 	}
 }
 

@@ -551,19 +551,19 @@ broker checks. What spawning adds, and how it is held:
   per login and agent. The loop never stops, starts or destroys an agent. Its daily backup reads
   the agent's conversation from the guest, as destroy does, into the host-only state directory.
 - **The message queue widens no one's reach.** A message to an agent that is not running (for
-  example one `idle_suspend` put to sleep) is queued by the broker in the host-only state
-  directory (0700 directories, 0600 files written by rename, outside every agent mount), with a
-  per-recipient count and byte cap checked before anything is written and half of it the most one
-  sender may hold. The send is authorized as a live send is, and again at delivery: a sender that
-  was revoked or that the policy no longer lets reach the recipient, or a recipient that is a new
-  life of its name (destroyed, purged or recycled since), gets nothing delivered. Delivery is a
-  live send, made at delivery time with the sender's own marker and kind recorded in the sent
-  ledger, so `message_verify` answers exactly the tier a live send would; the line saying the
-  message waited is lever's, under the marker, and the sender's text cannot forge it. A message
-  is sent at most once: one a broker crash interrupted is dropped, never repeated. `--wake` only
-  starts a resume its sender could already make (the operator, or the manager for a worker it
-  drives; never a worker, never the manager), admitted against the running caps and memory budget
-  like any other resume.
+  example one `idle_suspend` put to sleep) is queued by the broker in the host-only state directory
+  (0700 directories, 0600 files written by rename, outside every agent mount), with a per-recipient
+  count and byte cap checked before anything is written, half of it the most one agent may hold, and
+  separate caps for the operator's notes. The send is authorized as a live send is, and again at
+  delivery: a sender that was revoked, purged or recycled since, or that the policy no longer lets
+  reach the recipient, or a recipient that is a new life of its name (destroyed, purged or recycled
+  since), gets nothing delivered. Delivery is a live send, made at delivery time with the sender's
+  own marker and kind recorded in the sent ledger, so `message_verify` answers exactly the tier a
+  live send would; the line saying the message waited is lever's, under the marker, and the sender's
+  text cannot forge it. A message is sent at most once: one a broker crash interrupted is dropped,
+  never repeated. `--wake` only starts a resume its sender could already make (the operator, or the
+  manager for a worker it drives; never a worker, never the manager), admitted against the running
+  caps and memory budget like any other resume.
 
 - **Spawners stay apart.** A `delegate` to `template:<name>` held by the manager reaches only the
   agents the manager spawned, and one held by a spawned agent only its own spawner's. With

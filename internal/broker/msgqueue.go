@@ -102,13 +102,17 @@ type queuedMsg struct {
 	// Sender is the sender's cert CN, or operatorActor for `lever msg send`.
 	// To is the address it sent to, resolved again at delivery, and Kind
 	// the kind the send would have been recorded with.
-	Sender    string    `json:"sender"`
-	To        string    `json:"to"`
-	Kind      string    `json:"kind"`
-	Phase     string    `json:"phase"` // the recipient's phase label when queued
-	Body      string    `json:"body"`
-	Interrupt bool      `json:"interrupt,omitempty"`
-	QueuedAt  time.Time `json:"queued_at"`
+	Sender string `json:"sender"`
+	// SenderGeneration is the sender's generation when it sent (""
+	// for the operator): a message from an earlier life of a name is not
+	// that name's now.
+	SenderGeneration string    `json:"sender_generation,omitempty"`
+	To               string    `json:"to"`
+	Kind             string    `json:"kind"`
+	Phase            string    `json:"phase"` // the recipient's phase label when queued
+	Body             string    `json:"body"`
+	Interrupt        bool      `json:"interrupt,omitempty"`
+	QueuedAt         time.Time `json:"queued_at"`
 
 	file string // the file's base name
 }
@@ -306,11 +310,13 @@ func queueBytes(ms []queuedMsg) int64 {
 }
 
 // add queues m behind slug's waiting messages and returns how many wait,
-// m included. A full queue refuses m before anything is written, and so
-// does a full share: an agent may hold at most half of another's queue, so
-// one agent cannot fill it against everyone else. The operator's notes
-// count against the whole queue only.
-func (q *msgQueue) add(m queuedMsg) (int, error) {
+// m included (for an agent sender other than the manager, how many of its
+// own wait: it learns nothing of other senders). A full queue refuses m
+// before anything is written. The agents' messages share the caps, and one
+// agent may hold at most half of them, so one agent cannot fill a queue
+// against everyone else. The operator's notes have caps of their own, so
+// agents can never fill a queue against the operator.
+func (q *msgQueue) add(m queuedMsg, ownCount bool) (int, error) {
 	unlock := q.lock(m.Slug)
 	defer unlock()
 	waiting, sending, _, err := q.read(m.Slug)
@@ -319,16 +325,19 @@ func (q *msgQueue) add(m queuedMsg) (int, error) {
 	}
 	all := append(slices.Clone(waiting), sending...)
 	adding := int64(len(m.Body))
-	if full := (&queueFullError{count: len(all), maxCount: q.cfg.MaxMessages, bytes: queueBytes(all), maxBytes: q.cfg.MaxBytes, adding: adding}); full.full() {
+	var pool, mine []queuedMsg
+	for _, x := range all {
+		if (x.Sender == operatorActor) == (m.Sender == operatorActor) {
+			pool = append(pool, x)
+		}
+		if x.Sender == m.Sender {
+			mine = append(mine, x)
+		}
+	}
+	if full := (&queueFullError{count: len(pool), maxCount: q.cfg.MaxMessages, bytes: queueBytes(pool), maxBytes: q.cfg.MaxBytes, adding: adding}); full.full() {
 		return 0, full
 	}
 	if m.Sender != operatorActor {
-		var mine []queuedMsg
-		for _, x := range all {
-			if x.Sender == m.Sender {
-				mine = append(mine, x)
-			}
-		}
 		share := &queueFullError{count: len(mine), maxCount: max(q.cfg.MaxMessages/2, 1), bytes: queueBytes(mine), maxBytes: max(q.cfg.MaxBytes/2, 1), adding: adding, sender: true}
 		if share.full() {
 			return 0, share
@@ -351,6 +360,15 @@ func (q *msgQueue) add(m queuedMsg) (int, error) {
 	}
 	if err := fsutil.WriteFileAtomic(filepath.Join(dir, fmt.Sprintf("%020d-%s%s", next, m.ID, queueWaiting)), raw, 0o600); err != nil {
 		return 0, err
+	}
+	if ownCount {
+		n := 1
+		for _, x := range waiting {
+			if x.Sender == m.Sender {
+				n++
+			}
+		}
+		return n, nil
 	}
 	return len(waiting) + 1, nil
 }
@@ -445,6 +463,19 @@ func (b *Broker) queueGeneration(cn, slug string) string {
 	return strings.Join(g, ";")
 }
 
+// senderGeneration is the generation of the agent identity cn, "" for the
+// operator.
+func (b *Broker) senderGeneration(cn string) string {
+	if cn == operatorActor {
+		return ""
+	}
+	_, slug, _, ok := b.identity(cn)
+	if !ok {
+		return ""
+	}
+	return b.queueGeneration(cn, slug)
+}
+
 // queuedSend is a send the handler could not make because the recipient is
 // not running.
 type queuedSend struct {
@@ -476,8 +507,8 @@ func (b *Broker) enqueue(ctx context.Context, s queuedSend) (queueAnswer, error)
 		return queueAnswer{}, err
 	}
 	m := queuedMsg{ID: id, Recipient: s.recipientCN, Slug: s.slug, Generation: b.queueGeneration(s.recipientCN, s.slug),
-		Sender: s.caller, To: s.to, Kind: s.kind, Phase: s.phase, Body: s.body, Interrupt: s.interrupt, QueuedAt: b.now().UTC()}
-	n, err := b.queue.add(m)
+		Sender: s.caller, SenderGeneration: b.senderGeneration(s.caller), To: s.to, Kind: s.kind, Phase: s.phase, Body: s.body, Interrupt: s.interrupt, QueuedAt: b.now().UTC()}
+	n, err := b.queue.add(m, s.caller != operatorActor && s.caller != b.manager)
 	if err != nil {
 		return queueAnswer{}, err
 	}
@@ -633,6 +664,9 @@ func (b *Broker) queuedStillAllowed(m queuedMsg) string {
 	if b.isRevoked(m.Sender) {
 		return "its sender is revoked"
 	}
+	if b.senderGeneration(m.Sender) != m.SenderGeneration {
+		return "its sender was destroyed, purged or recycled since it was sent"
+	}
 	tgt, err := b.resolveMsgTarget(m.Sender, m.To)
 	if err != nil || tgt.recipientCN != m.Recipient {
 		return "the messaging policy no longer lets its sender reach the recipient"
@@ -742,7 +776,14 @@ func (b *Broker) deliverQueued(ctx context.Context, slug string) (sent int) {
 	if _, _, phase := b.notRunningCheck(ctx, "lever", slug, toManager); phase != scion.PhaseRunning {
 		return 0
 	}
-	for _, m := range pending {
+	for i, m := range pending {
+		// Read again before each send but the first: the fewer sends that
+		// meet an agent gone away, the fewer are dropped below.
+		if i > 0 {
+			if _, _, phase := b.notRunningCheck(ctx, "lever", slug, toManager); phase != scion.PhaseRunning {
+				return sent
+			}
+		}
 		m, err := b.queue.beginSend(m)
 		if err != nil {
 			b.audit("msg", m.Sender, "error", "queue->agent:"+slug+": "+err.Error())
@@ -759,14 +800,9 @@ func (b *Broker) deliverQueued(ctx context.Context, slug string) (sent int) {
 		}
 		if err != nil {
 			b.audit("msg", m.Sender, "error", "queued send->agent:"+slug+" "+ref+": "+err.Error())
-			// The hub refuses a message to an agent that stopped running
-			// meanwhile: nothing left, so it waits again. An error while the
-			// agent still runs may have delivered it: it is never sent twice.
-			if _, _, phase := b.notRunningCheck(ctx, "lever", slug, toManager); phase != "" && phase != scion.PhaseRunning {
-				if uerr := b.queue.undoSend(m); uerr == nil {
-					return sent
-				}
-			}
+			// A runtime error cannot tell a refusal from a send that arrived
+			// (a timeout after the hub took it), so the message is never
+			// sent again. The rest wait in order.
 			b.dropQueued(ctx, m, "the send failed with a runtime error after it began, so it may or may not have arrived; it is not sent again")
 			return sent
 		}

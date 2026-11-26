@@ -1248,3 +1248,239 @@ func TestQueueLoopAgainstResumeAndDestroy(t *testing.T) {
 		}
 	}
 }
+
+// toScratch is the bodies delivered to scratch, in order.
+func (f queueFixture) toScratch() []string {
+	f.rt.mu.Lock()
+	defer f.rt.mu.Unlock()
+	var got []string
+	for _, m := range f.rt.sent {
+		if m.To == "agent:scratch" {
+			got = append(got, m.Body[strings.LastIndex(m.Body, "\n")+1:])
+		}
+	}
+	return got
+}
+
+// A queue file that cannot be read (an I/O error) keeps its place: it is
+// audited once, the messages behind it wait, it goes out in order once it
+// can be read, and it is removed without a notice once it is older than the
+// expiry, or when its recipient is destroyed.
+func TestQueueUnreadableFileKeepsItsPlace(t *testing.T) {
+	setup := func(t *testing.T) (queueFixture, string, func(bool)) {
+		f := queueBroker(t, "suspended", func(c *Config) { c.MessageQueue.Expiry = time.Hour })
+		for _, body := range []string{"a", "b", "c"} {
+			resp, _ := f.send(t, "manager", `{"to":"scratch","body":"`+body+`"}`)
+			mustOK(t, resp, body)
+		}
+		dir := filepath.Join(f.queueDir, "scratch")
+		ents, _ := os.ReadDir(dir)
+		first := ents[0].Name()
+		var mu sync.Mutex
+		failing := true
+		f.b.queue.readFile = func(p string) (queuedMsg, error) {
+			mu.Lock()
+			fail := failing
+			mu.Unlock()
+			if fail && filepath.Base(p) == first {
+				return queuedMsg{}, &os.PathError{Op: "read", Path: p, Err: syscall.EIO}
+			}
+			return readQueued(p)
+		}
+		f.setPhase("scratch", "running")
+		return f, filepath.Join(dir, first), func(v bool) { mu.Lock(); failing = v; mu.Unlock() }
+	}
+	t.Run("held, then delivered in order", func(t *testing.T) {
+		f, _, fail := setup(t)
+		for range 3 {
+			f.b.queuePass(context.Background())
+		}
+		f.b.queueJobs.Wait()
+		if got := f.toScratch(); len(got) != 0 {
+			t.Fatalf("delivered %q past an unreadable file", got)
+		}
+		if n := strings.Count(f.audit.String(), "could not be read"); n != 1 {
+			t.Fatalf("audited %d times", n)
+		}
+		fail(false)
+		f.b.queuePass(context.Background())
+		f.b.queueJobs.Wait()
+		if got := strings.Join(f.toScratch(), ","); got != "a,b,c" {
+			t.Fatalf("delivered %q", got)
+		}
+	})
+	t.Run("removed past the expiry", func(t *testing.T) {
+		f, p, _ := setup(t)
+		old := time.Now().Add(-2 * time.Hour)
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+		f.b.queuePass(context.Background())
+		f.b.queueJobs.Wait()
+		if got := strings.Join(f.toScratch(), ","); got != "b,c" {
+			t.Fatalf("delivered %q", got)
+		}
+		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("left: %v", err)
+		}
+		if len(f.rt.sent) != 2 || !strings.Contains(f.audit.String(), "its sender is not known, so not told") {
+			t.Fatalf("sent %+v", f.rt.sent)
+		}
+	})
+	t.Run("removed with its recipient", func(t *testing.T) {
+		f, _, _ := setup(t)
+		f.b.pruneAgentState("scratch")
+		f.b.queueJobs.Wait()
+		if _, err := os.Stat(filepath.Join(f.queueDir, "scratch")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("queue directory left: %v", err)
+		}
+		if len(f.rt.sent) != 2 {
+			t.Fatalf("sent %+v, want the notices of b and c", f.rt.sent)
+		}
+	})
+}
+
+// listHookRuntime calls onList once, at the first List: a change made while
+// a delivery reads the recipient's phase.
+type listHookRuntime struct {
+	*fakeMsgRuntime
+	once   sync.Once
+	onList func()
+}
+
+func (r *listHookRuntime) List(ctx context.Context, project string) ([]scion.Agent, error) {
+	r.once.Do(r.onList)
+	return r.fakeMsgRuntime.List(ctx, project)
+}
+
+// The policy is checked again just before a send begins: a sender revoked
+// or recycled during the phase read is not sent.
+func TestQueuePolicyRecheckedBeforeTheSend(t *testing.T) {
+	for name, change := range map[string]func(*Broker) error{
+		"revoked":  func(b *Broker) error { b.Revoke("worker"); return nil },
+		"recycled": func(b *Broker) error { return b.Supersede("worker") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := queueBroker(t, "suspended")
+			resp, _ := f.send(t, "worker", `{"to":"scratch","body":"x"}`)
+			mustOK(t, resp, "send")
+			f.setPhase("scratch", "running")
+			f.b.runtime = &listHookRuntime{fakeMsgRuntime: f.rt, onList: func() {
+				if err := change(f.b); err != nil {
+					t.Error(err)
+				}
+			}}
+			if n := f.b.deliverQueued(context.Background(), "scratch"); n != 0 {
+				t.Fatalf("sent %d", n)
+			}
+			f.b.queueJobs.Wait()
+			if got := f.toScratch(); len(got) != 0 || f.b.queue.count("scratch") != 0 {
+				t.Fatalf("delivered %q, %d queued", got, f.b.queue.count("scratch"))
+			}
+		})
+	}
+}
+
+// A wake that fails tells the caller, under the generation it queued with.
+func TestQueueWakeFailureNoticeGeneration(t *testing.T) {
+	f := queueBroker(t, "suspended")
+	f.fleet.resumeErr = errors.New("resume refused")
+	resp, res := f.send(t, "manager", `{"to":"scratch","body":"now","wake":true}`)
+	mustOK(t, resp, "send")
+	if !res.Waking {
+		t.Fatalf("answer %+v", res)
+	}
+	f.b.queueJobs.Wait()
+	a := f.audit.String()
+	if !strings.Contains(a, "queue notice for manager: Lever could not wake scratch") || strings.Contains(a, "the name was destroyed, purged or recycled since") || f.b.queue.count("scratch") != 1 {
+		t.Fatalf("audit %s", a)
+	}
+}
+
+// Only the names add writes are queue files; a file whose id is not its
+// name's is removed, and add refuses when the sequence is exhausted.
+func TestQueueFileNames(t *testing.T) {
+	for name, ok := range map[string]bool{
+		"00000000000000000001-0123456789abcdef.msg":     true,
+		"00000000000000000001-0123456789abcdef.sending": true,
+		"00000000000000000001-0123456789abcdef.sent":    false,
+		"1-0123456789abcdef.msg":                        false,
+		"00000000000000000001-0123456789ABCDEF.msg":     false,
+		"00000000000000000001-0123456789abcde.msg":      false,
+		"99999999999999999999-0123456789abcdef.msg":     false, // past uint64
+		"00000000000000000001-0123456789abcdef.msg.x":   false,
+	} {
+		if _, got := queueSeq(name); got != ok {
+			t.Errorf("%s: %v, want %v", name, got, ok)
+		}
+	}
+	q := newMsgQueue(MessageQueueConfig{Dir: filepath.Join(t.TempDir(), "q")})
+	id, _ := newQueueID()
+	m := queuedMsg{ID: id, Recipient: "scratch", Slug: "scratch", Sender: "manager", Kind: sentledger.KindManager, Body: "x", QueuedAt: time.Now()}
+	if _, err := q.add(context.Background(), m, "manager"); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(q.cfg.Dir, "scratch")
+	ents, _ := os.ReadDir(dir)
+	last := fmt.Sprintf("%020d-%s%s", uint64(1<<64-1), id, queueWaiting)
+	if err := os.Rename(filepath.Join(dir, ents[0].Name()), filepath.Join(dir, last)); err != nil {
+		t.Fatal(err)
+	}
+	m.ID, _ = newQueueID()
+	if _, err := q.add(context.Background(), m, "manager"); err == nil || !strings.Contains(err.Error(), "exhausted") {
+		t.Fatalf("add past the last sequence: %v", err)
+	}
+	other, _ := newQueueID()
+	if err := os.Rename(filepath.Join(dir, last), filepath.Join(dir, fmt.Sprintf("%020d-%s%s", 1, other, queueWaiting))); err != nil {
+		t.Fatal(err)
+	}
+	unlock := q.lock("scratch")
+	waiting, _, bad, _, err := q.read("scratch")
+	unlock()
+	if err != nil || len(waiting) != 0 || bad != 1 {
+		t.Fatalf("read %v %d %v, want the mismatched file removed", waiting, bad, err)
+	}
+}
+
+// A send refused before it began whose file could not be renamed back
+// waits again: the next sweep renames it, and does not take it for an
+// interrupted send.
+func TestQueueUndoSendFailureIsNotAnInterruptedSend(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores a read-only directory")
+	}
+	f := queueBroker(t, "suspended")
+	for _, body := range []string{"a", "b"} {
+		resp, _ := f.send(t, "manager", `{"to":"scratch","body":"`+body+`"}`)
+		mustOK(t, resp, body)
+	}
+	unlock := f.b.queue.lock("scratch")
+	waiting, _, _, _, _ := f.b.queue.read("scratch")
+	m, err := f.b.queue.beginSend(waiting[0])
+	unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(f.queueDir, "scratch")
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	if f.b.endQueuedSend(m, "", errNotRecorded) {
+		t.Fatal("reported sent")
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f.setPhase("scratch", "running")
+	if n := f.b.deliverQueued(context.Background(), "scratch"); n != 2 {
+		t.Fatalf("sent %d, want 2", n)
+	}
+	f.b.queueJobs.Wait()
+	if got := strings.Join(f.toScratch(), ","); got != "a,b" || len(f.rt.sent) != 2 || strings.Contains(f.audit.String(), "may or may not have arrived") {
+		t.Fatalf("delivered %q, sent %+v", got, f.rt.sent)
+	}
+	if len(f.b.queue.notSent) != 0 {
+		t.Fatalf("notSent still holds %v", f.b.queue.notSent)
+	}
+}

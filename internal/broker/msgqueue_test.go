@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -81,7 +82,7 @@ func (f queueFixture) queued(t *testing.T, slug string) []queuedMsg {
 	t.Helper()
 	unlock := f.b.queue.lock(slug)
 	defer unlock()
-	waiting, _, _, err := f.b.queue.read(slug)
+	waiting, _, _, _, err := f.b.queue.read(slug)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,10 +453,12 @@ func TestQueueInterruptedSendIsNotRepeated(t *testing.T) {
 	resp, _ := f.send(t, "manager", `{"to":"scratch","body":"x"}`)
 	mustOK(t, resp, "send")
 	unlock := f.b.queue.lock("scratch")
-	waiting, _, _, _ := f.b.queue.read("scratch")
-	if _, err := f.b.queue.beginSend(waiting[0]); err != nil {
+	waiting, _, _, _, _ := f.b.queue.read("scratch")
+	m, err := f.b.queue.beginSend(waiting[0])
+	if err != nil {
 		t.Fatal(err)
 	}
+	f.b.queue.sendDone(m) // as a crash leaves it: no send under way
 	unlock()
 	f.setPhase("scratch", "running")
 	f.b.deliverQueued(context.Background(), "scratch")
@@ -575,7 +578,7 @@ func TestQueueOperatorRoomAndWorkerCount(t *testing.T) {
 		t.Fatalf("operator past its own cap: %d", rec.Code)
 	}
 	// The operator's notes are not in the manager's count.
-	if n, err := f.b.queue.add(queuedMsg{ID: "probe", Recipient: "scratch", Slug: "scratch", Sender: "worker", Kind: sentledger.WorkerKind("worker"), Body: "x", QueuedAt: time.Now()}, "manager"); err == nil {
+	if n, err := f.b.queue.add(context.Background(), queuedMsg{ID: "probe", Recipient: "scratch", Slug: "scratch", Sender: "worker", Kind: sentledger.WorkerKind("worker"), Body: "x", QueuedAt: time.Now()}, "manager"); err == nil {
 		t.Fatalf("worker past its share queued (%d)", n)
 	}
 }
@@ -590,20 +593,20 @@ func TestQueuePools(t *testing.T) {
 		return queuedMsg{ID: id, Recipient: "scratch", Slug: "scratch", Sender: sender, Kind: "k", Body: "x", QueuedAt: time.Now()}
 	}
 	for _, w := range []string{"w1", "w1", "w2", "w2"} {
-		if _, err := q.add(msg(w), "manager"); err != nil {
+		if _, err := q.add(context.Background(), msg(w), "manager"); err != nil {
 			t.Fatalf("%s: %v", w, err)
 		}
 	}
-	_, err := q.add(msg("w3"), "manager")
+	_, err := q.add(context.Background(), msg("w3"), "manager")
 	var full *queueFullError
 	if !errors.As(err, &full) || err.Error() != "its message queue is full" {
 		t.Fatalf("a worker past the agents' pool: %v", err)
 	}
-	if _, err := q.add(msg(operatorActor), "manager"); err != nil {
+	if _, err := q.add(context.Background(), msg(operatorActor), "manager"); err != nil {
 		t.Fatalf("operator: %v", err)
 	}
 	for i := range 4 {
-		n, err := q.add(msg("manager"), "manager")
+		n, err := q.add(context.Background(), msg("manager"), "manager")
 		if err != nil {
 			t.Fatalf("the manager's send %d refused for the workers' messages: %v", i, err)
 		}
@@ -611,10 +614,10 @@ func TestQueuePools(t *testing.T) {
 			t.Fatalf("manager told %d wait, want %d (not the operator's note)", n, want)
 		}
 	}
-	if _, err := q.add(msg("manager"), "manager"); !errors.As(err, &full) || !strings.Contains(err.Error(), "manager's messages is full (4 messages waiting") {
+	if _, err := q.add(context.Background(), msg("manager"), "manager"); !errors.As(err, &full) || !strings.Contains(err.Error(), "manager's messages is full (4 messages waiting") {
 		t.Fatalf("manager past its pool: %v", err)
 	}
-	if n, err := q.add(msg(operatorActor), "manager"); err != nil || n != 10 {
+	if n, err := q.add(context.Background(), msg(operatorActor), "manager"); err != nil || n != 10 {
 		t.Fatalf("operator: %d %v, want all 10", n, err)
 	}
 }
@@ -633,6 +636,9 @@ func TestQueueFullRefusalTellsAWorkerNoCounts(t *testing.T) {
 	if rec.Code != http.StatusConflict || rec.Header().Get(ReasonHeader) != ReasonQueueFull || !strings.Contains(body, "its message queue is full, so nothing was queued") ||
 		strings.ContainsAny(body, "0123456789") {
 		t.Fatalf("%d %q", rec.Code, body)
+	}
+	if !strings.Contains(f.audit.String(), "its message queue is full (2 messages waiting, the limit is 2)") {
+		t.Fatalf("the audit log has no counts: %s", f.audit)
 	}
 }
 
@@ -763,10 +769,10 @@ func TestQueueNoticesAreBounded(t *testing.T) {
 	f := queueBroker(t, "suspended")
 	rt := &blockingMsgRuntime{fakeMsgRuntime: f.rt, blockTo: "agent:worker", entered: make(chan struct{}), release: make(chan struct{})}
 	f.b.runtime = rt
-	f.b.queueNotice("worker", "first")
+	f.b.queueNotice("worker", f.b.senderGeneration("worker"), "first")
 	<-rt.entered
 	for range queueNoticesPending + 5 {
-		f.b.queueNotice("worker", "more")
+		f.b.queueNotice("worker", f.b.senderGeneration("worker"), "more")
 	}
 	f.b.notices.mu.Lock()
 	n := len(f.b.notices.pending)
@@ -845,6 +851,9 @@ func TestQueueSentFileLeftIsDroppedSilently(t *testing.T) {
 		}
 	})
 	t.Run("not removed", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root ignores a read-only directory")
+		}
 		f := queueBroker(t, "suspended")
 		resp, _ := f.send(t, "manager", `{"to":"scratch","body":"x"}`)
 		mustOK(t, resp, "send")
@@ -868,7 +877,166 @@ func TestQueueSentFileLeftIsDroppedSilently(t *testing.T) {
 		if ents, _ := os.ReadDir(dir); len(ents) != 0 {
 			t.Fatalf("left %v", ents)
 		}
+		if len(f.b.queue.delivered) != 0 {
+			t.Fatalf("delivered still holds %v", f.b.queue.delivered)
+		}
 	})
+	t.Run("renamed to .sent", func(t *testing.T) {
+		f := queueBroker(t, "suspended")
+		resp, _ := f.send(t, "manager", `{"to":"scratch","body":"x"}`)
+		mustOK(t, resp, "send")
+		f.setPhase("scratch", "running")
+		dir := filepath.Join(f.queueDir, "scratch")
+		// The remove after the send fails; the rename to .sent is made, and
+		// the delivery's next sweep removes the .sent file.
+		f.b.queue.removeFile = func(p string) error {
+			if strings.HasSuffix(p, queueSending) {
+				return &os.PathError{Op: "remove", Path: p, Err: syscall.EIO}
+			}
+			return os.Remove(p)
+		}
+		if n := f.b.deliverQueued(context.Background(), "scratch"); n != 1 {
+			t.Fatalf("sent %d", n)
+		}
+		if a := f.audit.String(); !strings.Contains(a, "marked sent, it is not sent again") || !strings.Contains(a, "removed 1 file(s) of messages already sent") {
+			t.Fatalf("audit %s", a)
+		}
+		if len(f.b.queue.delivered) != 0 {
+			t.Fatalf("a renamed file remembered: %v", f.b.queue.delivered)
+		}
+		f.b.queuePass(context.Background())
+		f.b.queueJobs.Wait()
+		if len(f.rt.sent) != 1 || f.rt.sent[0].To != "agent:scratch" {
+			t.Fatalf("sent %+v, want the message once and no notice", f.rt.sent)
+		}
+		if ents, _ := os.ReadDir(dir); len(ents) != 0 || !strings.Contains(f.audit.String(), "messages already sent") {
+			t.Fatalf("left %v", ents)
+		}
+	})
+}
+
+// A delivery whose send is slow holds no queue lock: a send queued to the
+// same recipient and the queue list answer while it is under way, a queue
+// pass leaves its .sending file alone, and the message queued meanwhile goes
+// out after the ones before it.
+func TestQueueSlowDeliveryHoldsNoQueueLock(t *testing.T) {
+	f := queueBroker(t, "suspended")
+	for _, body := range []string{"a", "b"} {
+		resp, _ := f.send(t, "manager", `{"to":"scratch","body":"`+body+`"}`)
+		mustOK(t, resp, body)
+	}
+	f.setPhase("scratch", "running")
+	rt := &blockingMsgRuntime{fakeMsgRuntime: f.rt, blockTo: "agent:scratch", entered: make(chan struct{}), release: make(chan struct{})}
+	f.b.runtime = rt
+	delivered := make(chan int)
+	go func() { delivered <- f.b.deliverQueued(context.Background(), "scratch") }()
+	select {
+	case <-rt.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the delivery did not begin")
+	}
+	f.setPhase("scratch", "suspended")
+	within(t, 5*time.Second, "a send to the same recipient", func() {
+		resp, res := f.send(t, "manager", `{"to":"scratch","body":"c"}`)
+		mustOK(t, resp, "send while a delivery is under way")
+		if !res.Queued || res.Waiting != 2 {
+			t.Errorf("answer %+v", res)
+		}
+	})
+	within(t, 5*time.Second, "the queue list", func() {
+		rec := httpGet(t, f.b.OperatorHandler(), PathOperatorMsgQueue+"?to=scratch")
+		var ql QueueListResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &ql); err != nil || len(ql.Messages) != 3 || !ql.Messages[0].Sending {
+			t.Errorf("list %d %s", rec.Code, rec.Body)
+		}
+	})
+	within(t, 5*time.Second, "a queue pass", func() { f.b.queuePass(context.Background()) })
+	if strings.Contains(f.audit.String(), "may or may not have arrived") {
+		t.Fatal("a send under way was taken for an interrupted one")
+	}
+	f.setPhase("scratch", "running")
+	close(rt.release)
+	if n := <-delivered; n != 3 {
+		t.Fatalf("sent %d, want 3", n)
+	}
+	f.b.queueJobs.Wait()
+	var got []string
+	for _, m := range f.rt.sent {
+		if m.To == "agent:scratch" {
+			got = append(got, m.Body[strings.LastIndex(m.Body, "\n")+1:])
+		}
+	}
+	if strings.Join(got, ",") != "a,b,c" || f.b.queue.count("scratch") != 0 {
+		t.Fatalf("delivered %q, %d queued", got, f.b.queue.count("scratch"))
+	}
+}
+
+// add writes nothing for a request whose context ended while it waited.
+func TestQueueAddAfterTheRequestEnded(t *testing.T) {
+	q := newMsgQueue(MessageQueueConfig{Dir: filepath.Join(t.TempDir(), "q")})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	m := queuedMsg{ID: "x", Recipient: "scratch", Slug: "scratch", Sender: "manager", Kind: sentledger.KindManager, Body: "x", QueuedAt: time.Now()}
+	if _, err := q.add(ctx, m, "manager"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("add: %v", err)
+	}
+	if n := q.count("scratch"); n != 0 {
+		t.Fatalf("%d queued", n)
+	}
+}
+
+// A notice about a message from one life of a name does not go to the next:
+// the sender recycled since is the case the drop itself names.
+func TestQueueNoticeNotToANewLife(t *testing.T) {
+	f := queueBroker(t, "suspended")
+	resp, _ := f.send(t, "worker", `{"to":"scratch","body":"x"}`)
+	mustOK(t, resp, "send")
+	if err := f.b.Supersede("worker"); err != nil {
+		t.Fatal(err)
+	}
+	f.setPhase("scratch", "running")
+	f.b.queuePass(context.Background())
+	f.b.queueJobs.Wait()
+	if len(f.rt.sent) != 0 {
+		t.Fatalf("sent %+v", f.rt.sent)
+	}
+	if a := f.audit.String(); !strings.Contains(a, "its sender was destroyed, purged or recycled") || !strings.Contains(a, "not sent, the name was destroyed, purged or recycled since") {
+		t.Fatalf("audit %s", a)
+	}
+}
+
+// The notices waiting when the broker stops are not sent: one audit line
+// counts them.
+func TestQueueNoticesNotSentAtStop(t *testing.T) {
+	f := queueBroker(t, "suspended")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	f.b.bgMu.Lock()
+	f.b.bgCtx = ctx
+	f.b.bgMu.Unlock()
+	for range 3 {
+		f.b.queueNotice("worker", f.b.senderGeneration("worker"), "x")
+	}
+	f.b.queueJobs.Wait()
+	if len(f.rt.sent) != 0 || !strings.Contains(f.audit.String(), "queue notice(s) not sent: the broker is stopping") {
+		t.Fatalf("sent %+v", f.rt.sent)
+	}
+}
+
+// A queue directory that is not private is audited once, not every pass.
+func TestQueueUnreadableAuditedOnce(t *testing.T) {
+	f := queueBroker(t, "suspended")
+	resp, _ := f.send(t, "manager", `{"to":"scratch","body":"x"}`)
+	mustOK(t, resp, "send")
+	if err := os.Chmod(filepath.Join(f.queueDir, "scratch"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		f.b.queuePass(context.Background())
+	}
+	if n := strings.Count(f.audit.String(), "left until it can be read"); n != 1 {
+		t.Fatalf("audited %d times", n)
+	}
 }
 
 // One queue directory that is not private is left out of `lever msg list`,

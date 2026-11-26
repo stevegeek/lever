@@ -384,7 +384,10 @@ refused: start it first.
   change such as `worker_to_worker: false`), when the recipient was destroyed, purged or recycled
   since (its queue is bound to that life of the name, not to the name), or when its send failed
   after it began, or was under way while the broker stopped (it may have arrived, so it is not sent
-  twice; the messages behind it wait in order). The sender gets a
+  twice; the messages behind it wait in order). A message sent whose file the broker could
+  neither remove nor rename afterwards is removed later without a word by the same broker; after a
+  broker restart it looks like an interrupted send, so it is dropped with the "may or may not have
+  arrived" notice, and never sent again. The sender gets a
   `queue-notice` message saying which and why when it is running; the operator's notes, and notices
   to a sender that is not running, are in the broker's audit log only. A destroy drops the agent's
   queue; it is not kept in the agent's archive.

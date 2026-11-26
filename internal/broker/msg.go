@@ -279,7 +279,7 @@ func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
 	// Before sendRecorded: a refused send is not made, so it leaves no record.
 	slug := strings.TrimPrefix(tgt.scionTo, "agent:")
 	if refusal, reason, phase := b.notRunningCheck(r.Context(), caller, slug, tgt.recipientCN == b.manager); refusal != "" {
-		status := http.StatusConflict
+		status, audited := http.StatusConflict, refusal
 		if reason == ReasonNotRunning && b.queue != nil {
 			ans, err := b.enqueue(r.Context(), queuedSend{caller: caller, to: req.To, recipientCN: tgt.recipientCN, slug: slug,
 				kind: kind, phase: phase, body: req.Body, interrupt: req.Interrupt, wake: req.Wake})
@@ -287,13 +287,13 @@ func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, wire.MsgSendResponse{OK: true, Queued: true, Waiting: ans.waiting, Phase: phaseToken(phase), Waking: ans.waking, Note: ans.note})
 				return
 			}
-			refusal = b.queueRefusal(caller, refusal, err)
+			refusal, audited = b.queueRefusal(caller, refusal, err)
 			reason = ReasonQueueFull
 			if !errors.As(err, new(*queueFullError)) {
 				reason, status = ReasonRuntimeError, http.StatusInternalServerError
 			}
 		}
-		b.audit("msg", caller, "deny", "send->"+tgt.scionTo+": "+refusal)
+		b.audit("msg", caller, "deny", "send->"+tgt.scionTo+": "+audited)
 		refusePhase(w, reason, phase, refusal, status)
 		return
 	}

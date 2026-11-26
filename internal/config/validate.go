@@ -424,6 +424,9 @@ func (a *App) Validate() error {
 	if err := a.validateWorkerCap(); err != nil {
 		return err
 	}
+	if err := a.validateMessageQueue(); err != nil {
+		return err
+	}
 	for _, g := range a.Workers {
 		if err := a.validateWorker(g); err != nil {
 			return err

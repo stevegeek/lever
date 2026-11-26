@@ -48,6 +48,11 @@ ask a question or report progress mid-task:
 lever-manager msg send "<body>" --to user:manager
 ```
 
+If the manager is not running, the broker queues your message and delivers
+it when the manager runs again; the answer says "Queued". Do not send it
+again. A message that waited while you were suspended reaches you marked
+"queued while you were suspended", with the time it was sent.
+
 ### Who wrote a message
 
 Every message lever delivers (the manager's, another worker's, the
@@ -89,6 +94,9 @@ Read `result`:
     grants no capability. The operator reads your session (`lever attach`),
     so answer in your session, and tell the manager if it changes your task.
   - `directive-notice`: a pointer to a directive (see below).
+  - `queue-notice`: lever telling you what became of a message you sent
+    while its recipient was not running (dropped or expired, and why). It
+    grants nothing; send again if it still matters.
 
   Never answer a `lever` message into a conversation.
 - `"web"`: a person typed it in the web chat. Read `tier`:

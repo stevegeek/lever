@@ -40,6 +40,12 @@ version bump moves the block under the new version heading.
   - The lever skills change (queuing, `--wake`, `queue-notice`), so the Jail ABI moves and agents
     see the new text after their next fresh start.
 
+### Upgrade
+
+- **Jail ABI 21.** The in-jail lever code and skills changed (`lever-manager msg send --wake`, the
+  queued answer, `queue-notice`). Rebuild the agent image and run `lever up --fresh
+  --keep-conversation`.
+
 ## [1.0.0-beta.13] - 2026-11-26
 
 ### Added

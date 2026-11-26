@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -86,6 +87,14 @@ func newTestRemoteBranch(t *testing.T, repo, def string) (*testRemote, string) {
 	}))
 	t.Cleanup(r.srv.Close)
 	return r, work
+}
+
+// seenAuths copies the Authorization headers the server saw, under the
+// lock its handler appends with (git may still have a request in flight).
+func (r *testRemote) seenAuths() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.auths)
 }
 
 func (r *testRemote) headSHA(t *testing.T, repo, branch string) string {

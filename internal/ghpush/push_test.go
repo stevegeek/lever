@@ -76,8 +76,8 @@ func TestPushFullBundle(t *testing.T) {
 		t.Fatalf("compare url %q", res.CompareURL)
 	}
 	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:ghs_TESTTOKEN"))
-	if !slices.Contains(r.auths, want) {
-		t.Fatalf("push did not authenticate: %q", r.auths)
+	if auths := r.seenAuths(); !slices.Contains(auths, want) {
+		t.Fatalf("push did not authenticate: %q", auths)
 	}
 	for _, a := range *argvs {
 		for _, s := range a {
@@ -588,8 +588,8 @@ func TestPushPrivateRepoFreshMirror(t *testing.T) {
 	if res.NewSHA != r.headSHA(t, repo, "agent/x") {
 		t.Fatalf("res %+v remote %s", res, r.headSHA(t, repo, "agent/x"))
 	}
-	if len(r.auths) == 0 || slices.Contains(r.auths, "") {
-		t.Fatalf("a request reached the remote without credentials: %q", r.auths)
+	if auths := r.seenAuths(); len(auths) == 0 || slices.Contains(auths, "") {
+		t.Fatalf("a request reached the remote without credentials: %q", auths)
 	}
 }
 

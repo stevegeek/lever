@@ -225,8 +225,9 @@ func TestPusherDeleteBranchLease(t *testing.T) {
 		t.Fatalf("branch still there: %q", got)
 	}
 	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:ghs_TESTTOKEN"))
-	if !slices.Contains(r.auths, want) || slices.Contains(r.auths, "") {
-		t.Fatalf("delete did not authenticate on every request: %q", r.auths)
+	auths := r.seenAuths()
+	if !slices.Contains(auths, want) || slices.Contains(auths, "") {
+		t.Fatalf("delete did not authenticate on every request: %q", auths)
 	}
 	for _, a := range *argvs {
 		if strings.Contains(strings.Join(a, " "), "ghs_TESTTOKEN") {

@@ -291,6 +291,13 @@ func printAgentList(cmd *cobra.Command, resp broker.AgentListResponse) {
 			cmp.Or(memoryToken(a.Memory), "-"), creatorOf(a.CreatedBy), a.CreatedAt.Format("2006-01-02 15:04"), strings.ReplaceAll(termsafe.Sanitize(a.Label), "\t", " "))
 	}
 	tw.Flush()
+	var queued []string
+	for _, a := range resp.Agents {
+		if a.QueuedMessages > 0 {
+			queued = append(queued, fmt.Sprintf("%s %d", safeToken(a.Name), a.QueuedMessages))
+		}
+	}
+	printQueuedLine(cmd.OutOrStdout(), queued)
 }
 
 // creatorOf is a record's creator for the terminal: an agent or manager

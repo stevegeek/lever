@@ -218,3 +218,24 @@ func TestRefusalPrintsNoUsageAndIsSanitized(t *testing.T) {
 		t.Fatalf("control characters reached the terminal: %q", got)
 	}
 }
+
+// A queued send says it was queued, not delivered, and passes --wake on.
+func TestMsgSend_queued(t *testing.T) {
+	var gotBody map[string]any
+	root := newRoot(fakeBroker(t, func(w http.ResponseWriter, _ string, body map[string]any) {
+		gotBody = body
+		_, _ = w.Write([]byte(`{"ok":true,"queued":true,"waiting":2,"phase":"suspended","waking":true}`))
+	}))
+	out, err := clitest.Exec(t, root, "msg", "send", "hello", "--to", "scratch", "--wake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotBody["wake"] != true {
+		t.Fatalf("body %v", gotBody)
+	}
+	for _, want := range []string{"Queued for scratch, not delivered", "phase suspended", "2 message(s) wait", "Waking it"} {
+		if !strings.Contains(out, want) || strings.Contains(out, "Sent to") {
+			t.Fatalf("out %q lacks %q", out, want)
+		}
+	}
+}

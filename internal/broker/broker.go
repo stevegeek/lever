@@ -65,6 +65,8 @@ type Config struct {
 	AgentMessages AgentMessagesConfig
 	// Files is remote.files: the file exchange of the chat page.
 	Files FilesConfig
+	// MessageQueue is broker.messaging.queue. Zero Dir = off.
+	MessageQueue MessageQueueConfig
 
 	// Log receives the audit decisions; nil ⇒ a discard logger.
 	Log *slog.Logger
@@ -519,6 +521,16 @@ type Broker struct {
 	hostWatch      hostWatch
 	hostProbe      func(context.Context, hostTarget) bool
 	hostWatchEvery time.Duration
+	// queue is the message queue (msgqueue.go), nil when off. queueEvery
+	// is for tests; queueJobs counts the wakes and deliveries under way, and
+	// wakeSem bounds the wakes.
+	queue      *msgQueue
+	queueEvery time.Duration
+	queueJobs  sync.WaitGroup
+	wakeSem    chan struct{}
+	// bgCtx is the serving context, for background work (background).
+	bgMu  sync.Mutex
+	bgCtx context.Context
 }
 
 // New builds a Broker from c.
@@ -629,6 +641,7 @@ func New(c Config) *Broker {
 		archiveDir: d.ArchiveDir, backupConversation: d.BackupConversation, dailyBackup: d.DailyBackup, removeConversations: d.RemoveConversations, conversationDir: d.ConversationDir, agentLoopEvery: time.Minute,
 		captureSem: make(chan struct{}, 1),
 		spawnRate:  newRateWindow(managerSpawnRateLimit), inheritedUnsettled: inherited,
+		queue: newMsgQueue(c.MessageQueue), wakeSem: make(chan struct{}, queueWakesAtOnce),
 	}
 	if addRevoked {
 		b.mu.Lock()

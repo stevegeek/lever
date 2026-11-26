@@ -294,26 +294,31 @@ func (b *Broker) admitOrRefuse(ctx context.Context, w http.ResponseWriter, actor
 	if err == nil {
 		return release, true
 	}
-	if errors.Is(err, ErrTemplateCap) {
+	reason, msg, status := b.admissionRefusal(err, actor)
+	if status == http.StatusBadGateway {
+		b.audit("worker", actor, "error", verb+" "+name+": "+err.Error())
+	} else {
 		b.audit("worker", actor, "deny", verb+" "+name+": "+err.Error())
-		refuse(w, ReasonTemplateBusy, err.Error(), http.StatusConflict)
-		return nil, false
+	}
+	refuse(w, reason, msg, status)
+	return nil, false
+}
+
+// admissionRefusal is admitWorker's err as actor may read it: its reason,
+// text and status.
+func (b *Broker) admissionRefusal(err error, actor string) (reason, msg string, status int) {
+	if errors.Is(err, ErrTemplateCap) {
+		return ReasonTemplateBusy, err.Error(), http.StatusConflict
 	}
 	if mb := (*memoryBusyError)(nil); errors.As(err, &mb) {
-		b.audit("worker", actor, "deny", verb+" "+name+": "+err.Error())
-		refuse(w, ReasonMemoryBusy, b.memoryBusyText(mb, actor), http.StatusConflict)
-		return nil, false
+		return ReasonMemoryBusy, b.memoryBusyText(mb, actor), http.StatusConflict
 	}
 	if errors.Is(err, ErrWorkerCap) {
-		b.audit("worker", actor, "deny", verb+" "+name+": "+err.Error())
 		msg := err.Error()
 		if actor != b.manager {
 			msg = "busy: too many workers are running"
 		}
-		refuse(w, ReasonWorkerCap, msg, http.StatusConflict)
-		return nil, false
+		return ReasonWorkerCap, msg, http.StatusConflict
 	}
-	b.audit("worker", actor, "error", verb+" "+name+": "+err.Error())
-	refuse(w, ReasonRuntimeError, "runtime error", http.StatusBadGateway)
-	return nil, false
+	return ReasonRuntimeError, "runtime error", http.StatusBadGateway
 }

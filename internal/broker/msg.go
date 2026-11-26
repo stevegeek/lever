@@ -270,18 +270,32 @@ func (b *Broker) handleMsgSend(w http.ResponseWriter, r *http.Request) {
 	if !b.runtimeReady(w) {
 		return
 	}
-	// Before sendRecorded: a refused send is not made, so it leaves no record.
-	slug := strings.TrimPrefix(tgt.scionTo, "agent:")
-	if refusal := b.notRunningRefusal(r.Context(), caller, slug, tgt.recipientCN == b.manager); refusal != "" {
-		b.audit("msg", caller, "deny", "send->"+tgt.scionTo+": "+refusal)
-		http.Error(w, refusal, http.StatusConflict)
-		return
-	}
 	// The kind comes from the caller's identity, never from the request.
 	kind, compose := sentledger.KindManager, func(ref string) string { return markedBody(managerMarker, ref, req.Body) }
 	if tgt.relayFrom != "" {
 		kind = sentledger.WorkerKind(tgt.relayFrom)
 		compose = func(ref string) string { return relayedWorkerBody(tgt.relayFrom, ref, req.Body) }
+	}
+	// Before sendRecorded: a refused send is not made, so it leaves no record.
+	slug := strings.TrimPrefix(tgt.scionTo, "agent:")
+	if refusal, reason, phase := b.notRunningCheck(r.Context(), caller, slug, tgt.recipientCN == b.manager); refusal != "" {
+		status := http.StatusConflict
+		if reason == ReasonNotRunning && b.queue != nil {
+			ans, err := b.enqueue(r.Context(), queuedSend{caller: caller, to: req.To, recipientCN: tgt.recipientCN, slug: slug,
+				kind: kind, phase: phase, body: req.Body, interrupt: req.Interrupt, wake: req.Wake})
+			if err == nil {
+				writeJSON(w, wire.MsgSendResponse{OK: true, Queued: true, Waiting: ans.waiting, Phase: phaseToken(phase), Waking: ans.waking, Note: ans.note})
+				return
+			}
+			refusal = b.queueRefusal(caller, refusal, err)
+			reason = ReasonQueueFull
+			if !errors.As(err, new(*queueFullError)) {
+				reason, status = ReasonRuntimeError, http.StatusInternalServerError
+			}
+		}
+		b.audit("msg", caller, "deny", "send->"+tgt.scionTo+": "+refusal)
+		refusePhase(w, reason, phase, refusal, status)
+		return
 	}
 	ref, err := b.sendRecorded(r.Context(), tgt.recipientCN, slug, kind, compose, scion.MsgOpts{
 		To: tgt.scionTo, Interrupt: req.Interrupt, Project: tgt.project,

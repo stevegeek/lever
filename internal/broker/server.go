@@ -144,6 +144,7 @@ func (b *Broker) AdminHandler() http.Handler {
 func (b *Broker) OperatorHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+wire.PathOperatorNote, b.handleOperatorNote)
+	mux.HandleFunc("GET "+PathOperatorMsgQueue, b.handleOperatorMsgQueue)
 	mux.HandleFunc("POST "+PathOperatorWorkerResume, b.handleOperatorWorkerResume)
 	mux.HandleFunc("GET "+PathOperatorWorkerList, b.handleOperatorWorkerList)
 	mux.HandleFunc("POST "+PathOperatorWorkerStart, b.handleOperatorWorkerStart)
@@ -207,6 +208,12 @@ func (b *Broker) ServeListeners(ctx context.Context, jailLn, adminLn, directiveL
 	}
 	if b.agentLoopEnabled() {
 		go b.runAgentLoop(ctx)
+	}
+	b.bgMu.Lock()
+	b.bgCtx = ctx
+	b.bgMu.Unlock()
+	if b.queueLoopEnabled() {
+		go b.runQueueLoop(ctx)
 	}
 	if b.tokenWatchEnabled() {
 		// scion's hub token refresh timer stalls while the host sleeps, and

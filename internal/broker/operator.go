@@ -38,8 +38,22 @@ func (b *Broker) handleOperatorNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if refusal, reason, phase := b.notRunningCheck(r.Context(), operatorActor, slug, toManager); refusal != "" {
+		status := http.StatusConflict
+		if reason == ReasonNotRunning && b.queue != nil {
+			ans, err := b.enqueue(r.Context(), queuedSend{caller: operatorActor, to: req.To, recipientCN: cn, slug: slug,
+				kind: sentledger.KindOperatorNote, phase: phase, body: req.Body, interrupt: req.Interrupt, wake: req.Wake})
+			if err == nil {
+				writeJSON(w, wire.OperatorNoteResponse{Queued: true, Waiting: ans.waiting, Phase: phaseToken(phase), Waking: ans.waking, Note: ans.note})
+				return
+			}
+			refusal = b.queueRefusal(operatorActor, refusal, err)
+			reason = ReasonQueueFull
+			if !errors.As(err, new(*queueFullError)) {
+				reason, status = ReasonRuntimeError, http.StatusInternalServerError
+			}
+		}
 		b.audit("msg", "operator", "deny", "note->"+cn+": "+refusal)
-		refusePhase(w, reason, phase, refusal, http.StatusConflict)
+		refusePhase(w, reason, phase, refusal, status)
 		return
 	}
 	ref, err := b.sendRecorded(r.Context(), cn, slug, sentledger.KindOperatorNote,

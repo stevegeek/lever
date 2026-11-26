@@ -2,6 +2,7 @@ package host
 
 import (
 	"fmt"
+	"io"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -48,6 +49,7 @@ func sanitizeListEntry(e broker.WorkerListEntry) broker.WorkerListEntry {
 	e.Activity = boundedLabel(e.Activity)
 	e.ActivitySource = boundedLabel(e.ActivitySource)
 	e.Container = boundedLabel(e.Container)
+	e.QueuedMessages = max(e.QueuedMessages, 0)
 	return e
 }
 
@@ -132,6 +134,20 @@ func printWorkerTable(cmd *cobra.Command, workers []broker.WorkerListEntry, now 
 	}
 	_ = tw.Flush()
 	fmt.Fprintln(out, "* hub record fields the worker can write itself: the worker's word, not lever's.")
+	var queued []string
+	for _, e := range workers {
+		if e.QueuedMessages > 0 {
+			queued = append(queued, fmt.Sprintf("%s %d", e.Name, e.QueuedMessages))
+		}
+	}
+	printQueuedLine(out, queued)
+}
+
+// printQueuedLine names the agents the broker holds messages for.
+func printQueuedLine(out io.Writer, queued []string) {
+	if len(queued) > 0 {
+		fmt.Fprintf(out, "queued messages, delivered when the agent next runs (`lever msg list`): %s\n", strings.Join(queued, ", "))
+	}
 }
 
 // printOrphans names the hub records that are neither the manager nor a

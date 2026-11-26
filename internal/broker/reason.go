@@ -69,6 +69,7 @@ const (
 	ReasonNoArchive          = "no-archive"          // 404 (restore): the destroyed agent left nothing to restore
 	ReasonArchiveRefused     = "archive-refused"     // 409/422/507 (restore): the archive is unreadable, unsafe, past the limits or does not fit
 	ReasonSpawned            = "spawned"             // 403 (purge, recycle): a spawned agent is destroyed, never purged or recycled
+	ReasonQueueFull          = "queue-full"          // 409 (note, msg send): the recipient is not running and its message queue has no room; nothing was queued
 )
 
 // refuse writes an error answer with its machine-readable reason. The text is

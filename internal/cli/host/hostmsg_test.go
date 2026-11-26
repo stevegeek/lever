@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stevegeek/lever/internal/broker"
 	"github.com/stevegeek/lever/internal/cli/clitest"
 	"github.com/stevegeek/lever/internal/proc"
 	"github.com/stevegeek/lever/internal/testutil"
@@ -106,5 +107,64 @@ func TestHostMsgSendUnknownRecipientErrors(t *testing.T) {
 	testutil.WantErrContaining(t, err, "nope", "assistant", "scratch")
 	if len(rec.all()) != 0 {
 		t.Fatalf("the broker was asked about an unknown recipient: %+v", rec.all())
+	}
+}
+
+// A note to an agent that is not running is queued: the command says so,
+// how many wait and why it was not woken, and passes --wake on.
+func TestHostMsgSendQueued(t *testing.T) {
+	dir := msgDir(t)
+	t.Chdir(dir)
+	rec := startOperatorUDS(t, dir, canned{body: `{"id":"","queued":true,"waiting":3,"phase":"suspended","note":"not woken: busy: too many workers are running"}`})
+	out, err := clitest.Exec(t, stubRoot(&stubBackend{runner: proc.NewFakeRunner()}), "msg", "send", "hi", "--to", "scratch", "--wake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Queued for scratch, not delivered", "phase suspended", "3 message(s) wait", "not woken: busy"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output %q lacks %q", out, want)
+		}
+	}
+	var got wire.OperatorNoteRequest
+	if err := json.Unmarshal([]byte(rec.all()[0].body), &got); err != nil || !got.Wake {
+		t.Fatalf("request %+v: %v", got, err)
+	}
+}
+
+// A full queue exits 9: nothing was sent or queued.
+func TestHostMsgSendQueueFullExitCode(t *testing.T) {
+	dir := msgDir(t)
+	t.Chdir(dir)
+	startOperatorUDS(t, dir, canned{status: http.StatusConflict, body: "worker scratch is not running (phase suspended); its message queue is full",
+		header: map[string]string{broker.ReasonHeader: broker.ReasonQueueFull}})
+	_, err := clitest.Exec(t, stubRoot(&stubBackend{runner: proc.NewFakeRunner()}), "msg", "send", "hi", "--to", "scratch")
+	if exitCodeOf(err) != 9 || !strings.Contains(err.Error(), "queue is full") {
+		t.Fatalf("exit %d: %v", exitCodeOf(err), err)
+	}
+}
+
+// `lever msg list` shows the queue with the sender's text sanitised and cut.
+func TestHostMsgList(t *testing.T) {
+	dir := msgDir(t)
+	t.Chdir(dir)
+	stateDir := filepath.Join(dir, ".lever-state")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"max_messages":20,"max_bytes":262144,"expiry":"168h0m0s","messages":[{"id":"ab","to":"scratch","kind":"worker:w","queued_at":"2026-01-02T03:04:05Z","expires_at":"2999-01-02T03:04:05Z","bytes":9,"body":"hi \u001b]0;x\u0007there` + strings.Repeat("y", 200) + `"}]}`
+	rec := startUDSAt(t, filepath.Join(stateDir, "operator.sock"), map[string]canned{broker.PathOperatorMsgQueue: {body: body}})
+	out, err := clitest.Exec(t, stubRoot(&stubBackend{runner: proc.NewFakeRunner()}), "msg", "list", "--to", "scratch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "scratch") || !strings.Contains(out, "worker:w") || strings.Contains(out, "\x1b") || strings.Contains(out, strings.Repeat("y", 100)) {
+		t.Fatalf("output %q", out)
+	}
+	if reqs := rec.all(); len(reqs) != 1 || reqs[0].method != http.MethodGet {
+		t.Fatalf("requests %+v", reqs)
+	}
+	out, err = clitest.Exec(t, stubRoot(&stubBackend{runner: proc.NewFakeRunner()}), "msg", "list", "--json")
+	if err != nil || !strings.Contains(out, `"messages":[{"id":"ab"`) {
+		t.Fatalf("json %q: %v", out, err)
 	}
 }

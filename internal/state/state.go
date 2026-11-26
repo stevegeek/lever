@@ -67,6 +67,10 @@ func (s State) Agents() string { return filepath.Join(s.Dir, "agents.json") }
 // AgentArchives holds the workspaces destroy archived (0700).
 func (s State) AgentArchives() string { return filepath.Join(s.Dir, "agent-archives") }
 
+// MessageQueue holds the broker's queue of messages to agents that are not
+// running, a directory per recipient: written and read by the broker only.
+func (s State) MessageQueue() string { return filepath.Join(s.Dir, "message-queue") }
+
 // AgentConversations holds a directory of conversation backups per spawned
 // agent, taken when it is destroyed.
 func (s State) AgentConversations() string { return filepath.Join(s.Dir, "agent-conversations") }

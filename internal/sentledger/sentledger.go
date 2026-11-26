@@ -51,6 +51,10 @@ const (
 	// KindServiceHostNotice: the broker's notice that a service host it
 	// could not reach answers again.
 	KindServiceHostNotice = "service-host-notice"
+	// KindQueueNotice: the broker's notice to a sender that a message it
+	// queued for an agent that was not running was dropped, or could not
+	// be woken for.
+	KindQueueNotice = "queue-notice"
 	// KindWorkerPrefix + slug: that worker sent it. The slug is the sender's
 	// identity from its certificate, never a value from the request.
 	KindWorkerPrefix = "worker:"
@@ -64,7 +68,7 @@ func WorkerKind(slug string) string { return KindWorkerPrefix + slug }
 
 func ValidKind(k string) bool {
 	switch k {
-	case KindManager, KindOperatorNote, KindDirectiveNotice, KindServiceHostNotice:
+	case KindManager, KindOperatorNote, KindDirectiveNotice, KindServiceHostNotice, KindQueueNotice:
 		return true
 	}
 	slug, ok := strings.CutPrefix(k, KindWorkerPrefix)

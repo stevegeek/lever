@@ -22,15 +22,18 @@ version bump moves the block under the new version heading.
   - `--wake` on either send resumes the recipient to deliver now, when the sender may resume it (the
     operator any declared worker, the manager the workers it drives) and the running caps and
     memory budget allow; otherwise the message stays queued and the answer's `note` says why.
-  - New `broker.messaging.queue`: `max_messages` (20), `max_bytes` (256 KiB) per recipient and
-    `expiry` (7 days). One agent may hold at most half of a recipient's queue; the operator's notes
-    have caps of their own. A full queue
-    refuses the new message with 409 `queue-full` (`lever msg send` exit 9) and queues nothing.
+  - New `broker.messaging.queue`: `max_messages` (20), `max_bytes` (256 KiB of message text, at
+    most 4 MiB) and `expiry` (7 days). The caps bound each of three pools of a recipient's queue:
+    the operator's notes, the manager's messages and every other agent's, so agents never fill a
+    queue against the operator or the manager. One agent may hold at most half of the agents' pool.
+    A full pool refuses the new message with 409 `queue-full` (`lever msg send` exit 9) and queues
+    nothing; an agent refused for a full pool is told no counts.
   - A message is dropped, never delivered, when it expires, when its sender may no longer reach the
     recipient at delivery, when the recipient was destroyed, purged or recycled since, or when its
     send failed after it began or was interrupted by a broker stop (never sent twice). The sender gets a `queue-notice` (a new sent-ledger kind)
     when it runs; otherwise the audit log has it. A destroy drops the agent's queue.
-  - New `lever msg list [--to NAME] [--json]` shows the queue; `queued_messages` is in
+  - New `lever msg list [--to NAME] [--json]` shows the queue (a queue that cannot be read is named
+    in `unreadable` and left out); `queued_messages` is in
     `lever worker list`, `lever agent list --json` and remote-verb `list --json`.
   - The queue is host-side under the state directory (`message-queue/`, 0700, 0600 files). With the
     state directory inside the tree there is no queue, and such a send is refused as before.

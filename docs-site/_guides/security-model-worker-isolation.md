@@ -553,8 +553,12 @@ broker checks. What spawning adds, and how it is held:
 - **The message queue widens no one's reach.** A message to an agent that is not running (for
   example one `idle_suspend` put to sleep) is queued by the broker in the host-only state directory
   (0700 directories, 0600 files written by rename, outside every agent mount), with a per-recipient
-  count and byte cap checked before anything is written, half of it the most one agent may hold, and
-  separate caps for the operator's notes. The send is authorized as a live send is, and again at
+  count and byte cap checked before anything is written, in separate pools for the operator's
+  notes, the manager's messages and the other agents', half of the agents' pool the most one agent
+  may hold. An agent refused for a full pool learns no counts, and an agent's answer counts only its
+  own queued messages. Notices to senders about their queued messages go out from one background
+  sender with a bounded queue, never while a queue or worker lock is held, so a slow hub cannot hold
+  up a send or a destroy. The send is authorized as a live send is, and again at
   delivery: a sender that was revoked, purged or recycled since, or that the policy no longer lets
   reach the recipient, or a recipient that is a new life of its name (destroyed, purged or recycled
   since), gets nothing delivered. Delivery is a live send, made at delivery time with the sender's

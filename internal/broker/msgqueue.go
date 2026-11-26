@@ -24,9 +24,15 @@ package broker
 // forge it (neutraliseMarkers).
 //
 // A message is delivered at most once. Before its send its file is renamed
-// to .sending; after the send it is removed. A .sending file found later is
-// a send a crash interrupted: it may have arrived, so it is dropped, never
-// sent again, and its sender is told.
+// to .sending; after the send it is removed (or, when the remove fails,
+// renamed to .sent, which is removed later without a word). A .sending file
+// found later is a send a crash interrupted: it may have arrived, so it is
+// dropped, never sent again, and its sender is told.
+//
+// What becomes of a queued message is told to its sender by a queue notice.
+// Notices are never sent under a queue lock or a worker lock: the code under
+// the locks only decides and changes files, and hands the notices to one
+// background sender (queueNotice), which holds at most queueNoticesPending.
 
 import (
 	"cmp"
@@ -57,9 +63,10 @@ type MessageQueueConfig struct {
 	// Dir is the host directory (0700, outside the tree) the queue is kept
 	// in. "" = off: a send to an agent that is not running is refused.
 	Dir string
-	// MaxMessages and MaxBytes bound what may wait for one recipient: the
-	// count of messages and the bytes of their text. Expiry is how long a
-	// message may wait. Zero takes the default.
+	// MaxMessages and MaxBytes bound each pool of one recipient's queue (the
+	// agents' messages, the manager's, and the operator's notes): the count
+	// of messages and the bytes of their text. Expiry is how long a message
+	// may wait. Zero takes the default.
 	MaxMessages int
 	MaxBytes    int64
 	Expiry      time.Duration
@@ -79,6 +86,11 @@ const (
 	// queueFileLimit bounds the read of one queue file: a body is at most
 	// jailBodyLimit, and JSON escaping can grow it up to six times.
 	queueFileLimit = 8 * jailBodyLimit
+	// queueNoticesPending bounds the notices waiting for the background
+	// sender; past it a notice is in the audit log only.
+	queueNoticesPending = 256
+	// queueNoticeTimeout bounds one notice: the phase read and the send.
+	queueNoticeTimeout = msgPhaseTimeoutDefault + sendTimeout
 )
 
 func (c MessageQueueConfig) withDefaults() MessageQueueConfig {
@@ -119,10 +131,12 @@ type queuedMsg struct {
 
 const queuedMsgVersion = 1
 
-// Queue file suffixes: a message waiting, and one whose send began.
+// Queue file suffixes: a message waiting, one whose send began, and one
+// sent whose file could not be removed.
 const (
 	queueWaiting = ".msg"
 	queueSending = ".sending"
+	queueSent    = ".sent"
 )
 
 // msgQueue is the queue's files. Each recipient's directory is changed only
@@ -131,13 +145,17 @@ type msgQueue struct {
 	cfg   MessageQueueConfig
 	mu    sync.Mutex
 	locks map[string]*sync.Mutex
+	// delivered holds the ids of messages sent whose file could be neither
+	// removed nor renamed to .sent, so this broker drops what is left of
+	// them without a word. Under mu.
+	delivered map[string]bool
 }
 
 func newMsgQueue(c MessageQueueConfig) *msgQueue {
 	if c.Dir == "" {
 		return nil
 	}
-	return &msgQueue{cfg: c.withDefaults(), locks: map[string]*sync.Mutex{}}
+	return &msgQueue{cfg: c.withDefaults(), locks: map[string]*sync.Mutex{}, delivered: map[string]bool{}}
 }
 
 func (q *msgQueue) lock(slug string) func() {
@@ -191,7 +209,7 @@ func (q *msgQueue) dir(slug string, create bool) (string, error) {
 }
 
 // queueSeq is the order a file name gives, or false for a name that is not
-// a queue file.
+// a message waiting or being sent.
 func queueSeq(name string) (uint64, bool) {
 	base := strings.TrimSuffix(strings.TrimSuffix(name, queueWaiting), queueSending)
 	if base == name {
@@ -207,7 +225,7 @@ func queueSeq(name string) (uint64, bool) {
 
 // read lists slug's queue in order: the waiting messages, and the files of
 // sends that began and did not end. An unreadable file is removed and
-// counted in bad. The caller holds slug's lock.
+// counted in bad. A .sent file is not read. The caller holds slug's lock.
 func (q *msgQueue) read(slug string) (waiting, sending []queuedMsg, bad int, err error) {
 	dir, err := q.dir(slug, false)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -277,24 +295,24 @@ func readQueued(p string) (queuedMsg, error) {
 }
 
 // queueFullError is the refusal of a message the recipient's queue has no
-// room for. sender: the room left is the sender's share that is full, not
-// the whole queue.
+// room for. who names the pool or share that is full. quiet: the caller is
+// an agent whose pool is full, told no counts, since they are other agents'.
 type queueFullError struct {
 	count, maxCount int
 	bytes, maxBytes int64
 	adding          int64
-	sender          bool
+	who             string
+	quiet           bool
 }
 
 func (e *queueFullError) Error() string {
-	who := "its message queue"
-	if e.sender {
-		who = "your share of its message queue (one sender may hold at most half of it)"
+	if e.quiet {
+		return "its message queue is full"
 	}
 	if e.count >= e.maxCount {
-		return fmt.Sprintf("%s is full (%d messages waiting, the limit is %d)", who, e.count, e.maxCount)
+		return fmt.Sprintf("%s is full (%d messages waiting, the limit is %d)", e.who, e.count, e.maxCount)
 	}
-	return fmt.Sprintf("%s has no room for %d more bytes (%d of %d bytes waiting)", who, e.adding, e.bytes, e.maxBytes)
+	return fmt.Sprintf("%s has no room for %d more bytes (%d of %d bytes waiting)", e.who, e.adding, e.bytes, e.maxBytes)
 }
 
 func (e *queueFullError) full() bool {
@@ -309,14 +327,38 @@ func queueBytes(ms []queuedMsg) int64 {
 	return n
 }
 
+// The pools of a recipient's queue, each with the full caps: the operator's
+// notes, the manager's messages, and every other agent's.
+const (
+	poolOperator = "operator"
+	poolManager  = "manager"
+	poolAgents   = "agents"
+)
+
+// queuePool is the pool of a message from sender; manager is the manager's
+// cert CN.
+func queuePool(sender, manager string) string {
+	switch sender {
+	case operatorActor:
+		return poolOperator
+	case manager:
+		return poolManager
+	}
+	return poolAgents
+}
+
 // add queues m behind slug's waiting messages and returns how many wait,
-// m included (for an agent sender other than the manager, how many of its
-// own wait: it learns nothing of other senders). A full queue refuses m
-// before anything is written. The agents' messages share the caps, and one
-// agent may hold at most half of them, so one agent cannot fill a queue
-// against everyone else. The operator's notes have caps of their own, so
-// agents can never fill a queue against the operator.
-func (q *msgQueue) add(m queuedMsg, ownCount bool) (int, error) {
+// m included, as m's sender may see them: the operator all of them, the
+// manager all but the operator's notes, and any other agent its own only.
+// manager is the manager's cert CN. A full queue refuses m before anything
+// is written.
+//
+// The queue has three pools with the same caps: the operator's notes, the
+// manager's messages, and the other agents'. So no agent can fill a queue
+// against the operator or the manager, and the manager's queued sends are
+// never refused for what workers queued. Within the agents' pool one agent
+// may hold at most half, so one agent cannot fill it against the others.
+func (q *msgQueue) add(m queuedMsg, manager string) (int, error) {
 	unlock := q.lock(m.Slug)
 	defer unlock()
 	waiting, sending, _, err := q.read(m.Slug)
@@ -325,20 +367,23 @@ func (q *msgQueue) add(m queuedMsg, ownCount bool) (int, error) {
 	}
 	all := append(slices.Clone(waiting), sending...)
 	adding := int64(len(m.Body))
+	own := queuePool(m.Sender, manager)
 	var pool, mine []queuedMsg
 	for _, x := range all {
-		if (x.Sender == operatorActor) == (m.Sender == operatorActor) {
+		if queuePool(x.Sender, manager) == own {
 			pool = append(pool, x)
 		}
 		if x.Sender == m.Sender {
 			mine = append(mine, x)
 		}
 	}
-	if full := (&queueFullError{count: len(pool), maxCount: q.cfg.MaxMessages, bytes: queueBytes(pool), maxBytes: q.cfg.MaxBytes, adding: adding}); full.full() {
+	who := map[string]string{poolOperator: "its queue for the operator's notes", poolManager: "its queue for the manager's messages", poolAgents: "its message queue"}[own]
+	if full := (&queueFullError{count: len(pool), maxCount: q.cfg.MaxMessages, bytes: queueBytes(pool), maxBytes: q.cfg.MaxBytes, adding: adding, who: who, quiet: own == poolAgents}); full.full() {
 		return 0, full
 	}
-	if m.Sender != operatorActor {
-		share := &queueFullError{count: len(mine), maxCount: max(q.cfg.MaxMessages/2, 1), bytes: queueBytes(mine), maxBytes: max(q.cfg.MaxBytes/2, 1), adding: adding, sender: true}
+	if own == poolAgents {
+		share := &queueFullError{count: len(mine), maxCount: max(q.cfg.MaxMessages/2, 1), bytes: queueBytes(mine), maxBytes: max(q.cfg.MaxBytes/2, 1), adding: adding,
+			who: "your share of its message queue (one sender may hold at most half of it)"}
 		if share.full() {
 			return 0, share
 		}
@@ -361,16 +406,22 @@ func (q *msgQueue) add(m queuedMsg, ownCount bool) (int, error) {
 	if err := fsutil.WriteFileAtomic(filepath.Join(dir, fmt.Sprintf("%020d-%s%s", next, m.ID, queueWaiting)), raw, 0o600); err != nil {
 		return 0, err
 	}
-	if ownCount {
-		n := 1
-		for _, x := range waiting {
+	n := 1
+	for _, x := range waiting {
+		switch own {
+		case poolOperator:
+			n++
+		case poolManager:
+			if x.Sender != operatorActor {
+				n++
+			}
+		default:
 			if x.Sender == m.Sender {
 				n++
 			}
 		}
-		return n, nil
 	}
-	return len(waiting) + 1, nil
+	return n, nil
 }
 
 // remove deletes one message's file. The caller holds its recipient's lock.
@@ -394,6 +445,54 @@ func (q *msgQueue) beginSend(m queuedMsg) (queuedMsg, error) {
 	}
 	m.file = to
 	return m, nil
+}
+
+// endSend removes the file of m, which was sent. When the remove fails it
+// renames the file to .sent, and when that fails too it remembers m's id,
+// so what is left is dropped later without telling its sender it may not
+// have arrived. The caller holds m's recipient's lock.
+func (q *msgQueue) endSend(m queuedMsg) error {
+	dir, err := q.dir(m.Slug, false)
+	if err == nil {
+		p := filepath.Join(dir, m.file)
+		if err = os.Remove(p); err == nil || errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if os.Rename(p, filepath.Join(dir, strings.TrimSuffix(m.file, queueSending)+queueSent)) == nil {
+			return err
+		}
+	}
+	q.mu.Lock()
+	q.delivered[m.ID] = true
+	q.mu.Unlock()
+	return err
+}
+
+// wasDelivered reports m sent by this broker though its file is left.
+func (q *msgQueue) wasDelivered(m queuedMsg) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.delivered[m.ID]
+}
+
+// clearSent removes slug's .sent files and returns how many it removed.
+// The caller holds slug's lock.
+func (q *msgQueue) clearSent(slug string) int {
+	dir, err := q.dir(slug, false)
+	if err != nil {
+		return 0
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, e := range ents {
+		if strings.HasSuffix(e.Name(), queueSent) && os.Remove(filepath.Join(dir, e.Name())) == nil {
+			n++
+		}
+	}
+	return n
 }
 
 // undoSend renames a .sending file back: the send was refused before
@@ -508,7 +607,7 @@ func (b *Broker) enqueue(ctx context.Context, s queuedSend) (queueAnswer, error)
 	}
 	m := queuedMsg{ID: id, Recipient: s.recipientCN, Slug: s.slug, Generation: b.queueGeneration(s.recipientCN, s.slug),
 		Sender: s.caller, SenderGeneration: b.senderGeneration(s.caller), To: s.to, Kind: s.kind, Phase: s.phase, Body: s.body, Interrupt: s.interrupt, QueuedAt: b.now().UTC()}
-	n, err := b.queue.add(m, s.caller != operatorActor && s.caller != b.manager)
+	n, err := b.queue.add(m, b.manager)
 	if err != nil {
 		return queueAnswer{}, err
 	}
@@ -583,7 +682,7 @@ func (b *Broker) startWake(caller, slug string) bool {
 				why = strings.ToValidUTF8(why[:600], "") + "…"
 			}
 			b.audit("msg", caller, "error", "wake agent:"+slug+": the resume was refused, its messages stay queued")
-			b.queueNoticeTo(ctx, caller, "Lever could not wake "+slug+" to deliver the message you queued for it: "+why+". The message stays queued and goes out when "+slug+" next runs.")
+			b.queueNotice(caller, "Lever could not wake "+slug+" to deliver the message you queued for it: "+why+". The message stays queued and goes out when "+slug+" next runs.")
 			return
 		}
 		b.deliverWhenFree(ctx, slug, true)
@@ -716,21 +815,24 @@ func (q *msgQueue) expired(m queuedMsg, now time.Time) bool {
 	return now.Sub(m.QueuedAt) >= q.cfg.Expiry
 }
 
-// dropQueued removes m and tells its sender why. The caller holds m's
-// recipient's lock.
-func (b *Broker) dropQueued(ctx context.Context, m queuedMsg, why string) {
+// dropQueued removes m and has its sender told why (queueNotice: never
+// sent under the lock). The caller holds m's recipient's lock.
+func (b *Broker) dropQueued(m queuedMsg, why string) {
 	if err := b.queue.remove(m); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		b.audit("msg", m.Sender, "error", "queue->agent:"+m.Slug+": removing "+m.ID+": "+err.Error())
 	}
 	b.audit("msg", m.Sender, "deny", "queue->agent:"+m.Slug+": dropped: "+why, "queue_id", m.ID)
-	b.queueNoticeTo(ctx, m.Sender, fmt.Sprintf("Your message to %s, queued at %s, was dropped and not delivered: %s.",
+	b.queueNotice(m.Sender, fmt.Sprintf("Your message to %s, queued at %s, was dropped and not delivered: %s.",
 		m.Slug, m.QueuedAt.UTC().Format(time.RFC3339), why))
 }
 
 // sweepLocked drops slug's interrupted sends, its expired messages and the
-// ones the policy no longer allows, and returns the rest in order. The
-// caller holds slug's lock.
-func (b *Broker) sweepLocked(ctx context.Context, slug string) []queuedMsg {
+// ones the policy no longer allows, and returns the rest in order. It reads
+// no hub and sends nothing. The caller holds slug's lock.
+func (b *Broker) sweepLocked(slug string) []queuedMsg {
+	if n := b.queue.clearSent(slug); n > 0 {
+		b.audit("msg", "lever", "allow", fmt.Sprintf("queue of agent:%s: removed %d file(s) of messages already sent", slug, n))
+	}
 	waiting, sending, bad, err := b.queue.read(slug)
 	if err != nil {
 		b.audit("msg", "lever", "error", "queue of agent:"+slug+": "+err.Error())
@@ -740,17 +842,26 @@ func (b *Broker) sweepLocked(ctx context.Context, slug string) []queuedMsg {
 		b.audit("msg", "lever", "error", fmt.Sprintf("queue of agent:%s: removed %d unreadable file(s)", slug, bad))
 	}
 	for _, m := range sending {
-		b.dropQueued(ctx, m, "lever was stopped while sending it, so it may or may not have arrived; it is not sent again")
+		if b.queue.wasDelivered(m) {
+			// Sent by this broker; only its file was left.
+			if err := b.queue.remove(m); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				b.audit("msg", m.Sender, "error", "queue->agent:"+slug+": removing "+m.ID+" after its send: "+err.Error())
+			} else {
+				b.audit("msg", m.Sender, "allow", "queue->agent:"+slug+": removed the file of "+m.ID+", sent earlier", "queue_id", m.ID)
+			}
+			continue
+		}
+		b.dropQueued(m, "lever was stopped while sending it, so it may or may not have arrived; it is not sent again")
 	}
 	now := b.now()
 	var keep []queuedMsg
 	for _, m := range waiting {
 		if b.queue.expired(m, now) {
-			b.dropQueued(ctx, m, "it waited "+b.queue.cfg.Expiry.String()+", the queue's expiry, and the recipient did not run")
+			b.dropQueued(m, "it waited "+b.queue.cfg.Expiry.String()+", the queue's expiry, and the recipient did not run")
 			continue
 		}
 		if why := b.queuedStillAllowed(m); why != "" {
-			b.dropQueued(ctx, m, why)
+			b.dropQueued(m, why)
 			continue
 		}
 		keep = append(keep, m)
@@ -760,12 +871,12 @@ func (b *Broker) sweepLocked(ctx context.Context, slug string) []queuedMsg {
 
 // deliverQueued sends slug's queue in order while slug runs, each message on
 // the live send's path. It stops at the first message it could not send,
-// which waits in its place. The caller holds slug's worker lock when slug is
-// a worker.
+// which waits in its place, and when ctx ends (a broker stopping) before a
+// send begins. The caller holds slug's worker lock when slug is a worker.
 func (b *Broker) deliverQueued(ctx context.Context, slug string) (sent int) {
 	unlock := b.queue.lock(slug)
 	defer unlock()
-	pending := b.sweepLocked(ctx, slug)
+	pending := b.sweepLocked(slug)
 	if len(pending) == 0 {
 		return 0
 	}
@@ -783,6 +894,11 @@ func (b *Broker) deliverQueued(ctx context.Context, slug string) (sent int) {
 			if _, _, phase := b.notRunningCheck(ctx, "lever", slug, toManager); phase != scion.PhaseRunning {
 				return sent
 			}
+		}
+		// A send never begun waits in its place: only one under way when
+		// the broker stops may or may not have arrived.
+		if ctx.Err() != nil {
+			return sent
 		}
 		m, err := b.queue.beginSend(m)
 		if err != nil {
@@ -803,11 +919,11 @@ func (b *Broker) deliverQueued(ctx context.Context, slug string) (sent int) {
 			// A runtime error cannot tell a refusal from a send that arrived
 			// (a timeout after the hub took it), so the message is never
 			// sent again. The rest wait in order.
-			b.dropQueued(ctx, m, "the send failed with a runtime error after it began, so it may or may not have arrived; it is not sent again")
+			b.dropQueued(m, "the send failed with a runtime error after it began, so it may or may not have arrived; it is not sent again")
 			return sent
 		}
-		if err := b.queue.remove(m); err != nil {
-			b.audit("msg", m.Sender, "error", "queue->agent:"+slug+": removing "+m.ID+" after its send: "+err.Error())
+		if err := b.queue.endSend(m); err != nil {
+			b.audit("msg", m.Sender, "error", "queue->agent:"+slug+": removing "+m.ID+" after its send: "+err.Error()+"; marked sent, it is not sent again")
 		}
 		b.audit("msg", m.Sender, "allow", "queued send->agent:"+slug, "kind", m.Kind, "ref", ref, "queue_id", m.ID)
 		sent++
@@ -815,21 +931,27 @@ func (b *Broker) deliverQueued(ctx context.Context, slug string) (sent int) {
 	return sent
 }
 
-// dropQueue drops every message waiting for slug and tells their senders
-// why: its recipient is gone.
-func (b *Broker) dropQueue(ctx context.Context, slug, why string) {
+// dropQueue drops every message waiting for slug and has their senders told
+// why: its recipient is gone. It changes files only, so a destroy holding
+// the worker lock never waits on a notice.
+func (b *Broker) dropQueue(slug, why string) {
 	if b.queue == nil || b.queue.count(slug) == 0 {
 		return
 	}
 	unlock := b.queue.lock(slug)
 	defer unlock()
+	b.queue.clearSent(slug)
 	waiting, sending, _, err := b.queue.read(slug)
 	if err != nil {
 		b.audit("msg", "lever", "error", "queue of agent:"+slug+": "+err.Error())
 		return
 	}
 	for _, m := range append(sending, waiting...) {
-		b.dropQueued(ctx, m, why)
+		if b.queue.wasDelivered(m) {
+			_ = b.queue.remove(m)
+			continue
+		}
+		b.dropQueued(m, why)
 	}
 	if dir, err := b.queue.dir(slug, false); err == nil {
 		_ = os.Remove(dir) // only when empty
@@ -840,14 +962,67 @@ func (b *Broker) dropQueue(ctx context.Context, slug, why string) {
 // queued (sentledger.KindQueueNotice).
 const queueNoticeMarker = "[lever: message queue notice]"
 
-// queueNoticeTo tells sender, when it is an agent that runs now, what became
-// of a message it queued. It is never queued itself; a notice that cannot go
-// out is in the audit log only, as every notice is.
-func (b *Broker) queueNoticeTo(ctx context.Context, sender, text string) {
+// queueNoticeItem is one notice for the background sender.
+type queueNoticeItem struct{ sender, text string }
+
+// queueNotices is the background sender's queue of notices.
+type queueNotices struct {
+	mu      sync.Mutex
+	pending []queueNoticeItem
+	running bool
+}
+
+// queueNotice has sender told, when it is an agent that runs at the time,
+// what became of a message it queued. Every notice is in the audit log; one
+// to an agent goes to one background sender, so no caller waits on its
+// phase read or its send, and a caller may hold any lock. With
+// queueNoticesPending notices waiting, a new one is in the audit log only.
+// A notice is never queued itself.
+func (b *Broker) queueNotice(sender, text string) {
 	b.audit("msg", "lever", "allow", "queue notice for "+sender+": "+text)
 	if sender == operatorActor || b.runtime == nil {
 		return
 	}
+	n := &b.notices
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if len(n.pending) >= queueNoticesPending {
+		b.audit("msg", "lever", "deny", "queue notice for "+sender+": not sent, too many notices are waiting to go out")
+		return
+	}
+	n.pending = append(n.pending, queueNoticeItem{sender: sender, text: text})
+	if n.running {
+		return
+	}
+	n.running = true
+	b.queueJobs.Add(1)
+	go b.sendQueueNotices()
+}
+
+// sendQueueNotices sends the waiting notices one at a time, in order, and
+// ends when none is left.
+func (b *Broker) sendQueueNotices() {
+	defer b.queueJobs.Done()
+	n := &b.notices
+	for {
+		n.mu.Lock()
+		if len(n.pending) == 0 {
+			n.running = false
+			n.mu.Unlock()
+			return
+		}
+		it := n.pending[0]
+		n.pending = n.pending[1:]
+		n.mu.Unlock()
+		ctx, cancel := context.WithTimeout(b.background(), queueNoticeTimeout)
+		b.sendQueueNotice(ctx, it.sender, it.text)
+		cancel()
+	}
+}
+
+// sendQueueNotice sends one notice to sender when it is an agent that runs
+// now; otherwise the audit log has it.
+func (b *Broker) sendQueueNotice(ctx context.Context, sender, text string) {
 	cn, slug, isManager, ok := b.identity(sender)
 	if !ok || cn != sender || b.isRevoked(cn) {
 		return
@@ -884,7 +1059,7 @@ func (b *Broker) queuePass(ctx context.Context) {
 	var slugs []string
 	for _, slug := range b.queue.recipients() {
 		unlock := b.queue.lock(slug)
-		if len(b.sweepLocked(ctx, slug)) > 0 {
+		if len(b.sweepLocked(slug)) > 0 {
 			slugs = append(slugs, slug)
 		} else if dir, err := b.queue.dir(slug, false); err == nil {
 			_ = os.Remove(dir) // only when empty
@@ -952,13 +1127,16 @@ type QueueEntry struct {
 }
 
 // QueueListResponse answers PathOperatorMsgQueue. Off: there is no queue
-// (the state directory is inside the tree).
+// (the state directory is inside the tree). Unreadable names the agents
+// whose queue could not be read (the audit log says why); they are left out
+// of Messages.
 type QueueListResponse struct {
 	Off         bool         `json:"off,omitempty"`
 	MaxMessages int          `json:"max_messages,omitempty"`
 	MaxBytes    int64        `json:"max_bytes,omitempty"`
 	Expiry      string       `json:"expiry,omitempty"`
 	Messages    []QueueEntry `json:"messages"`
+	Unreadable  []string     `json:"unreadable,omitempty"`
 }
 
 func (b *Broker) handleOperatorMsgQueue(w http.ResponseWriter, r *http.Request) {
@@ -986,9 +1164,11 @@ func (b *Broker) handleOperatorMsgQueue(w http.ResponseWriter, r *http.Request) 
 		waiting, sending, _, err := b.queue.read(slug)
 		unlock()
 		if err != nil {
-			b.audit("msg", operatorActor, "error", "queue list "+slug+": "+err.Error())
-			refuse(w, ReasonRuntimeError, "queue error", http.StatusInternalServerError)
-			return
+			// One queue that cannot be read (a directory that is not
+			// private is left for the operator) hides no other.
+			b.audit("msg", operatorActor, "error", "queue list "+slug+": "+err.Error()+"; left out")
+			out.Unreadable = append(out.Unreadable, slug)
+			continue
 		}
 		for _, m := range append(sending, waiting...) {
 			out.Messages = append(out.Messages, QueueEntry{ID: m.ID, To: m.Slug, Kind: m.Kind, QueuedAt: m.QueuedAt,

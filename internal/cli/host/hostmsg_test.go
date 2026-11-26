@@ -168,3 +168,19 @@ func TestHostMsgList(t *testing.T) {
 		t.Fatalf("json %q: %v", out, err)
 	}
 }
+
+// A queue the broker could not read is named, and the rest is listed.
+func TestHostMsgListNamesUnreadableQueues(t *testing.T) {
+	dir := msgDir(t)
+	t.Chdir(dir)
+	stateDir := filepath.Join(dir, ".lever-state")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"max_messages":20,"max_bytes":262144,"expiry":"168h0m0s","messages":[],"unreadable":["worker"]}`
+	startUDSAt(t, filepath.Join(stateDir, "operator.sock"), map[string]canned{broker.PathOperatorMsgQueue: {body: body}})
+	out, err := clitest.Exec(t, stubRoot(&stubBackend{runner: proc.NewFakeRunner()}), "msg", "list")
+	if err != nil || !strings.Contains(out, "the queue of worker could not be read") || !strings.Contains(out, "no messages are queued") {
+		t.Fatalf("output %q: %v", out, err)
+	}
+}

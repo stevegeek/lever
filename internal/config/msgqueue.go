@@ -13,9 +13,12 @@ const (
 
 	queueMaxMessagesLimit = 1000
 	queueMinBytes         = 1 << 10
-	queueMaxBytesLimit    = 64 << 20
-	queueMinExpiry        = time.Hour
-	queueMaxExpiry        = 90 * 24 * time.Hour
+	// queueMaxBytesLimit bounds max_bytes: the broker reads a recipient's
+	// queue whole (each of its three pools up to max_bytes of text) on every
+	// send to it and every delivery.
+	queueMaxBytesLimit = 4 << 20
+	queueMinExpiry     = time.Hour
+	queueMaxExpiry     = 90 * 24 * time.Hour
 )
 
 // EffectiveMessageQueue is broker.messaging.queue with its defaults.

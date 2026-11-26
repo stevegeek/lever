@@ -140,7 +140,7 @@ func hostMsgList() *cobra.Command {
 		},
 	}
 	c.Flags().StringVar(&to, "to", "", "only the messages queued for this agent (the manager or a worker)")
-	c.Flags().BoolVar(&asJSON, "json", false, "print one JSON object: off, max_messages, max_bytes, expiry, messages")
+	c.Flags().BoolVar(&asJSON, "json", false, "print one JSON object: off, max_messages, max_bytes, expiry, messages, unreadable")
 	return c
 }
 
@@ -152,6 +152,9 @@ func printQueue(cmd *cobra.Command, resp broker.QueueListResponse, now time.Time
 	if resp.Off {
 		fmt.Fprintln(out, "no message queue: the state directory is inside the tree, so a message to an agent that is not running is refused.")
 		return
+	}
+	for _, name := range resp.Unreadable {
+		fmt.Fprintf(out, "the queue of %s could not be read and is left out (the broker's audit log says why).\n", boundedLabel(name))
 	}
 	if len(resp.Messages) == 0 {
 		fmt.Fprintln(out, "no messages are queued.")
@@ -171,7 +174,7 @@ func printQueue(cmd *cobra.Command, resp broker.QueueListResponse, now time.Time
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\n", boundedLabel(m.To), boundedLabel(m.Kind), m.QueuedAt.Local().Format("2006-01-02 15:04"), left, m.Bytes, text)
 	}
 	_ = tw.Flush()
-	fmt.Fprintf(out, "* the sender's own words. Limits: %d messages and %d bytes per agent; a message waits at most %s.\n", resp.MaxMessages, resp.MaxBytes, resp.Expiry)
+	fmt.Fprintf(out, "* the sender's own words. Limits per agent: %d messages and %d bytes of text each for the agents', the manager's and the operator's; a message waits at most %s.\n", resp.MaxMessages, resp.MaxBytes, resp.Expiry)
 }
 
 // boundedText is s on one line, sanitised and cut to n bytes.

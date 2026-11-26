@@ -173,8 +173,9 @@ type MsgSendRequest struct {
 
 // MsgSendResponse is the reply of POST /msg/send. Queued: the recipient was
 // not running, so the broker holds the message and delivers it when the
-// recipient next runs; Waiting counts its queue, this message included, and
-// Phase is the recipient's phase. Waking: the broker is resuming it to
+// recipient next runs; Waiting counts its queue as the caller may see it,
+// this message included (the manager all but the operator's notes, any
+// other agent its own messages only), and Phase is the recipient's phase. Waking: the broker is resuming it to
 // deliver now. Note says why a wake was not done.
 type MsgSendResponse struct {
 	OK      bool   `json:"ok"`

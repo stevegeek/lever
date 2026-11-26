@@ -929,10 +929,9 @@ func (b *Broker) pruneAgentState(name string) {
 	delete(b.reenrolTries, name)
 	delete(b.tokenHealLast, name)
 	b.reenrolMu.Unlock()
-	// Its queue goes with it, not into its archive: its senders are told.
-	ctx, cancel := context.WithTimeout(b.background(), time.Minute)
-	defer cancel()
-	b.dropQueue(ctx, name, "the recipient was destroyed")
+	// Its queue goes with it, not into its archive: its senders are told,
+	// in the background, so this holds the worker lock for file changes only.
+	b.dropQueue(name, "the recipient was destroyed")
 }
 
 // ReconcileAgents settles what a broker that stopped mid-spawn or

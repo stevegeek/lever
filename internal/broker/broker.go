@@ -522,12 +522,14 @@ type Broker struct {
 	hostProbe      func(context.Context, hostTarget) bool
 	hostWatchEvery time.Duration
 	// queue is the message queue (msgqueue.go), nil when off. queueEvery
-	// is for tests; queueJobs counts the wakes and deliveries under way, and
-	// wakeSem bounds the wakes.
+	// is for tests; queueJobs counts the wakes, deliveries and notice sends
+	// under way, wakeSem bounds the wakes, and notices are the queue
+	// notices waiting to go out.
 	queue      *msgQueue
 	queueEvery time.Duration
 	queueJobs  sync.WaitGroup
 	wakeSem    chan struct{}
+	notices    queueNotices
 	// bgCtx is the serving context, for background work (background).
 	bgMu  sync.Mutex
 	bgCtx context.Context

@@ -370,12 +370,15 @@ refused: start it first.
   drive; a worker may wake no one, and the manager is only ever brought back by `lever up`) and
   the running caps and memory budget let it start now. Otherwise the message stays queued and the
   answer says why. A wake that fails later leaves the message queued and tells the sender why.
-- **Limits.** `broker.messaging.queue` sets `max_messages` (20), `max_bytes` (256 KiB of text) per
-  recipient and `expiry` (7 days). One agent may hold at most half of a recipient's queue, and the
-  operator's notes have caps of their own, so agents never fill a queue against the operator. A
-  worker is told how many of its own messages wait, never the others'. A full
-  queue refuses the new message (`queue-full`) and queues nothing: refusing the new one keeps the
-  older ones in order and never drops what a sender was told is queued.
+- **Limits.** `broker.messaging.queue` sets `max_messages` (20), `max_bytes` (256 KiB of message
+  text, at most 4 MiB) and `expiry` (7 days). The counts and bytes bound each of three pools of a
+  recipient's queue: the operator's notes, the manager's messages, and every other agent's. So
+  agents never fill a queue against the operator or the manager, and within the agents' pool one
+  agent may hold at most half. The operator is told how many messages wait in all, the manager how
+  many but the operator's notes, and any other agent how many of its own, never the others'; an
+  agent refused for a full pool is told only that the queue is full. A full pool refuses the new
+  message (`queue-full`) and queues nothing: refusing the new one keeps the older ones in order and
+  never drops what a sender was told is queued.
 - **What is dropped, and who is told.** A message is dropped, never delivered, when it expires,
   when its sender may no longer reach the recipient at delivery (revoked, removed, purged or recycled since, or a config
   change such as `worker_to_worker: false`), when the recipient was destroyed, purged or recycled
@@ -385,7 +388,9 @@ refused: start it first.
   `queue-notice` message saying which and why when it is running; the operator's notes, and notices
   to a sender that is not running, are in the broker's audit log only. A destroy drops the agent's
   queue; it is not kept in the agent's archive.
-- **Seeing it.** `lever msg list [--to NAME]` shows what is queued; `lever worker list`, `lever agent
+- **Seeing it.** `lever msg list [--to NAME]` shows what is queued (an agent whose queue directory
+  cannot be read, for example one no longer private, is named and left out, and the audit log says
+  why); `lever worker list`, `lever agent
   list --json` and remote-verb `list --json` give each agent's `queued_messages`.
 
 The queue lives in the state directory (`message-queue/<agent>/`, 0700, one 0600 file per

@@ -143,10 +143,12 @@ type Messaging struct {
 // MessageQueue is broker.messaging.queue. Zero fields take the defaults
 // (EffectiveMessageQueue).
 type MessageQueue struct {
-	// MaxMessages is how many messages may wait for one recipient.
+	// MaxMessages is how many messages may wait for one recipient, in each
+	// of its queue's pools (the operator's, the manager's, the other
+	// agents').
 	MaxMessages int `yaml:"max_messages" json:",omitempty"`
-	// MaxBytes is how many bytes of message text may wait for one
-	// recipient.
+	// MaxBytes is how many bytes of message text (not of queue files) may
+	// wait for one recipient, in each pool.
 	MaxBytes int64 `yaml:"max_bytes" json:",omitempty"`
 	// Expiry is how long a message waits before it is dropped.
 	Expiry time.Duration `yaml:"expiry" json:",omitempty"`

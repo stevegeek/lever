@@ -232,6 +232,9 @@ type DispatchConfig struct {
 	AutoReenrol string
 	// MaxRunningWorkers is broker.max_running_workers. 0 = no cap.
 	MaxRunningWorkers int
+	// MemoryBudget is the bytes the running agents' memory limits may add
+	// up to (the manager not counted). 0 = no budget.
+	MemoryBudget int64
 	// Tree is the instance tree, the confinement anchor for staging. It is
 	// agent-writable and the broker writes there as the operator, so every
 	// staging write is confined to it, refuses agent-planted symlinks and
@@ -317,6 +320,11 @@ type DispatchConfig struct {
 	// (`lever agent gc`) and returns their size; dryRun only counts. nil:
 	// none are kept.
 	RemoveConversations func(agent string, dryRun bool) (int64, error)
+	// ConversationDir is the host directory (outside the tree) of the
+	// spawned agents' conversation backups, one convbackup.Store per agent:
+	// destroy moves its backup into the agent's archive, and restore reads
+	// the backups of agents destroyed before that. Empty: none are read.
+	ConversationDir string
 }
 
 // TimeoutConfig bounds request handling on the jail listener per route class.
@@ -410,6 +418,7 @@ type Broker struct {
 	onWorkerLockWait func(name string)
 	// admitting holds the starts admitted and not yet returned (admitMu).
 	maxRunningWorkers int
+	memoryBudget      int64
 	admitMu           sync.Mutex
 	admitting         map[string]int
 
@@ -489,6 +498,9 @@ type Broker struct {
 	backupConversation  func(ctx context.Context, agent string) (string, error)
 	dailyBackup         func(ctx context.Context, agent string) (string, error)
 	removeConversations func(agent string, dryRun bool) (int64, error)
+	conversationDir     string
+	restoreRateOnce     sync.Once
+	restoreRate         *rateWindow
 	// captureSem lets one conversation capture run at a time: each holds the
 	// whole compressed conversation in memory (convbackup's cap is 512 MiB).
 	captureSem chan struct{}
@@ -586,6 +598,7 @@ func New(c Config) *Broker {
 		ensureManager: d.EnsureManager,
 		liveAttempts:  defaultLiveAttempts, liveInterval: defaultLiveInterval, liveSettle: d.LiveSettle,
 		maxRunningWorkers:   d.MaxRunningWorkers,
+		memoryBudget:        d.MemoryBudget,
 		autoReenrol:         cmp.Or(d.AutoReenrol, autoReenrolAll),
 		managerBootstrapDir: d.ManagerBootstrapDir,
 		ticketStager:        d.Tickets,
@@ -613,7 +626,7 @@ func New(c Config) *Broker {
 		contactRate: newRateWindow(contactCallLimit),
 		files:       c.Files.withDefaults(), fileLedger: &fileRecord{dir: c.Files.LedgerDir},
 		filesRate:  newRateWindow(filesCallLimit),
-		archiveDir: d.ArchiveDir, backupConversation: d.BackupConversation, dailyBackup: d.DailyBackup, removeConversations: d.RemoveConversations, agentLoopEvery: time.Minute,
+		archiveDir: d.ArchiveDir, backupConversation: d.BackupConversation, dailyBackup: d.DailyBackup, removeConversations: d.RemoveConversations, conversationDir: d.ConversationDir, agentLoopEvery: time.Minute,
 		captureSem: make(chan struct{}, 1),
 		spawnRate:  newRateWindow(managerSpawnRateLimit), inheritedUnsettled: inherited,
 	}

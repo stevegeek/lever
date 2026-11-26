@@ -125,9 +125,11 @@ h1 { margin: 0; font-size: 17px; font-weight: 600; overflow: hidden; text-overfl
 .state.bad::before { background: var(--bad); }
 .state.bad { color: var(--bad); }
 nav { display: flex; gap: 8px; }
-/* The chat header's controls are icons, each named by aria-label and title,
-   so they fit beside the agent name on a 360px phone; the name gives way
-   (.who, ellipsis), the controls never wrap or leave the screen. */
+/* The chat header is a top bar: Back, the agent's name, then its actions.
+   From 720px the actions are a row of named icons (aria-label and title)
+   and the name gives way (.who, ellipsis); the controls never wrap or leave
+   the screen. On a phone the row would leave the name a few letters, so
+   the actions fold into a menu behind one More button (#more, below). */
 nav.tools { flex: none; gap: 4px; }
 .iconbtn {
   position: relative;
@@ -150,6 +152,52 @@ nav.tools { flex: none; gap: 4px; }
 #files[aria-expanded="true"] { background: var(--mine); border-color: var(--mine); color: var(--mine-text); }
 @media (max-width: 719.98px) {
   #pane-chat header { gap: 8px; padding-left: max(8px, env(safe-area-inset-left)); padding-right: max(8px, env(safe-area-inset-right)); }
+}
+/* The More menu: on a phone the actions drop from the top bar's right edge
+   as a list of rows, each its icon and its name (the button's aria-label,
+   shown), over the messages and never wider than the screen. chat.js
+   opens it (nav.tools.open) and closes it on a choice, Escape or a tap
+   outside. From 720px there is no menu: the row shows and More does not. */
+#more .ico { stroke-width: 3; }
+#more[aria-expanded="true"] { background: var(--mine); border-color: var(--mine); color: var(--mine-text); }
+@media (min-width: 720px) {
+  #more { display: none; }
+}
+@media (max-width: 719.98px) {
+  nav.tools { display: none; }
+  nav.tools.open {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    position: absolute;
+    top: calc(100% + 4px);
+    right: max(8px, env(safe-area-inset-right));
+    z-index: 11;
+    width: min(16rem, calc(100vw - 16px));
+    max-height: calc(var(--vvh, 100dvh) - 80px);
+    overflow-y: auto;
+    padding: 4px 0;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--panel);
+    box-shadow: 0 6px 24px rgb(0 0 0 / .18);
+  }
+  nav.tools .iconbtn {
+    justify-content: flex-start;
+    gap: 12px;
+    width: 100%;
+    height: 44px;
+    padding: 0 16px;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    font-size: 16px;
+    text-align: start;
+    text-decoration: none;
+  }
+  nav.tools .iconbtn::after { content: attr(aria-label); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  nav.tools .iconbtn:active { background: var(--bg); }
+  #tools .iconbtn[aria-expanded="true"] { background: transparent; border-color: transparent; color: var(--text); font-weight: 600; box-shadow: inset 3px 0 0 var(--mine); }
 }
 nav a:not(.iconbtn) {
   padding: 6px 10px;

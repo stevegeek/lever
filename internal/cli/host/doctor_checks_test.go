@@ -2391,3 +2391,22 @@ func TestCheckManagerLiveStrandedCreated(t *testing.T) {
 		t.Fatalf("suspended: %+v asked %v", r, s.asked)
 	}
 }
+
+func TestCheckMemoryBudget(t *testing.T) {
+	cases := []struct {
+		app  config.App
+		want string
+	}{
+		{config.App{}, "none (memory is unset)"},
+		{config.App{Memory: "32GiB", Manager: config.Manager{Resources: config.Resources{Memory: "2GiB"}}}, "29GiB for running agents (memory 32GiB less"},
+		{config.App{Memory: "32GiB", Broker: config.Broker{MemoryBudget: "20GiB"}}, "20GiB for running agents (broker.memory_budget)"},
+		{config.App{Memory: "16GiB", Templates: []config.Template{{Resources: config.Resources{Memory: "4GiB"}, MemorySizes: []string{"4GiB", "8GiB"}, MaxRunning: 3}}},
+			"would need 24GiB"},
+	}
+	for _, c := range cases {
+		r := checkMemoryBudget(&c.app)
+		if !r.ok || !strings.Contains(r.detail, c.want) {
+			t.Errorf("%+v: %+v, want %q", c.app.Memory, r, c.want)
+		}
+	}
+}

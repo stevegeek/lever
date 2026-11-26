@@ -77,6 +77,9 @@ type AgentSpawnRequest struct {
 	Template string `json:"template"`
 	Task     string `json:"task,omitempty"`
 	Label    string `json:"label,omitempty"`
+	// Memory is one of the template's memory sizes ("8GiB"); empty: its
+	// default.
+	Memory string `json:"memory,omitempty"`
 }
 
 // AgentSpawnResponse answers /agent/spawn.
@@ -85,6 +88,8 @@ type AgentSpawnResponse struct {
 	Template string `json:"template"`
 	Label    string `json:"label,omitempty"`
 	Phase    string `json:"phase"`
+	// Memory is the memory limit it was created with ("8GiB").
+	Memory string `json:"memory,omitempty"`
 }
 
 // AgentDestroyRequest is the body of POST /agent/destroy.
@@ -107,6 +112,17 @@ type AgentDestroyResponse struct {
 type AgentListResponse struct {
 	Templates []AgentTemplate `json:"templates"`
 	Agents    []SpawnedAgent  `json:"agents"`
+	// Memory is the memory budget for running agents and its use; absent
+	// when there is no budget or the hub could not be read.
+	Memory *MemoryTotals `json:"memory,omitempty"`
+}
+
+// MemoryTotals is the memory budget for running agents (the manager not
+// counted), in bytes.
+type MemoryTotals struct {
+	BudgetBytes int64 `json:"budget_bytes"`
+	UsedBytes   int64 `json:"used_bytes"`
+	FreeBytes   int64 `json:"free_bytes"`
 }
 
 // AgentTemplate is one template the manager may spawn from.
@@ -116,6 +132,10 @@ type AgentTemplate struct {
 	MaxRunning   int    `json:"max_running"`
 	Instances    int    `json:"instances"`
 	Running      int    `json:"running"`
+	// MemorySizes are the sizes a spawn may choose, smallest first;
+	// MemoryDefault is used when it names none.
+	MemorySizes   []string `json:"memory_sizes,omitempty"`
+	MemoryDefault string   `json:"memory_default,omitempty"`
 }
 
 // SpawnedAgent is one agent the manager spawned. Phase is a known label.
@@ -125,6 +145,7 @@ type SpawnedAgent struct {
 	Label    string `json:"label,omitempty"`
 	State    string `json:"state"`
 	Phase    string `json:"phase,omitempty"`
+	Memory   string `json:"memory,omitempty"`
 }
 
 // WorkerRequest is the body of the single-worker verbs
@@ -318,7 +339,10 @@ type ContactsResponse struct {
 // reference a send goes to ("@" + the contact's hub email). Times are RFC
 // 3339 UTC, "" when none: the contact's last post to the caller, the
 // caller's last initiated authorization to it, and when the initiate rule
-// next allows one (with CanInitiate false).
+// next allows one (with CanInitiate false; "" with Open at MaxOpen means
+// only the contact's answer allows one). MaxOpen is the caller's limit on
+// unanswered messages it starts to this contact and Open how many it has
+// (both 0 when the host record cannot be read).
 type ContactInfo struct {
 	Login           string `json:"login"`
 	To              string `json:"to"`
@@ -326,6 +350,8 @@ type ContactInfo struct {
 	LastInitiated   string `json:"last_initiated,omitempty"`
 	CanInitiate     bool   `json:"can_initiate"`
 	NextAllowedAt   string `json:"next_allowed_at,omitempty"`
+	MaxOpen         int    `json:"max_open,omitempty"`
+	Open            int    `json:"open"`
 }
 
 // ContactMessageRequest asks PathContactMessage to authorize Text to the

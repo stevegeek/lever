@@ -20,7 +20,8 @@ import (
 // lever.yaml. Every verb goes through the broker's operator socket.
 func newAgentCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "agent", Short: "Spawn and destroy agents from templates"}
-	cmd.AddCommand(newAgentSpawnCmd(), newAgentDestroyCmd(), newAgentListCmd(), newAgentGCCmd(), newAgentRemoteVerbCmd())
+	cmd.AddCommand(newAgentSpawnCmd(), newAgentDestroyCmd(), newAgentListCmd(), newAgentGCCmd(), newAgentRemoteVerbCmd(),
+		newAgentArchivesCmd(), newAgentRestoreCmd(), newAgentArchiveDeleteCmd())
 	return cmd
 }
 
@@ -29,26 +30,32 @@ type agentResult struct {
 	Name       string   `json:"name,omitempty"`
 	Template   string   `json:"template,omitempty"`
 	Label      string   `json:"label,omitempty"`
+	Memory     string   `json:"memory,omitempty"`
 	OK         bool     `json:"ok"`
 	Phase      string   `json:"phase,omitempty"`
 	Was        string   `json:"was,omitempty"`
 	Transcript string   `json:"transcript,omitempty"`
 	Workspace  string   `json:"workspace,omitempty"`
 	Warnings   []string `json:"warnings,omitempty"`
-	Reason     string   `json:"reason,omitempty"`
-	Error      string   `json:"error,omitempty"`
-	Exit       int      `json:"exit"`
+	// RestoredFrom (restore) names the archive; Freed (archive-delete) is
+	// the bytes deleted.
+	RestoredFrom string `json:"restored_from,omitempty"`
+	Freed        int64  `json:"freed_bytes,omitempty"`
+	Reason       string `json:"reason,omitempty"`
+	Error        string `json:"error,omitempty"`
+	Exit         int    `json:"exit"`
 }
 
 // agentExit maps a broker refusal to an exit code: the worker verbs' codes,
 // plus spawn's and destroy's own refusals.
 func agentExit(reason string) int {
 	switch reason {
-	case broker.ReasonTemplateFull, broker.ReasonTemplateBusy:
+	case broker.ReasonTemplateFull, broker.ReasonTemplateBusy, broker.ReasonMemoryBusy:
 		return exitWorkerBusy
 	case broker.ReasonRunning:
 		return exitWorkerNotStopped
-	case broker.ReasonNoTemplate, broker.ReasonBadLabel, broker.ReasonNotSpawned, broker.ReasonNotYours, broker.ReasonBadRequest:
+	case broker.ReasonNoTemplate, broker.ReasonBadLabel, broker.ReasonBadMemory, broker.ReasonNotSpawned, broker.ReasonNotYours, broker.ReasonBadRequest,
+		broker.ReasonNoArchive, broker.ReasonArchiveRefused:
 		return exitWorkerRefused
 	case broker.ReasonBackupFailed:
 		return exitWorkerResumeFailed
@@ -85,7 +92,7 @@ func agentRun(cmd *cobra.Command, verb, path string, body, out any, res *agentRe
 }
 
 func newAgentSpawnCmd() *cobra.Command {
-	var taskFile, label string
+	var taskFile, label, memory string
 	var asJSON bool
 	c := &cobra.Command{
 		Use:   "spawn TEMPLATE",
@@ -94,10 +101,11 @@ func newAgentSpawnCmd() *cobra.Command {
 		Long: "Spawn a new agent from TEMPLATE (under `templates:` in lever.yaml) and start it fresh with the task\n" +
 			"in --task-file. The broker picks its name (<prefix>-<6 characters>, never used before), creates its\n" +
 			"workspace under the template's dir_root and grants it the template's capabilities. The label is shown\n" +
-			"in lists only.\nExit codes and --json reasons: see the CLI reference.",
+			"in lists only. --memory picks one of the template's memory_sizes (default: its resources.memory); the\n" +
+			"spawn is refused when the memory budget has too little free.\nExit codes and --json reasons: see the CLI reference.",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			res := agentResult{Template: args[0], Label: label}
-			req := broker.SpawnRequest{Template: args[0], Label: label}
+			res := agentResult{Template: args[0], Label: label, Memory: memory}
+			req := broker.SpawnRequest{Template: args[0], Label: label, Memory: memory}
 			if taskFile != "" {
 				app, _, err := loadAppAndState(nil)
 				if err != nil {
@@ -118,17 +126,25 @@ func newAgentSpawnCmd() *cobra.Command {
 				return err
 			}
 			res.OK, res.Name, res.Phase = true, safeToken(resp.Name), safeToken(resp.Phase)
+			if resp.Memory != "" {
+				res.Memory = memoryToken(resp.Memory)
+			}
 			if asJSON {
 				printJSONLine(cmd, res)
 				return nil
 			}
-			cmd.Printf("agent %s spawned from template %s; it is %s.\n", res.Name, args[0], cmp.Or(res.Phase, "in an unknown phase"))
+			mem := ""
+			if res.Memory != "" {
+				mem = " with " + res.Memory + " of memory"
+			}
+			cmd.Printf("agent %s spawned from template %s%s; it is %s.\n", res.Name, args[0], mem, cmp.Or(res.Phase, "in an unknown phase"))
 			return nil
 		},
 	}
 	c.Flags().StringVar(&taskFile, "task-file", "", "a file holding the new agent's task")
 	c.Flags().StringVar(&label, "label", "", fmt.Sprintf("a title shown in lists (at most %d characters)", broker.MaxAgentLabel))
-	c.Flags().BoolVar(&asJSON, "json", false, "print one JSON object on stdout: name, template, ok, phase, reason, error, exit")
+	c.Flags().StringVar(&memory, "memory", "", "the new agent's memory limit, one of the template's memory_sizes such as 8GiB (default: its resources.memory)")
+	c.Flags().BoolVar(&asJSON, "json", false, "print one JSON object on stdout: name, template, memory, ok, phase, reason, error, exit")
 	return c
 }
 
@@ -238,28 +254,41 @@ func printAgentList(cmd *cobra.Command, resp broker.AgentListResponse) {
 		return
 	}
 	tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "TEMPLATE\tPREFIX\tAGENTS\tRUNNING\tSPAWNERS")
+	fmt.Fprintln(tw, "TEMPLATE\tPREFIX\tAGENTS\tRUNNING\tMEMORY\tSPAWNERS")
 	for _, t := range resp.Templates {
 		spawners := "operator"
 		if t.ManagerMay {
 			spawners += ", manager"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%d/%d\t%d/%d\t%s\n", safeToken(t.Name), safeToken(t.Prefix), t.Instances, t.MaxInstances, t.Running, t.MaxRunning, spawners)
+		var sizes []string
+		for _, sz := range t.MemorySizes {
+			n := memoryToken(sz.Name)
+			if sz.Name == t.MemoryDefault {
+				n += "*"
+			}
+			sizes = append(sizes, n)
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%d/%d\t%d/%d\t%s\t%s\n", safeToken(t.Name), safeToken(t.Prefix), t.Instances, t.MaxInstances, t.Running, t.MaxRunning,
+			cmp.Or(strings.Join(sizes, " "), "-"), spawners)
 	}
 	tw.Flush()
+	if m := resp.Memory; m != nil {
+		cmd.Printf("memory budget: %s used of %s, %s free (running and starting agents' limits; * is a template's default size)\n",
+			fmtBytes(m.UsedBytes), fmtBytes(m.BudgetBytes), fmtBytes(m.FreeBytes))
+	}
 	if len(resp.Agents) == 0 {
 		return
 	}
 	cmd.Println()
 	tw = tabwriter.NewWriter(cmd.OutOrStdout(), 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "AGENT\tTEMPLATE\tSTATE\tPHASE\tBY\tCREATED\tLABEL")
+	fmt.Fprintln(tw, "AGENT\tTEMPLATE\tSTATE\tPHASE\tMEMORY\tBY\tCREATED\tLABEL")
 	for _, a := range resp.Agents {
 		state := safeToken(a.State)
 		if a.Orphaned {
 			state += " (template gone or moved)"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", safeToken(a.Name), safeToken(a.Template), state, cmp.Or(safeToken(a.Phase), "-"),
-			creatorOf(a.CreatedBy), a.CreatedAt.Format("2006-01-02 15:04"), strings.ReplaceAll(termsafe.Sanitize(a.Label), "\t", " "))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", safeToken(a.Name), safeToken(a.Template), state, cmp.Or(safeToken(a.Phase), "-"),
+			cmp.Or(memoryToken(a.Memory), "-"), creatorOf(a.CreatedBy), a.CreatedAt.Format("2006-01-02 15:04"), strings.ReplaceAll(termsafe.Sanitize(a.Label), "\t", " "))
 	}
 	tw.Flush()
 }
@@ -280,10 +309,11 @@ func newAgentGCCmd() *cobra.Command {
 		Use:   "gc",
 		Args:  cobra.NoArgs,
 		Short: "Delete the archives and conversation backups of agents destroyed long ago",
-		Long: "For every agent destroyed at least --older ago (default 30d), delete its workspace archive and its\n" +
-			"conversation backups from the state directory, and drop its record, keeping only its name so it is\n" +
-			"never used again. A workspace kept in the tree (on_destroy: keep) is not touched. Destructive, so it\n" +
-			"requires --force; --dry-run lists what would go.",
+		Long: "For every agent destroyed at least --older ago (default 30d), delete its archive (workspace and\n" +
+			"conversation, or the older separate workspace archive and conversation backups) from the state\n" +
+			"directory, and drop its record, keeping only its name so it is never used again. A workspace kept in\n" +
+			"the tree (on_destroy: keep) is not touched. Destructive, so it requires --force; --dry-run lists what\n" +
+			"would go. `lever agent archive-delete NAME` deletes one archive now.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			fail := func(err error, reason string, code int) error {
 				if asJSON {
@@ -341,4 +371,21 @@ func newAgentGCCmd() *cobra.Command {
 	c.Flags().BoolVar(&dryRun, "dry-run", false, "list what would be deleted, and delete nothing")
 	c.Flags().BoolVar(&asJSON, "json", false, "print one JSON object: agents, freed_bytes, dry_run, warnings")
 	return c
+}
+
+// fmtBytes spells n bytes as GiB when whole, else MiB.
+func fmtBytes(n int64) string {
+	if n%(1<<30) == 0 {
+		return fmt.Sprintf("%dGiB", n>>30)
+	}
+	return fmt.Sprintf("%dMiB", n>>20)
+}
+
+// memoryToken is s when it is a memory size in the fixed format ("8GiB"),
+// else "": safeToken would drop it for its capitals.
+func memoryToken(s string) string {
+	if _, ok := broker.ParseMemorySize(s); ok {
+		return s
+	}
+	return ""
 }

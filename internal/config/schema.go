@@ -159,6 +159,11 @@ type Broker struct {
 	// broker.admitWorker); 0 is no cap, and the manager does not count. The
 	// json tag keeps it out of brokerctl.ConfigHash while unset.
 	MaxRunningWorkers int `yaml:"max_running_workers" json:",omitempty"`
+	// MemoryBudget is the memory the running agents' caps (workers and
+	// template instances, not the manager) may add up to; a start, resume
+	// or spawn past it is refused. Unset: the VM's memory less the
+	// manager's and 1GiB for the guest, or no budget when memory is unset.
+	MemoryBudget string `yaml:"memory_budget" json:",omitempty"`
 }
 
 // AutoReenrolMode selects which agents the broker's natural-lapse healer
@@ -221,6 +226,8 @@ type Manager struct {
 	LLMAuth        LLMAuthMode     `yaml:"llm_auth"`
 	Obtain         []Grant         `yaml:"obtain"`
 	Delegate       []DelegateGrant `yaml:"delegate"`
+	// AgentMessages overrides remote.agent_messages limits for the manager.
+	AgentMessages AgentMessageLimits `yaml:"agent_messages" json:",omitzero"`
 }
 
 type Worker struct {
@@ -258,6 +265,8 @@ type Worker struct {
 	Resources Resources `yaml:"resources" json:",omitzero"`
 	// SkipRmConfirm is as for the manager, and not inherited from it.
 	SkipRmConfirm bool `yaml:"even_more_dangerously_skip_permissions" json:",omitempty"`
+	// AgentMessages overrides remote.agent_messages limits for this worker.
+	AgentMessages AgentMessageLimits `yaml:"agent_messages" json:",omitzero"`
 }
 
 type ScionConfig struct {
@@ -443,14 +452,32 @@ type Push struct {
 type AgentMessages struct {
 	Enabled bool `yaml:"enabled"`
 	// FollowUpAfter is how long after an unanswered message an agent started
-	// it may send one reminder.
+	// it may start the next one (a reminder), up to MaxOpen.
 	FollowUpAfter time.Duration `yaml:"follow_up_after"`
 	MaxChars      int           `yaml:"max_chars"`
+	// MaxOpen is how many messages an agent may start to one contact before
+	// the contact writes: the first, then one more after each
+	// follow_up_after. A manager or worker agent_messages.max_open
+	// overrides it for that agent.
+	MaxOpen int `yaml:"max_open" json:",omitempty"`
+}
+
+// AgentMessageLimits is a manager's or worker's agent_messages: its own
+// limits on messages it starts to a contact. Zero fields use
+// remote.agent_messages. The json tag keeps it out of brokerctl.ConfigHash
+// while unset.
+type AgentMessageLimits struct {
+	MaxOpen int `yaml:"max_open" json:",omitempty"`
 }
 
 const (
 	DefaultAgentFollowUpAfter = 24 * time.Hour
-	DefaultAgentMaxChars      = 4000
+	// DefaultAgentMaxOpen is one message and one reminder.
+	DefaultAgentMaxOpen = 2
+	// MaxAgentMaxOpen keeps an unanswered contact from receiving more than
+	// a short run of messages; spacing is at least 1h each.
+	MaxAgentMaxOpen      = 10
+	DefaultAgentMaxChars = 4000
 	// MaxAgentMaxChars is scion's own cap on one message
 	// (messages.MaxMessageLength): a longer text could never be sent.
 	MaxAgentMaxChars = 16000

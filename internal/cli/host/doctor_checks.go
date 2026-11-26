@@ -444,8 +444,8 @@ func agentMessagesRow(app *config.App, st state.State) checkResult {
 			who = append(who, u.Login+" ("+strings.Join(u.Agents, ", ")+")")
 		}
 	}
-	detail := fmt.Sprintf("on: follow_up_after %s, max_chars %d; contacts: %s; agents need an image with this release's lever-agent (contacts, contact_message)",
-		shortDuration(app.EffectiveAgentFollowUpAfter()), app.EffectiveAgentMaxChars(), strings.Join(who, "; "))
+	detail := fmt.Sprintf("on: follow_up_after %s, max_open %d, max_chars %d; contacts: %s; agents need an image with this release's lever-agent (contacts, contact_message)",
+		shortDuration(app.EffectiveAgentFollowUpAfter()), app.EffectiveAgentMaxOpen(""), app.EffectiveAgentMaxChars(), strings.Join(who, "; "))
 	p := st.AgentLedger()
 	fi, err := os.Lstat(p)
 	switch {
@@ -997,8 +997,9 @@ const noConversationFix = "run `lever up`: it starts the manager fresh on its ow
 // session (only a suspended one gets --continue).
 // haltedResumeFix is the fix for a halted record: the platform ended the run
 // (an OOM kill, a VM reboot, a container that went missing), and scion
-// resumes it like a stopped one.
-const haltedResumeFix = "run `lever up` — the platform ended the manager's run (an OOM kill, a VM reboot or a container that went missing; scion's phase halted), and scion resumes it in a new claude session (no --continue); the old conversation stays in the agent home: `lever attach`, then `/resume`"
+// resumes it like a stopped one; lever up backs the conversation up first and
+// restores it once the manager is up.
+const haltedResumeFix = "run `lever up` — the platform ended the manager's run (an OOM kill, a VM reboot or a container that went missing; scion's phase halted). scion resumes it in a new claude session (no --continue), so lever up backs its conversation up first and restores it once the manager is up"
 
 const stoppedResumeFix = "run `lever up` — scion resumes a stopped record in a new claude session (no --continue); the old conversation stays in the agent home: `lever attach`, then `/resume`"
 
@@ -2439,6 +2440,38 @@ func checkHubExperiments(ctx context.Context, st state.State, sshOn bool, known 
 	}
 	if slices.Contains(rec.Asked, threadGroupsExperiment) && !slices.Contains(rec.Off, threadGroupsExperiment) {
 		detail += "; chat thread groups are always on in this scion (graduated), and the remote proxy refuses their routes"
+	}
+	return checkResult{name, true, detail, ""}
+}
+
+// checkMemoryBudget reports the memory budget the broker admits running
+// agents by. It never fails: the config check refuses an agent that could
+// never fit.
+func checkMemoryBudget(app *config.App) checkResult {
+	const name = "memory budget"
+	n, ok := app.MemoryBudgetBytes()
+	if !ok {
+		return checkResult{name, true, "none (memory is unset): agents are not admitted by their memory limits", ""}
+	}
+	from := "broker.memory_budget"
+	if app.Broker.MemoryBudget == "" {
+		from = "memory " + app.Memory + " less the manager's limit and 1GiB for the guest"
+	}
+	detail := fmt.Sprintf("%s for running agents (%s)", fmtBytes(n), from)
+	// What every worker and every template's max_running at its largest
+	// size would take: more than the budget is fine, the budget refuses
+	// the start that does not fit.
+	var all int64
+	for _, g := range app.Workers {
+		all += config.AgentMemoryBytes(g.Resources)
+	}
+	for _, t := range app.Templates {
+		if sz := t.Sizes(); len(sz) > 0 {
+			all += sz[len(sz)-1].Bytes * int64(t.MaxRunning)
+		}
+	}
+	if all > n {
+		detail += fmt.Sprintf("; all workers and template instances at their largest size would need %s, so some starts will be refused while others run", fmtBytes(all))
 	}
 	return checkResult{name, true, detail, ""}
 }

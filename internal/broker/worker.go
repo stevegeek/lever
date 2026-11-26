@@ -88,6 +88,10 @@ type WorkerSpec struct {
 	// Resources is sent at a fresh start only; scion keeps it in the record
 	// for resumes. Zero = scion's defaults.
 	Resources scion.Resources
+	// MemoryBytes is Resources' memory limit in bytes, what the agent
+	// counts against the memory budget while it runs (0: no limit, counts
+	// nothing).
+	MemoryBytes int64
 	// SkipRmConfirm sets scion.SkipPermissionsEnv at a fresh start; false
 	// sends "0".
 	SkipRmConfirm bool

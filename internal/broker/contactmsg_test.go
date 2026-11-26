@@ -86,22 +86,62 @@ func TestContactMessageInitiateRule(t *testing.T) {
 func TestInitiateDecision(t *testing.T) {
 	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
 	day := 24 * time.Hour
+	ago := func(h ...float64) []time.Time {
+		var out []time.Time
+		for _, x := range h {
+			out = append(out, now.Add(-time.Duration(x*float64(time.Hour))))
+		}
+		return out
+	}
 	for name, tc := range map[string]struct {
+		maxOpen   int
 		initiated []time.Time
 		last      time.Time
 		ok        bool
 		next      time.Time
 	}{
-		"none":               {nil, time.Time{}, true, time.Time{}},
-		"one fresh":          {[]time.Time{now.Add(-time.Hour)}, time.Time{}, false, now.Add(23 * time.Hour)},
-		"one old = reminder": {[]time.Time{now.Add(-25 * time.Hour)}, time.Time{}, true, time.Time{}},
-		"two":                {[]time.Time{now.Add(-50 * time.Hour), now.Add(-25 * time.Hour)}, time.Time{}, false, time.Time{}},
-		"answered resets":    {[]time.Time{now.Add(-50 * time.Hour), now.Add(-25 * time.Hour)}, now.Add(-time.Hour), true, time.Time{}},
-		"answered then one":  {[]time.Time{now.Add(-50 * time.Hour), now.Add(-30 * time.Minute)}, now.Add(-time.Hour), false, now.Add(-30*time.Minute + day)},
+		// max_open 2, the default: one message, one reminder.
+		"none":               {2, nil, time.Time{}, true, time.Time{}},
+		"one fresh":          {2, ago(1), time.Time{}, false, now.Add(23 * time.Hour)},
+		"one old = reminder": {2, ago(25), time.Time{}, true, time.Time{}},
+		"two":                {2, ago(50, 25), time.Time{}, false, time.Time{}},
+		"answered resets":    {2, ago(50, 25), now.Add(-time.Hour), true, time.Time{}},
+		"answered then one":  {2, ago(50, 0.5), now.Add(-time.Hour), false, now.Add(-30*time.Minute + day)},
+		"zero is one":        {0, ago(25), time.Time{}, false, time.Time{}},
+		// max_open 1: no reminder.
+		"1: none":            {1, nil, time.Time{}, true, time.Time{}},
+		"1: one old":         {1, ago(100), time.Time{}, false, time.Time{}},
+		"1: answered resets": {1, ago(100), now.Add(-time.Hour), true, time.Time{}},
+		// max_open 4: each further message a follow_up_after after the last.
+		"4: one fresh":          {4, ago(1), time.Time{}, false, now.Add(23 * time.Hour)},
+		"4: two, last fresh":    {4, ago(30, 2), time.Time{}, false, now.Add(22 * time.Hour)},
+		"4: three spaced":       {4, ago(75, 50, 25), time.Time{}, true, time.Time{}},
+		"4: three, last fresh":  {4, ago(75, 50, 23), time.Time{}, false, now.Add(time.Hour)},
+		"4: four":               {4, ago(100, 75, 50, 25), time.Time{}, false, time.Time{}},
+		"4: answered after two": {4, ago(100, 75, 50, 25), now.Add(-60 * time.Hour), true, time.Time{}},
+		"4: order-free":         {4, ago(2, 30), time.Time{}, false, now.Add(22 * time.Hour)},
 	} {
-		ok, next := initiateDecision(tc.initiated, tc.last, day, now)
+		ok, next := initiateDecision(tc.initiated, tc.last, day, tc.maxOpen, now)
 		if ok != tc.ok || !next.Equal(tc.next) {
 			t.Errorf("%s: ok=%v next=%v, want %v %v", name, ok, next, tc.ok, tc.next)
+		}
+	}
+}
+
+func TestAgentMessagesMaxOpen(t *testing.T) {
+	for name, tc := range map[string]struct {
+		c     AgentMessagesConfig
+		agent string
+		want  int
+	}{
+		"default":          {AgentMessagesConfig{}, "scratch", 2},
+		"instance":         {AgentMessagesConfig{MaxOpen: 4}, "scratch", 4},
+		"override":         {AgentMessagesConfig{MaxOpen: 4, MaxOpenFor: map[string]int{"scratch": 1}}, "scratch", 1},
+		"other agent":      {AgentMessagesConfig{MaxOpen: 4, MaxOpenFor: map[string]int{"scratch": 1}}, "assistant", 4},
+		"default override": {AgentMessagesConfig{MaxOpenFor: map[string]int{"assistant": 6}}, "assistant", 6},
+	} {
+		if got := tc.c.withDefaults().maxOpen(tc.agent); got != tc.want {
+			t.Errorf("%s: maxOpen = %d, want %d", name, got, tc.want)
 		}
 	}
 }
@@ -351,5 +391,116 @@ func TestContactMessageContactPostResetsTheLimit(t *testing.T) {
 	}
 	if got := f.contactMessage(t, "scratch", wire.ContactMessageRequest{To: "client@example.org", Text: "third"}); !got.OK {
 		t.Fatalf("after the contact wrote: %+v", got)
+	}
+}
+
+func agentMsgMaxOpen(n int, per map[string]int) verifyOpt {
+	return func(c *Config) { c.AgentMessages.MaxOpen, c.AgentMessages.MaxOpenFor = n, per }
+}
+
+func (f *verifyFixture) contacts(t *testing.T, cn string) wire.ContactsResponse {
+	t.Helper()
+	rec := callWorker(t, f.b, wire.PathContacts, `{}`, cn)
+	var out wire.ContactsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || len(out.Contacts) != 1 {
+		t.Fatalf("contacts = %s", rec.Body)
+	}
+	return out
+}
+
+func TestContactMessageMaxOpenOne(t *testing.T) {
+	f := verifyBroker(t, nil, agentMsgOpt(t.TempDir(), time.Hour), agentMsgMaxOpen(1, nil))
+	if got := f.contactMessage(t, "scratch", wire.ContactMessageRequest{To: "client@example.org", Text: "first"}); !got.OK {
+		t.Fatalf("first: %+v", got)
+	}
+	got := f.contactMessage(t, "scratch", wire.ContactMessageRequest{To: "client@example.org", Text: "second"})
+	if got.OK || got.Reason != "limit" || got.NextAllowedAt != "" || !strings.Contains(got.Note, "max_open 1") {
+		t.Fatalf("second: %+v, want limit with no next_allowed_at", got)
+	}
+	c := f.contacts(t, "scratch").Contacts[0]
+	if c.CanInitiate || c.MaxOpen != 1 || c.Open != 1 || c.NextAllowedAt != "" {
+		t.Fatalf("contacts = %+v", c)
+	}
+}
+
+// A per-agent override applies to that agent only.
+func TestContactMessageMaxOpenPerAgent(t *testing.T) {
+	f := verifyBroker(t, nil, agentMsgOpt(t.TempDir(), time.Hour), agentMsgMaxOpen(0, map[string]int{"assistant": 1}))
+	for _, cn := range []string{"scratch", "manager"} {
+		if got := f.contactMessage(t, cn, wire.ContactMessageRequest{To: "client@example.org", Text: "first from " + cn}); !got.OK {
+			t.Fatalf("%s first: %+v", cn, got)
+		}
+	}
+	if c := f.contacts(t, "scratch").Contacts[0]; c.MaxOpen != 2 || c.Open != 1 || c.CanInitiate || c.NextAllowedAt == "" {
+		t.Fatalf("scratch contacts = %+v, want max_open 2 with a reminder time", c)
+	}
+	if c := f.contacts(t, "manager").Contacts[0]; c.MaxOpen != 1 || c.Open != 1 || c.CanInitiate || c.NextAllowedAt != "" {
+		t.Fatalf("manager contacts = %+v, want max_open 1 and no reminder", c)
+	}
+}
+
+func TestContactsReportsTheLimit(t *testing.T) {
+	f := verifyBroker(t, nil, agentMsgOpt(t.TempDir(), time.Hour))
+	c := f.contacts(t, "scratch").Contacts[0]
+	if !c.CanInitiate || c.MaxOpen != 2 || c.Open != 0 || c.NextAllowedAt != "" {
+		t.Fatalf("before = %+v", c)
+	}
+	if got := f.contactMessage(t, "scratch", wire.ContactMessageRequest{To: "client@example.org", Text: "first"}); !got.OK {
+		t.Fatalf("first: %+v", got)
+	}
+	c = f.contacts(t, "scratch").Contacts[0]
+	if c.CanInitiate || c.MaxOpen != 2 || c.Open != 1 || c.NextAllowedAt == "" || c.LastInitiated == "" {
+		t.Fatalf("after = %+v", c)
+	}
+}
+
+// seedInitiated records messages scratch started to client@example.org at
+// the given times, as an earlier broker would have.
+func seedInitiated(t *testing.T, dir string, at ...time.Time) {
+	t.Helper()
+	l, err := agentledger.Open(filepath.Join(dir, "agent-ledger"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, c := range at {
+		id, err := agentledger.NewID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		a := agentledger.Auth{ID: id, Agent: "scratch", Contact: "client@example.org", Kind: agentledger.KindInitiated,
+			SHA256: agentledger.HashText(fmt.Sprint("seed ", i)), Length: 6, Created: c, Expires: c.Add(agentledger.TTL)}
+		if err := l.Authorize(a, c, func(agentledger.View) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// With max_open 4 each further message waits follow_up_after from the one
+// before, and the fifth waits for the contact.
+func TestContactMessageMaxOpenFourSpacing(t *testing.T) {
+	now := time.Now()
+	for name, tc := range map[string]struct {
+		seed     []time.Time
+		ok       bool
+		wantNext bool
+	}{
+		"third spaced":     {[]time.Time{now.Add(-3 * time.Hour), now.Add(-2 * time.Hour)}, true, false},
+		"third too soon":   {[]time.Time{now.Add(-3 * time.Hour), now.Add(-30 * time.Minute)}, false, true},
+		"fourth spaced":    {[]time.Time{now.Add(-3 * time.Hour), now.Add(-2 * time.Hour), now.Add(-61 * time.Minute)}, true, false},
+		"fifth is refused": {[]time.Time{now.Add(-4 * time.Hour), now.Add(-3 * time.Hour), now.Add(-2 * time.Hour), now.Add(-61 * time.Minute)}, false, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			seedInitiated(t, dir, tc.seed...)
+			f := verifyBroker(t, nil, agentMsgOpt(dir, time.Hour), agentMsgMaxOpen(4, nil))
+			before := f.contacts(t, "scratch").Contacts[0]
+			if before.MaxOpen != 4 || before.Open != len(tc.seed) || before.CanInitiate != tc.ok || (before.NextAllowedAt != "") != tc.wantNext {
+				t.Fatalf("contacts = %+v", before)
+			}
+			got := f.contactMessage(t, "scratch", wire.ContactMessageRequest{To: "client@example.org", Text: "news"})
+			if got.OK != tc.ok || !tc.ok && (got.Reason != "limit" || (got.NextAllowedAt != "") != tc.wantNext) {
+				t.Fatalf("message = %+v", got)
+			}
+		})
 	}
 }

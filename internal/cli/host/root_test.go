@@ -26,14 +26,15 @@ func TestHostRootHasProvisioningOnly(t *testing.T) {
 			t.Errorf("host root should not have %q", unwanted)
 		}
 	}
-	// The host's agent command is spawn and destroy from templates (and the
-	// ssh forced command for them), never
+	// The host's agent command is spawn and destroy from templates, the
+	// archives destroy leaves (and the ssh forced command for them), never
 	// the manager's `agent` verbs (those are `lever worker` on the host).
 	agent, _, err := NewRoot().Find([]string{"agent"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if verbs := clitest.Names(agent); len(verbs) != 5 || !verbs["spawn"] || !verbs["destroy"] || !verbs["list"] || !verbs["gc"] || !verbs["remote-verb"] {
+	if verbs := clitest.Names(agent); len(verbs) != 8 || !verbs["spawn"] || !verbs["destroy"] || !verbs["list"] || !verbs["gc"] || !verbs["remote-verb"] ||
+		!verbs["archives"] || !verbs["restore"] || !verbs["archive-delete"] {
 		t.Errorf("host agent verbs: %v", verbs)
 	}
 	// "down" is a deprecated alias of "destroy", not its own top-level Name().

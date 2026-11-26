@@ -61,6 +61,13 @@ type AgentRecord struct {
 	Transcript string `json:"transcript,omitempty"`
 	// Workspace is what destroy did with the workspace.
 	Workspace string `json:"workspace,omitempty"`
+	// Memory is the memory limit the agent was created with, as the config
+	// spells it ("8GiB"), and MemoryBytes the same in bytes. Unset in a
+	// record from before sizes: its template's resources.memory.
+	Memory      string `json:"memory,omitempty"`
+	MemoryBytes int64  `json:"memory_bytes,omitempty"`
+	// RestoredFrom names the destroyed agent whose archive seeded it.
+	RestoredFrom string `json:"restored_from,omitempty"`
 }
 
 // AgentsState is the registry file.
@@ -93,6 +100,37 @@ type TemplateSpec struct {
 	// IdleSuspend suspends an agent waiting at its prompt this long (0:
 	// never).
 	IdleSuspend time.Duration
+	// Sizes are the memory sizes a spawn may choose, smallest first;
+	// Default is the one used when a spawn names none.
+	Sizes         []MemorySize
+	DefaultMemory MemorySize
+}
+
+// MemorySize is one memory limit an agent may be spawned with.
+type MemorySize struct {
+	// Name is the config's spelling ("8GiB"), Scion scion's ("8Gi").
+	Name  string `json:"name"`
+	Bytes int64  `json:"bytes"`
+	Scion string `json:"-"`
+}
+
+// size finds the template's size of n bytes.
+func (t TemplateSpec) size(n int64) (MemorySize, bool) {
+	for _, s := range t.Sizes {
+		if s.Bytes == n {
+			return s, true
+		}
+	}
+	return MemorySize{}, false
+}
+
+// sizeNames lists the template's sizes for a message.
+func (t TemplateSpec) sizeNames() string {
+	names := make([]string, len(t.Sizes))
+	for i, s := range t.Sizes {
+		names[i] = s.Name
+	}
+	return strings.Join(names, ", ")
 }
 
 // errStateBackwards: a change would move a record back (destroying to
@@ -151,7 +189,7 @@ func (r *agentRegistry) load(templates []TemplateSpec, st AgentsState, tree stri
 			continue
 		}
 		if t, ok := r.templates[rec.Template]; ok && t.Worker != nil && inPlace(rec, t) {
-			r.specs[rec.Name] = spawnedSpec(t, rec.Name)
+			r.specs[rec.Name] = spawnedSpec(t, rec)
 			continue
 		}
 		r.specs[rec.Name] = bareSpec(rec, tree)
@@ -174,13 +212,29 @@ func bareSpec(rec AgentRecord, tree string) WorkerSpec {
 	if tree != "" && rec.Dir != "" {
 		ws = tree + "/" + rec.Dir
 	}
-	return WorkerSpec{Name: rec.Name, WorkspaceSubdir: rec.Dir, HostWorkspace: ws, spawned: true}
+	// Its memory still counts against the budget while it runs.
+	return WorkerSpec{Name: rec.Name, WorkspaceSubdir: rec.Dir, HostWorkspace: ws, MemoryBytes: rec.MemoryBytes, spawned: true}
 }
 
-func spawnedSpec(t TemplateSpec, name string) WorkerSpec {
-	s := t.Worker(name)
+// spawnedSpec is rec's spec from its template, with the memory it was
+// created with. A record from before sizes keeps the template's default.
+func spawnedSpec(t TemplateSpec, rec AgentRecord) WorkerSpec {
+	s := t.Worker(rec.Name)
 	s.spawned = true
+	if rec.MemoryBytes > 0 {
+		s.MemoryBytes = rec.MemoryBytes
+		s.Resources.Memory = scionMemory(rec.Memory)
+	}
 	return s
+}
+
+// scionMemory is a config size in scion's spelling: scion reads "Gi", not
+// "GiB".
+func scionMemory(m string) string {
+	if strings.HasSuffix(m, "iB") {
+		return strings.TrimSuffix(m, "B")
+	}
+	return m
 }
 
 // get returns a copy of name's spec.
@@ -407,7 +461,7 @@ func newInstanceID() (string, error) {
 // saved before it returns. taken reports a name used by anything outside
 // the registry (the manager, a revoked or superseded name). A save that
 // fails leaves nothing behind.
-func (r *agentRegistry) reserve(t TemplateSpec, createdBy, label string, now time.Time, taken func(string) bool, draw func() (string, error)) (AgentRecord, error) {
+func (r *agentRegistry) reserve(t TemplateSpec, size MemorySize, createdBy, label string, now time.Time, taken func(string) bool, draw func() (string, error)) (AgentRecord, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	n := 0
@@ -439,13 +493,14 @@ func (r *agentRegistry) reserve(t TemplateSpec, createdBy, label string, now tim
 		return AgentRecord{}, errors.New("could not draw an unused agent name")
 	}
 	rec := &AgentRecord{Name: name, Template: t.Name, Label: label, CreatedBy: createdBy, CreatedAt: now.UTC(),
-		State: AgentSpawning, Dir: strings.TrimSuffix(t.DirRoot, "/") + "/" + name}
+		State: AgentSpawning, Dir: strings.TrimSuffix(t.DirRoot, "/") + "/" + name,
+		Memory: size.Name, MemoryBytes: size.Bytes}
 	r.records[name] = rec
 	if err := r.saveLocked(); err != nil {
 		delete(r.records, name)
 		return AgentRecord{}, err
 	}
-	r.specs[name] = spawnedSpec(t, name)
+	r.specs[name] = spawnedSpec(t, *rec)
 	return *rec, nil
 }
 

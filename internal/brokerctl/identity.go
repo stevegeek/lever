@@ -46,8 +46,11 @@ func ConfigHash(app *config.App) string {
 		SharedFolders   []config.SharedFolder `json:",omitempty"`
 		ManagerReadOnly []string              `json:",omitempty"`
 		DailyReset      string                `json:",omitempty"`
+		// MemoryBudget derives from memory and the manager's limit, which
+		// are not hashed otherwise: a change must reach the broker.
+		MemoryBudget int64 `json:",omitempty"`
 	}{app.Broker, app.Workers, app.Templates, app.Scion, ChatConfigured(app), WebSenders(app), agentMessagesStampOf(app), filesStampOf(app), app.ManagerClaude(),
-		app.SharedFolders, app.Manager.ReadOnly, app.Manager.DailyReset})
+		app.SharedFolders, app.Manager.ReadOnly, app.Manager.DailyReset, memoryBudget(app)})
 }
 
 // agentMessagesStamp is the part of remote.agent_messages the broker acts on.
@@ -55,13 +58,19 @@ type agentMessagesStamp struct {
 	FollowUpAfter time.Duration
 	MaxChars      int
 	Contacts      []string // "login=agent,agent", config order
+	// MaxOpen and ManagerMaxOpen are the configured values, 0 when unset,
+	// so an instance that never sets them keeps its stamp. A worker's
+	// override is in Workers.
+	MaxOpen        int `json:",omitempty"`
+	ManagerMaxOpen int `json:",omitempty"`
 }
 
 func agentMessagesStampOf(app *config.App) *agentMessagesStamp {
 	if !app.AgentMessagesOn() {
 		return nil
 	}
-	s := &agentMessagesStamp{FollowUpAfter: app.EffectiveAgentFollowUpAfter(), MaxChars: app.EffectiveAgentMaxChars()}
+	s := &agentMessagesStamp{FollowUpAfter: app.EffectiveAgentFollowUpAfter(), MaxChars: app.EffectiveAgentMaxChars(),
+		MaxOpen: app.Remote.AgentMessages.MaxOpen, ManagerMaxOpen: app.Manager.AgentMessages.MaxOpen}
 	for _, u := range app.Remote.AllowedUsers {
 		if u.EffectiveTier() == config.TierContact {
 			s.Contacts = append(s.Contacts, u.Login+"="+strings.Join(u.Agents, ","))

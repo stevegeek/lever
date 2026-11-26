@@ -48,7 +48,8 @@ func newReloadCmd(bf BackendFactory) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := apply.Run(ctx, app, w.deps, apply.PlanOpts{}); err != nil {
+			afterRun := newConvOps(w, app, stateFor(path)).haltedRestore(&w.deps, nil)
+			if err := afterRun(ctx, apply.Run(ctx, app, w.deps, apply.PlanOpts{})); err != nil {
 				return err
 			}
 			recordConverge(app, stateFor(path), "reload", w.log)

@@ -260,6 +260,7 @@ func runDoctorChecks(ctx context.Context, app *config.App, state state.State, b 
 		func() checkResult { return checkRemoteExposure(app) },
 		func() checkResult { return checkVerifiedChat(app, state) },
 		func() checkResult { return checkChatLabels(app) },
+		func() checkResult { return checkMemoryBudget(app) },
 		func() checkResult { return checkPush(app, state) },
 		func() checkResult { return checkFiles(app, state) },
 		func() checkResult { return checkVoice(app) },

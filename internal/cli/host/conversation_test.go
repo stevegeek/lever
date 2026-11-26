@@ -608,3 +608,98 @@ func TestNoConversationBackupSkipsEmpty(t *testing.T) {
 		t.Fatalf("saved = %+v", saved)
 	}
 }
+
+// TestHaltedBackupThenRestore: before the resume of a halted manager the
+// conversation is backed up from the home the dead container left; the hub
+// resumes it in a new session, and once it is up the backup is restored: the
+// new session moved aside, the manager suspended and resumed with --continue
+// on the old conversation, and the session record keeps the old skill.
+func TestHaltedBackupThenRestore(t *testing.T) {
+	f := newConvFixture(t)
+	writeConvFile(t, f.transcript("old.jsonl"), "{\"old\":1}\n")
+	if err := sessionrec.Append(f.ops.st.Sessions(), sessionrec.Record{Agent: "mgr", SkillHash: "skill-v1", Started: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	var deps apply.Deps
+	after := f.ops.haltedRestore(&deps, nil)
+	f.sc.phase = scion.PhaseHalted
+	saved, err := deps.BackupHaltedConversation(context.Background(), &scion.Agent{Slug: "mgr", Phase: scion.PhaseHalted})
+	if err != nil || !saved {
+		t.Fatalf("backup: saved %v err %v", saved, err)
+	}
+	if len(f.sc.calls) != 0 {
+		t.Fatalf("calls = %v, want none: the backup only copies", f.sc.calls)
+	}
+	// The hub's resume: a new session beside the old one, the manager running.
+	writeConvFile(t, f.transcript("fresh.jsonl"), "{\"fresh\":1}\n")
+	f.sc.phase = scion.PhaseRunning
+
+	if err := after(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(f.sc.calls, ",") != "suspend,resume" {
+		t.Fatalf("calls = %v, want suspend then a resume that continues", f.sc.calls)
+	}
+	if b, err := os.ReadFile(f.transcript("old.jsonl")); err != nil || string(b) != "{\"old\":1}\n" {
+		t.Fatalf("restored: %q %v", b, err)
+	}
+	if _, err := os.Stat(f.transcript("fresh.jsonl")); !os.IsNotExist(err) {
+		t.Fatalf("the new session is still where --continue looks: %v", err)
+	}
+	if got := f.latestSkill(t); got != "skill-v1" {
+		t.Fatalf("session record skill = %q, want skill-v1", got)
+	}
+	store, _ := f.ops.store()
+	if m, err := store.Get(""); err != nil || m.Reason != "up (halted)" {
+		t.Fatalf("backup %+v %v", m, err)
+	}
+}
+
+// TestHaltedRestoreSkips: no restore when the halted home held no
+// conversation, and none after a failed run, which names the backup instead.
+func TestHaltedRestoreSkips(t *testing.T) {
+	t.Run("empty", func(t *testing.T) {
+		f := newConvFixture(t)
+		writeConvFile(t, f.transcript("empty.jsonl"), "")
+		var deps apply.Deps
+		after := f.ops.haltedRestore(&deps, nil)
+		saved, err := deps.BackupHaltedConversation(context.Background(), &scion.Agent{Phase: scion.PhaseHalted})
+		if err != nil || saved {
+			t.Fatalf("saved %v err %v, want nothing saved", saved, err)
+		}
+		if err := after(context.Background(), nil); err != nil || len(f.sc.calls) != 0 {
+			t.Fatalf("err %v calls %v, want no restore", err, f.sc.calls)
+		}
+	})
+	t.Run("run failed", func(t *testing.T) {
+		f := newConvFixture(t)
+		writeConvFile(t, f.transcript("old.jsonl"), "{}\n")
+		var deps apply.Deps
+		after := f.ops.haltedRestore(&deps, nil)
+		if saved, err := deps.BackupHaltedConversation(context.Background(), &scion.Agent{Phase: scion.PhaseHalted}); err != nil || !saved {
+			t.Fatalf("saved %v err %v", saved, err)
+		}
+		runErr := errors.New("gate failed")
+		err := after(context.Background(), runErr)
+		if !errors.Is(err, runErr) || len(f.sc.calls) != 0 {
+			t.Fatalf("err %v calls %v, want the run's error and no restore", err, f.sc.calls)
+		}
+		if !strings.Contains(err.Error(), "lever conversation restore") {
+			t.Fatalf("error %q does not name the backup", err)
+		}
+	})
+	t.Run("restore failed", func(t *testing.T) {
+		f := newConvFixture(t)
+		writeConvFile(t, f.transcript("old.jsonl"), "{}\n")
+		var deps apply.Deps
+		after := f.ops.haltedRestore(&deps, nil)
+		if saved, err := deps.BackupHaltedConversation(context.Background(), &scion.Agent{Phase: scion.PhaseHalted}); err != nil || !saved {
+			t.Fatalf("saved %v err %v", saved, err)
+		}
+		f.sc.phase, f.sc.suspendErr = scion.PhaseRunning, errors.New("hub down")
+		err := after(context.Background(), nil)
+		if err == nil || !strings.Contains(err.Error(), "tries again") {
+			t.Fatalf("err %v, want the restore's failure naming the backup", err)
+		}
+	})
+}

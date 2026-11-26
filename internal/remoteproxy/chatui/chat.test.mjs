@@ -2726,6 +2726,109 @@ test('settings: the panel opens and closes as a disclosure, and offers only what
   assert.equal(env.els.settingspanel.hidden, true);
 });
 
+// The More menu: a phone's top bar holds Back, the name and More; the chat's
+// actions are in the menu More opens (chat.css lays it out).
+test('more: shows while any action does, and opens and closes as a menu', async () => {
+  const env = await loadChat(hubWith({ agents: bothAgents() }), { media: {}, speech: { voices: [LOCAL] } });
+  const open = () => env.els.tools.classList.contains('open');
+  assert.equal(env.els.more.hidden, false, 'the operator has actions here');
+  assert.equal(open(), false);
+  env.els.more.dispatch('click');
+  assert.equal(open(), true);
+  assert.equal(env.els.more.attrs['aria-expanded'], 'true');
+  assert.equal(env.focused(), env.els.activity, 'focus moves to the first action shown');
+  env.document.dispatch('keydown', { key: 'Escape' });
+  assert.equal(open(), false);
+  assert.equal(env.els.more.attrs['aria-expanded'], 'false');
+  assert.equal(env.focused(), env.els.more, 'Escape gives focus back to More');
+  // A choice closes the menu; the action itself still runs.
+  env.els.more.dispatch('click');
+  env.els.settings.dispatch('click');
+  env.els.tools.dispatch('click', { target: env.els.settings });
+  assert.equal(open(), false, 'a choice closes the menu');
+  assert.equal(env.els.settingspanel.hidden, false, 'and does what it names');
+  assert.equal(env.focused(), env.els.autosend, 'focus the choice moved stays where it went');
+  // One overlay at a time: the menu replaces an open settings panel.
+  env.els.more.dispatch('click');
+  assert.equal(env.els.settingspanel.hidden, true, 'the menu closes the panel');
+  assert.equal(open(), true);
+  env.document.dispatch('keydown', { key: 'Escape' });
+  assert.equal(open(), false);
+  // Escape on a panel opened from the menu: focus goes to More, as the
+  // settings button is folded away (not displayed: no offsetParent).
+  env.els.more.dispatch('click');
+  env.els.settings.dispatch('click');
+  env.els.tools.dispatch('click', { target: env.els.settings });
+  env.els.settings.offsetParent = null;
+  env.document.dispatch('keydown', { key: 'Escape' });
+  assert.equal(env.els.settingspanel.hidden, true);
+  assert.equal(env.focused(), env.els.more, 'the folded button gives focus to More');
+  delete env.els.settings.offsetParent;
+  // A choice that leaves focus on its row, now not shown: focus goes to More.
+  env.els.tools.append(env.els.activity, env.els.files);
+  env.els.more.dispatch('click');
+  env.els.files.dispatch('click');
+  env.els.files.focus();
+  env.document.activeElement = env.els.files;
+  env.els.tools.dispatch('click', { target: env.els.files });
+  assert.equal(open(), false);
+  assert.equal(env.focused(), env.els.more, 'focus on the chosen row goes to More');
+  assert.equal(env.els.filespanel.hidden, false, 'and Files opened');
+  delete env.document.activeElement;
+  // Tab out of the menu closes it; focus to nothing (a tap in Safari) does not.
+  env.els.more.dispatch('click');
+  env.els.tools.dispatch('focusout', { relatedTarget: null });
+  assert.equal(open(), true);
+  env.els.tools.dispatch('focusout', { relatedTarget: env.els.files });
+  assert.equal(open(), true, 'focus moving within the menu');
+  env.els.tools.dispatch('focusout', { relatedTarget: env.els.text });
+  assert.equal(open(), false, 'focus leaving the menu');
+  // A tap outside closes it; a tap inside does not.
+  env.els.more.dispatch('click');
+  env.els.tools.append(env.els.files);
+  env.document.dispatch('pointerdown', { target: env.els.files });
+  assert.equal(open(), true, 'a tap inside keeps it open');
+  env.document.dispatch('pointerdown', { target: env.els.more });
+  assert.equal(open(), true, 'a tap on More is the button\'s own');
+  env.document.dispatch('pointerdown', { target: env.els.list });
+  assert.equal(open(), false, 'a tap outside closes it');
+  // Another chat, or none, closes it.
+  env.els.more.dispatch('click');
+  openRow(env, 'w1');
+  assert.equal(open(), false, 'opening a chat closes the menu');
+  env.els.more.dispatch('click');
+  env.els.back.dispatch('click');
+  assert.equal(open(), false, 'Back closes the menu');
+});
+
+test('more: a contact\'s transcript offers Refresh in the menu', async () => {
+  const env = await load(hubWith({ contacts: CONTACTS }));
+  assert.equal(env.els.more.hidden, true, 'no chat open: no More');
+  await env.clickContact(0);
+  await env.clickContactAgent(0, 0);
+  assert.equal(env.els.refresh.hidden, false);
+  assert.equal(env.els.more.hidden, false, 'Refresh is an action: More shows');
+  env.els.back.dispatch('click');
+  assert.equal(env.els.refresh.hidden, true);
+  assert.equal(env.els.more.hidden, true, 'Back: no action, no More');
+});
+
+test('more: hidden with no action, and an open menu closes when the last goes', async () => {
+  // A contact: no terminal, no activity, no new conversation, no settings, no files.
+  const contact = () => ({ status: 200, body: { login: 'c@x', tier: 'contact', userId: 'u1', agents: [A('w1', { terminal: '' })] } });
+  let env = await load(hubWith({ agents: contact }), { store: { 'lever-chat-open': 'w1' } });
+  assert.equal(env.els.agent.textContent, 'w1');
+  assert.equal(env.els.more.hidden, true, 'nothing to offer: no More');
+  // A see-only agent offers nothing; an open menu goes with the last action.
+  env = await loadChat(hubWith({ agents: bothAgents([BOSS(), A('w1', { access: 'see' })]) }), { media: {}, speech: { voices: [LOCAL] } });
+  env.els.more.dispatch('click');
+  assert.equal(env.els.tools.classList.contains('open'), true);
+  openRow(env, 'w1');
+  assert.equal(env.els.more.hidden, true);
+  assert.equal(env.els.tools.classList.contains('open'), false);
+  assert.equal(env.els.more.attrs['aria-expanded'], 'false');
+});
+
 test('settings: kept per login on the device, and working for the visit when storage throws', async () => {
   let env = await loadChat(hubWith({ agents: bothAgents() }), { media: {}, speech: { voices: [LOCAL] } });
   env.els.autosend.checked = true;

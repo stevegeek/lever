@@ -242,8 +242,9 @@ or one you start — goes in two steps:
 A message sent any other way does not reach the contact. Start a message
 only to a login `contacts()` lists, only when the task needs to tell them
 something (a result is ready, you need a document), as one message with
-everything in it. Lever allows one message you start until the contact
-answers, and one reminder after `next_allowed_at`; up to
+everything in it. Until the contact answers, lever allows `max_open`
+messages you start: the first at once, each further one after
+`next_allowed_at` (`contacts()` shows both and how many are `open`); up to
 3 replies to one contact message. Refusals are fixed
 words: `not-a-contact`, `limit` (wait for `next_allowed_at` or their
 answer), `too-long`, `empty`, `bad-text` (control characters, or an `@` at the
@@ -429,6 +430,11 @@ template, never from you.
   running. A 409 means the template is at its limit: destroy or suspend
   one of its agents first. A 429 means you spawned too many in the last
   minute.
+- Memory: a template may offer several sizes (`agent spawned` lists them,
+  the default marked `*`). Pick one with `--memory 8GiB`. A 409
+  `memory-busy` means the running agents' memory leaves too little free:
+  suspend one or pick a smaller size. The size is fixed at spawn; a
+  different size means a new agent.
 - Drive it like a worker: `agent suspend|resume|stop <name>`,
   `msg send --to <name>`. What it sends you is worker-tier data.
 - Destroy it when its work is done:

@@ -9,7 +9,7 @@ import (
 )
 
 func agentSpawn(c brokerCaller) *cobra.Command {
-	var task, label string
+	var task, label, memory string
 	cmd := &cobra.Command{Use: "spawn TEMPLATE", Args: cobra.ExactArgs(1),
 		Short: "Spawn a new agent from a template and start it with a task",
 		Long: "Spawn a new agent from TEMPLATE and start it fresh with --task.\n\n" +
@@ -17,18 +17,27 @@ func agentSpawn(c brokerCaller) *cobra.Command {
 			"picks the agent's name (<prefix>-<6 characters>, never used before); its workspace, image, tools\n" +
 			"and limits come from the template. --label is a title for lists only. Once it runs, drive it like a\n" +
 			"worker (`agent suspend|resume|stop NAME`, `msg send --to NAME`), and destroy it when its work is\n" +
-			"done. A template at its limit answers 409: destroy or suspend one of its agents first.",
+			"done. A template at its limit answers 409: destroy or suspend one of its agents first.\n\n" +
+			"--memory picks one of the template's memory sizes (`agent spawned` lists them; the default is marked *).\n" +
+			"A spawn, start or resume is refused (409 memory-busy) when the running agents' memory limits leave\n" +
+			"too little of the memory budget free: suspend one or pick a smaller size. An agent's size is fixed\n" +
+			"when it is created; another size means a new agent.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			res, err := brokerCall[wire.AgentSpawnResponse](cmd.Context(), c, wire.PathAgentSpawn,
-				wire.AgentSpawnRequest{Template: args[0], Task: task, Label: label})
+				wire.AgentSpawnRequest{Template: args[0], Task: task, Label: label, Memory: memory})
 			if err != nil {
 				return err
+			}
+			if res.Memory != "" {
+				cmd.Printf("%s: spawned from %s with %s, %s\n", res.Name, res.Template, res.Memory, res.Phase)
+				return nil
 			}
 			cmd.Printf("%s: spawned from %s, %s\n", res.Name, res.Template, res.Phase)
 			return nil
 		}}
 	cmd.Flags().StringVar(&task, "task", "Read your context, then begin.", "the new agent's task")
 	cmd.Flags().StringVar(&label, "label", "", "a title shown in lists")
+	cmd.Flags().StringVar(&memory, "memory", "", "the memory limit, one of the template's sizes such as 8GiB (default: the template's)")
 	return cmd
 }
 
@@ -68,12 +77,29 @@ func agentSpawned(c brokerCaller) *cobra.Command {
 				cmd.Println("No template lets the manager spawn agents.")
 			}
 			for _, t := range res.Templates {
-				cmd.Printf("template %s: %d/%d agents, %d/%d running\n", t.Name, t.Instances, t.MaxInstances, t.Running, t.MaxRunning)
+				line := fmt.Sprintf("template %s: %d/%d agents, %d/%d running", t.Name, t.Instances, t.MaxInstances, t.Running, t.MaxRunning)
+				if len(t.MemorySizes) > 0 {
+					sizes := make([]string, len(t.MemorySizes))
+					for i, sz := range t.MemorySizes {
+						sizes[i] = sz
+						if sz == t.MemoryDefault {
+							sizes[i] += "*"
+						}
+					}
+					line += ", memory " + strings.Join(sizes, " ")
+				}
+				cmd.Println(line)
+			}
+			if m := res.Memory; m != nil {
+				cmd.Printf("memory budget: %dMiB used of %dMiB, %dMiB free\n", m.UsedBytes>>20, m.BudgetBytes>>20, m.FreeBytes>>20)
 			}
 			for _, a := range res.Agents {
 				line := fmt.Sprintf("  %s  (%s)  %s", a.Name, a.Template, a.State)
 				if a.Phase != "" {
 					line += " [" + a.Phase + "]"
+				}
+				if a.Memory != "" {
+					line += " " + a.Memory
 				}
 				if a.Label != "" {
 					line += "  — " + strings.ReplaceAll(a.Label, "\n", " ")

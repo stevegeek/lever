@@ -9,7 +9,8 @@
 # image, and the next apply undoes them), `lever stop` and a resume, `lever
 # up` applying a config change, a warm `lever up`, `lever up --wait` under a
 # held lock, `lever up` over a stale hub pid file (a live decoy and a dead
-# pid), `lever conversation new` on the running manager, and doctor. `make test-lima-e2e` covers the jail and the broker
+# pid), `lever conversation new` on the running manager, a halted manager
+# brought back with its conversation, and doctor. `make test-lima-e2e` covers the jail and the broker
 # without scion; this covers what a scion pin bump can break.
 #
 # Needs: Lima >= 2.0, Go, perl, python3. The agent image comes from IMAGE_TAR (a
@@ -371,16 +372,19 @@ checkx "the manager spawns its own agent ($S2)" '[ -n "$S2" ] && [ "$S2" != "$S1
 checkx "the manager lists only its own agent" 'o=$(mgr agent spawned); [[ "$o" == *"$S2"* && "$o" != *"$S1"* ]]'
 (cd "$INST" && timeout 900 "$LEVER" reload 2>&1) | tail -2 | sed 's/^/      | /'
 checkx "both agents survive a broker restart" 'o=$(LA list); [[ "$o" == *"$S1"* && "$o" == *"$S2"* ]]'
+# A file only this workspace holds, for the restore below (T0658).
+echo "e2e restore marker" > "$INST/workspace/sessions/$S1/e2e-restore-marker.txt"
 dj=$(LA destroy "$S1" --force --json)
 echo "      | $dj" | cut -c1-300
 checkx "the operator destroys its agent" 'printf "%s" "$dj" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if d[\"ok\"] and d[\"workspace\"].startswith(\"archived\") else 1)"'
 TR=$(printf '%s' "$dj" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("transcript",""))' 2>/dev/null)
 if [ -n "$TR" ]; then
-	checkx "its conversation was backed up ($TR)" '[ -f "$INST/.lever-state/agent-conversations/$S1/$TR/projects.tar.gz" ]'
+	checkx "its conversation was kept in its archive ($TR)" '[ -f "$INST/.lever-state/agent-archives/$S1/conversation.tar.gz" ] && [ ! -e "$INST/.lever-state/agent-conversations/$S1" ]'
 else
 	echo "      | (no transcript in its home yet: nothing to back up)"
 fi
-checkx "its workspace was archived and removed" '[ -f "$INST/.lever-state/agent-archives/$S1.tar.gz" ] && [ ! -e "$INST/workspace/sessions/$S1" ]'
+checkx "its workspace was archived and removed" '[ -f "$INST/.lever-state/agent-archives/$S1/workspace.tar.gz" ] && [ ! -e "$INST/workspace/sessions/$S1" ]'
+checkx "its archive is host-only (0700, 0600)" '[ "$(stat -c %a "$INST/.lever-state/agent-archives/$S1")" = 700 ] && [ "$(stat -c %a "$INST/.lever-state/agent-archives/$S1/workspace.tar.gz")" = 600 ]'
 checkx "its name is revoked for good" 'grep -q "\"$S1\"" "$INST/.lever-state/revocation.json"'
 checkx "its hub record is gone" '! mgr agent list | grep -q -- "$S1"'
 checkx "a destroyed agent cannot be resumed" '! (cd "$INST" && "$LEVER" worker resume "$S1" >/dev/null 2>&1)'
@@ -411,14 +415,40 @@ echo "      | $rd" | cut -c1-300
 checkx "the key destroys its agent" 'printf "%s" "$rd" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if d[\"ok\"] else 1)"'
 checkx "its name is revoked for good" 'grep -q "\"$S3\"" "$INST/.lever-state/revocation.json"'
 
+say "archives and restore (T0658)"
+aj=$(LA archives --json)
+echo "      | $aj" | cut -c1-300
+checkx "lever agent archives lists the destroyed agent" 'printf "%s" "$aj" | grep -q "\"$S1\""'
+rj=$(LA restore "$S1" --label "restored in e2e" --json)
+echo "      | $rj" | cut -c1-300
+R1=$(printf '%s' "$rj" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("name",""))' 2>/dev/null)
+checkx "restore spawns a new agent under a new name ($R1)" '[[ "$R1" =~ ^s-[a-z2-7]{6}$ ]] && [ "$R1" != "$S1" ]'
+checkx "its workspace holds the old agent's files" 'grep -q "e2e restore marker" "$INST/workspace/sessions/$R1/e2e-restore-marker.txt"'
+if [ -n "$TR" ]; then
+	checkx "the old transcripts are in its workspace" '[ -d "$INST/workspace/sessions/$R1/.lever/conversation/$S1" ]'
+fi
+checkx "the archive stays after the restore" '[ -f "$INST/.lever-state/agent-archives/$S1/workspace.tar.gz" ]'
+checkx "the restored agent is destroyed" 'LA destroy "$R1" --stop --force --json | grep -q "\"ok\":true"'
+ak=$(RV "archives --json" </dev/null)
+echo "      | $ak" | cut -c1-300
+checkx "the key lists its own archive and not the operator's" '[[ "$ak" == *"\"$S3\""* && "$ak" != *"\"$S1\""* ]]'
+checkx "the key may not restore the operator's agent" 'o=$(RV "restore $S1" </dev/null); [[ "$o" == *"\"ok\":false"* ]]'
+checkx "the key may not delete the operator's archive" 'o=$(RV "archive-delete $S1" </dev/null); [[ "$o" == *"\"ok\":false"* ]] && [ -f "$INST/.lever-state/agent-archives/$S1/workspace.tar.gz" ]'
+r3=$(RV "restore $S3 again over ssh" </dev/null)
+echo "      | $r3" | cut -c1-300
+R3=$(printf '%s' "$r3" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("name",""))' 2>/dev/null)
+checkx "the key restores its own agent ($R3)" '[[ "$R3" =~ ^s-[a-z2-7]{6}$ ]] && [ "$R3" != "$S3" ]'
+checkx "the key destroys the restored agent" 'RV "destroy $R3 --stop" </dev/null | grep -q "\"ok\":true"'
+checkx "the key deletes its archive" 'RV "archive-delete $S3" </dev/null | grep -q "\"ok\":true" && [ ! -e "$INST/.lever-state/agent-archives/$S3" ]'
+
 say "lever agent gc"
 gj=$(LA gc --older 0 --dry-run --json)
 echo "      | $gj" | cut -c1-300
-checkx "a dry run lists the destroyed agents and deletes nothing" 'printf "%s" "$gj" | grep -q "\"$S1\"" && [ -f "$INST/.lever-state/agent-archives/$S1.tar.gz" ]'
+checkx "a dry run lists the destroyed agents and deletes nothing" 'printf "%s" "$gj" | grep -q "\"$S1\"" && [ -f "$INST/.lever-state/agent-archives/$S1/workspace.tar.gz" ]'
 gj=$(LA gc --older 0 --force --json)
 echo "      | $gj" | cut -c1-300
-checkx "gc collects the destroyed agents" 'for n in "$S1" "$S2" "$S3"; do printf "%s" "$gj" | grep -q "\"$n\"" || exit 1; done'
-checkx "their archives and backups are gone" '[ ! -e "$INST/.lever-state/agent-archives/$S1.tar.gz" ] && [ ! -e "$INST/.lever-state/agent-conversations/$S1" ]'
+checkx "gc collects the destroyed agents" 'for n in "$S1" "$S2"; do printf "%s" "$gj" | grep -q "\"$n\"" || exit 1; done'
+checkx "their archives and backups are gone" '[ ! -e "$INST/.lever-state/agent-archives/$S1" ] && [ ! -e "$INST/.lever-state/agent-conversations/$S1" ]'
 checkx "their names stay retired and revoked" 'python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if sys.argv[2] in d.get(\"retired\",[]) and all(a[\"name\"]!=sys.argv[2] for a in d[\"agents\"]) else 1)" "$INST/.lever-state/agents.json" "$S1" && grep -q "\"$S1\"" "$INST/.lever-state/revocation.json"'
 checkx "lever agent list --all no longer lists them" '! LA list --all | grep -q -- "$S1"'
 
@@ -805,6 +835,29 @@ doctor_run
 printf '%s\n' "$doctor_out" | grep -E '^(✗|!) ' | mask_secrets | sed 's/^/      | /'
 check "doctor: manager agent after the new conversation" manager_ok
 check "doctor: no failed row after the new conversation" no_failed_row
+
+say "a halted manager comes back with its conversation (T0544)"
+# A transcript only this conversation holds; `lever conversation new` above
+# moved the older ones into a backup.
+HMARK="stack-e2e-halted-$$"
+P exec --user scion "lever--$NAME" sh -c "mkdir -p /home/scion/.claude/projects/-workspace && echo '{\"marker\":\"$HMARK\"}' > /home/scion/.claude/projects/-workspace/$HMARK.jsonl"
+checkx "the marker transcript is in the manager's home" 'P exec --user scion "lever--$NAME" test -s "/home/scion/.claude/projects/-workspace/$HMARK.jsonl"'
+# A missing container is one of the ways the platform ends a run: the hub
+# records the manager halted, as after an OOM kill. SIGKILL first, so
+# nothing in the container reports a stop (podman rm alone sends SIGTERM,
+# and sciontool records the manager stopped); then the hub sees no
+# container for scion's missing-agent grace (3 minutes) and halts it.
+G sh -c 'export XDG_RUNTIME_DIR=/run/user/$(id -u); podman kill -s KILL "$1" && podman rm -f "$1"' _ "lever--$NAME" > /dev/null 2>&1
+for _ in $(seq 1 180); do [ "$(mgrrec phase)" = halted ] && break; sleep 2; done
+checkx "the hub reads the manager halted ($(mgrrec phase))" '[ "$(mgrrec phase)" = halted ]'
+(cd "$INST" && GOPROXY=off timeout 900 "$LEVER" up --no-attach > "$WORK/up-halted.log" 2>&1); rc=$?
+tail -4 "$WORK/up-halted.log" | mask_secrets | sed 's/^/      | /'
+checkx "lever up over the halted manager succeeds ($rc)" '[ "$rc" = 0 ]'
+checkx "it says it restores the conversation" 'grep -q "lever then restores its conversation" "$WORK/up-halted.log"'
+check "the manager runs after it" running
+checkx "the hub reads the manager running ($(mgrrec phase))" '[ "$(mgrrec phase)" = running ]'
+checkx "the halted conversation's transcript is back in place" 'P exec --user scion "lever--$NAME" grep -q "$HMARK" "/home/scion/.claude/projects/-workspace/$HMARK.jsonl"'
+checkx "a backup of it is listed" '(cd "$INST" && "$LEVER" conversation list 2>&1) | grep -q "halted"'
 
 say "teardown"
 (cd "$INST" && "$LEVER" destroy 2>&1 | tail -1)

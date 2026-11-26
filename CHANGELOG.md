@@ -7,6 +7,108 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [1.0.0-beta.13] - 2026-11-26
+
+### Added
+
+- **Memory sizes at spawn, admitted by a memory budget.**
+  - A template may list `memory_sizes` (for example `[4GiB, 8GiB, 14GiB]`); `resources.memory` is
+    the default and must be one of them. Sizes are spelled as whole `GiB`, else `MiB`, wherever
+    lever shows them.
+  - `lever agent spawn TEMPLATE --memory 8GiB`, `lever-manager agent spawn ... --memory 8GiB` and
+    remote-verb `spawn TEMPLATE --memory 8GiB [LABEL...]` pick one. The size is kept in the agent's
+    record and sent to scion when the agent is created; another size means a new agent. A size the
+    template does not offer is refused (`bad-memory`).
+  - New `broker.memory_budget`: the memory the running agents' limits may add up to, workers and
+    spawned agents but not the manager. By default it is the VM's `memory` less the manager's limit
+    and 1GiB; with no `memory` there is no budget.
+  - Every spawn, start, resume, recycle, wake and re-enrol resume is admitted against it. A refusal
+    is `memory-busy` (409, exit 75) and gives the sizes, for example "it asks 8GiB of memory and
+    5GiB of the 30GiB memory budget is free". Suspended, stopped, halted and error agents count
+    nothing, and an agent with no limit counts as 0. The operator's refusal names every agent
+    holding memory; the manager's only declared workers and its own spawned agents; anyone else's
+    none.
+  - `lever agent list`, `lever-manager agent spawned` and remote-verb `list --json` show each
+    agent's size, each template's sizes and default, and the budget's total, used and free bytes.
+    `lever doctor` has a *memory budget* row.
+- **One archive per destroyed agent.** Destroy now keeps the workspace archive and the
+  conversation backup together in `.lever-state/agent-archives/<name>/`. Older archives, split
+  between `agent-archives/<name>.tar.gz` and `agent-conversations/<name>/`, are still read.
+- **`lever agent restore ARCHIVE` spawns a new agent from a destroyed agent's archive.** It goes
+  through the same admission as a spawn, and takes `--template`, `--label`, `--memory` and
+  `--task-file`. Its workspace holds the old files, and the old transcripts are in
+  `.lever/conversation/<old name>/`, which its task tells it to read (claude does not continue the
+  old conversation itself). The archive is read as hostile: links and devices are skipped, unsafe
+  or case-colliding names and an archive past the limits are refused before a name is drawn, and a
+  restore into another template leaves out the old agent's configuration and git repositories.
+- **`lever agent archives` and `lever agent archive-delete`.** The first lists the archives with
+  sizes and whether each can be restored. The second deletes one for good.
+- **remote-verb: `archives`, `restore NAME [--memory SIZE] [LABEL...]` and `archive-delete NAME`.**
+  An ssh key sees, restores and deletes only the archives of its own agents.
+- **`remote.agent_messages.max_open` sets how many unanswered messages an agent may start to one
+  contact.** The default, 2, is one message and one reminder, as before. Each further message
+  still waits `follow_up_after` after the one before, and a message from the contact resets the
+  count. Allowed values are 1 to 10.
+- **`manager.agent_messages.max_open` and `workers[].agent_messages.max_open` override it for one
+  agent.**
+- **The `contacts` tool reports `max_open` and `open`** (how many unanswered messages the agent has
+  started to that contact) beside `next_allowed_at`, so an agent can say why it cannot send. A
+  `limit` refusal at the cap now says so.
+
+### Changed
+
+- **The memory fit check no longer reserves `max_running` × `resources.memory` per template,** nor
+  the sum of every worker's limit. It now refuses only an agent that could never start: a worker,
+  or a template's largest size, that with the manager's limit and 1GiB does not fit in the VM's
+  `memory`, or that is larger than the memory budget. How many run at once is the budget's to
+  decide at each start. A config that passed before still passes, and its default budget admits
+  everything it did before.
+- **The chat page's top bar no longer crowds the agent's name on a phone.** Below 720px the bar
+  holds Back, the name and a More button. Refresh, New conversation, Recent activity, Files,
+  Settings and Terminal are in the menu More opens, each with its name. A choice, Escape or a tap
+  outside closes the menu. From 720px the actions stay a row of icons as before.
+- **The agent-messages part of the manager's and workers' skill text changed,** on every instance
+  with `remote.agent_messages.enabled`, even one that never sets `max_open`. So did the manager's
+  part on spawning (memory sizes). See Upgrade.
+
+### Fixed
+
+- **A halted manager comes back with its conversation.** From scion e8160a10 an OOM kill, an
+  eviction, a VM reboot or a missing container leaves the manager in phase `halted`, and scion
+  resumes it in a new claude session (no `--continue`). `lever up`, `lever apply` and
+  `lever reload` now back the conversation up before that resume. Once the manager is up, they
+  restore the backup as `lever conversation restore` does, so claude continues the old
+  conversation. The new session in between gets a short task that tells claude to wait, not the
+  boot prompt. Its transcripts are moved aside in the agent home. If the backup fails, lever
+  logs a warning and the manager starts a new session on the boot prompt, as before. Workers, and
+  the broker's re-enrol bounce of a halted manager, still start a new session.
+
+### Security
+
+- **Halted-manager backups rotate among themselves.** A manager can halt itself (exceed its memory)
+  as often as it likes, and each `lever up` after a halt saves a backup. Those keep their own last
+  3 and never push out the operator's backups.
+- **The security model (§4.6) states** that the memory budget is a resource guard, that all
+  spawners share it with no reservation (bound each template with `max_running` and
+  `memory_sizes`), what a restore leaves out, and that the manager can read a restored agent's
+  transcripts in the tree.
+
+### Upgrade
+
+- **Jail ABI 20.** In-jail lever code changed (`lever-manager agent spawn --memory`, the memory
+  budget, agent messages): rebuild the agent image (`make lever-image` or `make lever-image-slim`,
+  then any instance image built from it) and recreate the manager on it with
+  `lever up --fresh --keep-conversation`. Doctor's *agent lever version* row says so.
+- **With `remote.agent_messages.enabled`, contacts' posts are refused until each agent starts a new
+  session** on the new skill text: run `lever conversation new` (or `lever up --fresh` without
+  `--keep-conversation`) after the upgrade. `--keep-conversation` alone keeps the old session.
+- **The broker restarts at the first `lever apply`** on an instance with `memory` set: the memory
+  budget is part of its config hash.
+- **Spawned agents from before this release count their template's `resources.memory`** against
+  the budget. Archives from before it are listed and restored from their old places.
+- **The beta.11 note that a config without templates could fail the memory check no longer
+  applies:** that check now looks at one agent at a time.
+
 ## [1.0.0-beta.11] - 2026-11-25
 
 ### Added

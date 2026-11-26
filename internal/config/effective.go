@@ -165,6 +165,22 @@ func (a *App) EffectiveAgentFollowUpAfter() time.Duration {
 	return cmp.Or(a.Remote.AgentMessages.FollowUpAfter, DefaultAgentFollowUpAfter)
 }
 
+// EffectiveAgentMaxOpen is the number of unanswered messages agent (the
+// manager's name or a worker's) may start to one contact: its own
+// agent_messages.max_open, else remote.agent_messages.max_open, else the
+// default. "" names no agent: the instance-wide value.
+func (a *App) EffectiveAgentMaxOpen(agent string) int {
+	own := 0
+	switch i := slices.IndexFunc(a.Workers, func(w Worker) bool { return w.Name == agent }); {
+	case agent == "":
+	case agent == a.Name:
+		own = a.Manager.AgentMessages.MaxOpen
+	case i >= 0:
+		own = a.Workers[i].AgentMessages.MaxOpen
+	}
+	return cmp.Or(own, a.Remote.AgentMessages.MaxOpen, DefaultAgentMaxOpen)
+}
+
 // EffectiveAgentMaxChars is max_chars with its default.
 func (a *App) EffectiveAgentMaxChars() int {
 	return cmp.Or(a.Remote.AgentMessages.MaxChars, DefaultAgentMaxChars)

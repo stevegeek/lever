@@ -137,6 +137,8 @@ const el = {
   readvoicerow: $('readvoicerow'),
   settings: $('settings'),
   settingspanel: $('settingspanel'),
+  more: $('more'),
+  tools: $('tools'),
   autosend: $('autosend'),
   autosendrow: $('autosendrow'),
   autoread: $('autoread'),
@@ -157,6 +159,7 @@ let appliedSeq = 0; // the request whose answer the page shows
 let listing = false; // a list read is under way
 let listAgain = false; // something asked for one while it was
 let current = ''; // the name of the open chat ('' = none)
+let menuOpen = false; // the More menu of the chat's actions (a phone's top bar)
 // The open chat: {name, id, conversation, userId, unsent, view}; null for none
 // and for a see-only agent. A request answers only the chat it was made for.
 let chat = null;
@@ -572,6 +575,7 @@ function leaveTranscript() {
   viewOlder = '';
   el.readonly.hidden = true;
   el.refresh.hidden = true;
+  syncMore();
 }
 
 function openTranscript(login, name) {
@@ -590,6 +594,7 @@ function openTranscript(login, name) {
   el.form.hidden = true;
   el.readonly.hidden = false;
   el.refresh.hidden = false;
+  syncMore();
   showNotice(c.signedIn ? '' : `${login} has not signed in yet.`);
   renderContacts();
   if (c.signedIn) void readTranscript('');
@@ -1499,6 +1504,7 @@ function syncSettings() {
   el.autosend.checked = option(autoSendKey());
   el.autoread.checked = option(autoReadKey());
   el.settings.hidden = el.readvoicerow.hidden && el.autosendrow.hidden && el.autoreadrow.hidden;
+  syncMore();
   if (!el.settings.hidden) return;
   // Focus inside a panel that goes would fall to the page's body.
   const inside = !!document.activeElement && el.settingspanel.contains(document.activeElement);
@@ -1517,7 +1523,45 @@ function closeSettings(refocus) {
   if (el.settingspanel.hidden) return;
   el.settingspanel.hidden = true;
   expanded(el.settings, false);
-  if (refocus) el.settings.focus();
+  if (refocus) inView(el.settings).focus();
+}
+
+// The More menu: on a phone (chat.css) the chat's actions are not in the top
+// bar but in a menu that More opens. The same buttons serve both layouts;
+// only chat.css moves them. More shows while any action does.
+const actions = () => [el.refresh, el.newconv, el.activity, el.files, el.settings, el.terminal];
+
+function syncMore() {
+  el.more.hidden = actions().every((b) => b.hidden);
+  if (!el.more.hidden) return;
+  // Focus on a row that goes would fall to the page's body.
+  const inside = !!document.activeElement && el.tools.contains(document.activeElement);
+  closeMenu(false);
+  if (inside) el.back.focus();
+}
+
+// One overlay at a time: the menu replaces an open settings panel.
+function openMenu() {
+  closeSettings(false);
+  menuOpen = true;
+  el.tools.classList.add('open');
+  expanded(el.more, true);
+  const first = actions().find((b) => !b.hidden);
+  if (first) first.focus();
+}
+
+function closeMenu(refocus) {
+  if (!menuOpen) return;
+  menuOpen = false;
+  el.tools.classList.remove('open');
+  expanded(el.more, false);
+  if (refocus) el.more.focus();
+}
+
+// An action in a shut menu cannot take focus (it is not displayed): More,
+// which shows it, takes it instead.
+function inView(button) {
+  return !menuOpen && !el.more.hidden && button.offsetParent === null ? el.more : button;
 }
 
 // Recent activity: the open agent's terminal, read on demand. The text is
@@ -1531,6 +1575,7 @@ function syncActivity() {
   const a = current && roster ? roster.agents.find((x) => x.name === current) : null;
   const on = !view && activityOffered(roster, a);
   el.activity.hidden = !on;
+  syncMore();
   if (!on) closeActivity();
 }
 
@@ -1717,6 +1762,7 @@ function openChat(name) {
     closeChat();
     return;
   }
+  closeMenu(false);
   current = a.name;
   store(OPEN_KEY, a.name);
   document.body.classList.add('chatting');
@@ -1765,6 +1811,7 @@ function openChat(name) {
 function closeChat() {
   leaveTranscript();
   cancelDictation();
+  closeMenu(false);
   current = '';
   chat = null;
   store(OPEN_KEY, null);
@@ -2048,6 +2095,7 @@ async function wake(c, text) {
 function syncNewConversation(a) {
   el.newconv.hidden = !newConversationOffered(roster, a);
   el.newconv.disabled = !!renewing;
+  syncMore();
 }
 
 // The manager's new conversation: asked twice when it is mid-turn, then
@@ -2343,9 +2391,43 @@ el.settings.addEventListener('click', () => {
   else closeSettings(true);
 });
 document.addEventListener('keydown', (ev) => {
-  if (ev.key !== 'Escape' || el.settingspanel.hidden) return;
-  ev.preventDefault();
-  closeSettings(true);
+  if (ev.key !== 'Escape') return;
+  // The settings panel first: it may have been opened from the menu.
+  if (!el.settingspanel.hidden) {
+    ev.preventDefault();
+    closeSettings(true);
+  } else if (menuOpen) {
+    ev.preventDefault();
+    closeMenu(true);
+  }
+});
+el.more.addEventListener('click', () => {
+  if (menuOpen) closeMenu(true);
+  else openMenu();
+});
+// A choice closes the menu. Focus that the choice moved (into the settings
+// panel) stays there; focus left on the chosen row, now not shown, goes to
+// More.
+el.tools.addEventListener('click', (ev) => {
+  if (!menuOpen || !ev.target || ev.target === el.tools) return;
+  closeMenu(!!document.activeElement && el.tools.contains(document.activeElement));
+});
+// A menu left open as the screen widens (a rotation) would come back open.
+const wide = window.matchMedia('(min-width: 720px)');
+if (typeof wide.addEventListener === 'function') wide.addEventListener('change', () => closeMenu(false));
+// Focus that Tab takes out of the menu closes it. A tap that drops focus to
+// nothing (Safari does not focus a tapped button) is left to the handlers
+// above and below.
+for (const n of [el.more, el.tools]) {
+  n.addEventListener('focusout', (ev) => {
+    const to = ev.relatedTarget;
+    if (!menuOpen || !to || el.tools.contains(to) || el.more.contains(to)) return;
+    closeMenu(false);
+  });
+}
+document.addEventListener('pointerdown', (ev) => {
+  if (!menuOpen || !ev.target || el.tools.contains(ev.target) || el.more.contains(ev.target)) return;
+  closeMenu(false);
 });
 // A tap outside the panel closes it, as a menu does.
 document.addEventListener('pointerdown', (ev) => {

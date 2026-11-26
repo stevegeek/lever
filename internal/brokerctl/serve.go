@@ -252,6 +252,7 @@ func decorateConfig(cfg *broker.Config, app *config.App, st state.State, be back
 	if !StateInsideTree(app, st) {
 		cfg.Dispatch.Templates = TemplateSpecs(app, be.MountDest(), env.JailUID, version)
 		cfg.Dispatch.ArchiveDir = st.AgentArchives()
+		cfg.Dispatch.ConversationDir = st.AgentConversations()
 	} else {
 		// Nor is its registry read: an agent could have written it.
 		cfg.Persistence.Agents, cfg.Persistence.PersistAgents = broker.AgentsState{}, nil
@@ -318,6 +319,7 @@ func dispatchConfig(app *config.App, st state.State, be backend.Backend, env Ser
 		// Same value as apply's manager gate.
 		LiveSettle:        workerLiveSettle,
 		MaxRunningWorkers: app.Broker.MaxRunningWorkers,
+		MemoryBudget:      memoryBudget(app),
 		// Closed-internet agents dial the host-alias IP; otherwise the alias
 		// hostname (the cert's DNS SAN).
 		BrokerURL: workerBrokerURL(cmp.Or(env.HostAliasIP, be.HostToolAlias()), app.EffectiveJailPort()),
@@ -618,4 +620,13 @@ func managerLock(app *config.App, st state.State) apply.ManagerLock {
 		}
 		return unlock, err
 	}
+}
+
+// memoryBudget is the broker's memory budget in bytes; 0: none.
+func memoryBudget(app *config.App) int64 {
+	n, ok := app.MemoryBudgetBytes()
+	if !ok {
+		return 0
+	}
+	return n
 }

@@ -25,7 +25,7 @@ func TestAgentGC(t *testing.T) {
 	if rec := callOperator(t, e.b, http.MethodPost, PathOperatorAgentDestroy, `{"name":"`+old+`","stop":true}`); rec.Code != http.StatusOK {
 		t.Fatalf("destroy: %d %s", rec.Code, rec.Body)
 	}
-	archive := filepath.Join(e.archives, old+".tar.gz")
+	archive := filepath.Join(e.archives, old, archiveWorkspaceFile)
 	fi, err := os.Stat(archive)
 	if err != nil {
 		t.Fatal(err)
@@ -60,6 +60,9 @@ func TestAgentGC(t *testing.T) {
 	if _, err := os.Stat(archive); !os.IsNotExist(err) || len(removed) != 1 || removed[0] != old {
 		t.Fatalf("archive %v, backups removed %v", err, removed)
 	}
+	if _, err := os.Stat(filepath.Dir(archive)); !os.IsNotExist(err) {
+		t.Fatalf("archive directory: %v", err)
+	}
 	st := e.state()
 	if len(st.Retired) != 1 || st.Retired[0] != old {
 		t.Fatalf("retired %+v", st.Retired)
@@ -77,7 +80,7 @@ func TestAgentGC(t *testing.T) {
 	if !again.b.isRevoked(old) {
 		t.Fatal("a retired name is not revoked after a restart")
 	}
-	if _, err := again.b.workers.reserve(sessionTemplate(again.tree), "operator", "", time.Now(), func(string) bool { return false },
+	if _, err := again.b.workers.reserve(sessionTemplate(again.tree), MemorySize{}, "operator", "", time.Now(), func(string) bool { return false },
 		func() (string, error) { return old[2:], nil }); err == nil {
 		t.Fatal("a retired name was drawn again")
 	}

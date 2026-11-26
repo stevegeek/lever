@@ -296,14 +296,16 @@ so it gives no agent anything new:
   record is resumed; a running worker is left alone.
 - `lever worker resume NAME` brings a worker that is not running back up and waits until it is live.
   Run it after `lever stop` and `lever up` (which resumes the manager, not the workers), or whenever
-  a send is refused with exit `9`. It is a no-op for a running worker. It does not start a worker
+  a send is refused with exit `9`. The messages queued for the worker go out once it is live. It is a no-op for a running worker. It does not start a worker
   that has no record (exit `8`): `lever worker start` does.
 - `lever worker watch NAME [--json]` prints the worker's hub events as they come: its state changes
   and the completion summary it reports. Each is the worker's own report, so a completion is a
   trigger to go and look at its work (its workspace, its tests), never the result itself. Start the
   watch before the work, since it shows only events from then on.
-- `lever msg send "…" --to NAME` gives a running worker its next piece of work. The worker verifies
-  it as an `operator-note`. Exit `9` means the worker was not running and nothing was sent.
+- `lever msg send "…" --to NAME` gives a worker its next piece of work. The worker verifies it as
+  an `operator-note`. To a worker that is not running the note is queued and goes out when it next
+  runs (`--wake` resumes it to deliver now); exit `9` means nothing was sent or queued (no record,
+  or a full queue).
 - `lever worker recycle NAME [--task-file F]` discards a worker's record and starts it fresh (any
   declared worker: `recyclable: true` is only the manager's authority), for a slot that needs a
   fresh context; the workspace is kept and the conversation is lost. `lever worker suspend NAME` and
@@ -346,6 +348,57 @@ The remote chat page wakes a worker through the same `/operator/worker/resume` r
 object naming the worker, the chat login and its tier: then the narrower rules apply (only a
 suspended or stopped worker, and a stopped one only for the operator's own login). A host program
 never sets `for`.
+
+### Messages to an agent that is not running
+
+A message to an agent that is suspended (by you, the manager or its template's `idle_suspend`),
+stopped, or in any phase but running is queued by the broker, not refused. This holds for
+`lever-manager msg send` from any agent and for `lever msg send`; the answer says `Queued for
+NAME, not delivered`, the phase and how many messages wait. A recipient with no record is still
+refused: start it first.
+
+- **Delivery.** The queued messages go out in order on the agent's next start, resume or wake
+  through lever (`lever worker resume`, `lever-manager agent resume`, a chat-page wake), and within
+  30 seconds of it running again by any other way (`lever up` for the manager, a re-enrol bounce).
+  Each is sent as a live send would be: the same marker, the same handling of the sender's text,
+  and a host record written at delivery, so the recipient's `message_verify` names the sender's own
+  kind. Under the marker lever adds `[lever: sent at TIME, queued while you were suspended]` (or
+  `stopped`, or `not running`). A live send made in the 30 seconds before a queue drains can arrive
+  before the older queued messages.
+- **Waking.** `--wake` on either send also resumes the recipient to deliver now, in the background,
+  when the sender may resume it (the operator any declared worker, the manager the workers it may
+  drive; a worker may wake no one, and the manager is only ever brought back by `lever up`) and
+  the running caps and memory budget let it start now. Otherwise the message stays queued and the
+  answer says why. A wake that fails later leaves the message queued and tells the sender why.
+- **Limits.** `broker.messaging.queue` sets `max_messages` (20), `max_bytes` (256 KiB of message
+  text, at most 4 MiB) and `expiry` (7 days). The counts and bytes bound each of three pools of a
+  recipient's queue: the operator's notes, the manager's messages, and every other agent's. So
+  agents never fill a queue against the operator or the manager, and within the agents' pool one
+  agent may hold at most half. The operator is told how many messages wait in all, the manager how
+  many but the operator's notes, and any other agent how many of its own, never the others'; an
+  agent refused for a full pool is told only that the queue is full. A full pool refuses the new
+  message (`queue-full`) and queues nothing: refusing the new one keeps the older ones in order and
+  never drops what a sender was told is queued.
+- **What is dropped, and who is told.** A message is dropped, never delivered, when it expires,
+  when its sender may no longer reach the recipient at delivery (revoked, removed, purged or recycled since, or a config
+  change such as `worker_to_worker: false`), when the recipient was destroyed, purged or recycled
+  since (its queue is bound to that life of the name, not to the name), or when its send failed
+  after it began, or was under way while the broker stopped (it may have arrived, so it is not sent
+  twice; the messages behind it wait in order). A message sent whose file the broker could
+  neither remove nor rename afterwards is removed later without a word by the same broker; after a
+  broker restart it looks like an interrupted send, so it is dropped with the "may or may not have
+  arrived" notice, and never sent again. The sender gets a
+  `queue-notice` message saying which and why when it is running; the operator's notes, and notices
+  to a sender that is not running, are in the broker's audit log only. A destroy drops the agent's
+  queue; it is not kept in the agent's archive.
+- **Seeing it.** `lever msg list [--to NAME]` shows what is queued (an agent whose queue directory
+  cannot be read, for example one no longer private, is named and left out, and the audit log says
+  why); `lever worker list`, `lever agent
+  list --json` and remote-verb `list --json` give each agent's `queued_messages`.
+
+The queue lives in the state directory (`message-queue/<agent>/`, 0700, one 0600 file per
+message), outside the tree and every agent mount. With the state directory inside the tree there is
+no queue and a send to an agent that is not running is refused with 409, as before.
 
 ## Where the logs are
 

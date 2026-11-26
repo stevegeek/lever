@@ -242,6 +242,10 @@ func decorateConfig(cfg *broker.Config, app *config.App, st state.State, be back
 	if !StateInsideTree(app, st) {
 		cfg.Chat.UsedPath = st.ChatVerified()
 		cfg.Chat.SentLedgerDir = st.SentLedger()
+		// The queue is host-side for the same reason: an agent that could
+		// write it could queue a message in another sender's name.
+		q := app.EffectiveMessageQueue()
+		cfg.MessageQueue = broker.MessageQueueConfig{Dir: st.MessageQueue(), MaxMessages: q.MaxMessages, MaxBytes: q.MaxBytes, Expiry: q.Expiry}
 	}
 	cfg.AgentMessages = AgentMessages(app, st)
 	cfg.Files = Files(app, st)

@@ -152,6 +152,9 @@ type AgentEntry struct {
 	// prompt, as the hub reports it (agent-reported: a hint, never
 	// authority). Unset when it is not waiting or was not looked at yet.
 	WaitingSince *time.Time `json:"waiting_since,omitempty"`
+	// QueuedMessages counts the messages the broker holds for it until it
+	// runs again.
+	QueuedMessages int `json:"queued_messages"`
 }
 
 // Operator routes.
@@ -291,6 +294,7 @@ func (b *Broker) agentList(ctx context.Context, all bool, createdBy string, hub 
 		}
 		if rec.State == AgentActive {
 			e.WaitingSince = b.agentWatch.waiting(rec.Name)
+			e.QueuedMessages = b.queue.count(rec.Name)
 		}
 		if rec.State != AgentDestroyed {
 			e.Phase = phases[rec.Name]
@@ -925,6 +929,9 @@ func (b *Broker) pruneAgentState(name string) {
 	delete(b.reenrolTries, name)
 	delete(b.tokenHealLast, name)
 	b.reenrolMu.Unlock()
+	// Its queue goes with it, not into its archive: its senders are told,
+	// in the background, so this holds the worker lock for file changes only.
+	b.dropQueue(name, "the recipient was destroyed")
 }
 
 // ReconcileAgents settles what a broker that stopped mid-spawn or

@@ -712,6 +712,7 @@ func (b *Broker) resumeRecordAs(ctx context.Context, w http.ResponseWriter, spec
 			return
 		}
 		b.audit("worker", actor, "allow", "resume "+spec.Name+" (already "+phase+")")
+		b.afterResume(spec.Name)
 		writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 		return
 	}
@@ -813,6 +814,8 @@ func (b *Broker) resumeRecordAs(ctx context.Context, w http.ResponseWriter, spec
 	}
 	b.resetReenrolTries(spec.Name)
 	b.audit("worker", actor, "allow", "resume "+spec.Name)
+	// The queued messages go out once the caller lets go of the worker.
+	b.afterResume(spec.Name)
 	writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 }
 
@@ -1037,6 +1040,7 @@ func (b *Broker) startFreshWorker(ctx context.Context, w http.ResponseWriter, sp
 	}
 	b.resetReenrolTries(spec.Name)
 	b.audit("worker", actor, "allow", "start "+spec.Name)
+	b.afterResume(spec.Name)
 	writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 }
 
@@ -1189,6 +1193,8 @@ func (b *Broker) resumeWorker(ctx context.Context, w http.ResponseWriter, spec W
 	}
 	if phase == scion.PhaseRunning {
 		b.audit("worker", actor, "allow", "resume "+spec.Name+": already running")
+		// What waits for it goes out now, not on the queue loop's next pass.
+		b.afterResume(spec.Name)
 		writeJSON(w, wire.WorkerResponse{Worker: spec.Name, Phase: scion.PhaseRunning})
 		return
 	}

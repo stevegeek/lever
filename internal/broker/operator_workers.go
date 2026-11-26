@@ -40,6 +40,9 @@ type WorkerListEntry struct {
 	// IdleAtPrompt is nil when the evidence does not settle it. It derives
 	// from Activity, so it is worker-reported too.
 	IdleAtPrompt *bool `json:"idle_at_prompt"`
+	// QueuedMessages counts the messages the broker holds for it until it
+	// runs again.
+	QueuedMessages int `json:"queued_messages"`
 }
 
 // WorkerListResponse is the answer of GET PathOperatorWorkerList.
@@ -96,7 +99,9 @@ func (b *Broker) handleOperatorWorkerList(w http.ResponseWriter, r *http.Request
 	out := WorkerListResponse{Workers: make([]WorkerListEntry, 0, len(names))}
 	for _, name := range names {
 		stranded := func() bool { return b.strandedCreated(r.Context(), name) }
-		out.Workers = append(out.Workers, workerListEntry(name, bySlug[name], bySlug[name].Slug == name, stranded))
+		e := workerListEntry(name, bySlug[name], bySlug[name].Slug == name, stranded)
+		e.QueuedMessages = b.queue.count(name)
+		out.Workers = append(out.Workers, e)
 	}
 	out.Orphans, out.UnnamedOrphans = b.orphansOf(agents)
 	writeJSON(w, out)

@@ -161,16 +161,29 @@ type WorkerResponse struct {
 	Phase  string `json:"phase"`
 }
 
-// MsgSendRequest is the body of POST /msg/send.
+// MsgSendRequest is the body of POST /msg/send. Wake asks the broker to
+// resume a recipient that is not running so a queued message goes out now;
+// it is honoured only for a caller that may resume the recipient.
 type MsgSendRequest struct {
 	To        string `json:"to"`
 	Body      string `json:"body"`
 	Interrupt bool   `json:"interrupt"`
+	Wake      bool   `json:"wake,omitempty"`
 }
 
-// MsgSendResponse is the reply of POST /msg/send.
+// MsgSendResponse is the reply of POST /msg/send. Queued: the recipient was
+// not running, so the broker holds the message and delivers it when the
+// recipient next runs; Waiting counts its queue as the caller may see it,
+// this message included (the manager all but the operator's notes, any
+// other agent its own messages only), and Phase is the recipient's phase. Waking: the broker is resuming it to
+// deliver now. Note says why a wake was not done.
 type MsgSendResponse struct {
-	OK bool `json:"ok"`
+	OK      bool   `json:"ok"`
+	Queued  bool   `json:"queued,omitempty"`
+	Waiting int    `json:"waiting,omitempty"`
+	Phase   string `json:"phase,omitempty"`
+	Waking  bool   `json:"waking,omitempty"`
+	Note    string `json:"note,omitempty"`
 }
 
 // MsgListRequest is the body of POST /msg/list.
@@ -232,12 +245,19 @@ type OperatorNoteRequest struct {
 	To        string `json:"to"`
 	Body      string `json:"body"`
 	Interrupt bool   `json:"interrupt"`
+	Wake      bool   `json:"wake,omitempty"`
 }
 
 // OperatorNoteResponse is the reply of POST /operator/note: the sent-ledger
-// id of the note ("" when the ledger is off).
+// id of the note ("" when the ledger is off or the note was queued), or the
+// queue fields of MsgSendResponse.
 type OperatorNoteResponse struct {
-	ID string `json:"id"`
+	ID      string `json:"id"`
+	Queued  bool   `json:"queued,omitempty"`
+	Waiting int    `json:"waiting,omitempty"`
+	Phase   string `json:"phase,omitempty"`
+	Waking  bool   `json:"waking,omitempty"`
+	Note    string `json:"note,omitempty"`
 }
 
 // MessageVerifyRequest is the body of POST /message/verify (and

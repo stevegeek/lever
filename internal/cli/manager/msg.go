@@ -51,20 +51,35 @@ const msgAddressHelp = "Address forms for --to:\n" +
 
 func msgSend(c brokerCaller) *cobra.Command {
 	var to string
-	var interrupt bool
-	cmd := &cobra.Command{Use: "send BODY", Args: cobra.MinimumNArgs(1), Short: "Send a message to a running agent",
-		Long: "Send a message to a running agent through the broker.\n\n" + msgAddressHelp,
+	var interrupt, wake bool
+	cmd := &cobra.Command{Use: "send BODY", Args: cobra.MinimumNArgs(1), Short: "Send a message to an agent (queued while it is not running)",
+		Long: "Send a message to an agent through the broker. To an agent that is not running (suspended or\n" +
+			"stopped) the broker queues it and delivers it, in order, when the agent next runs; the answer says\n" +
+			"so and how many wait. --wake also resumes the agent to deliver now, when you may resume it and\n" +
+			"the running caps and memory budget allow; otherwise it stays queued and the answer says why.\n\n" + msgAddressHelp,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			body := strings.Join(args, " ")
-			if _, err := msgCall(cmd.Context(), c, wire.PathMsgSend,
-				wire.MsgSendRequest{To: to, Body: body, Interrupt: interrupt}); err != nil {
+			res, err := brokerCall[wire.MsgSendResponse](cmd.Context(), c, wire.PathMsgSend,
+				wire.MsgSendRequest{To: to, Body: body, Interrupt: interrupt, Wake: wake})
+			if err != nil {
 				return err
 			}
-			cmd.Printf("Sent to %s.\n", to)
+			if !res.Queued {
+				cmd.Printf("Sent to %s.\n", to)
+				return nil
+			}
+			cmd.Printf("Queued for %s, not delivered: it is not running (phase %s). %d message(s) wait for it; they go out when it next runs.\n",
+				to, res.Phase, res.Waiting)
+			if res.Waking {
+				cmd.Println("Waking it to deliver now.")
+			} else if res.Note != "" {
+				cmd.Println(res.Note)
+			}
 			return nil
 		}}
 	cmd.Flags().StringVar(&to, "to", "", "recipient: user:manager | agent:<name> | <name> (required; \"msg recipients\" lists yours)")
 	cmd.Flags().BoolVar(&interrupt, "interrupt", false, "inject before the agent's next turn")
+	cmd.Flags().BoolVar(&wake, "wake", false, "resume a recipient that is not running to deliver now (only one you may resume)")
 	_ = cmd.MarkFlagRequired("to")
 	return cmd
 }

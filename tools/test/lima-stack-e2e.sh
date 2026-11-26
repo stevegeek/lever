@@ -634,7 +634,17 @@ check "the manager runs after the resume" running
 checkx "the manager still lists the worker" 'mgr agent list | grep -q worker'
 checkx "lever msg send after the resume" '(cd "$INST" && "$LEVER" msg send --to "$NAME" "stack e2e after resume" 2>&1) | grep -q Sent'
 checkx "the broker link survived the restart (no second link)" '! grep -q "linking the jail.s runtime broker" "$WORK/up.log"'
+# T0660: the worker is suspended after the stop, so a message to it waits in
+# the broker's queue and goes out when the manager resumes it.
+checkx "a message to the suspended worker is queued" 'mgr msg send --to worker stack-e2e-queued | grep -q "^Queued for worker"'
+checkx "lever msg list shows it queued" '(cd "$INST" && "$LEVER" msg list --to worker 2>&1) | grep -q stack-e2e-queued'
+checkx "lever worker list counts it" '(cd "$INST" && "$LEVER" worker list --json 2>&1) | grep -q "\"queued_messages\": *1"'
 checkx "the manager resumes the suspended worker" 'mgr agent resume worker | grep -qE "running|resumed"'
+qdone() { (cd "$INST" && "$LEVER" msg list --to worker 2>&1) | grep -q "no messages are queued"; }
+qwait() { for _ in $(seq 1 24); do qdone && return 0; sleep 5; done; return 1; }
+check "the queue drains after the resume" qwait
+checkx "the queued message was sent, not dropped" 'grep "queued send->agent:worker" "$INST/.lever-state/broker.log" | grep -q "decision=allow"'
+checkx "no queued message was dropped" '! grep -q "queue->agent:worker: dropped" "$INST/.lever-state/broker.log"'
 doctor_run
 printf '%s\n' "$doctor_out" | grep -E '^(✗|!) ' | mask_secrets | sed 's/^/      | /'
 check "doctor: remote web role bound after the sign-ins" row_ok "remote web role"

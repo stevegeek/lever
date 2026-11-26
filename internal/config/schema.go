@@ -134,6 +134,24 @@ func (m EgressMode) valid() bool {
 type Messaging struct {
 	// WorkerToWorker permits worker-to-worker sends; unset means allowed.
 	WorkerToWorker *bool `yaml:"worker_to_worker"`
+	// Queue bounds the broker's queue of messages to agents that are not
+	// running. The json tag keeps it out of brokerctl.ConfigHash while
+	// unset.
+	Queue *MessageQueue `yaml:"queue" json:",omitempty"`
+}
+
+// MessageQueue is broker.messaging.queue. Zero fields take the defaults
+// (EffectiveMessageQueue).
+type MessageQueue struct {
+	// MaxMessages is how many messages may wait for one recipient, in each
+	// of its queue's pools (the operator's, the manager's, the other
+	// agents').
+	MaxMessages int `yaml:"max_messages" json:",omitempty"`
+	// MaxBytes is how many bytes of message text (not of queue files) may
+	// wait for one recipient, in each pool.
+	MaxBytes int64 `yaml:"max_bytes" json:",omitempty"`
+	// Expiry is how long a message waits before it is dropped.
+	Expiry time.Duration `yaml:"expiry" json:",omitempty"`
 }
 
 type Broker struct {

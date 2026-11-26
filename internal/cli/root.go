@@ -17,7 +17,7 @@ import (
 	"github.com/stevegeek/lever/internal/termsafe"
 )
 
-const Version = "1.0.0-beta.13"
+const Version = "1.0.0-beta.14"
 
 // VersionCmd returns the host `version` command.
 func VersionCmd() *cobra.Command {

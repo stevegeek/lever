@@ -276,6 +276,9 @@ type remoteAgent struct {
 	// bytes.
 	Memory      string `json:"memory,omitempty"`
 	MemoryBytes int64  `json:"memory_bytes,omitempty"`
+	// QueuedMessages counts the messages the broker holds for it until it
+	// runs again.
+	QueuedMessages int `json:"queued_messages"`
 }
 
 func newAgentRemoteVerbCmd() *cobra.Command {
@@ -533,7 +536,8 @@ func runRemoteVerb(cmd *cobra.Command, templates []string, as, configPath string
 		}
 		for _, a := range list.Agents {
 			if a.CreatedBy == by && a.State != broker.AgentDestroyed && slices.Contains(templates, a.Template) {
-				ra := remoteAgent{Name: a.Name, Template: a.Template, Label: a.Label, State: a.State, Phase: safeToken(a.Phase), CreatedAt: a.CreatedAt}
+				ra := remoteAgent{Name: a.Name, Template: a.Template, Label: a.Label, State: a.State, Phase: safeToken(a.Phase), CreatedAt: a.CreatedAt,
+					QueuedMessages: max(a.QueuedMessages, 0)}
 				if _, ok := broker.ParseMemorySize(a.Memory); ok {
 					ra.Memory, ra.MemoryBytes = a.Memory, a.MemoryBytes
 				}

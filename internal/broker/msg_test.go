@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -97,6 +98,7 @@ func TestResolveListSubject(t *testing.T) {
 // fakeMsgRuntime captures what the msg handlers pass to Message and Inbox.
 type fakeMsgRuntime struct {
 	WorkerRuntime
+	mu           sync.Mutex // guards sent while sends run in the background
 	sent         []scion.MsgOpts
 	events       []scion.Event
 	inboxProject string
@@ -105,6 +107,8 @@ type fakeMsgRuntime struct {
 }
 
 func (f *fakeMsgRuntime) Message(_ context.Context, o scion.MsgOpts) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.sent = append(f.sent, o)
 	return f.sendErr
 }

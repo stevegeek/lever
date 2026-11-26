@@ -367,3 +367,27 @@ func TestConfigHashCoversSharedFoldersAndReadOnly(t *testing.T) {
 		t.Fatal("an instance without shared_folders or read_only must keep its hash")
 	}
 }
+
+// broker.messaging.queue is in the hash only once set, so an instance that
+// never sets it keeps its hash across the upgrade that added it.
+func TestConfigHashMessageQueueOnlyWhileSet(t *testing.T) {
+	mk := func() *config.App {
+		return &config.App{Name: "hello", Backend: "orbstack", Tree: "/tmp/tree", Manager: config.Manager{Image: "img"},
+			Broker: config.Broker{JailPort: 8443, AdminPort: 8444}}
+	}
+	base := ConfigHash(mk())
+	old := state.HashJSON(struct {
+		Broker       config.Broker
+		Workers      []config.Worker
+		Scion        config.ScionConfig
+		VerifiedChat bool
+	}{mk().Broker, nil, config.ScionConfig{}, false})
+	if base != old {
+		t.Fatal("an unset queue must keep the hash")
+	}
+	set := mk()
+	set.Broker.Messaging.Queue = &config.MessageQueue{MaxMessages: 5}
+	if ConfigHash(set) == base {
+		t.Fatal("setting the queue's limits must change the hash")
+	}
+}

@@ -332,6 +332,9 @@ func TestDecorateConfigWiresVerification(t *testing.T) {
 	if len(c.WebSenders) != 1 || c.WebSenders[0] != "user:me@example.com" {
 		t.Fatalf("web senders = %v", c.WebSenders)
 	}
+	if q := cfg.MessageQueue; q.Dir != st.MessageQueue() || q.MaxMessages != config.DefaultQueueMaxMessages || q.MaxBytes != config.DefaultQueueMaxBytes || q.Expiry != config.DefaultQueueExpiry {
+		t.Fatalf("message queue = %+v", q)
+	}
 	app.Remote = config.Remote{}
 	cfg, st = decorateForTest(t, app, "v1")
 	if c := cfg.Chat; c.Configured || c.LedgerPath != "" || len(c.WebSenders) != 0 || c.SentLedgerDir != st.SentLedger() {

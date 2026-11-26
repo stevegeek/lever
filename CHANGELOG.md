@@ -7,7 +7,7 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
-## [1.0.0-beta.12] - 2026-11-25
+## [1.0.0-beta.13] - 2026-11-26
 
 ### Added
 

@@ -7,6 +7,10 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+## [1.0.0-beta.14] - 2026-11-26
+
+This release includes 1.0.0-beta.13, which was not tagged on its own: read its notes below too.
+
 ### Added
 
 - **Messages to an agent that is not running are queued, not refused.**

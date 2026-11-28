@@ -309,7 +309,7 @@ func TestEnsureScionWebAssetsReusesAPinnedSourceBuildOffline(t *testing.T) {
 		t.Fatal(err)
 	}
 	stageCompletedBuild(t, cacheRoot, digest)
-	const pin = "d6d6abc7"
+	const pin = "ddb48b02"
 	fakePrebuilt(t, func(context.Context, string) (string, string, error) {
 		_, _, err := webassets.Prebuilt(context.Background(), "666333f9")
 		return "", "", err

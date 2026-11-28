@@ -27,7 +27,7 @@ import (
 
 // ReleasePin is the scion commit a lever release builds its prebuilt scion
 // binaries from, and the scion.version the examples and docs pin.
-const ReleasePin = "d6d6abc7"
+const ReleasePin = "ddb48b02"
 
 // ReleasePinGo is the go line of ReleasePin's go.mod, the oldest Go that
 // builds it. scion's go.mod has no toolchain line, so an older local Go

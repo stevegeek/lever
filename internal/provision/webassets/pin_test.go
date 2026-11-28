@@ -40,13 +40,13 @@ func TestPinnedBuild(t *testing.T) {
 	digest := strings.Repeat("ab", 32)
 	completeBuild(t, root, digest)
 
-	if _, _, ok := PinnedBuild("d6d6abc7"); ok {
+	if _, _, ok := PinnedBuild("ddb48b02"); ok {
 		t.Fatal("a pin with no record was found")
 	}
-	if err := RecordPinnedBuild("d6d6abc7", digest); err != nil {
+	if err := RecordPinnedBuild("ddb48b02", digest); err != nil {
 		t.Fatal(err)
 	}
-	dist, got, ok := PinnedBuild("d6d6abc7")
+	dist, got, ok := PinnedBuild("ddb48b02")
 	if !ok || got != digest || dist != filepath.Join(root, digest, "dist", "client") {
 		t.Fatalf("PinnedBuild = %q %q %v", dist, got, ok)
 	}
@@ -68,7 +68,7 @@ func TestPinnedBuild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ents) != 1 || ents[0].Name() != "d6d6abc7" {
+	if len(ents) != 1 || ents[0].Name() != "ddb48b02" {
 		t.Fatalf("pins dir holds %v, want only the one record", ents)
 	}
 
@@ -87,7 +87,7 @@ func TestPinnedBuild(t *testing.T) {
 	if err := os.Remove(filepath.Join(root, digest, BuildMarker)); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, ok := PinnedBuild("d6d6abc7"); ok {
+	if _, _, ok := PinnedBuild("ddb48b02"); ok {
 		t.Fatal("an incomplete build was found")
 	}
 }

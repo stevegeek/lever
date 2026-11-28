@@ -218,7 +218,7 @@ name: $NAME
 scion:
   # Must stay >= ce96122c: a pre-enforcement pin cannot catch the as_needed
   # injection or plaintext-encoding regressions this suite exists for.
-  version: ${SCION_VERSION:-d34ffbc1}
+  version: ${SCION_VERSION:-d6d6abc7}
 backend: lima
 $egressline
 tree: workspace

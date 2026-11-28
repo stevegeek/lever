@@ -72,6 +72,18 @@ type pinnedExperiment struct {
 // is pinned off, so there are none); it is pinned with the rest so the set
 // lever reviewed stays the set that can run.
 //
+// From scion ddb48b02: hub.mcp_server serves an MCP endpoint (send and read
+// messages, event push) on a listener of its own; lever never configures that
+// listener, and the pin is the second lock. hub.large_uploads takes resumable
+// uploads of up to 1 GiB into a project's workspace and shared directories.
+// agent_policy.telemetry_enforcement lets an admin force every agent's
+// telemetry export on. hub.artifacts_review_requests and
+// hub.flat_runtime_brokers (on by default from ddb48b02: single-target broker
+// registrations and agent pinning to a target) are pinned so the set lever
+// reviewed stays the set that can run. ddb48b02 also turns hub.conduit,
+// hub.artifacts and hub.agent_plugins on by default, which these pins hold
+// off.
+//
 // hub.chat_thread_groups (project-wide chat groups that agents can create and
 // rename) is graduated from e8160a10 on: always on, never registered, and
 // scion refuses an override for it. It stays here for older pins, where the
@@ -120,6 +132,11 @@ var pinnedOffExperiments = []pinnedExperiment{
 	{name: "lifecycle.never_suspend"},
 	{name: "hub.artifacts_transfer"},
 	{name: "hub.decision_retention"},
+	{name: "hub.mcp_server"},
+	{name: "hub.large_uploads"},
+	{name: "agent_policy.telemetry_enforcement"},
+	{name: "hub.artifacts_review_requests"},
+	{name: "hub.flat_runtime_brokers"},
 }
 
 // accessConstraintsExperiment (scion d6d6abc7 on, default off) serves the

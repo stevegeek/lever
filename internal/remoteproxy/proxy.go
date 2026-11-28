@@ -264,6 +264,16 @@ func mintsCredential(method, p string) bool {
 //     them), an agent's usage events and reads (tokenomics.usage_ledger), and
 //     a project's System One instances (hub-run model calls; the admin System
 //     One routes, older, are refused with them).
+//   - Routes new in scion ddb48b02 behind experiments lever pins off: token
+//     usage reads (the caller's, a user's, a group's budgets, a project's and
+//     the hub's), an agent's trajectory segments (transcripts, readable by any
+//     member of the agent's project, with an HMAC-only content link), chunked
+//     uploads into a project's workspace or a shared directory
+//     (hub.large_uploads), the inbox lists of secret and command requests, the
+//     decisions roll-up and its suggestions, and a chat attachment downloaded
+//     as an artifact. And the GCS object link (web.gcs_links, graduated in
+//     ddb48b02, so always routed): lever gives the hub no GCP credential, so it
+//     answers 404, and it is refused should one ever be found.
 //
 // p is the decoded path. It is compared in lower case, and the feature
 // prefixes without a segment boundary, so no spelling the hub might route
@@ -285,8 +295,28 @@ func refusedRoute(method, p string) bool {
 	}
 	if rest, ok := strings.CutPrefix(p, "/api/v1/agents/"); ok {
 		if _, sub, ok := strings.Cut(rest, "/"); ok &&
-			(strings.HasPrefix(sub, "ports/tunnel") || strings.HasPrefix(sub, "delegations") || strings.HasPrefix(sub, "usage")) {
+			(strings.HasPrefix(sub, "ports/tunnel") || strings.HasPrefix(sub, "delegations") || strings.HasPrefix(sub, "usage") ||
+				strings.HasPrefix(sub, "trajectory")) {
 			return true
+		}
+	}
+	if p == "/api/v1/usage" {
+		// The hub-wide usage read; /api/v1/usage/me, older, is the quota.
+		return true
+	}
+	for _, base := range []string{"/api/v1/users/", "/api/v1/groups/"} {
+		if rest, ok := strings.CutPrefix(p, base); ok {
+			if _, sub, ok := strings.Cut(rest, "/"); ok && strings.HasPrefix(sub, "usage") {
+				return true
+			}
+		}
+	}
+	if rest, ok := strings.CutPrefix(p, "/api/v1/conversations/"); ok {
+		// .../messages/{mid}/attachments/{aid}, artifact-backed.
+		if _, sub, ok := strings.Cut(rest, "/"); ok && strings.HasPrefix(sub, "messages/") {
+			if _, tail, ok := strings.Cut(strings.TrimPrefix(sub, "messages/"), "/"); ok && strings.HasPrefix(tail, "attachment") {
+				return true
+			}
 		}
 	}
 	if p == "/api/v1/system" || strings.HasPrefix(p, "/api/v1/system/") {
@@ -315,8 +345,14 @@ func refusedRoute(method, p string) bool {
 			return true
 		}
 		if strings.HasPrefix(sub, "visitor") || strings.HasPrefix(sub, "trigger") || strings.HasPrefix(sub, "webhook-endpoint") ||
-			strings.HasPrefix(sub, "message-polic") || strings.HasPrefix(sub, "decision") || strings.HasPrefix(sub, "system-one") {
+			strings.HasPrefix(sub, "message-polic") || strings.HasPrefix(sub, "decision") || strings.HasPrefix(sub, "system-one") ||
+			strings.HasPrefix(sub, "usage") || strings.HasPrefix(sub, "workspace/upload") {
 			return true
+		}
+		if dir, ok := strings.CutPrefix(sub, "shared-dirs/"); ok {
+			if _, tail, ok := strings.Cut(dir, "/"); ok && strings.HasPrefix(tail, "upload") {
+				return true
+			}
 		}
 	}
 	return false
@@ -349,6 +385,11 @@ var refusedPrefixes = []string{
 	"/api/v1/command-request",
 	"/api/v1/agent/command-request",
 	"/api/v1/admin/system-one",
+	"/api/v1/me/usage",
+	"/api/v1/users/me/secret-request",
+	"/api/v1/users/me/command-request",
+	"/api/v1/users/me/decision",
+	"/api/v1/gcs",
 }
 
 // brokerWritePrefixes are lower case, with no trailing slash on purpose: the

@@ -1028,6 +1028,31 @@ func TestHubRoutesTheProxyNeverForwards(t *testing.T) {
 		{"POST", "/api/v1/agents/a1/usage/events", true},
 		{"GET", "/api/v1/agents/a1/Usage", true},
 		{"GET", "/api/v1/agents/a1/usage/capabilities", true},
+		// scion ddb48b02: usage reads, trajectories, chunked uploads, inbox
+		// request lists, decisions and artifact-backed attachments.
+		{"GET", "/api/v1/usage", true},
+		{"GET", "/api/v1/Usage", true},
+		{"GET", "/api/v1/usage/me", false},
+		{"GET", "/api/v1/me/usage", true},
+		{"GET", "/api/v1/users/u1/usage", true},
+		{"GET", "/api/v1/users/me/inbox/summary", false},
+		{"GET", "/api/v1/groups/g1/usage/budgets", true},
+		{"GET", "/api/v1/groups/g1/members", false},
+		{"GET", "/api/v1/projects/p1/usage", true},
+		{"GET", "/api/v1/groves/p1/Usage", true},
+		{"GET", "/api/v1/agents/a1/trajectory/segments", true},
+		{"PUT", "/api/v1/agents/a1/trajectory/segments/s1/content", true},
+		{"POST", "/api/v1/projects/p1/workspace/uploads", true},
+		{"PUT", "/api/v1/projects/p1/workspace/uploads/s1", true},
+		{"GET", "/api/v1/projects/p1/workspace/files", false},
+		{"POST", "/api/v1/projects/p1/shared-dirs/d1/uploads/s1/complete", true},
+		{"GET", "/api/v1/projects/p1/shared-dirs/d1", false},
+		{"GET", "/api/v1/users/me/secret-requests", true},
+		{"GET", "/api/v1/users/me/command-requests", true},
+		{"GET", "/api/v1/users/me/decisions/suggestions", true},
+		{"GET", "/api/v1/conversations/c1/messages/m1/attachments/a1", true},
+		{"GET", "/api/v1/conversations/c1/messages", false},
+		{"GET", "/api/v1/conversations/c1/messages/m1", false},
 	} {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
 			hub := newRecordingHub(t)

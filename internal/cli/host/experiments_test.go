@@ -645,24 +645,32 @@ var d6d6abcPinned = append(slices.Clone(d34ffbcPinned), "hub.command_requests", 
 	"hub.agent_move_bundle", "tokenomics.usage_ledger", "tokenomics.token_budgets", "tokenomics.trajectory_capture",
 	"lifecycle.never_suspend", "hub.artifacts_transfer", "hub.decision_retention")
 
-// On scion d6d6abc7 the new experiments are pinned off, and the access
-// constraints lever caps remote users with are pinned on, against its
-// default off and against an admin's override off; an experiment lever does
-// not list keeps its own state.
-func TestEnsureHubExperimentsOnD6d6abc7(t *testing.T) {
+// ddb48b0Pinned are the pinned-off experiments scion ddb48b02 registers.
+var ddb48b0Pinned = append(slices.Clone(d6d6abcPinned), "hub.mcp_server", "hub.large_uploads",
+	"agent_policy.telemetry_enforcement", "hub.artifacts_review_requests", "hub.flat_runtime_brokers")
+
+// On scion ddb48b02 the new experiments are pinned off, against the defaults
+// ddb48b02 turns on, and the access constraints lever caps remote users with
+// (from d6d6abc7) are pinned on, against its default off and against an
+// admin's override off; an experiment lever does not list keeps its own state.
+func TestEnsureHubExperimentsOnDdb48b02(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		on   map[string]bool
 	}{
 		{"defaults", nil},
 		{"constraints overridden off", map[string]bool{accessConstraintsExperiment: false}},
-		{"new ones on", map[string]bool{"hub.command_requests": true, "tokenomics.usage_ledger": true}},
+		{"new ones on", map[string]bool{"hub.command_requests": true, "tokenomics.usage_ledger": true, "hub.mcp_server": true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newFakeExperimentsHub()
 			newScionExperiments(h)
-			h.registered = append(slices.Clone(d6d6abcPinned), accessConstraintsExperiment, "web.terminal_key_bar", "web.agent_edit")
-			h.defaultOn["hub.suspend_screen"] = true
+			h.registered = append(slices.Clone(ddb48b0Pinned), accessConstraintsExperiment, "web.terminal_key_bar", "web.agent_edit")
+			// ddb48b02's defaults: a probed experiment served on (conduit's
+			// relay runs) costs one restart after the pin.
+			for _, n := range []string{"hub.suspend_screen", "hub.conduit", "hub.artifacts", "hub.agent_plugins", "hub.flat_runtime_brokers"} {
+				h.defaultOn[n] = true
+			}
 			maps.Copy(h.overrides, tc.on)
 			st := state.ForConfig(t.TempDir())
 			restarts := 0
@@ -672,10 +680,10 @@ func TestEnsureHubExperimentsOnD6d6abc7(t *testing.T) {
 				restartHub: func(context.Context) error { restarts++; return nil },
 				log:        func(string, ...any) {}, warn: func(f string, a ...any) { t.Errorf("warn: "+f, a...) },
 			})
-			if err != nil || on || restarts != 0 {
+			if err != nil || on || restarts != 1 {
 				t.Fatalf("on=%v err=%v restarts=%d (%v)", on, err, restarts, h.calls)
 			}
-			for _, n := range d6d6abcPinned {
+			for _, n := range ddb48b0Pinned {
 				if v, ok := h.overrides[n]; !ok || v || h.enabled(n) {
 					t.Fatalf("%s override = %v, %v; want pinned off", n, v, ok)
 				}
@@ -689,7 +697,7 @@ func TestEnsureHubExperimentsOnD6d6abc7(t *testing.T) {
 				}
 			}
 			rec, found, _ := st.LoadHubExperimentsRecord()
-			if !found || !slices.Equal(rec.Off, d6d6abcPinned) || !slices.Equal(rec.On, []string{accessConstraintsExperiment}) ||
+			if !found || !slices.Equal(rec.Off, ddb48b0Pinned) || !slices.Equal(rec.On, []string{accessConstraintsExperiment}) ||
 				!slices.Contains(rec.Asked, accessConstraintsExperiment) {
 				t.Fatalf("record = %+v (found %v)", rec, found)
 			}

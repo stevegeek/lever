@@ -290,6 +290,18 @@ Two things need more than the controller's authority, and `lever-admin` does the
   (the hub removing containers it takes for orphans), `hub.reincarnate_harness_switch` and
   `hub.custom_default_user_role`. The remote proxy also refuses the trigger and secret-request routes
   and the other new routes behind these experiments.
+- **Scion `d6d6abc7`'s new experiments are kept off too.** `hub.command_requests` (an agent asks a
+  user to approve a shell command, which the hub then runs in a container over conduit),
+  `hub.template_drift_warning` (outbound GitHub calls from the hub at agent creation),
+  `hub.agent_move_bundle` (an agent's workspace and home carried through hub storage to another
+  broker), `tokenomics.usage_ledger` (usage events from agents to the hub), `tokenomics.token_budgets`
+  and `tokenomics.trajectory_capture` (not built in this scion yet, pinned so a later default cannot
+  turn them on), `lifecycle.never_suspend` (an agent record that refuses lever's suspend) and
+  `hub.artifacts_transfer`. The remote proxy refuses the command-request and System One routes. One
+  experiment is pinned **on**: `hub.access_constraints` serves the access-constraint admin API that
+  lever caps every remote user with. Stored constraints are enforced whether or not it is on, so
+  on widens nothing; off, `lever apply` would stop at the cap. On an older scion that does not
+  register it, the routes are served ungated and lever writes nothing for it.
 
 `lever doctor`'s `hub authentication` row tests the effective configuration by behaviour, since
 file contents cannot prove it: an assertion signed by another key and one for another instance get

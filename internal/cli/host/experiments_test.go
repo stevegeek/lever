@@ -225,7 +225,7 @@ func TestPinExperimentsOff(t *testing.T) {
 			}
 			if rec.NotApplicable != tc.wantRec.NotApplicable || rec.Revision != tc.wantRec.Revision ||
 				!sameScopeSet(rec.Off, tc.wantRec.Off) || !rec.PinnedAt.Equal(now) ||
-				(!rec.NotApplicable && !sameScopeSet(rec.Asked, pinnedOffNames())) {
+				(!rec.NotApplicable && !sameScopeSet(rec.Asked, pinnedNames())) {
 				t.Fatalf("record = %+v, want %+v", rec, tc.wantRec)
 			}
 			for n, v := range tc.wantKept {
@@ -637,5 +637,80 @@ func TestEnsureHubExperimentsOnD34ffbc1(t *testing.T) {
 				t.Fatalf("doctor row = %+v", r)
 			}
 		})
+	}
+}
+
+// d6d6abcPinned are the pinned-off experiments scion d6d6abc7 registers.
+var d6d6abcPinned = append(slices.Clone(d34ffbcPinned), "hub.command_requests", "hub.template_drift_warning",
+	"hub.agent_move_bundle", "tokenomics.usage_ledger", "tokenomics.token_budgets", "tokenomics.trajectory_capture",
+	"lifecycle.never_suspend", "hub.artifacts_transfer")
+
+// On scion d6d6abc7 the new experiments are pinned off, and the access
+// constraints lever caps remote users with are pinned on, against its
+// default off and against an admin's override off; an experiment lever does
+// not list keeps its own state.
+func TestEnsureHubExperimentsOnD6d6abc7(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		on   map[string]bool
+	}{
+		{"defaults", nil},
+		{"constraints overridden off", map[string]bool{accessConstraintsExperiment: false}},
+		{"new ones on", map[string]bool{"hub.command_requests": true, "tokenomics.usage_ledger": true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newFakeExperimentsHub()
+			newScionExperiments(h)
+			h.registered = append(slices.Clone(d6d6abcPinned), accessConstraintsExperiment, "web.terminal_key_bar", "web.agent_edit")
+			h.defaultOn["hub.suspend_screen"] = true
+			maps.Copy(h.overrides, tc.on)
+			st := state.ForConfig(t.TempDir())
+			restarts := 0
+			on, err := ensureHubExperiments(context.Background(), experimentsPin{
+				admin: &hubapi.Client{T: h}, st: st, known: knowsExperiments(true),
+				now:        func() time.Time { return time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC) },
+				restartHub: func(context.Context) error { restarts++; return nil },
+				log:        func(string, ...any) {}, warn: func(f string, a ...any) { t.Errorf("warn: "+f, a...) },
+			})
+			if err != nil || on || restarts != 0 {
+				t.Fatalf("on=%v err=%v restarts=%d (%v)", on, err, restarts, h.calls)
+			}
+			for _, n := range d6d6abcPinned {
+				if v, ok := h.overrides[n]; !ok || v || h.enabled(n) {
+					t.Fatalf("%s override = %v, %v; want pinned off", n, v, ok)
+				}
+			}
+			if v, ok := h.overrides[accessConstraintsExperiment]; !ok || !v || !h.enabled(accessConstraintsExperiment) {
+				t.Fatalf("access constraints override = %v, %v; want pinned on", v, ok)
+			}
+			for _, n := range []string{"web.terminal_key_bar", "web.agent_edit"} {
+				if _, ok := h.overrides[n]; ok {
+					t.Fatalf("lever pinned %s, which it does not list", n)
+				}
+			}
+			rec, found, _ := st.LoadHubExperimentsRecord()
+			if !found || !slices.Equal(rec.Off, d6d6abcPinned) || !slices.Equal(rec.On, []string{accessConstraintsExperiment}) ||
+				!slices.Contains(rec.Asked, accessConstraintsExperiment) {
+				t.Fatalf("record = %+v (found %v)", rec, found)
+			}
+			if r := checkHubExperiments(context.Background(), st, false, knowsExperiments(true), &hubapi.Client{T: h}); !r.ok || r.fix != "" {
+				t.Fatalf("doctor row = %+v", r)
+			}
+		})
+	}
+}
+
+// A scion before d6d6abc7 does not register access constraints and serves
+// their routes ungated: lever writes no override for it.
+func TestPinExperimentsSkipsUnregisteredPinnedOn(t *testing.T) {
+	h := newFakeExperimentsHub()
+	newScionExperiments(h)
+	h.registered = slices.Clone(d34ffbcPinned)
+	rec, err := pinExperimentsOff(context.Background(), &hubapi.Client{T: h}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := h.overrides[accessConstraintsExperiment]; ok || len(rec.On) != 0 {
+		t.Fatalf("override written for an unregistered experiment: %v, record on %v", h.overrides, rec.On)
 	}
 }

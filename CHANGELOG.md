@@ -7,6 +7,22 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Changed
+
+- **scion pin `d34ffbc1` → `d6d6abc7`** (upstream main of 2026-11-26), for the terminal fixes on
+  phone screens: the pane toolbar no longer overflows at 390px and narrower (#5603), and terminals
+  take touch scrolling (#5568) and, behind `web.terminal_key_bar`, a touch key bar (#5584). The
+  examples, the release prebuilt scion, the Makefile `SCION_VERSION`, the Lima e2e, the docs and the
+  tests move. The module pseudo-version is `v0.4.0-preview.3.0.20261126160110-d6d6abc793ae`.
+- **scion's new experiments are pinned off:** `hub.command_requests`, `hub.template_drift_warning`,
+  `hub.agent_move_bundle`, `tokenomics.usage_ledger`, `tokenomics.token_budgets`,
+  `tokenomics.trajectory_capture`, `lifecycle.never_suspend` and `hub.artifacts_transfer`. The
+  remote proxy refuses the command-request and System One routes.
+- **`hub.access_constraints` is pinned on** where scion registers it (`d6d6abc7` on). That scion
+  serves the access-constraint admin API, which lever caps every remote user with, only while it
+  is on, and it is off by default. Stored constraints are enforced either way, so this widens
+  nothing. `lever doctor`'s experiments row names it.
+
 ## [1.0.0-beta.14] - 2026-11-26
 
 ### Added

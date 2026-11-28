@@ -2438,6 +2438,9 @@ func checkHubExperiments(ctx context.Context, st state.State, sshOn bool, known 
 	if conduitOn {
 		detail += "; " + conduitExperiment + " on for `lever ssh` (its own row)"
 	}
+	if slices.Contains(rec.On, accessConstraintsExperiment) {
+		detail += "; " + accessConstraintsExperiment + " pinned on, for the caps lever sets on remote users"
+	}
 	if slices.Contains(rec.Asked, threadGroupsExperiment) && !slices.Contains(rec.Off, threadGroupsExperiment) {
 		detail += "; chat thread groups are always on in this scion (graduated), and the remote proxy refuses their routes"
 	}

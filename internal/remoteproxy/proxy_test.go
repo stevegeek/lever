@@ -1018,6 +1018,13 @@ func TestHubRoutesTheProxyNeverForwards(t *testing.T) {
 		{"GET", "/api/v1/pre-start-hooks", false},
 		{"GET", "/api/v1/projects/p1/pre-start-hooks", false},
 		{"GET", "/api/v1/projects/p1/schedules", false},
+		// scion d6d6abc7: command requests and System One.
+		{"GET", "/api/v1/command-requests/c1", true},
+		{"POST", "/api/v1/command-requests/c1/approve", true},
+		{"GET", "/api/v1/Agent/Command-Requests", true},
+		{"PUT", "/api/v1/projects/p1/system-one/instances/x", true},
+		{"GET", "/api/v1/groves/p1/system-one/instances", true},
+		{"GET", "/api/v1/admin/system-one/instances", true},
 	} {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
 			hub := newRecordingHub(t)

@@ -57,6 +57,18 @@ type pinnedExperiment struct {
 // checks. hub.suspend_screen (on by default) stores the agent's last terminal
 // screen in the hub database at every hub-run suspend.
 //
+// From scion d6d6abc7: hub.command_requests lets an agent ask a user to
+// approve a shell command that the hub then runs in a container over
+// conduit, which lever turns on for `lever ssh`. hub.template_drift_warning
+// makes outbound GitHub calls from the hub at agent creation.
+// hub.agent_move_bundle carries an agent's workspace and home through hub
+// storage to another broker. tokenomics.usage_ledger adds an agent-to-hub
+// usage data path; tokenomics.token_budgets and tokenomics.trajectory_capture
+// (budget admission and breach actions; transcript capture and harvest in
+// agents) are pinned before scion builds them, so no later default turns them
+// on. lifecycle.never_suspend lets an agent record refuse lever's suspend.
+// hub.artifacts_transfer hands an artifact to another agent.
+//
 // hub.chat_thread_groups (project-wide chat groups that agents can create and
 // rename) is graduated from e8160a10 on: always on, never registered, and
 // scion refuses an override for it. It stays here for older pins, where the
@@ -96,6 +108,31 @@ var pinnedOffExperiments = []pinnedExperiment{
 	{name: "hub.runtime_orphan_reconcile"},
 	{name: "hub.reincarnate_harness_switch"},
 	{name: "hub.custom_default_user_role"},
+	{name: "hub.command_requests"},
+	{name: "hub.template_drift_warning"},
+	{name: "hub.agent_move_bundle"},
+	{name: "tokenomics.usage_ledger"},
+	{name: "tokenomics.token_budgets"},
+	{name: "tokenomics.trajectory_capture"},
+	{name: "lifecycle.never_suspend"},
+	{name: "hub.artifacts_transfer"},
+}
+
+// accessConstraintsExperiment (scion d6d6abc7 on, default off) serves the
+// access-constraint admin API, which lever caps every remote user with
+// (ensureRemoteCeiling); while it is off those routes answer 404 and apply
+// stops at the cap. Stored constraints are enforced whether or not it is on,
+// so on widens nothing: it serves a hub-admin route.
+const accessConstraintsExperiment = "hub.access_constraints"
+
+// pinnedOnExperiments are the experiments lever pins on wherever the hub
+// registers them, against a changed default or an admin's override. An older
+// scion that does not register one serves its routes ungated.
+var pinnedOnExperiments = []string{accessConstraintsExperiment}
+
+// pinnedNames are every experiment lever pins, off and on.
+func pinnedNames() []string {
+	return append(pinnedOffNames(), pinnedOnExperiments...)
 }
 
 // asyncAgentStartExperiment (scion e8160a10 on, default on) starts, resumes
@@ -178,11 +215,13 @@ func pinExperimentsOff(ctx context.Context, hc *hubapi.Client, now time.Time) (s
 }
 
 // pinExperiments writes an explicit override for each pinned experiment the
-// hub registers and does not already hold at the wanted value (false, or true
-// for conduit when conduitOn), leaving every other override as it is, then
+// hub registers and does not already hold at the wanted value (false; true for
+// pinnedOnExperiments, and for conduit when conduitOn), leaving every other override as it is, then
 // requires the hub's answer to show each one overridden that way.
 func pinExperiments(ctx context.Context, hc *hubapi.Client, now time.Time, conduitOn bool) (state.HubExperimentsRecord, error) {
-	wantOn := func(name string) bool { return conduitOn && name == conduitExperiment }
+	wantOn := func(name string) bool {
+		return slices.Contains(pinnedOnExperiments, name) || conduitOn && name == conduitExperiment
+	}
 	for attempt := 1; ; attempt++ {
 		cur, err := hc.AdminExperiments(ctx)
 		if errors.Is(err, hubapi.ErrNoExperiments) {
@@ -199,7 +238,7 @@ func pinExperiments(ctx context.Context, hc *hubapi.Client, now time.Time, condu
 		}
 		var registered []string
 		want := map[string]bool{}
-		for _, name := range pinnedOffNames() {
+		for _, name := range pinnedNames() {
 			e, ok := cur.Lookup(name)
 			if !ok {
 				continue
@@ -222,7 +261,7 @@ func pinExperiments(ctx context.Context, hc *hubapi.Client, now time.Time, condu
 				return state.HubExperimentsRecord{}, err
 			}
 		}
-		rec := state.HubExperimentsRecord{Asked: pinnedOffNames(), Revision: got.Revision, PinnedAt: now}
+		rec := state.HubExperimentsRecord{Asked: pinnedNames(), Revision: got.Revision, PinnedAt: now}
 		for _, name := range registered {
 			e, ok := got.Lookup(name)
 			on := wantOn(name)

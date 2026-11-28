@@ -258,6 +258,11 @@ func mintsCredential(method, p string) bool {
 //     /api/v1/hooks/{id} ingress, which messages agents and can dispatch
 //     new ones), and secret requests (a card an agent posts that asks the
 //     user to type a secret in).
+//   - Routes new in scion d6d6abc7 behind experiments lever pins off: command
+//     requests (a card an agent posts that asks a user to approve a shell
+//     command the hub then runs in a container, and the agent's own list of
+//     them), and System One (project and admin instances of hub-run model
+//     calls).
 //
 // p is the decoded path. It is compared in lower case, and the feature
 // prefixes without a segment boundary, so no spelling the hub might route
@@ -309,7 +314,7 @@ func refusedRoute(method, p string) bool {
 			return true
 		}
 		if strings.HasPrefix(sub, "visitor") || strings.HasPrefix(sub, "trigger") || strings.HasPrefix(sub, "webhook-endpoint") ||
-			strings.HasPrefix(sub, "message-polic") || strings.HasPrefix(sub, "decision") {
+			strings.HasPrefix(sub, "message-polic") || strings.HasPrefix(sub, "decision") || strings.HasPrefix(sub, "system-one") {
 			return true
 		}
 	}
@@ -340,6 +345,9 @@ var refusedPrefixes = []string{
 	"/api/v1/github-app/repo-routing",
 	"/api/v1/webhooks/github",
 	"/api/v1/decision-prompt",
+	"/api/v1/command-request",
+	"/api/v1/agent/command-request",
+	"/api/v1/admin/system-one",
 }
 
 // brokerWritePrefixes are lower case, with no trailing slash on purpose: the

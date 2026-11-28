@@ -302,11 +302,13 @@ Two things need more than the controller's authority, and `lever-admin` does the
 - **So are scion `ddb48b02`'s.** `hub.mcp_server` (an MCP endpoint for messages and events on a
   listener of its own, which lever never configures), `hub.large_uploads` (resumable uploads of up
   to 1 GiB into a project's workspace and shared directories), `agent_policy.telemetry_enforcement`
-  (an admin forcing every agent's telemetry export on), `hub.artifacts_review_requests` and
-  `hub.flat_runtime_brokers` (single-target brokers; on by scion's default). `ddb48b02` also turns
+  (an admin forcing every agent's telemetry export on), `agent_policy.limit_ceilings` and
+  `agent_policy.duration_backstop` (run limits and deadlines that stop agents),
+  `hub.artifacts_review_requests` and `hub.flat_runtime_brokers` (single-target brokers, older but
+  now on by scion's default). `ddb48b02` also turns
   `hub.conduit`, `hub.artifacts` and `hub.agent_plugins` on by default, which lever's pins hold off.
   The remote proxy refuses the token usage reads, an agent's trajectory segments, the chunked
-  upload routes, the inbox lists of secret and command requests, the decisions roll-up,
+  upload routes, the inbox lists of secret and command requests, the decision suggestions and roll-up,
   artifact-backed chat attachments and the GCS object link (`web.gcs_links` graduated, and lever
   gives the hub no GCP credential). One
   experiment is pinned **on**: `hub.access_constraints` serves the access-constraint admin API that

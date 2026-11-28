@@ -77,10 +77,13 @@ type pinnedExperiment struct {
 // listener, and the pin is the second lock. hub.large_uploads takes resumable
 // uploads of up to 1 GiB into a project's workspace and shared directories.
 // agent_policy.telemetry_enforcement lets an admin force every agent's
-// telemetry export on. hub.artifacts_review_requests and
-// hub.flat_runtime_brokers (on by default from ddb48b02: single-target broker
-// registrations and agent pinning to a target) are pinned so the set lever
-// reviewed stays the set that can run. ddb48b02 also turns hub.conduit,
+// telemetry export on. agent_policy.duration_backstop stamps run deadlines
+// that stop agents, with agent_policy.limit_ceilings; both only restrict, and
+// they are pinned with hub.artifacts_review_requests and
+// hub.flat_runtime_brokers (older, on by default from ddb48b02: single-target
+// broker registrations and agent pinning to a target; lever's broker is not
+// one) so the set lever reviewed stays the set that can run.
+// web.agents_column_picker is display only and left alone. ddb48b02 also turns hub.conduit,
 // hub.artifacts and hub.agent_plugins on by default, which these pins hold
 // off.
 //
@@ -135,6 +138,8 @@ var pinnedOffExperiments = []pinnedExperiment{
 	{name: "hub.mcp_server"},
 	{name: "hub.large_uploads"},
 	{name: "agent_policy.telemetry_enforcement"},
+	{name: "agent_policy.limit_ceilings"},
+	{name: "agent_policy.duration_backstop"},
 	{name: "hub.artifacts_review_requests"},
 	{name: "hub.flat_runtime_brokers"},
 }

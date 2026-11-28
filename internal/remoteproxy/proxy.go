@@ -270,7 +270,7 @@ func mintsCredential(method, p string) bool {
 //     member of the agent's project, with an HMAC-only content link), chunked
 //     uploads into a project's workspace or a shared directory
 //     (hub.large_uploads), the inbox lists of secret and command requests, the
-//     decisions roll-up and its suggestions, and a chat attachment downloaded
+//     decision suggestions (the older roll-up is refused with them), and a chat attachment downloaded
 //     as an artifact. And the GCS object link (web.gcs_links, graduated in
 //     ddb48b02, so always routed): lever gives the hub no GCP credential, so it
 //     answers 404, and it is refused should one ever be found.

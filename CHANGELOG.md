@@ -17,23 +17,25 @@ version bump moves the block under the new version heading.
 
 - **scion pin `d34ffbc1` → `ddb48b02`** (upstream main of 2026-11-28), for the terminal on phone
   screens: the terminal takes the whole screen on a phone (#5614), the pane toolbar no longer
-  overflows at 390px and narrower (#5603), and terminals take touch scrolling (#5568). The touch key bar (#5584) stays behind `web.terminal_key_bar`, which
-  is off by scion's default and which lever leaves alone: a hub admin turns it on. The
-  examples, the release prebuilt scion, the Makefile `SCION_VERSION`, the Lima e2e, the docs and the
-  tests move. The module pseudo-version is `v0.4.0-preview.4.0.20261128150159-ddb48b024467`.
+  overflows at 390px and narrower (#5603), and terminals take touch scrolling (#5568). The touch
+  key bar (#5584) stays behind `web.terminal_key_bar`, which is off by scion's default and which
+  lever leaves alone: a hub admin turns it on. The examples, the release prebuilt scion, the
+  Makefile `SCION_VERSION`, the Lima e2e, the docs and the tests move. The module pseudo-version is `v0.4.0-preview.4.0.20261128150159-ddb48b024467`.
 - **scion's new experiments are pinned off:** `hub.command_requests`, `hub.template_drift_warning`,
   `hub.agent_move_bundle`, `tokenomics.usage_ledger`, `tokenomics.token_budgets`,
   `tokenomics.trajectory_capture`, `lifecycle.never_suspend`, `hub.artifacts_transfer` and
-  `hub.decision_retention` (from `d6d6abc7`), and `hub.mcp_server`, `hub.large_uploads`,
-  `agent_policy.telemetry_enforcement`, `hub.artifacts_review_requests` and
-  `hub.flat_runtime_brokers` (from `ddb48b02`). `ddb48b02` turns `hub.conduit`, `hub.artifacts`,
+  `hub.decision_retention` (from `d6d6abc7`); `hub.mcp_server`, `hub.large_uploads`,
+  `agent_policy.telemetry_enforcement`, `agent_policy.limit_ceilings`,
+  `agent_policy.duration_backstop` and `hub.artifacts_review_requests` (from `ddb48b02`); and
+  `hub.flat_runtime_brokers` (older, on by default from `ddb48b02`). `ddb48b02` turns `hub.conduit`, `hub.artifacts`,
   `hub.agent_plugins` and `hub.flat_runtime_brokers` on by default, which lever's pins hold off; on a
   hub still on those defaults the first `lever apply` pins them and restarts the hub once.
 - **The remote proxy refuses more of scion's new routes:** command requests, System One and agent
   usage (`d6d6abc7`); and the token usage reads (the caller's, a user's, a group's budgets, a
   project's and the hub's), an agent's trajectory segments, chunked uploads into a project's
-  workspace or a shared directory, the inbox lists of secret and command requests, the decisions
-  roll-up and suggestions, artifact-backed chat attachments and the GCS object link (`ddb48b02`).
+  workspace or a shared directory, the inbox lists of secret and command requests, the decision
+  suggestions (and the older decisions roll-up with them), artifact-backed chat attachments and the
+  GCS object link (`ddb48b02`).
 - **`hub.access_constraints` is pinned on** where scion registers it (`d6d6abc7` on). That scion
   serves the access-constraint admin API, which lever caps every remote user with, only while it
   is on, and it is off by default. Stored constraints are enforced either way, so this widens

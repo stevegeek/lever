@@ -1053,6 +1053,11 @@ func TestHubRoutesTheProxyNeverForwards(t *testing.T) {
 		{"GET", "/api/v1/conversations/c1/messages/m1/attachments/a1", true},
 		{"GET", "/api/v1/conversations/c1/messages", false},
 		{"GET", "/api/v1/conversations/c1/messages/m1", false},
+		{"GET", "/api/v1/gcs/object", true},
+		{"GET", "/api/v1/users/me/decisions", true},
+		{"POST", "/api/v1/groves/p1/workspace/uploads", true},
+		{"POST", "/api/v1/groves/p1/shared-dirs/d1/uploads", true},
+		{"POST", "/api/v1/projects/p1/shared-dirs/d1/uploads", true},
 	} {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
 			hub := newRecordingHub(t)

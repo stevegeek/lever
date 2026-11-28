@@ -647,7 +647,8 @@ var d6d6abcPinned = append(slices.Clone(d34ffbcPinned), "hub.command_requests", 
 
 // ddb48b0Pinned are the pinned-off experiments scion ddb48b02 registers.
 var ddb48b0Pinned = append(slices.Clone(d6d6abcPinned), "hub.mcp_server", "hub.large_uploads",
-	"agent_policy.telemetry_enforcement", "hub.artifacts_review_requests", "hub.flat_runtime_brokers")
+	"agent_policy.telemetry_enforcement", "agent_policy.limit_ceilings", "agent_policy.duration_backstop",
+	"hub.artifacts_review_requests", "hub.flat_runtime_brokers")
 
 // On scion ddb48b02 the new experiments are pinned off, against the defaults
 // ddb48b02 turns on, and the access constraints lever caps remote users with

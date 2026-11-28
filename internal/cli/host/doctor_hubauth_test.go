@@ -268,6 +268,15 @@ func TestDoctorHubAuthRowsOverTheJail(t *testing.T) {
 		defer func() { c.Status = "invited" }()
 		hiWantRow(t, checkRemoteWebRole(ctx, app, d.auth()), false, contact+" is not a configured login (or remote access is off) but its hub user is active")
 	})
+	t.Run("access constraints off at the hub", func(t *testing.T) {
+		d.hub.constraintsOff = true
+		defer func() { d.hub.constraintsOff = false }()
+		r := checkRemoteWebRole(ctx, d.app, d.auth())
+		hiWantRow(t, r, false, op+": the hub does not serve its access constraints", "a stored ceiling is still enforced")
+		if strings.Contains(r.detail, "has no ceiling") {
+			t.Fatalf("an unreadable ceiling reads as missing: %q", r.detail)
+		}
+	})
 	t.Run("record names another key", func(t *testing.T) {
 		rec := d.record()
 		rec.KeyFingerprint = "sha256:other"

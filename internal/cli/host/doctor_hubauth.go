@@ -330,9 +330,13 @@ func checkRemoteWebRole(ctx context.Context, app *config.App, d doctorHubAuth) c
 		})
 		// A ceiling counts only when its maximum keeps the tier's limit: exactly
 		// the contact role's permissions, or no project.create for an operator.
-		capped := false
+		capped, unread := false, false
 		for _, n := range remoteCeilingNames(u.Email) {
 			cs, err := admin.AccessConstraintsNamed(ctx, n)
+			var ae *hubapi.APIError
+			if errors.As(err, &ae) && ae.Status == http.StatusNotFound {
+				unread = true
+			}
 			if err != nil {
 				continue
 			}
@@ -356,6 +360,9 @@ func checkRemoteWebRole(ctx context.Context, app *config.App, d doctorHubAuth) c
 			problems = append(problems, u.Email+" is not bound to "+tier)
 		case wrong:
 			problems = append(problems, u.Email+" is also bound to the other tier's role")
+		case !capped && unread:
+			problems = append(problems, u.Email+": the hub does not serve its access constraints ("+accessConstraintsExperiment+
+				" is off at the hub), so lever cannot read its ceiling; a stored ceiling is still enforced; run `lever apply` to pin it on")
 		case !capped:
 			problems = append(problems, u.Email+" has no ceiling that keeps its tier's limit")
 		default:

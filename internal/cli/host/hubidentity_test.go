@@ -38,11 +38,14 @@ type hiHub struct {
 	roles       []hubapi.RoleDefinition
 	bindings    []hubapi.RoleBinding
 	constraints []*hiConstraint
-	previews    map[string]string
-	tokens      []*hiToken
-	projects    []hubapi.Project
-	agents      []hiAgent
-	scopeActs   []string
+	// constraintsOff answers every access-constraint route 404, as scion
+	// d6d6abc7 does while hub.access_constraints is off.
+	constraintsOff bool
+	previews       map[string]string
+	tokens         []*hiToken
+	projects       []hubapi.Project
+	agents         []hiAgent
+	scopeActs      []string
 	// agentsTooLarge answers every agent list as over the reply cap.
 	agentsTooLarge bool
 	// registry is the hub's agent image registry, which any loopback caller,
@@ -658,6 +661,10 @@ func (h *hiHub) constraintRoute(method, p string, q url.Values, body []byte, ifM
 		got, ok := h.previews[tok]
 		delete(h.previews, tok)
 		return ok && got == want
+	}
+	if h.constraintsOff && strings.HasPrefix(p, "/api/v1/admin/access-constraint") {
+		st, b := hiErr(404, "route not found")
+		return st, b, true
 	}
 	switch {
 	case method == http.MethodPost && p == "/api/v1/admin/access-constraint-previews":

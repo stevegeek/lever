@@ -21,8 +21,8 @@ import (
 type HubExperimentsRecord struct {
 	NotApplicable bool     `json:"not_applicable,omitempty"`
 	Off           []string `json:"off,omitempty"`
-	// On lists the pinned experiments lever turned on (only hub.conduit, for
-	// `lever ssh`).
+	// On lists the pinned experiments lever turned on: hub.conduit for `lever
+	// ssh`, and hub.access_constraints where the hub registers it.
 	On       []string  `json:"on,omitempty"`
 	Asked    []string  `json:"asked,omitempty"`
 	Revision int64     `json:"revision"`

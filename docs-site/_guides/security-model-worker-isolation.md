@@ -297,7 +297,8 @@ Two things need more than the controller's authority, and `lever-admin` does the
   broker), `tokenomics.usage_ledger` (usage events from agents to the hub), `tokenomics.token_budgets`
   and `tokenomics.trajectory_capture` (not built in this scion yet, pinned so a later default cannot
   turn them on), `lifecycle.never_suspend` (an agent record that refuses lever's suspend) and
-  `hub.artifacts_transfer`. The remote proxy refuses the command-request and System One routes. One
+  `hub.artifacts_transfer` and `hub.decision_retention`. The remote proxy refuses the
+  command-request, System One and agent usage routes. One
   experiment is pinned **on**: `hub.access_constraints` serves the access-constraint admin API that
   lever caps every remote user with. Stored constraints are enforced whether or not it is on, so
   on widens nothing; off, `lever apply` would stop at the cap. On an older scion that does not

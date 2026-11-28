@@ -68,6 +68,9 @@ type pinnedExperiment struct {
 // agents) are pinned before scion builds them, so no later default turns them
 // on. lifecycle.never_suspend lets an agent record refuse lever's suspend.
 // hub.artifacts_transfer hands an artifact to another agent.
+// hub.decision_retention lets an admin purge settled decisions (web.decisions
+// is pinned off, so there are none); it is pinned with the rest so the set
+// lever reviewed stays the set that can run.
 //
 // hub.chat_thread_groups (project-wide chat groups that agents can create and
 // rename) is graduated from e8160a10 on: always on, never registered, and
@@ -116,6 +119,7 @@ var pinnedOffExperiments = []pinnedExperiment{
 	{name: "tokenomics.trajectory_capture"},
 	{name: "lifecycle.never_suspend"},
 	{name: "hub.artifacts_transfer"},
+	{name: "hub.decision_retention"},
 }
 
 // accessConstraintsExperiment (scion d6d6abc7 on, default off) serves the
@@ -209,7 +213,7 @@ const pinConflictRetries = 3
 // for `lever ssh` (sshGate).
 const conduitExperiment = "hub.conduit"
 
-// pinExperimentsOff is pinExperiments with every experiment off.
+// pinExperimentsOff is pinExperiments with conduit off.
 func pinExperimentsOff(ctx context.Context, hc *hubapi.Client, now time.Time) (state.HubExperimentsRecord, error) {
 	return pinExperiments(ctx, hc, now, false)
 }
@@ -356,7 +360,8 @@ func ensureHubExperiments(ctx context.Context, p experimentsPin) (conduitOn bool
 			conduitOn = false
 		}
 		p.warn("hub experiments: %v, so scion keeps %s off but lever cannot pin them; "+
-			"reset them to the defaults in the hub's admin experiments page, then run `lever apply`", err, names)
+			"scion then keeps %s off too, so the caps on remote users cannot be written or read; "+
+			"reset them to the defaults in the hub's admin experiments page, then run `lever apply`", err, names, accessConstraintsExperiment)
 	case err != nil:
 		return false, fmt.Errorf("hub experiments: pinning %s as lever-admin: %w", names, err)
 	default:

@@ -643,7 +643,7 @@ func TestEnsureHubExperimentsOnD34ffbc1(t *testing.T) {
 // d6d6abcPinned are the pinned-off experiments scion d6d6abc7 registers.
 var d6d6abcPinned = append(slices.Clone(d34ffbcPinned), "hub.command_requests", "hub.template_drift_warning",
 	"hub.agent_move_bundle", "tokenomics.usage_ledger", "tokenomics.token_budgets", "tokenomics.trajectory_capture",
-	"lifecycle.never_suspend", "hub.artifacts_transfer")
+	"lifecycle.never_suspend", "hub.artifacts_transfer", "hub.decision_retention")
 
 // On scion d6d6abc7 the new experiments are pinned off, and the access
 // constraints lever caps remote users with are pinned on, against its

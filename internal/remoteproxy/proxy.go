@@ -261,8 +261,9 @@ func mintsCredential(method, p string) bool {
 //   - Routes new in scion d6d6abc7 behind experiments lever pins off: command
 //     requests (a card an agent posts that asks a user to approve a shell
 //     command the hub then runs in a container, and the agent's own list of
-//     them), and System One (project and admin instances of hub-run model
-//     calls).
+//     them), an agent's usage events and reads (tokenomics.usage_ledger), and
+//     a project's System One instances (hub-run model calls; the admin System
+//     One routes, older, are refused with them).
 //
 // p is the decoded path. It is compared in lower case, and the feature
 // prefixes without a segment boundary, so no spelling the hub might route
@@ -284,7 +285,7 @@ func refusedRoute(method, p string) bool {
 	}
 	if rest, ok := strings.CutPrefix(p, "/api/v1/agents/"); ok {
 		if _, sub, ok := strings.Cut(rest, "/"); ok &&
-			(strings.HasPrefix(sub, "ports/tunnel") || strings.HasPrefix(sub, "delegations")) {
+			(strings.HasPrefix(sub, "ports/tunnel") || strings.HasPrefix(sub, "delegations") || strings.HasPrefix(sub, "usage")) {
 			return true
 		}
 	}

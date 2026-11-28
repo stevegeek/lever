@@ -1025,6 +1025,9 @@ func TestHubRoutesTheProxyNeverForwards(t *testing.T) {
 		{"PUT", "/api/v1/projects/p1/system-one/instances/x", true},
 		{"GET", "/api/v1/groves/p1/system-one/instances", true},
 		{"GET", "/api/v1/admin/system-one/instances", true},
+		{"POST", "/api/v1/agents/a1/usage/events", true},
+		{"GET", "/api/v1/agents/a1/Usage", true},
+		{"GET", "/api/v1/agents/a1/usage/capabilities", true},
 	} {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
 			hub := newRecordingHub(t)

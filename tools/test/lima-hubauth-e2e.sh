@@ -159,12 +159,13 @@ fenced() {
 	out=$(proxy "$login" -w '\n%{http_code}' "$@")
 	[ "${out##*$'\n'}" = 403 ] && [[ "$out" == *"does not forward this route"* ]]
 }
-# fence_checks <label>: scion's conduit, artifacts and thread groups are off at
-# the hub, lever recorded the pin, and the proxy refuses them and an
-# experiments write.
+# fence_checks <label>: scion's conduit and artifacts are off at the hub, lever
+# recorded the pin, and the proxy refuses them, thread groups and an
+# experiments write. scion e8160a10 graduated thread groups: the hub always
+# serves them, so only the proxy's refusal is checked.
 fence_checks() {
 	local p code
-	for p in /api/v1/conduit/grant-keys /api/v1/artifacts /api/v1/thread-groups; do
+	for p in /api/v1/conduit/grant-keys /api/v1/artifacts; do
 		code=$(hubcode "$p")
 		checkx "$1: hub answers $p with 404 ($code)" '[ "$code" = 404 ]'
 	done

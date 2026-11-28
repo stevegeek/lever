@@ -7,6 +7,12 @@ version bump moves the block under the new version heading.
 
 ## [Unreleased]
 
+### Upgrade
+
+- **Jail ABI 22.** The agent image carries sciontool (and, in the slim image, scion) built from the
+  scion pin, which moved to `d6d6abc7`. Rebuild the agent image and run `lever up --fresh
+  --keep-conversation`.
+
 ### Changed
 
 - **scion pin `d34ffbc1` → `d6d6abc7`** (upstream main of 2026-11-26), for the terminal fixes on
